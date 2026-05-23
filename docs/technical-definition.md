@@ -283,6 +283,8 @@ Required user-facing goals:
 
 Before creating a new workflow from scratch, Forge should inspect available workflows and reusable flow definitions. If an existing flow can satisfy part of the new objective, Forge should propose or attach it as a child subflow instead of duplicating orchestration logic.
 
+The first reuse contract is deterministic and registry-derived. `forge list` exposes reusable local code-node subflows with a compatibility key based on execution policy, language, entrypoint and validation gate, plus a context lineage hash derived from the task-local context requirements and validation rules. `forge plan` reports compatible `reuse_candidates` from existing workflows before saving the new workflow, allowing a later cycle to attach the candidate as a recursive child subflow without spending a model call or re-creating identical Python/Node.js orchestration work.
+
 ## Async Request Contract
 
 When Codex/OpenCode use Forge as a skill, they should not hold the user interaction open for long-running work.

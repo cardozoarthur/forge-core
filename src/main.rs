@@ -9,7 +9,7 @@ use forge_core::improve::generate_improvement;
 use forge_core::inspection::inspect_workflow;
 use forge_core::intent::parse_intent;
 use forge_core::lease::{acquire_task_lease, release_task_lease};
-use forge_core::registry::list_workflows;
+use forge_core::registry::{find_reuse_candidates, list_workflows};
 use forge_core::request::{load_request_status, start_async_request};
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
@@ -341,6 +341,7 @@ fn run() -> Result<i32> {
             let store = ForgeStore::open(cli.store)?;
             let intent = parse_intent(&goal);
             let workflow = create_workflow(intent);
+            let reuse_candidates = find_reuse_candidates(&store, &workflow)?;
             store.save_workflow(&workflow)?;
             store.record_event(
                 &workflow.id,
@@ -353,6 +354,7 @@ fn run() -> Result<i32> {
                 "goal": workflow.goal,
                 "tasks": workflow.tasks,
                 "intent": workflow.intent,
+                "reuse_candidates": reuse_candidates,
             });
             print_response(output, &response)?;
             Ok(0)

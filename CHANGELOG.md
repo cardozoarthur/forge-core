@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.18 - 2026-05-23
+
+### Added
+
+- Added registry-derived reusable deterministic subflow entries for repeated/frequent local code-node tasks.
+- `forge list` now exposes `summary.reusable_subflows` and per-workflow `reusable_subflows` with task id, executor, policy mode, reuse hint, human-readable compatibility key, context lineage hash, language, entrypoint, validation gate and lifecycle state.
+- `forge plan` now reports `reuse_candidates` before saving the new workflow when an existing workflow contains a compatible reusable local code-node subflow.
+
+### Changed
+
+- Planning now consults Forge's persisted workflow registry before creating duplicate deterministic Python/Node.js code-node work, while still keeping Forge as the source of truth.
+- Reuse candidate matching requires both the execution-policy compatibility key and task-local context lineage hash to match.
+
+### Safety
+
+- The reuse registry is read-only projection metadata. It does not execute local Python/Node.js code, authorize CLIs, mutate Docker/Kubernetes/Knative, or attach child subflows automatically.
+- Candidates are only marked `attachable_as_child_subflow` when the existing workflow lifecycle is idle, completed or scaled to zero.
+
+### Validation
+
+- Added CLI contract coverage for `forge list` surfacing reusable code-node subflows with compatibility keys.
+- Added CLI contract coverage for `forge plan` reporting compatible reuse candidates from a previously validated workflow before duplicating a deterministic code node.
+
 ## 0.4.17 - 2026-05-23
 
 ### Added

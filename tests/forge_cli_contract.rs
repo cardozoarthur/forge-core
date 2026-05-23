@@ -2508,6 +2508,138 @@ fn list_surfaces_workflow_registry_with_lifecycle_and_initial_request() {
 }
 
 #[test]
+fn list_surfaces_reusable_code_node_subflows_with_compatibility_keys() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with repeated local Python cost calculations without AI and email ops@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    let row = find_workflow(&listed_json, workflow_id);
+    assert_eq!(listed_json["summary"]["reusable_subflows"], 1);
+    let reusable = row["reusable_subflows"].as_array().unwrap();
+    assert_eq!(reusable.len(), 1);
+    assert_eq!(reusable[0]["task_id"], "task-011");
+    assert_eq!(reusable[0]["policy_mode"], "local_code_node");
+    assert_eq!(reusable[0]["language"], "python");
+    assert_eq!(
+        reusable[0]["reuse_key"],
+        "local_code_node:python:forge_local_python_code_node:deterministic_code_node_validation_required"
+    );
+    assert_eq!(
+        reusable[0]["context_lineage_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+}
+
+#[test]
+fn plan_reports_compatible_reuse_candidates_before_creating_duplicate_code_nodes() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let first = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with repeated local Python cost calculations without AI and email ops@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first_json: Value = serde_json::from_slice(&first).unwrap();
+    let first_workflow_id = first_json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            first_workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let second = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with frequent local Python cost calculations without AI and email finance@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let second_json: Value = serde_json::from_slice(&second).unwrap();
+    let candidates = second_json["reuse_candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0]["requested_task_id"], "task-011");
+    assert_eq!(candidates[0]["candidate_workflow_id"], first_workflow_id);
+    assert_eq!(candidates[0]["candidate_task_id"], "task-011");
+    assert_eq!(candidates[0]["candidate_lifecycle_state"], "scaled_to_zero");
+    assert_eq!(candidates[0]["attachable_as_child_subflow"], true);
+    assert_eq!(
+        candidates[0]["reuse_key"],
+        "local_code_node:python:forge_local_python_code_node:deterministic_code_node_validation_required"
+    );
+    assert_eq!(
+        candidates[0]["context_lineage_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+}
+
+#[test]
 fn list_loads_legacy_workflows_without_async_policy_or_revisions() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

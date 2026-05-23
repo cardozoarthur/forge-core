@@ -103,7 +103,8 @@ forge request status --run <run-id> --output json
 
 Codex/OpenCode should prefer this pattern when using Forge as a skill: make a short request, receive a `run_id`, and let Forge own the asynchronous workflow state.
 `forge request status` resolves the run id back to the current Forge workflow state, including the current goal, original requested goal, latest revision, artifact count and task status summary.
-`forge list` exposes the workflow registry across planned and async workflows, including stable workflow ids, associated run ids, initial request, current goal, lifecycle state and task summary. Completed finite workflows are projected as `scaled_to_zero` when there is no remaining task work.
+`forge list` exposes the workflow registry across planned and async workflows, including stable workflow ids, associated run ids, initial request, current goal, lifecycle state, task summary and deterministic code-node subflows that can be reused by compatible future workflows. Completed finite workflows are projected as `scaled_to_zero` when there is no remaining task work.
+`forge plan` reports `reuse_candidates` when the registry already contains a compatible reusable deterministic subflow, so Forge can propose child-subflow reuse before duplicating local Python/Node.js work.
 `forge inspect <workflow-id>` renders the current DAG as terminal text and also exposes the same graph as structured JSON when `--output json` is used. `--verbose` includes task goals, expected outputs, validation rules and subtasks. Persona-aware nodes are annotated with their node-scoped persona mode; recursive subflow records are reserved for the next registry increment.
 
 Sync local execution engines before Forge uses external CLIs:
