@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.3 - 2026-05-23
+
+### Added
+
+- Added source-of-truth async request status projection:
+  - `forge request status` now loads the current workflow behind the run id;
+  - status output includes the current workflow goal, original requested goal, workflow status, latest revision, artifact count and task status summary.
+
+### Changed
+
+- `forge request status` no longer behaves as a stale run-record lookup for Codex/OpenCode skill callers. The run id now resolves to the current workflow state after runtime mutations such as `workflow update-goal` and `workflow attach-artifact`.
+
+### Safety
+
+- The original request goal is preserved as `requested_goal`, while `goal` reflects the current Forge workflow goal. This keeps Forge as the source of truth without losing the initial request intent.
+
 ## 0.4.2 - 2026-05-23
 
 ### Added

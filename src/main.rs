@@ -8,7 +8,7 @@ use forge_core::graph::create_workflow;
 use forge_core::improve::generate_improvement;
 use forge_core::intent::parse_intent;
 use forge_core::lease::{acquire_task_lease, release_task_lease};
-use forge_core::request::{load_run_record, start_async_request};
+use forge_core::request::{load_request_status, start_async_request};
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
 };
@@ -652,7 +652,7 @@ fn run() -> Result<i32> {
             }
             RequestCommands::Status { run_id, output } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = load_run_record(&store, &run_id)?;
+                let report = load_request_status(&store, &run_id)?;
                 print_response(output, &report)?;
                 Ok(0)
             }

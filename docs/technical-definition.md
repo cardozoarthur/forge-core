@@ -192,6 +192,8 @@ Codex/OpenCode/skill
 
 `run_id` is distinct from `workflow_id`. The workflow is the operational graph; the run is the asynchronous execution instance that can continue, pause, resume and report progress.
 
+`forge request status` must resolve the run id to the current workflow before reporting status. Runtime mutations performed through Forge, including goal updates and attached artifacts, are reflected in request status with the original request preserved as `requested_goal`.
+
 ## Self-Evolution Contract
 
 Forge may work on Forge itself only through bounded cycles:

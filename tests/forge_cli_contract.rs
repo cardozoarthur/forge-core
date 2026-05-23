@@ -1457,6 +1457,114 @@ fn request_start_returns_async_run_identifier_for_skill_callers() {
 }
 
 #[test]
+fn request_status_reflects_current_workflow_mutations_for_async_callers() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let artifact = temp.path().join("status-note.md");
+    fs::write(
+        &artifact,
+        "# Status note\n\nA runtime artifact attached through Forge.\n",
+    )
+    .unwrap();
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Improve Forge with async request status",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "update-goal",
+            "--workflow",
+            workflow_id,
+            "--goal",
+            "Improve Forge with source-of-truth request status",
+            "--origin",
+            "opencode",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "attach-artifact",
+            "--workflow",
+            workflow_id,
+            "--path",
+            artifact.to_str().unwrap(),
+            "--kind",
+            "runtime_note",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status_json["run_id"], run_id);
+    assert_eq!(status_json["workflow_id"], workflow_id);
+    assert_eq!(
+        status_json["requested_goal"],
+        "Improve Forge with async request status"
+    );
+    assert_eq!(
+        status_json["goal"],
+        "Improve Forge with source-of-truth request status"
+    );
+    assert_eq!(status_json["workflow_status"], "pending");
+    assert_eq!(status_json["workflow_revision"], 2);
+    assert_eq!(status_json["artifact_count"], 1);
+    assert_eq!(
+        status_json["task_summary"]["total"],
+        status_json["task_summary"]["pending"]
+    );
+}
+
+#[test]
 fn task_lease_prevents_two_executors_from_acquiring_same_task() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

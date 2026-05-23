@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.2`
+Current version: `0.4.3`
 
 This is the first functional CLI + Skill version:
 
@@ -79,6 +79,7 @@ forge request status --run <run-id> --output json
 ```
 
 Codex/OpenCode should prefer this pattern when using Forge as a skill: make a short request, receive a `run_id`, and let Forge own the asynchronous workflow state.
+`forge request status` resolves the run id back to the current Forge workflow state, including the current goal, original requested goal, latest revision, artifact count and task status summary.
 
 Sync local execution engines before Forge uses external CLIs:
 

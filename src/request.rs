@@ -1,4 +1,4 @@
-use crate::graph::{create_workflow, Workflow};
+use crate::graph::{create_workflow, TaskStatus, Workflow};
 use crate::intent::parse_intent;
 use crate::storage::ForgeStore;
 use anyhow::Result;
@@ -28,6 +28,34 @@ pub struct RequestStartReport {
     pub origin: String,
     #[serde(rename = "async")]
     pub async_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestStatusReport {
+    pub status: String,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub goal: String,
+    pub requested_goal: String,
+    pub origin: String,
+    #[serde(rename = "async")]
+    pub async_run: bool,
+    pub workflow_status: String,
+    pub workflow_revision: u64,
+    pub artifact_count: usize,
+    pub task_summary: TaskStatusSummary,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TaskStatusSummary {
+    pub total: usize,
+    pub pending: usize,
+    pub running: usize,
+    pub completed: usize,
+    pub blocked: usize,
+    pub failed: usize,
 }
 
 pub fn start_async_request(
@@ -78,4 +106,47 @@ pub fn save_run_record(store: &ForgeStore, run: &RunRecord) -> Result<()> {
 
 pub fn load_run_record(store: &ForgeStore, run_id: &str) -> Result<RunRecord> {
     Ok(serde_json::from_value(store.load_run(run_id)?)?)
+}
+
+pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestStatusReport> {
+    let run = load_run_record(store, run_id)?;
+    let workflow = store.load_workflow(&run.workflow_id)?;
+    let task_summary = summarize_tasks(&workflow);
+    let workflow_revision = workflow
+        .revisions
+        .last()
+        .map(|revision| revision.revision)
+        .unwrap_or(0);
+    Ok(RequestStatusReport {
+        status: run.status,
+        run_id: run.run_id,
+        workflow_id: workflow.id,
+        goal: workflow.goal,
+        requested_goal: run.goal,
+        origin: run.origin,
+        async_run: run.async_run,
+        workflow_status: workflow.status,
+        workflow_revision,
+        artifact_count: workflow.artifacts.len(),
+        task_summary,
+        created_at: run.created_at,
+        updated_at: run.updated_at,
+    })
+}
+
+fn summarize_tasks(workflow: &Workflow) -> TaskStatusSummary {
+    let mut summary = TaskStatusSummary {
+        total: workflow.tasks.len(),
+        ..TaskStatusSummary::default()
+    };
+    for task in &workflow.tasks {
+        match task.status {
+            TaskStatus::Pending => summary.pending += 1,
+            TaskStatus::Running => summary.running += 1,
+            TaskStatus::Completed => summary.completed += 1,
+            TaskStatus::Blocked => summary.blocked += 1,
+            TaskStatus::Failed => summary.failed += 1,
+        }
+    }
+    summary
 }
