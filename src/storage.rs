@@ -133,6 +133,18 @@ impl ForgeStore {
         Ok(serde_json::from_str(&data_json)?)
     }
 
+    pub fn load_workflows(&self) -> Result<Vec<Workflow>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT data_json FROM workflows ORDER BY created_at ASC, id ASC")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut workflows = Vec::new();
+        for row in rows {
+            workflows.push(serde_json::from_str(&row?)?);
+        }
+        Ok(workflows)
+    }
+
     pub fn record_event(
         &self,
         workflow_id: &str,
@@ -231,6 +243,18 @@ impl ForgeStore {
             .optional()?;
         let data_json = data_json.with_context(|| format!("run not found: {id}"))?;
         Ok(serde_json::from_str(&data_json)?)
+    }
+
+    pub fn load_runs(&self) -> Result<Vec<serde_json::Value>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT data_json FROM runs ORDER BY created_at ASC, id ASC")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut runs = Vec::new();
+        for row in rows {
+            runs.push(serde_json::from_str(&row?)?);
+        }
+        Ok(runs)
     }
 
     pub fn try_save_task_lease(&self, lease: TaskLeaseWrite<'_>) -> Result<bool> {

@@ -8,6 +8,7 @@ use forge_core::graph::create_workflow;
 use forge_core::improve::generate_improvement;
 use forge_core::intent::parse_intent;
 use forge_core::lease::{acquire_task_lease, release_task_lease};
+use forge_core::registry::list_workflows;
 use forge_core::request::{load_request_status, start_async_request};
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
@@ -35,6 +36,10 @@ enum Commands {
     Plan {
         #[arg(long)]
         goal: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    List {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -342,6 +347,12 @@ fn run() -> Result<i32> {
                 "intent": workflow.intent,
             });
             print_response(output, &response)?;
+            Ok(0)
+        }
+        Commands::List { output } => {
+            let store = ForgeStore::open(cli.store)?;
+            let report = list_workflows(&store)?;
+            print_response(output, &report)?;
             Ok(0)
         }
         Commands::Status { workflow, output } => {

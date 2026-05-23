@@ -6,6 +6,7 @@ pub mod graph;
 pub mod improve;
 pub mod intent;
 pub mod lease;
+pub mod registry;
 pub mod request;
 pub mod runtime;
 pub mod self_evolve;

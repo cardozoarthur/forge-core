@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.8 - 2026-05-23
+
+### Added
+
+- Added the first workflow registry surface through `forge list`.
+- Registry rows include stable workflow ids, associated run ids, run statuses, current goal, initial request, workflow status, derived lifecycle state, revision, artifact count and task status summary.
+- New workflows persist `initial_goal` so the original request remains visible after runtime goal mutations.
+
+### Changed
+
+- Completed finite workflows are projected as `scaled_to_zero` in the registry when all tasks are completed, giving operators a first lifecycle signal without mutating Docker/Kubernetes/Knative resources.
+
+### Safety
+
+- `forge list` is read-only and derives its view from Forge's SQLite source of truth.
+- Existing workflow records without `initial_goal` still load; list falls back to the async run's original request when available, then to the current goal.
+
 ## 0.4.7 - 2026-05-23
 
 ### Added

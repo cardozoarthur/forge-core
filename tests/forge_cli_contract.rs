@@ -1717,6 +1717,134 @@ fn request_status_reflects_current_workflow_mutations_for_async_callers() {
 }
 
 #[test]
+fn list_surfaces_workflow_registry_with_lifecycle_and_initial_request() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build a reusable invoice workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let planned_workflow_id = planned_json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            planned_workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Operate recurring fraud review",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let async_workflow_id = started_json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "update-goal",
+            "--workflow",
+            async_workflow_id,
+            "--goal",
+            "Operate recurring fraud review with supervisor alerts",
+            "--origin",
+            "opencode",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    assert_eq!(listed_json["status"], "loaded");
+    assert_eq!(listed_json["summary"]["total"], 2);
+    assert_eq!(listed_json["summary"]["running"], 0);
+    assert_eq!(listed_json["summary"]["non_running"], 2);
+
+    let planned_row = find_workflow(&listed_json, planned_workflow_id);
+    assert_eq!(
+        planned_row["initial_request"],
+        "Build a reusable invoice workflow"
+    );
+    assert_eq!(
+        planned_row["current_goal"],
+        "Build a reusable invoice workflow"
+    );
+    assert_eq!(planned_row["lifecycle_state"], "scaled_to_zero");
+    assert_eq!(planned_row["running"], false);
+    assert!(planned_row["run_ids"].as_array().unwrap().is_empty());
+
+    let async_row = find_workflow(&listed_json, async_workflow_id);
+    assert_eq!(
+        async_row["initial_request"],
+        "Operate recurring fraud review"
+    );
+    assert_eq!(
+        async_row["current_goal"],
+        "Operate recurring fraud review with supervisor alerts"
+    );
+    assert_eq!(async_row["lifecycle_state"], "idle");
+    assert_eq!(async_row["running"], false);
+    assert_eq!(async_row["run_ids"], serde_json::json!([run_id]));
+    assert_eq!(async_row["workflow_revision"], 1);
+    assert_eq!(
+        async_row["task_summary"]["total"],
+        async_row["task_summary"]["pending"]
+    );
+}
+
+#[test]
 fn task_lease_prevents_two_executors_from_acquiring_same_task() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -1876,6 +2004,15 @@ fn find_runtime<'a>(json: &'a Value, id: &str) -> &'a Value {
         .unwrap()
         .iter()
         .find(|runtime| runtime["id"] == id)
+        .unwrap()
+}
+
+fn find_workflow<'a>(json: &'a Value, id: &str) -> &'a Value {
+    json["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workflow| workflow["workflow_id"] == id)
         .unwrap()
 }
 

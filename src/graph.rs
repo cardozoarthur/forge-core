@@ -128,6 +128,8 @@ pub struct WorkflowRevision {
 pub struct Workflow {
     pub id: String,
     pub goal: String,
+    #[serde(default)]
+    pub initial_goal: Option<String>,
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub intent: IntentSpec,
@@ -142,6 +144,7 @@ pub fn create_workflow(intent: IntentSpec) -> Workflow {
     Workflow {
         id,
         goal: intent.goal.clone(),
+        initial_goal: Some(intent.goal.clone()),
         status: "pending".to_string(),
         created_at: Utc::now(),
         intent,

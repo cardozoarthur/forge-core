@@ -50,6 +50,7 @@ forge runtimes --output json
 forge workflow update-goal --workflow <workflow-id> --goal "new goal" --origin codex --output json
 forge workflow attach-artifact --workflow <workflow-id> --path ./artifact.md --kind report --origin opencode --output json
 forge runtime guard --substrate knative --resource service/forge-node --namespace forge --action update --owner forge --output json
+forge list --output json
 forge status --workflow <workflow-id> --output json
 forge context --workflow <workflow-id> --task task-001 --budget 1200 --output json
 forge run --workflow <workflow-id> --simulate --output json
