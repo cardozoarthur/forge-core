@@ -156,6 +156,17 @@ Goal: make Forge call external CLIs while keeping execution bounded.
 - Add process timeouts, log capture, cancellation and retry classification.
 - Pass only `forge context` output plus explicit artifact references to each executor.
 
+### Phase 2.5: Context Routing Engine
+
+Goal: make minimal correct context a first-class runtime product.
+
+- Add versioned context packets with hashes and source references.
+- Add context summary artifacts that can be reused across tasks.
+- Add context sharding by workflow, subflow, task and validation gate.
+- Add selection rules that exclude irrelevant history by default.
+- Add context lineage to executor results for replay and cost accounting.
+- Add stale-context detection when goals or artifacts change during runtime.
+
 ### Phase 3: Durable Scheduling
 
 Goal: make future work real, not just represented in the graph.
@@ -168,6 +179,26 @@ Goal: make future work real, not just represented in the graph.
 - Enforce resource ownership labels before update/delete.
 - Add notification dispatch adapters.
 - Keep email/Telegram/webhook dispatch behind explicit configuration and dry-run defaults.
+
+### Phase 3.1: Deterministic + AI Hybrid Graph
+
+Goal: let one graph combine AI cognition and deterministic execution.
+
+- Add deterministic code-node contracts for local Python and Node.js execution.
+- Add node-selection policy that can choose no-AI execution when work is repeated, stable or cheaper as code.
+- Add rollback and deployment node types.
+- Keep waits, cron, approvals, validation and notifications in the same graph model as AI tasks.
+- Persist per-node cost and execution evidence so Forge can compare AI versus deterministic execution choices.
+
+### Phase 3.2: Long-Running Cognition
+
+Goal: make cognitive workflows resumable instead of one-shot sessions.
+
+- Add pause/resume commands.
+- Add checkpoints for workflow, subflow and task state.
+- Add partial retry from failed nodes.
+- Add resumable context packets tied to checkpoint ids.
+- Add durable async continuation records that survive CLI restart or executor change.
 
 ### Phase 3.5: Workflow Registry, Inspect And Recursive Subflows
 
@@ -219,6 +250,9 @@ Goal: let Forge improve workflows structurally without unrestricted self-modific
 13. Add `forge inspect` graph rendering with verbose recursive subflow descriptions.
 14. Add recursive finite/infinite subflow records and scale-to-zero lifecycle semantics.
 15. Add available-flow discovery so new workflows can reuse compatible existing flows as child subflows.
+16. Add versioned context packets and context lineage for the Context Routing Engine.
+17. Add deterministic Python/Node.js code-node contracts and no-AI node selection policy.
+18. Add pause/resume, checkpoints, partial retry and resumable context for long-running cognition.
 
 ## Non-Goals
 

@@ -1,5 +1,6 @@
 use assert_cmd::Command;
 use forge_core::artifact::hex_sha256;
+use rusqlite::Connection;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
@@ -1845,6 +1846,55 @@ fn list_surfaces_workflow_registry_with_lifecycle_and_initial_request() {
 }
 
 #[test]
+fn list_loads_legacy_workflows_without_async_policy_or_revisions() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build a legacy-compatible workflow registry",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+
+    remove_legacy_fields_from_stored_workflow(&store, workflow_id);
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    let row = find_workflow(&listed_json, workflow_id);
+
+    assert_eq!(
+        row["initial_request"],
+        "Build a legacy-compatible workflow registry"
+    );
+    assert_eq!(row["lifecycle_state"], "idle");
+    assert_eq!(row["task_summary"]["pending"], row["task_summary"]["total"]);
+}
+
+#[test]
 fn task_lease_prevents_two_executors_from_acquiring_same_task() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -2014,6 +2064,29 @@ fn find_workflow<'a>(json: &'a Value, id: &str) -> &'a Value {
         .iter()
         .find(|workflow| workflow["workflow_id"] == id)
         .unwrap()
+}
+
+fn remove_legacy_fields_from_stored_workflow(store: &Path, workflow_id: &str) {
+    let connection = Connection::open(store).unwrap();
+    let data_json: String = connection
+        .query_row(
+            "SELECT data_json FROM workflows WHERE id = ?1",
+            [workflow_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut workflow: Value = serde_json::from_str(&data_json).unwrap();
+    workflow.as_object_mut().unwrap().remove("revisions");
+    for task in workflow["tasks"].as_array_mut().unwrap() {
+        task.as_object_mut().unwrap().remove("async_policy");
+    }
+    let patched = serde_json::to_string(&workflow).unwrap();
+    connection
+        .execute(
+            "UPDATE workflows SET data_json = ?1 WHERE id = ?2",
+            (&patched, workflow_id),
+        )
+        .unwrap();
 }
 
 fn write_fake_cli(bin: &Path, name: &str) {

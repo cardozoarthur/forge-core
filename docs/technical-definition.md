@@ -36,7 +36,7 @@ Close coupling is still valuable when it reduces friction. The target architectu
 - Workflow fragmentation engine: produces atomic retryable tasks with explicit goals.
 - Work item controller: tracks backlog state, subtasks, impediments, owner role, acceptance criteria and definition of done.
 - Atomic task graph: keeps dependency-aware execution state.
-- Context controller: injects only task-local context under a byte budget.
+- Context routing engine: compresses, summarizes, selects, versions and shards the minimum correct context for each executor under a budget.
 - Execution runtime: coordinates task execution and trace collection.
 - Executor policy: detects installed/configured CLIs and persists human authorization before use.
 - Runtime substrate policy: detects Docker/Kubernetes/Knative and persists human authorization before use.
@@ -174,6 +174,53 @@ Mutation rules:
 - downstream tasks must see updated goals/artifacts through Forge context packages.
 
 Codex CLI and OpenCode CLI are therefore human interfaces for Forge as well as possible executor adapters. They can update Forge state through CLI commands while Forge remains the persistent source of truth.
+
+## Context Routing Engine
+
+The context routing engine is a primary Forge differentiator. Forge should not pass broad project history to every executor. It should build minimal, correct context packets.
+
+Responsibilities:
+
+- compress large context into task-relevant summaries;
+- select only the files, artifacts, decisions and constraints required by the current task;
+- version context packets so executor results can be reproduced;
+- shard context by task, subflow, artifact and validation gate;
+- avoid redundant reasoning by reusing validated summaries and prior artifacts;
+- reduce model cost and hallucination risk by excluding irrelevant history.
+
+The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
+
+## Deterministic + AI Hybrid Graph
+
+Forge workflows should mix AI and non-AI execution in one graph.
+
+Supported graph node classes should include:
+
+- AI executor tasks;
+- deterministic local code tasks;
+- Python or Node.js code nodes for repeated/frequent logic that does not need model reasoning;
+- waits and cron continuation;
+- approvals;
+- validation gates;
+- rollback;
+- deployment;
+- notifications and cost reports.
+
+Forge should decide whether a node needs AI. If the work is stable, repeated or high-volume, Forge should prefer a deterministic local code node over a model call.
+
+## Long-Running Cognition
+
+Forge must make cognition durable over time.
+
+Long-running workflow support should include:
+
+- pause/resume;
+- async continuation;
+- durable execution records;
+- checkpointing;
+- partial retry from the failed node or subflow;
+- resumable context packets;
+- run state that survives crashes, CLI restarts and executor changes.
 
 ## Workflow Registry, Inspect And Subflows
 

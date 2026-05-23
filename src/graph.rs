@@ -74,6 +74,16 @@ pub struct AsyncPolicy {
     pub run_substrates: Vec<String>,
 }
 
+impl Default for AsyncPolicy {
+    fn default() -> Self {
+        Self {
+            mode: "sync".to_string(),
+            resume_strategy: "inline".to_string(),
+            run_substrates: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkItemSpec {
     pub item_type: String,
@@ -102,6 +112,7 @@ pub struct AtomicTask {
     pub cost: CostEstimate,
     pub notification: Option<NotificationSpec>,
     pub work_item: WorkItemSpec,
+    #[serde(default)]
     pub async_policy: AsyncPolicy,
     pub status: TaskStatus,
 }
@@ -134,7 +145,9 @@ pub struct Workflow {
     pub created_at: DateTime<Utc>,
     pub intent: IntentSpec,
     pub tasks: Vec<AtomicTask>,
+    #[serde(default)]
     pub artifacts: Vec<ArtifactRecord>,
+    #[serde(default)]
     pub revisions: Vec<WorkflowRevision>,
 }
 
@@ -196,11 +209,7 @@ fn task(
         },
         notification: None,
         work_item,
-        async_policy: AsyncPolicy {
-            mode: "sync".to_string(),
-            resume_strategy: "inline".to_string(),
-            run_substrates: Vec::new(),
-        },
+        async_policy: AsyncPolicy::default(),
         status: TaskStatus::Pending,
     }
 }

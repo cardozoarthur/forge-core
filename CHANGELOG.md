@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.9 - 2026-05-23
+
+### Fixed
+
+- `forge list` now loads older workflow records that were created before `async_policy` existed on tasks, defaulting them to synchronous inline execution policy.
+
+### Added
+
+- Added persistent goals for the Context Routing Engine: compression, summarization, selection, versioning and sharding of minimal correct context.
+- Added persistent goals for deterministic + AI hybrid graphs, including local Python/Node.js code nodes for repeated work that does not need model calls.
+- Added persistent goals for long-running cognition: pause/resume, async continuation, durable execution, checkpointing, partial retry and resumable context.
+- Added the same goals to the self-evolution prompt so future Forge cycles can work on them directly.
+
 ## 0.4.8 - 2026-05-23
 
 ### Added

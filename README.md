@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.8`
+Current version: `0.4.9`
 
 This is the first functional CLI + Skill version:
 
@@ -36,6 +36,7 @@ This is the first functional CLI + Skill version:
 - notification payloads with final workflow cost reporting
 - artifact listing
 - workflow registry listing with lifecycle state
+- context routing, deterministic code-node and long-running cognition goals
 - controlled improvement proposal generation
 - Codex/OpenCode-compatible `forge-core` skill
 - executor sync that detects installed/configured CLIs and persists human authorization policy
