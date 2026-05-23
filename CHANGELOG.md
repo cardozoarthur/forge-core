@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0 - 2026-05-23
+
+### Added
+
+- Added async request handoff:
+  - `forge request start`;
+  - `forge request status`.
+- Added run records with stable `run_id` identifiers.
+- Added `forge self run` for bounded Forge self-evolution cycles.
+- Added self-evolution prompt/report artifacts per cycle.
+- Added stop-date validation for autonomous work windows.
+
+### Changed
+
+- Codex/OpenCode skill flow now prefers returning a `run_id` instead of waiting for long work inline.
+- Forge self-evolution can alternate authorized Codex/OpenCode executors while preserving validation gates.
+
 ## 0.3.0 - 2026-05-23
 
 ### Added

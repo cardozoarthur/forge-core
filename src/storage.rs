@@ -65,6 +65,14 @@ impl ForgeStore {
                 data_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS runs (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             "#,
         )?;
         Ok(())
@@ -168,5 +176,40 @@ impl ForgeStore {
             states.push(serde_json::from_str(&row?)?);
         }
         Ok(states)
+    }
+
+    pub fn save_run(
+        &self,
+        id: &str,
+        workflow_id: &str,
+        status: &str,
+        data: &serde_json::Value,
+    ) -> Result<()> {
+        self.connection.execute(
+            r#"
+            INSERT INTO runs (id, workflow_id, status, data_json, updated_at)
+            VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+                workflow_id=excluded.workflow_id,
+                status=excluded.status,
+                data_json=excluded.data_json,
+                updated_at=CURRENT_TIMESTAMP
+            "#,
+            params![id, workflow_id, status, serde_json::to_string(data)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_run(&self, id: &str) -> Result<serde_json::Value> {
+        let data_json: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT data_json FROM runs WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let data_json = data_json.with_context(|| format!("run not found: {id}"))?;
+        Ok(serde_json::from_str(&data_json)?)
     }
 }

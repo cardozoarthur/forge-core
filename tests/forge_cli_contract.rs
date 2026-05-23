@@ -1246,6 +1246,127 @@ fn workflow_artifacts_can_be_attached_during_runtime_from_codex_or_opencode() {
         .any(|item| item["path"].as_str().unwrap().contains("runtime-note.md")));
 }
 
+#[test]
+fn self_run_dry_run_creates_bounded_self_evolution_workflow_and_artifacts() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("README.md"), "# Repo\n").unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2026-05-25T10:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--executor",
+            "codex",
+            "--executor",
+            "opencode",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "planned");
+    assert!(json["run_id"].as_str().unwrap().starts_with("run_"));
+    assert_eq!(json["stop_at"], "2026-05-25T10:00:00-03:00");
+    assert_eq!(json["executors"], serde_json::json!(["codex", "opencode"]));
+    assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
+    assert!(json["cycle_reports"].as_array().unwrap().len() == 1);
+    let prompt_path = temp
+        .path()
+        .join(json["cycle_reports"][0]["prompt_path"].as_str().unwrap());
+    assert!(prompt_path.exists());
+    let prompt = fs::read_to_string(prompt_path).unwrap();
+    assert!(prompt.contains("Improve Forge Core"));
+    assert!(prompt.contains("Codex/OpenCode"));
+    assert!(prompt.contains("cargo test"));
+    assert!(prompt.contains("Do not mutate external Docker/Kubernetes/Knative resources"));
+}
+
+#[test]
+fn request_start_returns_async_run_identifier_for_skill_callers() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Improve Forge asynchronously from Codex skill",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "accepted");
+    assert_eq!(json["async"], true);
+    assert!(json["run_id"].as_str().unwrap().starts_with("run_"));
+    assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            json["run_id"].as_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Improve Forge asynchronously"));
+}
+
+#[test]
+fn self_run_rejects_stop_date_in_the_past() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            temp.path().to_str().unwrap(),
+            "--until",
+            "2000-01-01T00:00:00-03:00",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("stop date is in the past"));
+}
+
 fn find_executor<'a>(json: &'a Value, id: &str) -> &'a Value {
     json["executors"]
         .as_array()

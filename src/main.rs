@@ -7,9 +7,11 @@ use forge_core::executor::{load_executors, sync_executors, ExecutorSyncOptions};
 use forge_core::graph::create_workflow;
 use forge_core::improve::generate_improvement;
 use forge_core::intent::parse_intent;
+use forge_core::request::{load_run_record, start_async_request};
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
 };
+use forge_core::self_evolve::{run_self_evolution, SelfRunOptions};
 use forge_core::skill::install_skill;
 use forge_core::storage::ForgeStore;
 use forge_core::validation::validate_workflow;
@@ -102,6 +104,15 @@ enum Commands {
     Workflow {
         #[command(subcommand)]
         command: WorkflowCommands,
+    },
+    Request {
+        #[command(subcommand)]
+        command: RequestCommands,
+    },
+    #[command(name = "self")]
+    SelfRun {
+        #[command(subcommand)]
+        command: SelfCommands,
     },
 }
 
@@ -216,6 +227,46 @@ enum WorkflowCommands {
         kind: String,
         #[arg(long)]
         origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RequestCommands {
+    Start {
+        #[arg(long)]
+        goal: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Status {
+        #[arg(long = "run")]
+        run_id: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SelfCommands {
+    Run {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long)]
+        until: String,
+        #[arg(long, default_value_t = 1)]
+        max_cycles: u32,
+        #[arg(long, default_value_t = 1800)]
+        sleep_seconds: u64,
+        #[arg(long = "executor")]
+        executors: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        push: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -523,6 +574,52 @@ fn run() -> Result<i32> {
             } => {
                 let store = ForgeStore::open(cli.store)?;
                 let report = attach_workflow_artifact(&store, &workflow, &path, &kind, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+        },
+        Commands::Request { command } => match command {
+            RequestCommands::Start {
+                goal,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = start_async_request(&store, &goal, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            RequestCommands::Status { run_id, output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = load_run_record(&store, &run_id)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+        },
+        Commands::SelfRun { command } => match command {
+            SelfCommands::Run {
+                repo,
+                until,
+                max_cycles,
+                sleep_seconds,
+                executors,
+                dry_run,
+                push,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = run_self_evolution(
+                    &store,
+                    SelfRunOptions {
+                        repo,
+                        until,
+                        max_cycles,
+                        sleep_seconds,
+                        executors,
+                        dry_run,
+                        push,
+                    },
+                )?;
                 print_response(output, &report)?;
                 Ok(0)
             }

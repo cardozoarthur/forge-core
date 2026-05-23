@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.3.0`
+Current version: `0.4.0`
 
 This is the first functional CLI + Skill version:
 
@@ -42,6 +42,8 @@ This is the first functional CLI + Skill version:
 - goal-oriented tasks with subtasks, impediments, acceptance criteria and rework readiness checks
 - runtime workflow mutation for goals and artifacts with origin trace from `codex`, `opencode`, `forge_cli` or skills
 - async workflow substrate policy with scope guards for Forge-owned resources
+- async request handoff for skill callers: submit a goal, receive `run_id`, continue later with Forge
+- self-evolution runner for bounded Codex/OpenCode cycles until a stop date
 - versioned improvement artifacts with strong changelog generation
 
 ## Install
@@ -66,6 +68,15 @@ forge validate --workflow <workflow-id> --output json
 forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
+
+Skill-style async handoff:
+
+```bash
+forge request start --goal "Improve Forge Core" --origin codex --output json
+forge request status --run <run-id> --output json
+```
+
+Codex/OpenCode should prefer this pattern when using Forge as a skill: make a short request, receive a `run_id`, and let Forge own the asynchronous workflow state.
 
 Sync local execution engines before Forge uses external CLIs:
 
@@ -103,6 +114,20 @@ forge workflow attach-artifact --workflow <workflow-id> --path ./report.md --kin
 ```
 
 This is how Codex/OpenCode act as the human interface for Forge: the CLI session can update goals, attach artifacts and keep a revision trail without bypassing Forge's persistent runtime state.
+
+Run Forge self-evolution:
+
+```bash
+forge self run \
+  --repo /home/arthur/projects/forge-core \
+  --until 2026-05-25T10:00:00-03:00 \
+  --executor codex \
+  --executor opencode \
+  --max-cycles 1 \
+  --output json
+```
+
+`forge self run` creates a run id and workflow id, writes prompt/report artifacts for every cycle, runs validation before committing, and only pushes when `--push` is passed.
 
 Example autonomous mixed objective:
 
@@ -182,6 +207,7 @@ Current structural improvement domains:
 - executor policy: installed/configured CLIs require saved human authorization;
 - runtime substrates: Docker/Kubernetes/Knative require authorization and resource ownership checks;
 - runtime mutation: goals/artifacts can change while running with origin trace and revisions.
+- async request handoff: skill callers receive a `run_id` and do not need to wait for the full run.
 
 ## Evolution Direction
 

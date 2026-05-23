@@ -175,6 +175,34 @@ Mutation rules:
 
 Codex CLI and OpenCode CLI are therefore human interfaces for Forge as well as possible executor adapters. They can update Forge state through CLI commands while Forge remains the persistent source of truth.
 
+## Async Request Contract
+
+When Codex/OpenCode use Forge as a skill, they should not hold the user interaction open for long-running work.
+
+The preferred flow is:
+
+```text
+Codex/OpenCode/skill
+→ forge request start
+→ receives run_id
+→ returns run_id to human
+→ Forge continues asynchronously
+→ human/agent checks forge request status later
+```
+
+`run_id` is distinct from `workflow_id`. The workflow is the operational graph; the run is the asynchronous execution instance that can continue, pause, resume and report progress.
+
+## Self-Evolution Contract
+
+Forge may work on Forge itself only through bounded cycles:
+
+- stop date is mandatory;
+- every cycle writes prompt/report artifacts;
+- authorized executors are selected from local policy;
+- validation must pass before commit;
+- push is explicit;
+- external Docker/Kubernetes/Knative resources remain out of scope unless explicitly authorized.
+
 ## Validation Contract
 
 A workflow is only promotable when all tasks are completed and validation rules pass. Until then, `forge validate` returns a blocked status and non-zero exit code.
