@@ -427,12 +427,16 @@ fn execute_cycle(repo: &Path, executor: &str, prompt: &str) -> Result<String> {
 }
 
 fn run_validation(repo: &Path) -> Result<bool> {
-    let status = Command::new("sh")
+    let output = Command::new("sh")
         .arg("-lc")
         .arg("cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test && cargo build --release")
         .current_dir(repo)
-        .status()?;
-    Ok(status.success())
+        .output()?;
+    if !output.status.success() {
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(output.status.success())
 }
 
 fn run_self_update(repo: &Path) -> Result<SelfUpdateReport> {

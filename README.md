@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.3`
+Current version: `0.4.4`
 
 This is the first functional CLI + Skill version:
 

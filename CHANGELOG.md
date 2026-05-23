@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.4 - 2026-05-23
+
+### Fixed
+
+- Captured self-evolution validation output so `forge self run --output json` remains machine-readable after Codex/OpenCode cycles.
+- Validation details are now emitted to stderr only when the validation gate fails.
+
 ## 0.4.3 - 2026-05-23
 
 ### Added
