@@ -4,6 +4,12 @@ Forge Core is a high-performance AI-native workflow runtime for transforming lar
 
 Forge is not an LLM wrapper and not a human-flow builder. It treats models as interchangeable execution resources and can run workflows that mix AI steps, deterministic non-AI steps, waits/cron and notifications.
 
+The intended architecture is hybrid:
+
+- CLIs such as Codex, OpenCode and Gemini CLI can call Forge directly for simpler adoption.
+- Forge can also call those CLIs as bounded execution engines for long-running tasks.
+- Native integrations/plugins are useful when they make the developer experience simpler, but the operational authority remains in Forge: graph state, context routing, retries, validation, scheduling, costs and persistence.
+
 - decomposition;
 - scheduling;
 - context routing;
@@ -117,6 +123,18 @@ execute workflow
 ```
 
 `forge improve` generates a controlled experiment artifact and keeps `auto_promoted=false`.
+
+## Evolution Direction
+
+Forge should evolve as an operational kernel for agentic systems, not as a subordinate extension of a single agent CLI.
+
+The practical path still includes close CLI coupling where it helps adoption:
+
+- Codex/OpenCode/Gemini invoke `forge plan`, `forge context`, `forge run`, `forge validate` and `forge artifacts` from inside their normal workflows.
+- Forge invokes Codex/OpenCode/Gemini/Claude/Ollama adapters for bounded tasks using a strict task packet with allowed context, expected output and validation rules.
+- Open-source CLIs can receive deeper native integration over time so their interactive experience can be backed by Forge's persistent workflow runtime.
+
+See [docs/evolution-roadmap.md](docs/evolution-roadmap.md) for the planned integration path.
 
 ## Project Scope
 

@@ -4,6 +4,9 @@ Forge Core is a Rust workflow runtime. Treat it as operational infrastructure, n
 
 ## Product Rules
 
+- Preserve Forge as the orchestration authority. CLIs and model providers are execution engines, even when they integrate tightly with Forge for usability.
+- Treat skill/plugin/native CLI coupling as an adoption layer, not as the source of truth for workflow state.
+- Support both integration directions: CLIs call Forge for planning/context/validation, and Forge calls CLIs through bounded executor adapters for long-running tasks.
 - Preserve validation-before-promotion semantics.
 - Keep self-improvement controlled: generate experiments, benchmark, compare and promote only after validation.
 - Do not add unrestricted self-modification.
