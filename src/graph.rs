@@ -63,6 +63,38 @@ pub struct PersonaRoutingSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodeRuntimeSpec {
+    pub language: String,
+    pub entrypoint: String,
+    pub sandbox: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionPolicySpec {
+    pub mode: String,
+    pub ai_allowed: bool,
+    pub deterministic: bool,
+    pub code_runtime: Option<CodeRuntimeSpec>,
+    pub reuse_hint: String,
+    pub selection_reason: String,
+    pub validation_gate: String,
+}
+
+impl Default for ExecutionPolicySpec {
+    fn default() -> Self {
+        Self {
+            mode: "executor_adapter".to_string(),
+            ai_allowed: true,
+            deterministic: false,
+            code_runtime: None,
+            reuse_hint: "task_local".to_string(),
+            selection_reason: "default executor policy".to_string(),
+            validation_gate: "task_validation_rules".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubtaskSpec {
     pub id: String,
     pub title: String,
@@ -128,6 +160,8 @@ pub struct AtomicTask {
     pub work_item: WorkItemSpec,
     #[serde(default)]
     pub async_policy: AsyncPolicy,
+    #[serde(default)]
+    pub execution_policy: ExecutionPolicySpec,
     pub status: TaskStatus,
 }
 
@@ -200,6 +234,7 @@ fn task(
 ) -> AtomicTask {
     let (executor, estimated_cost_usd) = execution;
     let work_item = work_item(id, title, dependencies, &validation_rules);
+    let execution_policy = default_execution_policy(&executor);
     AtomicTask {
         id: id.to_string(),
         title: title.to_string(),
@@ -225,6 +260,7 @@ fn task(
         persona: None,
         work_item,
         async_policy: AsyncPolicy::default(),
+        execution_policy,
         status: TaskStatus::Pending,
     }
 }
@@ -445,7 +481,7 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         });
         tasks.push(wait);
 
-        tasks.push(task(
+        let mut deterministic = task(
             "task-011",
             "Run deterministic non-AI step",
             &["task-010"],
@@ -457,7 +493,14 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
             )],
             "Non-AI execution result",
             (ExecutorKind::Command, 0.0002),
-        ));
+        );
+        if let Some(policy) = local_code_execution_policy(&intent.goal) {
+            deterministic.execution_policy = policy;
+            deterministic
+                .context_requirements
+                .push("local deterministic code-node policy".to_string());
+        }
+        tasks.push(deterministic);
 
         if let Some(email) = extract_email(&intent.goal) {
             let mut notification = with_persona(
@@ -538,6 +581,84 @@ fn persona(mode: &str, voice: &str, tone: &str) -> PersonaRoutingSpec {
         ],
         auditable: true,
     }
+}
+
+fn default_execution_policy(executor: &ExecutorKind) -> ExecutionPolicySpec {
+    match executor {
+        ExecutorKind::Ai => ExecutionPolicySpec {
+            mode: "model_executor".to_string(),
+            ai_allowed: true,
+            deterministic: false,
+            code_runtime: None,
+            reuse_hint: "task_local".to_string(),
+            selection_reason: "task requires model reasoning".to_string(),
+            validation_gate: "task_validation_rules".to_string(),
+        },
+        ExecutorKind::Command | ExecutorKind::Wait | ExecutorKind::Notification => {
+            ExecutionPolicySpec {
+                mode: "deterministic_executor".to_string(),
+                ai_allowed: false,
+                deterministic: true,
+                code_runtime: None,
+                reuse_hint: "task_local".to_string(),
+                selection_reason: "task can run without a live model call".to_string(),
+                validation_gate: "task_validation_rules".to_string(),
+            }
+        }
+        ExecutorKind::Mixed => ExecutionPolicySpec {
+            mode: "bounded_mixed_executor".to_string(),
+            ai_allowed: true,
+            deterministic: false,
+            code_runtime: None,
+            reuse_hint: "task_local".to_string(),
+            selection_reason: "task may combine deterministic work and bounded model reasoning"
+                .to_string(),
+            validation_gate: "task_validation_rules".to_string(),
+        },
+    }
+}
+
+fn local_code_execution_policy(goal: &str) -> Option<ExecutionPolicySpec> {
+    let lower = goal.to_lowercase();
+    let runtime = if lower.contains("python") {
+        CodeRuntimeSpec {
+            language: "python".to_string(),
+            entrypoint: "forge_local_python_code_node".to_string(),
+            sandbox: "local_process_no_network".to_string(),
+        }
+    } else if lower.contains("node.js") || lower.contains("node ") || lower.contains("javascript") {
+        CodeRuntimeSpec {
+            language: "nodejs".to_string(),
+            entrypoint: "forge_local_node_code_node".to_string(),
+            sandbox: "local_process_no_network".to_string(),
+        }
+    } else {
+        return None;
+    };
+
+    let reuse_hint = if lower.contains("repeated")
+        || lower.contains("frequent")
+        || lower.contains("recurring")
+        || lower.contains("frequente")
+        || lower.contains("recorrente")
+    {
+        "reuse_compatible_code_node".to_string()
+    } else {
+        "task_local_code_node".to_string()
+    };
+
+    Some(ExecutionPolicySpec {
+        mode: "local_code_node".to_string(),
+        ai_allowed: false,
+        deterministic: true,
+        selection_reason: format!(
+            "goal requested {} deterministic work without routing the repeated step through a model",
+            runtime.language
+        ),
+        code_runtime: Some(runtime),
+        reuse_hint,
+        validation_gate: "deterministic_code_node_validation_required".to_string(),
+    })
 }
 
 fn requires_async_runtime(goal: &str) -> bool {

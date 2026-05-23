@@ -1,16 +1,17 @@
 use crate::artifact::hex_sha256;
-use crate::graph::{AtomicTask, ExecutorKind, PersonaRoutingSpec, Workflow};
+use crate::graph::{AtomicTask, ExecutionPolicySpec, ExecutorKind, PersonaRoutingSpec, Workflow};
 use anyhow::{bail, Result};
 use serde::Serialize;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v5";
-const ROUTING_POLICY: &str = "task_local_revisioned_persona_compressed_executor_profile_budget_v5";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v6";
+const ROUTING_POLICY: &str = "task_local_revisioned_persona_compressed_executor_policy_budget_v6";
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
 const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
 const ALL_CONTEXT_SECTIONS: &[&str] = &[
     "local_objective",
     "workflow_goal",
     "persona_routing",
+    "execution_policy",
     "context_requirements",
     "validation_rules",
     "dependencies",
@@ -20,6 +21,7 @@ const ALL_CONTEXT_SECTIONS: &[&str] = &[
 const NO_AI_CONTEXT_SECTIONS: &[&str] = &[
     "local_objective",
     "workflow_goal",
+    "execution_policy",
     "context_requirements",
     "validation_rules",
     "dependencies",
@@ -28,6 +30,7 @@ const NOTIFICATION_CONTEXT_SECTIONS: &[&str] = &[
     "local_objective",
     "workflow_goal",
     "persona_routing",
+    "execution_policy",
     "context_requirements",
     "validation_rules",
     "dependencies",
@@ -44,6 +47,7 @@ pub struct ContextPackage {
     pub lineage: ContextLineage,
     pub persona: Option<PersonaRoutingSpec>,
     pub executor_profile: ContextExecutorProfile,
+    pub execution_policy: ExecutionPolicySpec,
     pub requested_budget: usize,
     pub effective_budget: usize,
     pub context_bytes: usize,
@@ -202,6 +206,12 @@ pub fn build_context_package(
                 .unwrap_or_default(),
         },
         ContextShardCandidate {
+            section: "execution_policy",
+            source: "execution_policy",
+            priority: priority_for_profile(&profile, "execution_policy", 91),
+            content: render_execution_policy_context(&task.execution_policy),
+        },
+        ContextShardCandidate {
             section: "context_requirements",
             source: "task",
             priority: priority_for_profile(&profile, "context_requirements", 90),
@@ -324,6 +334,7 @@ pub fn build_context_package(
         lineage,
         persona,
         executor_profile: profile.to_public(&task.executor),
+        execution_policy: task.execution_policy.clone(),
         requested_budget: budget,
         effective_budget,
         context_bytes: content.len(),
@@ -388,6 +399,26 @@ fn render_persona_context(persona: &PersonaRoutingSpec) -> String {
         persona.validation_gate,
         persona.source_models.join(", "),
         persona.auditable
+    )
+}
+
+fn render_execution_policy_context(policy: &ExecutionPolicySpec) -> String {
+    let Some(runtime) = &policy.code_runtime else {
+        return format!(
+            "Policy: {}\nAI: {} deterministic: {}\nGate: {}\n",
+            policy.mode, policy.ai_allowed, policy.deterministic, policy.validation_gate
+        );
+    };
+
+    format!(
+        "Execution policy mode: {}\nAI allowed: {} deterministic: {}\nCode runtime: {} via {}\nReuse hint: {}\nValidation gate: {}\n",
+        policy.mode,
+        policy.ai_allowed,
+        policy.deterministic,
+        runtime.language,
+        runtime.entrypoint,
+        policy.reuse_hint,
+        policy.validation_gate
     )
 }
 
@@ -473,15 +504,17 @@ fn priority_for_profile(
     match profile.id {
         "no_ai_deterministic" => match section {
             "local_objective" => 100,
+            "execution_policy" => 98,
             "validation_rules" => 96,
+            "workflow_goal" => 95,
             "context_requirements" => 90,
             "dependencies" => 85,
-            "workflow_goal" => 75,
             _ => default_priority,
         },
         "no_ai_notification" => match section {
             "local_objective" => 100,
             "persona_routing" => 96,
+            "execution_policy" => 94,
             "validation_rules" => 90,
             "workflow_goal" => 85,
             "context_requirements" => 80,

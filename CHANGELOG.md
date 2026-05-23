@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.17 - 2026-05-23
+
+### Added
+
+- Added Forge-owned `execution_policy` metadata to every atomic task with deterministic/AI allowance, reuse hint, validation gate and optional local code runtime.
+- `forge context` now emits schema `forge.context.v6` with routing policy `task_local_revisioned_persona_compressed_executor_policy_budget_v6`.
+- Context packets include top-level `execution_policy` metadata and an `execution_policy` shard so executor adapters can audit why a node should run as a model, mixed adapter, deterministic executor or local code node.
+- Planner now selects a `local_code_node` policy for deterministic non-AI steps when the goal explicitly requests local Python or Node.js work, including reusable hints for repeated or frequent work.
+
+### Changed
+
+- Deterministic context profiles now preserve execution policy before lower-priority narrative context, keeping no-AI code-node decisions visible inside bounded context packets.
+- Context contract tests now target schema `forge.context.v6`.
+
+### Safety
+
+- Execution policy selection is metadata only. It does not execute local Python/Node.js code during planning, authorize external CLIs, mutate Docker/Kubernetes/Knative, bypass validation gates or make an installed CLI the source of truth.
+- Code-node policy remains Forge-owned and validation-gated through `deterministic_code_node_validation_required`.
+
+### Validation
+
+- Added a CLI contract test proving repeated local Python work without AI receives a deterministic `local_code_node` policy in both the planned task and the routed context packet.
+
 ## 0.4.16 - 2026-05-23
 
 ### Added

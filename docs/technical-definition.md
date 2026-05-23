@@ -190,24 +190,27 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v5` and routing policy
-`task_local_revisioned_persona_compressed_executor_profile_budget_v5`. Each packet
+Current `forge context` packets use schema `forge.context.v6` and routing policy
+`task_local_revisioned_persona_compressed_executor_policy_budget_v6`. Each packet
 includes the executor-facing content, the full context checksum, workflow revision,
 artifact count, node-scoped persona routing metadata for human-facing tasks, executor
-profile metadata, requested and effective budgets, lineage hashes, included and
-omitted sections, profile-driven omissions, and a deterministic shard manifest with
-source, priority, compression state, profile exclusion state, byte count, summary and
-shard checksum.
+profile metadata, execution policy metadata, requested and effective budgets, lineage
+hashes, included and omitted sections, profile-driven omissions, and a deterministic
+shard manifest with source, priority, compression state, profile exclusion state, byte
+count, summary and shard checksum.
 
 Executor profiles let Forge route different envelopes without changing workflow
 authority. Deterministic `command` and `wait` nodes use a no-AI profile that shrinks
 the context budget and prioritizes local objective, validation rules, declared context
 requirements and dependencies before lower-priority narrative context. Notification
 nodes use a smaller deterministic profile that still allows persona routing. AI and
-mixed nodes keep the richer reasoning profile. Runtime goal, artifact and persona
-routing state remain part of the context lineage, which gives long-running executors a
-deterministic stale-context signal while leaving room for persisted summaries,
-artifact shards and subflow-aware routing in later versions.
+mixed nodes keep the richer reasoning profile. Execution policy metadata records
+whether the node is allowed to use AI, whether it is deterministic, whether a local
+Python/Node.js code runtime was selected and which validation gate controls the node.
+Runtime goal, artifact and persona routing state remain part of the context lineage,
+which gives long-running executors a deterministic stale-context signal while leaving
+room for persisted summaries, artifact shards and subflow-aware routing in later
+versions.
 
 ## Personality/Soul Routing
 

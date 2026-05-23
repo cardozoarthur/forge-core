@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.16`
+Current version: `0.4.17`
 
 This is the first functional CLI + Skill version:
 
@@ -38,6 +38,7 @@ This is the first functional CLI + Skill version:
 - workflow registry listing with lifecycle state
 - terminal workflow DAG inspection with lifecycle, dependency and persona annotations
 - context routing with deterministic shard manifests, deterministic code-node and long-running cognition goals
+- Forge-owned execution policy metadata for deterministic local Python/Node.js code nodes
 - node-scoped Personality/Soul Routing metadata for human-facing artifacts
 - controlled improvement proposal generation
 - Codex/OpenCode-compatible `forge-core` skill
@@ -77,17 +78,21 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v5`) with a deterministic
-`task_local_revisioned_persona_compressed_executor_profile_budget_v5` routing policy.
+`forge context` emits a versioned context packet (`forge.context.v6`) with a deterministic
+`task_local_revisioned_persona_compressed_executor_policy_budget_v6` routing policy.
 The packet keeps the legacy `content` body for executors, and also returns workflow
 revision, artifact count, persona routing metadata for human-facing nodes, executor
-profile metadata, lineage hashes and a shard manifest with included/omitted sections,
-profile exclusions, compression flags, source labels, priorities, byte counts,
-summaries and SHA-256 checksums. Deterministic command and wait nodes receive a smaller
-no-AI context envelope that preserves local objective and validation context before
-lower-priority narrative sections, while AI and mixed nodes keep richer reasoning
-context. Runtime goal, artifact and persona routing state are included in the context
-lineage so executors can detect stale context before resuming work.
+profile metadata, execution policy metadata, lineage hashes and a shard manifest with
+included/omitted sections, profile exclusions, compression flags, source labels,
+priorities, byte counts, summaries and SHA-256 checksums. Deterministic command and
+wait nodes receive a smaller no-AI context envelope that preserves local objective,
+execution policy and validation context before lower-priority narrative sections, while
+AI and mixed nodes keep richer reasoning context. When a goal explicitly calls for
+repeated local Python or Node.js work without AI, Forge marks the deterministic step as
+a `local_code_node`, records the selected runtime and routes that policy into the task
+context without executing external code during planning. Runtime goal, artifact and
+persona routing state are included in the context lineage so executors can detect stale
+context before resuming work.
 
 Skill-style async handoff:
 

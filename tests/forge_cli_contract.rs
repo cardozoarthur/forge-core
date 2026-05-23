@@ -317,10 +317,10 @@ fn context_controller_returns_versioned_shard_manifest() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v5");
+    assert_eq!(context["schema_version"], "forge.context.v6");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_profile_budget_v5"
+        "task_local_revisioned_persona_compressed_executor_policy_budget_v6"
     );
     assert_eq!(context["workflow_id"], workflow_id);
     assert_eq!(context["task_id"], task_id);
@@ -399,10 +399,10 @@ fn context_controller_compresses_oversized_shards_before_omitting() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v5");
+    assert_eq!(context["schema_version"], "forge.context.v6");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_profile_budget_v5"
+        "task_local_revisioned_persona_compressed_executor_policy_budget_v6"
     );
     assert_eq!(context["executor_profile"]["id"], "ai_reasoning");
     assert!(context["context_bytes"].as_u64().unwrap() <= 420);
@@ -486,10 +486,10 @@ fn context_package_applies_no_ai_profile_to_deterministic_executor_nodes() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v5");
+    assert_eq!(context["schema_version"], "forge.context.v6");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_profile_budget_v5"
+        "task_local_revisioned_persona_compressed_executor_policy_budget_v6"
     );
     assert_eq!(context["requested_budget"], 1600);
     assert!(context["effective_budget"].as_u64().unwrap() < 1600);
@@ -525,6 +525,90 @@ fn context_package_applies_no_ai_profile_to_deterministic_executor_nodes() {
             && shard["profile_excluded"] == true
             && shard["included"] == false
     }));
+}
+
+#[test]
+fn deterministic_code_nodes_carry_no_ai_execution_policy_in_context() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with repeated local Python cost calculations without AI and email ops@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let code_task = find_task(
+        json["tasks"].as_array().unwrap(),
+        "Run deterministic non-AI step",
+    );
+    assert_eq!(code_task["executor"], "command");
+    assert_eq!(code_task["execution_policy"]["mode"], "local_code_node");
+    assert_eq!(code_task["execution_policy"]["ai_allowed"], false);
+    assert_eq!(code_task["execution_policy"]["deterministic"], true);
+    assert_eq!(
+        code_task["execution_policy"]["code_runtime"]["language"],
+        "python"
+    );
+    assert_eq!(
+        code_task["execution_policy"]["validation_gate"],
+        "deterministic_code_node_validation_required"
+    );
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            code_task["id"].as_str().unwrap(),
+            "--budget",
+            "1600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+    assert_eq!(context["schema_version"], "forge.context.v6");
+    assert_eq!(
+        context["routing_policy"],
+        "task_local_revisioned_persona_compressed_executor_policy_budget_v6"
+    );
+    assert_eq!(context["execution_policy"]["mode"], "local_code_node");
+    assert_eq!(
+        context["execution_policy"]["code_runtime"]["entrypoint"],
+        "forge_local_python_code_node"
+    );
+    assert!(context["included_sections"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("execution_policy".to_string())));
+    assert!(context["shards"].as_array().unwrap().iter().any(|shard| {
+        shard["section"] == "execution_policy"
+            && shard["source"] == "execution_policy"
+            && shard["included"] == true
+    }));
+    assert!(context["content"]
+        .as_str()
+        .unwrap()
+        .contains("Execution policy mode: local_code_node"));
 }
 
 #[test]
@@ -617,10 +701,10 @@ fn context_package_tracks_runtime_mutation_lineage_and_current_goal() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v5");
+    assert_eq!(context["schema_version"], "forge.context.v6");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_profile_budget_v5"
+        "task_local_revisioned_persona_compressed_executor_policy_budget_v6"
     );
     assert_eq!(context["workflow_revision"], 2);
     assert_eq!(context["artifact_count"], 1);
@@ -742,10 +826,10 @@ fn context_package_includes_persona_routing_lineage_for_human_facing_task() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v5");
+    assert_eq!(context["schema_version"], "forge.context.v6");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_profile_budget_v5"
+        "task_local_revisioned_persona_compressed_executor_policy_budget_v6"
     );
     assert_eq!(context["persona"]["mode"], "operator_report");
     assert_eq!(context["persona"]["scope"], "node");
