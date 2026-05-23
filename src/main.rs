@@ -3,12 +3,17 @@ use clap::{Parser, Subcommand, ValueEnum};
 use forge_core::artifact::list_workflow_artifacts;
 use forge_core::context::build_context_package;
 use forge_core::execution::run_simulated;
+use forge_core::executor::{load_executors, sync_executors, ExecutorSyncOptions};
 use forge_core::graph::create_workflow;
 use forge_core::improve::generate_improvement;
 use forge_core::intent::parse_intent;
+use forge_core::runtime::{
+    guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
+};
 use forge_core::skill::install_skill;
 use forge_core::storage::ForgeStore;
 use forge_core::validation::validate_workflow;
+use forge_core::workflow::{attach_workflow_artifact, update_workflow_goal};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -63,6 +68,8 @@ enum Commands {
     Improve {
         #[arg(long)]
         workflow: String,
+        #[arg(long)]
+        target_version: Option<String>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -76,6 +83,26 @@ enum Commands {
         #[command(subcommand)]
         command: SkillCommands,
     },
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommands,
+    },
+    Executors {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Runtimes {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Runtime {
+        #[command(subcommand)]
+        command: RuntimeCommands,
+    },
+    Workflow {
+        #[command(subcommand)]
+        command: WorkflowCommands,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -85,6 +112,110 @@ enum SkillCommands {
         home: PathBuf,
         #[arg(long)]
         target: Vec<String>,
+        #[arg(long = "executor-path")]
+        executor_paths: Vec<PathBuf>,
+        #[arg(long = "runtime-path")]
+        runtime_paths: Vec<PathBuf>,
+        #[arg(long)]
+        allow: Vec<String>,
+        #[arg(long)]
+        deny: Vec<String>,
+        #[arg(long)]
+        no_prompt: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SyncCommands {
+    Executors {
+        #[arg(long, default_value = ".")]
+        home: PathBuf,
+        #[arg(long = "executor-path")]
+        executor_paths: Vec<PathBuf>,
+        #[arg(long)]
+        allow: Vec<String>,
+        #[arg(long)]
+        deny: Vec<String>,
+        #[arg(long)]
+        no_prompt: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Runtimes {
+        #[arg(long, default_value = ".")]
+        home: PathBuf,
+        #[arg(long = "runtime-path")]
+        runtime_paths: Vec<PathBuf>,
+        #[arg(long)]
+        allow: Vec<String>,
+        #[arg(long)]
+        deny: Vec<String>,
+        #[arg(long)]
+        no_prompt: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    All {
+        #[arg(long, default_value = ".")]
+        home: PathBuf,
+        #[arg(long = "executor-path")]
+        executor_paths: Vec<PathBuf>,
+        #[arg(long = "runtime-path")]
+        runtime_paths: Vec<PathBuf>,
+        #[arg(long)]
+        allow: Vec<String>,
+        #[arg(long)]
+        deny: Vec<String>,
+        #[arg(long)]
+        no_prompt: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RuntimeCommands {
+    Guard {
+        #[arg(long)]
+        substrate: String,
+        #[arg(long)]
+        resource: String,
+        #[arg(long)]
+        namespace: String,
+        #[arg(long)]
+        action: String,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        allow_external: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkflowCommands {
+    UpdateGoal {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        goal: String,
+        #[arg(long)]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    AttachArtifact {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -138,6 +269,7 @@ fn run() -> Result<i32> {
                 "goal": workflow.goal,
                 "tasks": workflow.tasks,
                 "artifacts": workflow.artifacts,
+                "revisions": workflow.revisions,
             });
             print_response(output, &response)?;
             Ok(0)
@@ -182,10 +314,14 @@ fn run() -> Result<i32> {
             print_response(output, &report)?;
             Ok(exit_code)
         }
-        Commands::Improve { workflow, output } => {
+        Commands::Improve {
+            workflow,
+            target_version,
+            output,
+        } => {
             let store = ForgeStore::open(cli.store)?;
             let workflow = store.load_workflow(&workflow)?;
-            let proposal = generate_improvement(&store, &workflow)?;
+            let proposal = generate_improvement(&store, &workflow, target_version)?;
             print_response(output, &proposal)?;
             Ok(0)
         }
@@ -204,9 +340,189 @@ fn run() -> Result<i32> {
             SkillCommands::Install {
                 home,
                 target,
+                executor_paths,
+                runtime_paths,
+                allow,
+                deny,
+                no_prompt,
                 output,
             } => {
+                let store = ForgeStore::open(cli.store)?;
                 let report = install_skill(&home, &target)?;
+                let executor_sync = sync_executors(
+                    &store,
+                    ExecutorSyncOptions {
+                        home: home.clone(),
+                        executor_paths,
+                        allow: allow.clone(),
+                        deny: deny.clone(),
+                        prompt: !no_prompt,
+                    },
+                )?;
+                let runtime_sync = sync_runtimes(
+                    &store,
+                    RuntimeSyncOptions {
+                        home: home.clone(),
+                        runtime_paths,
+                        allow: allow.clone(),
+                        deny: deny.clone(),
+                        prompt: !no_prompt,
+                    },
+                )?;
+                let response = serde_json::json!({
+                    "skill": report.skill,
+                    "installed": report.installed,
+                    "executor_sync": executor_sync,
+                    "runtime_sync": runtime_sync,
+                });
+                print_response(output, &response)?;
+                Ok(0)
+            }
+        },
+        Commands::Sync { command } => match command {
+            SyncCommands::Executors {
+                home,
+                executor_paths,
+                allow,
+                deny,
+                no_prompt,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = sync_executors(
+                    &store,
+                    ExecutorSyncOptions {
+                        home,
+                        executor_paths,
+                        allow,
+                        deny,
+                        prompt: !no_prompt,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            SyncCommands::Runtimes {
+                home,
+                runtime_paths,
+                allow,
+                deny,
+                no_prompt,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = sync_runtimes(
+                    &store,
+                    RuntimeSyncOptions {
+                        home,
+                        runtime_paths,
+                        allow,
+                        deny,
+                        prompt: !no_prompt,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            SyncCommands::All {
+                home,
+                executor_paths,
+                runtime_paths,
+                allow,
+                deny,
+                no_prompt,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let executor_sync = sync_executors(
+                    &store,
+                    ExecutorSyncOptions {
+                        home: home.clone(),
+                        executor_paths,
+                        allow: allow.clone(),
+                        deny: deny.clone(),
+                        prompt: !no_prompt,
+                    },
+                )?;
+                let runtime_sync = sync_runtimes(
+                    &store,
+                    RuntimeSyncOptions {
+                        home,
+                        runtime_paths,
+                        allow,
+                        deny,
+                        prompt: !no_prompt,
+                    },
+                )?;
+                let response = serde_json::json!({
+                    "status": "synced",
+                    "executor_sync": executor_sync,
+                    "runtime_sync": runtime_sync,
+                });
+                print_response(output, &response)?;
+                Ok(0)
+            }
+        },
+        Commands::Executors { output } => {
+            let store = ForgeStore::open(cli.store)?;
+            let report = load_executors(&store)?;
+            print_response(output, &report)?;
+            Ok(0)
+        }
+        Commands::Runtimes { output } => {
+            let store = ForgeStore::open(cli.store)?;
+            let report = load_runtimes(&store)?;
+            print_response(output, &report)?;
+            Ok(0)
+        }
+        Commands::Runtime { command } => match command {
+            RuntimeCommands::Guard {
+                substrate,
+                resource,
+                namespace,
+                action,
+                owner,
+                allow_external,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = guard_runtime_scope(
+                    &store,
+                    RuntimeGuardRequest {
+                        substrate,
+                        resource,
+                        namespace,
+                        action,
+                        owner,
+                        allow_external,
+                    },
+                )?;
+                let exit_code = if report.allowed { 0 } else { 1 };
+                print_response(output, &report)?;
+                Ok(exit_code)
+            }
+        },
+        Commands::Workflow { command } => match command {
+            WorkflowCommands::UpdateGoal {
+                workflow,
+                goal,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = update_workflow_goal(&store, &workflow, &goal, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::AttachArtifact {
+                workflow,
+                path,
+                kind,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = attach_workflow_artifact(&store, &workflow, &path, &kind, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
             }

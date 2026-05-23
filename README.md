@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.1.0`
+Current version: `0.3.0`
 
 This is the first functional CLI + Skill version:
 
@@ -37,6 +37,12 @@ This is the first functional CLI + Skill version:
 - artifact listing
 - controlled improvement proposal generation
 - Codex/OpenCode-compatible `forge-core` skill
+- executor sync that detects installed/configured CLIs and persists human authorization policy
+- runtime sync that detects Docker/Kubernetes/Knative and persists human authorization policy
+- goal-oriented tasks with subtasks, impediments, acceptance criteria and rework readiness checks
+- runtime workflow mutation for goals and artifacts with origin trace from `codex`, `opencode`, `forge_cli` or skills
+- async workflow substrate policy with scope guards for Forge-owned resources
+- versioned improvement artifacts with strong changelog generation
 
 ## Install
 
@@ -60,6 +66,43 @@ forge validate --workflow <workflow-id> --output json
 forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
+
+Sync local execution engines before Forge uses external CLIs:
+
+```bash
+forge sync executors --home "$HOME" --output json
+forge sync executors --home "$HOME" --allow codex --allow opencode --output json
+forge executors --output json
+```
+
+Forge detects known CLIs, checks whether they appear configured and asks for human authorization when run interactively. A detected CLI is not usable until the policy is explicitly allowed. On this machine, `codex` and `opencode` can be authorized for Forge self-improvement with the second command above.
+
+Sync async run substrates separately:
+
+```bash
+forge sync runtimes --home "$HOME" --output json
+forge runtimes --output json
+```
+
+Forge can detect Docker, Kubernetes and Knative. If Docker and Kubernetes are available but Knative is missing, Forge reports a Knative install suggestion that requires human approval. Forge does not install or mutate infrastructure by itself.
+
+Runtime resources are scope-guarded:
+
+```bash
+forge runtime guard --substrate knative --resource service/forge-node --namespace forge --action update --owner forge --output json
+forge runtime guard --substrate knative --resource service/existing-api --namespace default --action update --owner external --output json
+```
+
+Forge may update/delete resources it created. External resources require explicit human authorization, even when the substrate is available.
+
+Workflows can be changed while running:
+
+```bash
+forge workflow update-goal --workflow <workflow-id> --goal "new goal" --origin codex --output json
+forge workflow attach-artifact --workflow <workflow-id> --path ./report.md --kind report --origin opencode --output json
+```
+
+This is how Codex/OpenCode act as the human interface for Forge: the CLI session can update goals, attach artifacts and keep a revision trail without bypassing Forge's persistent runtime state.
 
 Example autonomous mixed objective:
 
@@ -123,6 +166,22 @@ execute workflow
 ```
 
 `forge improve` generates a controlled experiment artifact and keeps `auto_promoted=false`.
+
+Every improvement can target a version and generates a Markdown changelog:
+
+```bash
+forge improve --workflow <workflow-id> --target-version 0.3.0 --output json
+```
+
+Current structural improvement domains:
+
+- task structure: backlog state, subtasks, impediments, owner role and acceptance criteria;
+- prompt system: versioned prompt/task packets that can be benchmarked and rolled back;
+- process runtime: Scrum/SAFe-style blocked work and promotion readiness;
+- validation governance: goals must be definitively ready before promotion;
+- executor policy: installed/configured CLIs require saved human authorization;
+- runtime substrates: Docker/Kubernetes/Knative require authorization and resource ownership checks;
+- runtime mutation: goals/artifacts can change while running with origin trace and revisions.
 
 ## Evolution Direction
 

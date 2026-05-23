@@ -32,8 +32,24 @@ pub fn build_context_package(
         &mut sections,
         "local_objective",
         &format!(
-            "Task {}: {}\nExpected output: {}\n",
-            task.id, task.title, task.expected_output
+            "Task {}: {}\nGoal: {}\nExpected output: {}\nDefinition of ready: {}\n",
+            task.id,
+            task.title,
+            task.goal,
+            task.expected_output,
+            task.work_item.goal_validation.evidence_required.join("; ")
+        ),
+        budget,
+    );
+    push_section(
+        &mut content,
+        &mut sections,
+        "work_item",
+        &format!(
+            "Backlog state: {}\nImpediments: {}\nAcceptance criteria: {}\n",
+            task.work_item.backlog_state,
+            task.work_item.impediments.join("; "),
+            task.work_item.acceptance_criteria.join("; ")
         ),
         budget,
     );

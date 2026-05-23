@@ -51,9 +51,47 @@ pub struct NotificationSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubtaskSpec {
+    pub id: String,
+    pub title: String,
+    pub goal: String,
+    pub definition_of_done: Vec<String>,
+    pub status: TaskStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalValidationSpec {
+    pub goal: String,
+    pub evidence_required: Vec<String>,
+    pub definitively_ready: bool,
+    pub rework_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AsyncPolicy {
+    pub mode: String,
+    pub resume_strategy: String,
+    pub run_substrates: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkItemSpec {
+    pub item_type: String,
+    pub backlog_state: String,
+    pub priority: String,
+    pub owner_role: String,
+    pub parent_id: Option<String>,
+    pub subtasks: Vec<SubtaskSpec>,
+    pub impediments: Vec<String>,
+    pub acceptance_criteria: Vec<String>,
+    pub goal_validation: GoalValidationSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtomicTask {
     pub id: String,
     pub title: String,
+    pub goal: String,
     pub dependencies: Vec<String>,
     pub context_requirements: Vec<String>,
     pub validation_rules: Vec<ValidationRule>,
@@ -63,6 +101,8 @@ pub struct AtomicTask {
     pub schedule: Option<ScheduleSpec>,
     pub cost: CostEstimate,
     pub notification: Option<NotificationSpec>,
+    pub work_item: WorkItemSpec,
+    pub async_policy: AsyncPolicy,
     pub status: TaskStatus,
 }
 
@@ -76,6 +116,15 @@ pub struct ArtifactRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowRevision {
+    pub revision: u64,
+    pub origin: String,
+    pub change_type: String,
+    pub summary: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workflow {
     pub id: String,
     pub goal: String,
@@ -84,6 +133,7 @@ pub struct Workflow {
     pub intent: IntentSpec,
     pub tasks: Vec<AtomicTask>,
     pub artifacts: Vec<ArtifactRecord>,
+    pub revisions: Vec<WorkflowRevision>,
 }
 
 pub fn create_workflow(intent: IntentSpec) -> Workflow {
@@ -97,6 +147,7 @@ pub fn create_workflow(intent: IntentSpec) -> Workflow {
         intent,
         tasks,
         artifacts: Vec::new(),
+        revisions: Vec::new(),
     }
 }
 
@@ -118,9 +169,11 @@ fn task(
     execution: (ExecutorKind, f64),
 ) -> AtomicTask {
     let (executor, estimated_cost_usd) = execution;
+    let work_item = work_item(id, title, dependencies, &validation_rules);
     AtomicTask {
         id: id.to_string(),
         title: title.to_string(),
+        goal: format!("{title}: produce {expected_output}"),
         dependencies: dependencies
             .iter()
             .map(|item| (*item).to_string())
@@ -139,7 +192,98 @@ fn task(
             cost_model: "static_v0_estimate".to_string(),
         },
         notification: None,
+        work_item,
+        async_policy: AsyncPolicy {
+            mode: "sync".to_string(),
+            resume_strategy: "inline".to_string(),
+            run_substrates: Vec::new(),
+        },
         status: TaskStatus::Pending,
+    }
+}
+
+fn work_item(
+    id: &str,
+    title: &str,
+    dependencies: &[&str],
+    validation_rules: &[ValidationRule],
+) -> WorkItemSpec {
+    let item_type = if dependencies.is_empty() {
+        "capability".to_string()
+    } else if title.to_lowercase().contains("validate") {
+        "validation_story".to_string()
+    } else {
+        "execution_story".to_string()
+    };
+    let parent_id = dependencies
+        .first()
+        .map(|dependency| (*dependency).to_string());
+    let subtasks = vec![
+        SubtaskSpec {
+            id: format!("{id}-subtask-001"),
+            title: "Prepare bounded context".to_string(),
+            goal: format!("Gather the minimal context required to complete {title}"),
+            definition_of_done: vec![
+                "Context references are task-local".to_string(),
+                "Context stays within the declared budget".to_string(),
+            ],
+            status: TaskStatus::Pending,
+        },
+        SubtaskSpec {
+            id: format!("{id}-subtask-002"),
+            title: "Execute work".to_string(),
+            goal: format!("Produce the expected output for {title}"),
+            definition_of_done: vec![
+                "Execution trace is recorded".to_string(),
+                "Output is persisted or attached to the workflow state".to_string(),
+            ],
+            status: TaskStatus::Pending,
+        },
+        SubtaskSpec {
+            id: format!("{id}-subtask-003"),
+            title: "Validate readiness".to_string(),
+            goal: format!("Prove that {title} is definitively ready"),
+            definition_of_done: vec![
+                "Validation rules pass".to_string(),
+                "No unresolved impediment blocks promotion".to_string(),
+            ],
+            status: TaskStatus::Pending,
+        },
+    ];
+    let impediments = vec![
+        "missing executor authorization".to_string(),
+        "failed validation gate".to_string(),
+        "blocked dependency task".to_string(),
+    ];
+    let mut acceptance_criteria = validation_rules
+        .iter()
+        .map(|rule| format!("Validation rules pass for {}: {}", rule.kind, rule.expected))
+        .collect::<Vec<_>>();
+    acceptance_criteria
+        .push("Task output is persisted as replayable operational evidence".to_string());
+
+    WorkItemSpec {
+        item_type,
+        backlog_state: "ready".to_string(),
+        priority: "p1".to_string(),
+        owner_role: "forge_runtime".to_string(),
+        parent_id,
+        subtasks,
+        impediments,
+        acceptance_criteria,
+        goal_validation: GoalValidationSpec {
+            goal: format!("{title}: reach a definitively ready state before promotion"),
+            evidence_required: vec![
+                "completed task status".to_string(),
+                "completed subtasks".to_string(),
+                "passing validation rules".to_string(),
+                "no blocking impediments".to_string(),
+            ],
+            definitively_ready: false,
+            rework_policy:
+                "if goal evidence is missing, return the task to work instead of promoting"
+                    .to_string(),
+        },
     }
 }
 
@@ -309,7 +453,31 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         }
     }
 
+    if requires_async_runtime(&intent.goal) {
+        for task in &mut tasks {
+            task.async_policy = AsyncPolicy {
+                mode: "async".to_string(),
+                resume_strategy: "event_or_poll".to_string(),
+                run_substrates: vec![
+                    "docker".to_string(),
+                    "kubernetes".to_string(),
+                    "knative".to_string(),
+                ],
+            };
+        }
+    }
+
     tasks
+}
+
+fn requires_async_runtime(goal: &str) -> bool {
+    let lower = goal.to_lowercase();
+    lower.contains("async")
+        || lower.contains("assíncron")
+        || lower.contains("asynchronous")
+        || lower.contains("docker")
+        || lower.contains("kubernetes")
+        || lower.contains("knative")
 }
 
 fn requires_autonomous_extensions(goal: &str) -> bool {

@@ -44,6 +44,11 @@ pub fn run_simulated(workflow: &mut Workflow) -> ExecutionReport {
 
     for task in &mut workflow.tasks {
         task.status = TaskStatus::Completed;
+        task.work_item.backlog_state = "done".to_string();
+        task.work_item.goal_validation.definitively_ready = true;
+        for subtask in &mut task.work_item.subtasks {
+            subtask.status = TaskStatus::Completed;
+        }
         by_task.push(TaskCost {
             task_id: task.id.clone(),
             title: task.title.clone(),

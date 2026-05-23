@@ -7,8 +7,17 @@ Forge Core is a Rust workflow runtime. Treat it as operational infrastructure, n
 - Preserve Forge as the orchestration authority. CLIs and model providers are execution engines, even when they integrate tightly with Forge for usability.
 - Treat skill/plugin/native CLI coupling as an adoption layer, not as the source of truth for workflow state.
 - Support both integration directions: CLIs call Forge for planning/context/validation, and Forge calls CLIs through bounded executor adapters for long-running tasks.
+- On install and sync, detect installed/configured CLIs, ask for human authorization, and persist which executors Forge may use.
+- Do not use an installed CLI as an execution engine unless local executor policy marks it allowed.
+- Detect Docker, Kubernetes and Knative as async run substrates, not cognitive executors.
+- Do not install Knative or mutate Kubernetes/Docker/Knative resources without explicit user authorization.
+- Forge may update/delete resources it created. Pre-existing external resources require explicit authorization before mutation.
+- Workflows are mutable at runtime: goals and artifacts can be changed by `forge_cli`, Codex/OpenCode or skills, but every mutation must be revisioned and traced.
+- Treat every task and subtask as goal-oriented. Completion means the goal is definitively ready, not merely that an executor produced output.
+- If a goal is not definitively ready, return the task to work and expose the rework reason.
 - Preserve validation-before-promotion semantics.
 - Keep self-improvement controlled: generate experiments, benchmark, compare and promote only after validation.
+- Self-improvement should be structural: task/backlog model, prompts, process, validation and executor policy. Every candidate version needs a strong changelog.
 - Do not add unrestricted self-modification.
 - Keep models provider-agnostic.
 - Support autonomous and mixed workflows that can combine AI tasks, deterministic non-AI tasks, cron/wait tasks and notifications without requiring a human decision at every step.

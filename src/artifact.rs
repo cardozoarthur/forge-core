@@ -27,6 +27,29 @@ pub fn write_json_artifact(
     Ok((full_path, hex_sha256(&bytes)))
 }
 
+pub fn copy_artifact(
+    base_dir: &Path,
+    workflow_id: &str,
+    source_path: &Path,
+    kind: &str,
+) -> Result<(String, String, u64)> {
+    let bytes = fs::read(source_path)
+        .with_context(|| format!("failed to read artifact {}", source_path.display()))?;
+    let filename = source_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("artifact.bin");
+    let relative_path = format!("artifacts/{workflow_id}/attached-{kind}-{filename}");
+    let full_path = base_dir.join(&relative_path);
+    if let Some(parent) = full_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create artifact directory {}", parent.display()))?;
+    }
+    fs::write(&full_path, &bytes)
+        .with_context(|| format!("failed to write artifact {}", full_path.display()))?;
+    Ok((relative_path, hex_sha256(&bytes), bytes.len() as u64))
+}
+
 pub fn list_workflow_artifacts(base_dir: &Path, workflow_id: &str) -> Result<Vec<ListedArtifact>> {
     let artifact_dir = base_dir.join("artifacts").join(workflow_id);
     if !artifact_dir.exists() {

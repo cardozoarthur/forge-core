@@ -121,11 +121,18 @@ Status: implemented in the current CLI.
 - Rust CLI.
 - SQLite persistence.
 - Atomic task graph.
+- Goal-oriented task/work-item metadata.
+- Rework validation when a task is not definitively ready.
 - Context budget command.
 - Simulated mixed AI/non-AI execution.
 - Cron/wait task representation.
 - Notification payload with workflow cost report.
 - Controlled improvement artifacts.
+- Version changelog generation for improvement candidates.
+- Executor sync and persisted human authorization policy.
+- Runtime substrate sync for Docker/Kubernetes/Knative.
+- Runtime scope guard for Forge-owned versus external resources.
+- Runtime goal/artifact mutation with origin-tracked revisions.
 - Codex/OpenCode-compatible skill installation.
 
 ### Phase 1: Adapter Contract
@@ -137,7 +144,7 @@ Goal: define the stable executor interface before binding to specific CLIs.
 - Persist executor traces as JSONL.
 - Persist per-task cost estimates.
 - Add executor response schema validation.
-- Add dry-run adapters for `codex`, `opencode`, `gemini`, `claude`, `ollama` and `command`.
+- Add dry-run adapters for authorized `codex`, `opencode`, `gemini`, `claude`, `ollama` and `command`.
 
 ### Phase 2: First Real CLI Adapters
 
@@ -157,6 +164,8 @@ Goal: make future work real, not just represented in the graph.
 - Add due-task queue backed by SQLite.
 - Add cron evaluation.
 - Add task wakeup records.
+- Route async tasks to authorized Docker/Kubernetes/Knative substrates.
+- Enforce resource ownership labels before update/delete.
 - Add notification dispatch adapters.
 - Keep email/Telegram/webhook dispatch behind explicit configuration and dry-run defaults.
 
@@ -171,24 +180,28 @@ Goal: make Forge feel simple inside daily coding tools.
 
 ### Phase 5: Controlled Self-Improvement
 
-Goal: let Forge improve workflows without unrestricted self-modification.
+Goal: let Forge improve workflows structurally without unrestricted self-modification.
 
 - Collect metrics per workflow, executor and validation gate.
-- Generate experimental workflow variants.
+- Generate experimental workflow variants across task structure, prompt system, process runtime, validation governance and executor policy.
 - Benchmark variants against baseline workflows.
 - Promote only when validation, cost and quality gates improve.
 - Record lineage, reproducibility hashes and rollback metadata.
+- Produce a strong changelog for every candidate version.
 
 ## Near-Term Implementation Backlog
 
 1. Add executor adapter traits and response schemas.
 2. Add task leasing and long-running execution records.
-3. Add dry-run CLI adapters for Codex/OpenCode/Gemini.
+3. Add dry-run CLI adapters for authorized Codex/OpenCode/Gemini.
 4. Add real OpenCode adapter with bounded context.
-5. Add scheduler daemon and due-task queue.
-6. Add notification configuration for email, Telegram and webhooks.
-7. Add cost accounting across AI, command runtime and notification steps.
-8. Add native integration spike for the easiest open-source CLI.
+5. Add real Codex adapter and enforce the OpenCode/Codex bridge policy.
+6. Add scheduler daemon and due-task queue.
+7. Add notification configuration for email, Telegram and webhooks.
+8. Add cost accounting across AI, command runtime and notification steps.
+9. Add native integration spike for the easiest open-source CLI.
+10. Add real Knative node adapter with ownership labels and namespace guard.
+11. Add runtime mutation propagation so changed goals invalidate stale downstream context.
 
 ## Non-Goals
 
@@ -200,3 +213,4 @@ Forge should not:
 - auto-promote self-generated changes without validation;
 - hide workflow costs from users;
 - require human decisions when the workflow was defined as autonomous.
+- mutate user-owned Docker/Kubernetes/Knative resources without explicit authorization.

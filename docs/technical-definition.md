@@ -11,6 +11,7 @@ Forge Core should not be treated only as a plugin or skill that adds capability 
 Forge owns:
 
 - objective decomposition;
+- explicit goal hierarchy;
 - atomic task graph state;
 - context minimization;
 - task scheduling and cron/wait continuation;
@@ -32,10 +33,13 @@ Close coupling is still valuable when it reduces friction. The target architectu
 
 - Intent parser: extracts goal, constraints, deliverables, risks and unknowns.
 - Requirement extractor: normalizes the objective into measurable execution needs.
-- Workflow fragmentation engine: produces atomic retryable tasks.
+- Workflow fragmentation engine: produces atomic retryable tasks with explicit goals.
+- Work item controller: tracks backlog state, subtasks, impediments, owner role, acceptance criteria and definition of done.
 - Atomic task graph: keeps dependency-aware execution state.
 - Context controller: injects only task-local context under a byte budget.
 - Execution runtime: coordinates task execution and trace collection.
+- Executor policy: detects installed/configured CLIs and persists human authorization before use.
+- Runtime substrate policy: detects Docker/Kubernetes/Knative and persists human authorization before use.
 - Scheduled execution: represents future continuation with cron/wait tasks.
 - Non-AI execution: runs deterministic command-style steps without requiring a live model call.
 - Notification execution: creates final notification payloads such as email cost reports.
@@ -46,7 +50,7 @@ Close coupling is still valuable when it reduces friction. The target architectu
 
 ## v0 Boundary
 
-The first version is a local Rust CLI and skill package. It includes SQLite persistence, simulated execution, AI/non-AI/wait/notification task kinds, cost report generation and controlled improvement artifacts. It does not yet include distributed execution, provider adapters, SaaS UI or WASM plugins.
+The current version is a local Rust CLI and skill package. It includes SQLite persistence, simulated execution, AI/non-AI/wait/notification task kinds, executor sync/policy, runtime substrate sync/policy, goal-oriented work items, rework validation, runtime goal/artifact mutation, cost report generation and controlled improvement artifacts with changelog generation. It does not yet include distributed execution, real provider adapters, SaaS UI or WASM plugins.
 
 ## Executor Contract Direction
 
@@ -86,8 +90,93 @@ The executor response should be structured enough for validation, cost reporting
 }
 ```
 
+## Goal-Oriented Work Contract
+
+Every task and subtask must have a goal. A task is not promotable just because an executor returned output. Forge must evaluate whether the task is definitively ready.
+
+The task work item includes:
+
+- `goal`;
+- `backlog_state`;
+- `subtasks`;
+- `impediments`;
+- `acceptance_criteria`;
+- `goal_validation.evidence_required`;
+- `goal_validation.definitively_ready`;
+- `goal_validation.rework_policy`.
+
+If goal evidence is missing, validation reports `goal_readiness` failures and returns rework tasks. The workflow must go back to work instead of advancing as if it were complete.
+
+## Executor Sync Contract
+
+On install and on every sync, Forge should inspect known execution CLIs:
+
+- Codex;
+- OpenCode;
+- Gemini;
+- Claude;
+- Ollama.
+
+Forge records whether each CLI is installed and configured. Installed/configured does not mean usable. A CLI becomes usable only after a human explicitly allows it. The local policy is persisted in SQLite.
+
+When Codex and OpenCode are both authorized, Forge records the `opencode_codex_bridge` integration so OpenCode and Codex can be coordinated as bounded execution engines.
+
+## Runtime Substrate Contract
+
+Forge separates cognitive executors from run substrates.
+
+Cognitive executors:
+
+- Codex;
+- OpenCode;
+- Gemini;
+- Claude;
+- Ollama.
+
+Run substrates:
+
+- Docker;
+- Kubernetes;
+- Knative.
+
+Run substrates can execute asynchronous workflow nodes. They still require human authorization before use.
+
+If Docker and Kubernetes are available but Knative is missing, Forge may suggest Knative installation. It must not install Knative or mutate a cluster without explicit user authorization.
+
+## Resource Ownership Contract
+
+Forge must not mutate resources outside its ownership scope.
+
+Allowed without extra approval:
+
+- create Forge-owned resources;
+- update Forge-owned resources;
+- delete Forge-owned resources.
+
+Blocked without explicit approval:
+
+- update pre-existing Docker/Kubernetes/Knative resources;
+- delete pre-existing Docker/Kubernetes/Knative resources;
+- patch resources that belong to another app, namespace or context.
+
+Forge-owned resources should be labeled or recorded with ownership metadata. Until real substrate adapters exist, `forge runtime guard` provides the policy decision as a testable contract.
+
+## Runtime Mutation Contract
+
+Workflows are not frozen snapshots. Goals and artifacts can change while execution is active.
+
+Mutation rules:
+
+- every goal change records origin and revision;
+- every artifact attachment copies the artifact into Forge workflow storage;
+- origins can be `forge_cli`, `codex`, `opencode`, `skill` or another future adapter;
+- mutation must not bypass validation;
+- downstream tasks must see updated goals/artifacts through Forge context packages.
+
+Codex CLI and OpenCode CLI are therefore human interfaces for Forge as well as possible executor adapters. They can update Forge state through CLI commands while Forge remains the persistent source of truth.
+
 ## Validation Contract
 
 A workflow is only promotable when all tasks are completed and validation rules pass. Until then, `forge validate` returns a blocked status and non-zero exit code.
 
-Self-improvement is intentionally conservative. `forge improve` generates an experiment artifact and does not auto-promote.
+Self-improvement is intentionally conservative. `forge improve` generates an experiment artifact plus a version changelog and does not auto-promote.
