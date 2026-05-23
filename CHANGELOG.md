@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.5 - 2026-05-23
+
+### Added
+
+- Added versioned self-evolution validation evidence artifacts:
+  - schema version: `forge.self_evolution.validation.v1`;
+  - per-cycle `self-evolution-cycle-NNN-validation.json` artifacts;
+  - cycle report fields for validation report path and SHA-256 checksum.
+
+### Changed
+
+- Self-evolution validation now runs the required commands as a structured sequence and records command status, exit code, duration and captured stdout/stderr.
+- Failed validation still keeps `forge self run --output json` machine-readable by sending diagnostic command logs to stderr while persisting the full evidence in the validation artifact.
+
+### Safety
+
+- Validation remains fail-closed: post-validation local install and GitHub publication only run after every required validation command passes.
+- Commands after the first failed validation gate are recorded as skipped so operators can see exactly where promotion stopped.
+
 ## 0.4.4 - 2026-05-23
 
 ### Fixed

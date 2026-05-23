@@ -1411,6 +1411,76 @@ fn self_run_declares_self_update_and_gh_publication_after_validation_contract() 
 }
 
 #[test]
+fn self_run_writes_validation_evidence_contract_artifact() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("README.md"), "# Repo\n").unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2026-05-25T10:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--executor",
+            "codex",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let cycle_report = &json["cycle_reports"][0];
+    let validation_report_path = cycle_report["validation_report_path"].as_str().unwrap();
+    assert!(validation_report_path.ends_with("self-evolution-cycle-001-validation.json"));
+    assert!(
+        cycle_report["validation_report_sha256"]
+            .as_str()
+            .unwrap()
+            .len()
+            >= 64
+    );
+
+    let validation_report_full_path = temp.path().join(validation_report_path);
+    assert!(validation_report_full_path.exists());
+    let validation_report_bytes = fs::read(&validation_report_full_path).unwrap();
+    assert_eq!(
+        cycle_report["validation_report_sha256"],
+        hex_sha256(&validation_report_bytes)
+    );
+
+    let validation_report: Value = serde_json::from_slice(&validation_report_bytes).unwrap();
+    assert_eq!(
+        validation_report["schema_version"],
+        "forge.self_evolution.validation.v1"
+    );
+    assert_eq!(
+        validation_report["prompt_packet_version"],
+        "forge.self_evolution.prompt.v1"
+    );
+    assert_eq!(validation_report["status"], "planned");
+    assert_eq!(validation_report["validation_passed"], false);
+    let commands = validation_report["commands"].as_array().unwrap();
+    assert_eq!(commands.len(), 4);
+    assert_eq!(commands[0]["command"], "cargo fmt --check");
+    assert_eq!(commands[0]["status"], "planned");
+    assert_eq!(commands[3]["command"], "cargo build --release");
+}
+
+#[test]
 fn request_start_returns_async_run_identifier_for_skill_callers() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

@@ -9,10 +9,18 @@ use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 const SELF_EVOLUTION_PROMPT_PACKET_VERSION: &str = "forge.self_evolution.prompt.v1";
+const SELF_EVOLUTION_VALIDATION_REPORT_VERSION: &str = "forge.self_evolution.validation.v1";
 const GH_AUTH_TIMEOUT_SECONDS: &str = "20";
 const GIT_PUSH_TIMEOUT_SECONDS: &str = "300";
+const VALIDATION_COMMANDS: [&str; 4] = [
+    "cargo fmt --check",
+    "cargo clippy --all-targets --all-features -- -D warnings",
+    "cargo test",
+    "cargo build --release",
+];
 
 #[derive(Debug, Clone)]
 pub struct SelfRunOptions {
@@ -47,6 +55,8 @@ pub struct SelfCycleReport {
     pub prompt_path: String,
     pub prompt_packet_version: String,
     pub prompt_sha256: String,
+    pub validation_report_path: String,
+    pub validation_report_sha256: String,
     pub report_path: String,
     pub validation_passed: bool,
     pub self_update: SelfUpdateReport,
@@ -84,6 +94,33 @@ struct SelfEvolutionPromptPacket {
     stop_at: String,
     repo: String,
     validation_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SelfValidationEvidenceReport {
+    schema_version: String,
+    prompt_packet_version: String,
+    workflow_id: String,
+    run_id: String,
+    cycle: u32,
+    executor: String,
+    repo: String,
+    status: String,
+    validation_passed: bool,
+    started_at: Option<DateTime<Utc>>,
+    finished_at: Option<DateTime<Utc>>,
+    commands: Vec<SelfValidationCommandEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SelfValidationCommandEvidence {
+    command: String,
+    status: String,
+    exit_code: Option<i32>,
+    duration_ms: Option<u64>,
+    stdout: String,
+    stderr: String,
+    reason: Option<String>,
 }
 
 pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result<SelfRunReport> {
@@ -130,10 +167,14 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             "artifacts/{}/self-evolution-cycle-{:03}-report.json",
             workflow.id, cycle
         );
+        let validation_report_path = format!(
+            "artifacts/{}/self-evolution-cycle-{:03}-validation.json",
+            workflow.id, cycle
+        );
         write_text_artifact(&store.base_dir(), &prompt_path, &prompt)?;
 
         let mut status = "planned".to_string();
-        let mut validation_passed = false;
+        let mut validation_report = SelfValidationEvidenceReport::planned(&prompt_packet);
         let mut self_update = SelfUpdateReport::planned();
         let mut committed = false;
         let mut commit = None;
@@ -141,7 +182,11 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
 
         if !options.dry_run {
             status = execute_cycle(&options.repo, &executor, &prompt)?;
-            validation_passed = run_validation(&options.repo)?;
+            validation_report = run_validation(&options.repo, &prompt_packet)?;
+            if !validation_report.validation_passed {
+                emit_validation_failure_logs(&validation_report);
+            }
+            let validation_passed = validation_report.validation_passed;
             if validation_passed {
                 self_update = run_self_update(&options.repo)?;
                 if has_changes(&options.repo)? {
@@ -165,6 +210,11 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
                     PublicProjectUpdateReport::skipped(options.push, "validation failed");
             }
         }
+        let (_validation_full_path, validation_report_sha256) = write_json_artifact(
+            &store.base_dir(),
+            &validation_report_path,
+            &serde_json::to_value(&validation_report)?,
+        )?;
 
         let cycle_report = SelfCycleReport {
             cycle,
@@ -173,8 +223,10 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             prompt_path: prompt_path.clone(),
             prompt_packet_version: prompt_packet.version,
             prompt_sha256,
+            validation_report_path: validation_report_path.clone(),
+            validation_report_sha256,
             report_path: report_path.clone(),
-            validation_passed,
+            validation_passed: validation_report.validation_passed,
             self_update,
             committed,
             commit,
@@ -230,11 +282,60 @@ impl SelfEvolutionPromptPacket {
             stop_at: options.until.clone(),
             repo: options.repo.display().to_string(),
             validation_commands: vec![
-                "cargo fmt --check".to_string(),
-                "cargo clippy --all-targets --all-features -- -D warnings".to_string(),
-                "cargo test".to_string(),
-                "cargo build --release".to_string(),
+                VALIDATION_COMMANDS[0].to_string(),
+                VALIDATION_COMMANDS[1].to_string(),
+                VALIDATION_COMMANDS[2].to_string(),
+                VALIDATION_COMMANDS[3].to_string(),
             ],
+        }
+    }
+}
+
+impl SelfValidationEvidenceReport {
+    fn planned(packet: &SelfEvolutionPromptPacket) -> Self {
+        Self {
+            schema_version: SELF_EVOLUTION_VALIDATION_REPORT_VERSION.to_string(),
+            prompt_packet_version: packet.version.clone(),
+            workflow_id: packet.workflow_id.clone(),
+            run_id: packet.run_id.clone(),
+            cycle: packet.cycle,
+            executor: packet.executor.clone(),
+            repo: packet.repo.clone(),
+            status: "planned".to_string(),
+            validation_passed: false,
+            started_at: None,
+            finished_at: None,
+            commands: packet
+                .validation_commands
+                .iter()
+                .map(|command| SelfValidationCommandEvidence::planned(command))
+                .collect(),
+        }
+    }
+}
+
+impl SelfValidationCommandEvidence {
+    fn planned(command: &str) -> Self {
+        Self {
+            command: command.to_string(),
+            status: "planned".to_string(),
+            exit_code: None,
+            duration_ms: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            reason: None,
+        }
+    }
+
+    fn skipped(command: &str, reason: &str) -> Self {
+        Self {
+            command: command.to_string(),
+            status: "skipped".to_string(),
+            exit_code: None,
+            duration_ms: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            reason: Some(reason.to_string()),
         }
     }
 }
@@ -426,17 +527,82 @@ fn execute_cycle(repo: &Path, executor: &str, prompt: &str) -> Result<String> {
     }
 }
 
-fn run_validation(repo: &Path) -> Result<bool> {
-    let output = Command::new("sh")
-        .arg("-lc")
-        .arg("cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test && cargo build --release")
-        .current_dir(repo)
-        .output()?;
-    if !output.status.success() {
-        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
-        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+fn run_validation(
+    repo: &Path,
+    packet: &SelfEvolutionPromptPacket,
+) -> Result<SelfValidationEvidenceReport> {
+    let started_at = Utc::now();
+    let mut commands = Vec::new();
+    let mut validation_passed = true;
+    let mut skip_remaining = false;
+
+    for command in &packet.validation_commands {
+        if skip_remaining {
+            commands.push(SelfValidationCommandEvidence::skipped(
+                command,
+                "previous validation command failed",
+            ));
+            continue;
+        }
+
+        let started = Instant::now();
+        let output = Command::new("sh")
+            .arg("-lc")
+            .arg(command)
+            .current_dir(repo)
+            .output()
+            .with_context(|| format!("failed to run validation command `{command}`"))?;
+        let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let passed = output.status.success();
+        if !passed {
+            validation_passed = false;
+            skip_remaining = true;
+        }
+        commands.push(SelfValidationCommandEvidence {
+            command: command.clone(),
+            status: if passed { "passed" } else { "failed" }.to_string(),
+            exit_code: output.status.code(),
+            duration_ms: Some(duration_ms),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            reason: None,
+        });
     }
-    Ok(output.status.success())
+
+    Ok(SelfValidationEvidenceReport {
+        schema_version: SELF_EVOLUTION_VALIDATION_REPORT_VERSION.to_string(),
+        prompt_packet_version: packet.version.clone(),
+        workflow_id: packet.workflow_id.clone(),
+        run_id: packet.run_id.clone(),
+        cycle: packet.cycle,
+        executor: packet.executor.clone(),
+        repo: packet.repo.clone(),
+        status: if validation_passed {
+            "passed"
+        } else {
+            "failed"
+        }
+        .to_string(),
+        validation_passed,
+        started_at: Some(started_at),
+        finished_at: Some(Utc::now()),
+        commands,
+    })
+}
+
+fn emit_validation_failure_logs(report: &SelfValidationEvidenceReport) {
+    for command in &report.commands {
+        if command.status != "failed" {
+            continue;
+        }
+        eprintln!("validation command failed: {}", command.command);
+        if !command.stdout.is_empty() {
+            eprintln!("{}", command.stdout);
+        }
+        if !command.stderr.is_empty() {
+            eprintln!("{}", command.stderr);
+        }
+    }
 }
 
 fn run_self_update(repo: &Path) -> Result<SelfUpdateReport> {
