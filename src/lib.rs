@@ -4,6 +4,7 @@ pub mod execution;
 pub mod executor;
 pub mod graph;
 pub mod improve;
+pub mod inspection;
 pub mod intent;
 pub mod lease;
 pub mod registry;

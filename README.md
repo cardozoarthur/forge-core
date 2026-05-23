@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.13`
+Current version: `0.4.14`
 
 This is the first functional CLI + Skill version:
 
@@ -36,6 +36,7 @@ This is the first functional CLI + Skill version:
 - notification payloads with final workflow cost reporting
 - artifact listing
 - workflow registry listing with lifecycle state
+- terminal workflow DAG inspection with lifecycle, dependency and persona annotations
 - context routing with deterministic shard manifests, deterministic code-node and long-running cognition goals
 - node-scoped Personality/Soul Routing metadata for human-facing artifacts
 - controlled improvement proposal generation
@@ -67,6 +68,7 @@ Use the returned `workflow_id`:
 
 ```bash
 forge list --output json
+forge inspect <workflow-id> --verbose --output json
 forge status --workflow <workflow-id> --output json
 forge context --workflow <workflow-id> --task task-001 --budget 1200 --output json
 forge run --workflow <workflow-id> --simulate --output json
@@ -94,6 +96,7 @@ forge request status --run <run-id> --output json
 Codex/OpenCode should prefer this pattern when using Forge as a skill: make a short request, receive a `run_id`, and let Forge own the asynchronous workflow state.
 `forge request status` resolves the run id back to the current Forge workflow state, including the current goal, original requested goal, latest revision, artifact count and task status summary.
 `forge list` exposes the workflow registry across planned and async workflows, including stable workflow ids, associated run ids, initial request, current goal, lifecycle state and task summary. Completed finite workflows are projected as `scaled_to_zero` when there is no remaining task work.
+`forge inspect <workflow-id>` renders the current DAG as terminal text and also exposes the same graph as structured JSON when `--output json` is used. `--verbose` includes task goals, expected outputs, validation rules and subtasks. Persona-aware nodes are annotated with their node-scoped persona mode; recursive subflow records are reserved for the next registry increment.
 
 Sync local execution engines before Forge uses external CLIs:
 
@@ -192,6 +195,7 @@ The current test suite validates:
 - controlled improvement never auto-promotes without validation;
 - artifact listing returns SHA-256 hashed outputs;
 - workflow registry listing preserves initial requests and lifecycle state;
+- workflow inspection renders terminal DAGs with dependency, lifecycle and persona annotations;
 - simulated execution can complete the graph and unlock validation;
 - skill installation works for Codex and OpenCode paths.
 

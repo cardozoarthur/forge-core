@@ -263,8 +263,8 @@ Required user-facing goals:
 - Each list row includes a stable id, lifecycle state and the original initial request description, even after later goal mutations.
 - Non-infinite workflows should scale to zero when no runnable or scheduled work remains.
 - Infinite workflows and infinite subflows remain eligible for scheduling instead of being treated as completed one-shot graphs.
-- `forge inspect <id>` renders the workflow graph in the terminal.
-- `forge inspect <id> --verbose` includes subflows and a description of each process and subprocess/subflow.
+- `forge inspect <id>` renders the current workflow graph in the terminal from persisted Forge state.
+- `forge inspect <id> --verbose` includes task goals, expected outputs, validation rules and subtasks. Recursive subflow descriptions remain the next registry increment.
 - Workflows may contain subflows recursively. A flow can own many subflows, and each subflow can own many child subflows.
 - Subflows can be finite or infinite. Infinite subflows require explicit lifecycle metadata so Forge can distinguish "idle but alive" from "completed".
 - Running workflows must remain mutable: list gives stable ids, inspect shows the current graph, and goal/artifact mutations appear as revisions.

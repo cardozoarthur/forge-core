@@ -588,6 +588,80 @@ fn context_package_includes_persona_routing_lineage_for_human_facing_task() {
 }
 
 #[test]
+fn inspect_renders_terminal_dag_with_lifecycle_persona_and_verbose_subtasks() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Create an operator report with auditable persona routing",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+
+    let inspect_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--verbose",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let inspection: Value = serde_json::from_slice(&inspect_output).unwrap();
+    assert_eq!(inspection["status"], "inspected");
+    assert_eq!(inspection["workflow_id"], workflow_id);
+    assert_eq!(inspection["lifecycle_state"], "idle");
+    assert_eq!(inspection["verbose"], true);
+    assert_eq!(inspection["subflow_count"], 0);
+    assert!(inspection["diagram"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("Workflow {workflow_id} [idle]")));
+    assert!(inspection["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("task-002 Extract requirements [pending] depends_on task-001"));
+    assert!(inspection["diagram"].as_str().unwrap().contains(
+        "task-008 Generate documentation [pending] depends_on task-007 persona operator_report"
+    ));
+
+    let nodes = inspection["nodes"].as_array().unwrap();
+    assert!(nodes.len() >= 8);
+    let documentation = find_task(nodes, "Generate documentation");
+    assert_eq!(documentation["persona_mode"], "operator_report");
+    assert!(documentation["subtasks"].as_array().unwrap().len() >= 3);
+    assert!(documentation["validation_rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| {
+            rule["kind"] == "documentation"
+                && rule["expected"]
+                    .as_str()
+                    .unwrap()
+                    .contains("operator can replay")
+        }));
+}
+
+#[test]
 fn improve_creates_controlled_experiment_and_never_promotes_without_validation() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.14 - 2026-05-23
+
+### Added
+
+- Added `forge inspect <workflow-id>` as a read-only workflow inspection surface.
+- Added `src/inspection.rs` to render persisted Forge workflows as terminal DAG text with lifecycle state, dependency edges, executor kinds and node-scoped persona annotations.
+- Added structured JSON inspection output with task nodes, validation rules, subtasks and reserved subflow fields for the upcoming recursive subflow registry.
+
+### Safety
+
+- `forge inspect` derives its view from Forge's SQLite workflow source of truth and registry projection. It does not mutate workflow state, executor policy or external runtime substrates.
+
+### Validation
+
+- Added a CLI contract test proving that `forge inspect --verbose --output json` exposes lifecycle state, dependency edges, persona annotations, validation rules and subtasks for the persisted DAG.
+
 ## 0.4.13 - 2026-05-23
 
 ### Added

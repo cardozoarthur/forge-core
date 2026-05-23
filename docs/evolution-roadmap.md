@@ -217,8 +217,8 @@ Goal: make Forge observable and composable as a long-running runtime.
 - Add `forge list` to show running and non-running workflows with stable ids, lifecycle state and the original initial request description.
 - Add lifecycle state that distinguishes running, idle, completed, blocked, failed, scaled-to-zero and infinite/daemon-style workflows.
 - Implement scale-to-zero semantics for finite workflows when no runnable or scheduled work remains.
-- Add `forge inspect <id>` to render the workflow graph in the terminal.
-- Add `forge inspect <id> --verbose` to include subflows and descriptions of each process and subprocess/subflow.
+- Initial `forge inspect <id>` renders the workflow graph in the terminal with lifecycle, dependency and persona annotations.
+- Expand `forge inspect <id> --verbose` from task goals, validation rules and subtasks to recursive subflows and descriptions of each process and subprocess/subflow.
 - Add recursive subflow records so a workflow can contain many subflows and each subflow can contain child subflows.
 - Add infinite subflow metadata so idle long-lived subflows remain schedulable instead of being incorrectly marked complete.
 - Before creating a new workflow, search available workflow definitions and prior workflows for compatible reusable flows, then integrate compatible ones as child subflows when appropriate.

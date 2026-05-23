@@ -6,6 +6,7 @@ use forge_core::execution::run_simulated;
 use forge_core::executor::{load_executors, sync_executors, ExecutorSyncOptions};
 use forge_core::graph::create_workflow;
 use forge_core::improve::generate_improvement;
+use forge_core::inspection::inspect_workflow;
 use forge_core::intent::parse_intent;
 use forge_core::lease::{acquire_task_lease, release_task_lease};
 use forge_core::registry::list_workflows;
@@ -40,6 +41,13 @@ enum Commands {
         output: OutputFormat,
     },
     List {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Inspect {
+        workflow: String,
+        #[arg(long)]
+        verbose: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -353,6 +361,19 @@ fn run() -> Result<i32> {
             let store = ForgeStore::open(cli.store)?;
             let report = list_workflows(&store)?;
             print_response(output, &report)?;
+            Ok(0)
+        }
+        Commands::Inspect {
+            workflow,
+            verbose,
+            output,
+        } => {
+            let store = ForgeStore::open(cli.store)?;
+            let report = inspect_workflow(&store, &workflow, verbose)?;
+            match output {
+                OutputFormat::Json => print_response(output, &report)?,
+                OutputFormat::Human => println!("{}", report.diagram),
+            }
             Ok(0)
         }
         Commands::Status { workflow, output } => {
