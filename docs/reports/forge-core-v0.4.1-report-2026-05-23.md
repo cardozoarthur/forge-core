@@ -23,7 +23,7 @@ O relatório do ciclo permite responder:
 
 Isso prepara o caminho para adapters reais, leases e comparação de regressões de prompt sem tornar Codex/OpenCode a fonte de verdade do workflow.
 
-## Validação esperada
+## Validação executada
 
 O contrato é coberto pelo teste:
 
@@ -31,7 +31,7 @@ O contrato é coberto pelo teste:
 cargo test self_run_prompt_packet_is_versioned_and_checksummed_for_executor_replay
 ```
 
-A validação completa desta versão continua exigindo:
+A validação completa desta versão foi executada com:
 
 ```bash
 cargo fmt --check
@@ -39,6 +39,15 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 cargo build --release
 ```
+
+Smokes CLI executados com o binário release:
+
+```bash
+./target/release/forge --store /tmp/forge-core-run42-smoke.sqlite plan --goal "Create a delivery platform" --output json
+./target/release/forge --store /tmp/forge-core-run42-skill-smoke.sqlite skill install --target codex --target opencode --output json --home /tmp/forge-skill-smoke-run42
+```
+
+O relatório foi anexado ao workflow `wf_a5d1be8019c84a109b84e4ec2aa16b99` como artifact `version_report` pela origem `codex`.
 
 ## Próximo passo
 
