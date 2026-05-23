@@ -3,8 +3,8 @@ use crate::graph::{PersonaRoutingSpec, Workflow};
 use anyhow::{bail, Result};
 use serde::Serialize;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v3";
-const ROUTING_POLICY: &str = "task_local_revisioned_persona_budget_v3";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v4";
+const ROUTING_POLICY: &str = "task_local_revisioned_persona_compressed_budget_v4";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ContextPackage {
@@ -43,7 +43,9 @@ pub struct ContextShard {
     pub source: String,
     pub priority: u8,
     pub included: bool,
+    pub compressed: bool,
     pub bytes: usize,
+    pub original_bytes: usize,
     pub content_sha256: String,
     pub summary: String,
 }
@@ -202,9 +204,22 @@ pub fn build_context_package(
         if candidate.content.is_empty() {
             continue;
         }
-        let included = content.len() + candidate.content.len() <= budget;
+        let summary = summarize_shard(&candidate.content);
+        let original_bytes = candidate.content.len();
+        let compressed_content = compress_shard(&candidate, &summary);
+        let (included, compressed, selected_content) =
+            if content.len() + candidate.content.len() <= budget {
+                (true, false, candidate.content.clone())
+            } else if compressed_content.len() < original_bytes
+                && content.len() + compressed_content.len() <= budget
+            {
+                (true, true, compressed_content)
+            } else {
+                (false, false, candidate.content.clone())
+            };
+
         if included {
-            content.push_str(&candidate.content);
+            content.push_str(&selected_content);
             included_sections.push(candidate.section.to_string());
         } else {
             omitted_sections.push(candidate.section.to_string());
@@ -215,9 +230,11 @@ pub fn build_context_package(
             source: candidate.source.to_string(),
             priority: candidate.priority,
             included,
-            bytes: candidate.content.len(),
-            content_sha256: hex_sha256(candidate.content.as_bytes()),
-            summary: summarize_shard(&candidate.content),
+            compressed,
+            bytes: selected_content.len(),
+            original_bytes,
+            content_sha256: hex_sha256(selected_content.as_bytes()),
+            summary,
         });
     }
 
@@ -302,4 +319,8 @@ fn summarize_shard(content: &str) -> String {
         .chars()
         .take(120)
         .collect()
+}
+
+fn compress_shard(candidate: &ContextShardCandidate, summary: &str) -> String {
+    format!("[compressed {}]\n{}\n", candidate.section, summary)
 }

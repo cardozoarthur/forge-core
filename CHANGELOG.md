@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.15 - 2026-05-23
+
+### Added
+
+- `forge context` now emits schema `forge.context.v4` with routing policy `task_local_revisioned_persona_compressed_budget_v4`.
+- Added deterministic compressed shard fallback for tight context budgets: when a full high-priority shard does not fit, Forge now attempts to include a compact summary payload before omitting the shard.
+- Context shard manifests now expose `compressed` and `original_bytes` so operators can audit when executor-facing context was reduced.
+
+### Changed
+
+- Context routing preserves more high-priority workflow state under constrained budgets without exposing whole history or exceeding the requested byte budget.
+
+### Safety
+
+- Compression is deterministic and local to the context packet. It does not change workflow goals, artifacts, executor policy, validation rules or external runtime substrates.
+
+### Validation
+
+- Added a CLI contract test proving that an oversized `workflow_goal` shard is included as a compressed summary when it fits inside the remaining context budget.
+
 ## 0.4.14 - 2026-05-23
 
 ### Added

@@ -313,10 +313,10 @@ fn context_controller_returns_versioned_shard_manifest() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v3");
+    assert_eq!(context["schema_version"], "forge.context.v4");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_budget_v3"
+        "task_local_revisioned_persona_compressed_budget_v4"
     );
     assert_eq!(context["workflow_id"], workflow_id);
     assert_eq!(context["task_id"], task_id);
@@ -343,6 +343,91 @@ fn context_controller_returns_versioned_shard_manifest() {
         .any(|shard| shard["section"] == "workflow_goal" && shard["source"] == "workflow"));
     assert!(shards.iter().any(|shard| shard["included"] == false));
     assert!(!context["omitted_sections"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn context_controller_compresses_oversized_shards_before_omitting() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let goal = format!(
+        "Build context routing {}",
+        "with repeated operational details ".repeat(40)
+    );
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            &goal,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let task_id = json["tasks"][0]["id"].as_str().unwrap();
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--budget",
+            "420",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+    assert_eq!(context["schema_version"], "forge.context.v4");
+    assert_eq!(
+        context["routing_policy"],
+        "task_local_revisioned_persona_compressed_budget_v4"
+    );
+    assert!(context["context_bytes"].as_u64().unwrap() <= 420);
+    assert!(context["included_sections"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("workflow_goal".to_string())));
+    assert!(!context["omitted_sections"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("workflow_goal".to_string())));
+
+    let workflow_goal = context["shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|shard| shard["section"] == "workflow_goal")
+        .unwrap();
+    assert_eq!(workflow_goal["included"], true);
+    assert_eq!(workflow_goal["compressed"], true);
+    assert!(
+        workflow_goal["original_bytes"].as_u64().unwrap()
+            > workflow_goal["bytes"].as_u64().unwrap()
+    );
+    assert!(workflow_goal["summary"]
+        .as_str()
+        .unwrap()
+        .starts_with("Current workflow goal: Build context routing"));
+    assert!(context["content"]
+        .as_str()
+        .unwrap()
+        .contains("[compressed workflow_goal]"));
 }
 
 #[test]
@@ -435,10 +520,10 @@ fn context_package_tracks_runtime_mutation_lineage_and_current_goal() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v3");
+    assert_eq!(context["schema_version"], "forge.context.v4");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_budget_v3"
+        "task_local_revisioned_persona_compressed_budget_v4"
     );
     assert_eq!(context["workflow_revision"], 2);
     assert_eq!(context["artifact_count"], 1);
@@ -560,10 +645,10 @@ fn context_package_includes_persona_routing_lineage_for_human_facing_task() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v3");
+    assert_eq!(context["schema_version"], "forge.context.v4");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_budget_v3"
+        "task_local_revisioned_persona_compressed_budget_v4"
     );
     assert_eq!(context["persona"]["mode"], "operator_report");
     assert_eq!(context["persona"]["scope"], "node");
