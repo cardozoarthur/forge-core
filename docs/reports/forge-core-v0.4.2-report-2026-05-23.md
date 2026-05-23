@@ -14,9 +14,9 @@ Adicionar um contrato mínimo de leases de task para impedir que dois executores
 - Campos explícitos no relatório de auto-evolução para instalação local pós-validação e publicação via GitHub CLI.
 - Execução pós-validação em ciclos não dry-run:
   - `cargo install --path . --force`;
-  - `gh auth status`;
-  - `gh repo view --json url,visibility`;
-  - `git push` com timeout quando `--push` foi solicitado e o repositório é público.
+  - `gh auth token`;
+  - `git remote get-url origin`;
+  - `git push` com timeout quando `--push` foi solicitado.
 
 ## Contrato operacional
 
@@ -24,7 +24,7 @@ Um executor só recebe ownership temporário de uma task quando Forge persiste o
 
 Leases expirados podem ser substituídos por uma nova aquisição, mantendo Forge como fonte de verdade para coordenação entre Codex, OpenCode e futuros adapters.
 
-Durante a validação completa, também foi corrigido o contrato já existente de auto-evolução: o prompt agora declara a atualização local com `cargo install --path . --force` e a publicação por GitHub CLI, o `SelfCycleReport` expõe esses comandos de forma auditável e ciclos não dry-run executam essa etapa somente depois da validação passar.
+Durante a validação completa, também foi corrigido o contrato já existente de auto-evolução: o prompt agora declara a atualização local com `cargo install --path . --force` e a publicação usando o token local do GitHub CLI antes do `git push`, o `SelfCycleReport` expõe esses comandos de forma auditável e ciclos não dry-run executam essa etapa somente depois da validação passar.
 
 ## Validação executada
 

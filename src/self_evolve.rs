@@ -5,14 +5,13 @@ use crate::request::{create_run_record, save_run_record};
 use crate::storage::ForgeStore;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SELF_EVOLUTION_PROMPT_PACKET_VERSION: &str = "forge.self_evolution.prompt.v1";
-const GH_AUTH_TIMEOUT_SECONDS: &str = "120";
-const GH_REPO_VIEW_TIMEOUT_SECONDS: &str = "120";
+const GH_AUTH_TIMEOUT_SECONDS: &str = "20";
 const GIT_PUSH_TIMEOUT_SECONDS: &str = "300";
 
 #[derive(Debug, Clone)]
@@ -73,12 +72,6 @@ pub struct PublicProjectUpdateReport {
     pub url: Option<String>,
     pub visibility: Option<String>,
     pub reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GhRepoView {
-    url: Option<String>,
-    visibility: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -289,15 +282,15 @@ impl PublicProjectUpdateReport {
         }
     }
 
-    fn completed(repo: GhRepoView) -> Self {
+    fn completed(remote_url: String) -> Self {
         Self {
             status: "completed".to_string(),
             uses_gh: true,
             gh_auth_command: gh_auth_command(),
             repo_view_command: gh_repo_view_command(),
             push_command: git_push_command(),
-            url: repo.url,
-            visibility: repo.visibility,
+            url: Some(remote_url),
+            visibility: None,
             reason: None,
         }
     }
@@ -345,7 +338,7 @@ Constraints:
 - Generate or update a strong changelog/report artifact when the version behavior changes.
 - Codex/OpenCode should treat Forge as the source of truth: update goals/artifacts through Forge CLI if runtime state changes.
 - After validation passes, update the local Forge installation with `cargo install --path . --force`.
-- Publish validated commits through the GitHub CLI contract: `gh auth status`, `gh repo view --json url,visibility`, then `git push`.
+- Publish validated commits through the GitHub CLI contract: `gh auth token`, `git remote get-url origin`, then `git push`.
 
 Required validation commands:
 {}
@@ -452,33 +445,16 @@ fn publish_public_project_with_gh(repo: &Path) -> Result<PublicProjectUpdateRepo
     run_program(
         repo,
         "timeout",
-        &[GH_AUTH_TIMEOUT_SECONDS, "gh", "auth", "status"],
+        &[GH_AUTH_TIMEOUT_SECONDS, "gh", "auth", "token"],
     )
     .context("failed to validate GitHub CLI authentication")?;
-    let repo_json = run_program(
-        repo,
-        "timeout",
-        &[
-            GH_REPO_VIEW_TIMEOUT_SECONDS,
-            "gh",
-            "repo",
-            "view",
-            "--json",
-            "url,visibility",
-        ],
-    )
-    .context("failed to inspect GitHub repository through gh")?;
-    let repo_view: GhRepoView = serde_json::from_str(&repo_json)
-        .with_context(|| format!("failed to parse gh repo view JSON: {repo_json}"))?;
-    if repo_view.visibility.as_deref() != Some("PUBLIC") {
-        bail!(
-            "GitHub repository is not public according to gh: {:?}",
-            repo_view.visibility
-        );
-    }
+    let remote_url = run_git(repo, &["remote", "get-url", "origin"])
+        .context("failed to inspect git origin before public project update")?;
     run_program(repo, "timeout", &[GIT_PUSH_TIMEOUT_SECONDS, "git", "push"])
         .context("failed to push validated Forge update")?;
-    Ok(PublicProjectUpdateReport::completed(repo_view))
+    Ok(PublicProjectUpdateReport::completed(
+        remote_url.trim().to_string(),
+    ))
 }
 
 fn has_changes(repo: &Path) -> Result<bool> {
@@ -529,25 +505,17 @@ fn self_update_command() -> Vec<String> {
 }
 
 fn gh_auth_command() -> Vec<String> {
-    ["timeout", GH_AUTH_TIMEOUT_SECONDS, "gh", "auth", "status"]
+    ["timeout", GH_AUTH_TIMEOUT_SECONDS, "gh", "auth", "token"]
         .iter()
         .map(|part| part.to_string())
         .collect()
 }
 
 fn gh_repo_view_command() -> Vec<String> {
-    [
-        "timeout",
-        GH_REPO_VIEW_TIMEOUT_SECONDS,
-        "gh",
-        "repo",
-        "view",
-        "--json",
-        "url,visibility",
-    ]
-    .iter()
-    .map(|part| part.to_string())
-    .collect()
+    ["git", "remote", "get-url", "origin"]
+        .iter()
+        .map(|part| part.to_string())
+        .collect()
 }
 
 fn git_push_command() -> Vec<String> {

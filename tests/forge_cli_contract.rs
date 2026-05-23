@@ -1391,19 +1391,11 @@ fn self_run_declares_self_update_and_gh_publication_after_validation_contract() 
     assert_eq!(cycle_report["public_project_update"]["uses_gh"], true);
     assert_eq!(
         cycle_report["public_project_update"]["gh_auth_command"],
-        serde_json::json!(["timeout", "120", "gh", "auth", "status"])
+        serde_json::json!(["timeout", "20", "gh", "auth", "token"])
     );
     assert_eq!(
         cycle_report["public_project_update"]["repo_view_command"],
-        serde_json::json!([
-            "timeout",
-            "120",
-            "gh",
-            "repo",
-            "view",
-            "--json",
-            "url,visibility"
-        ])
+        serde_json::json!(["git", "remote", "get-url", "origin"])
     );
     assert_eq!(
         cycle_report["public_project_update"]["push_command"],

@@ -9,7 +9,7 @@
   - `forge task release`;
   - SQLite-backed `task_leases` records keyed by workflow task;
   - JSON lease conflict reports when a second executor attempts to acquire an unexpired task lease.
-- Added explicit self-evolution cycle report fields and non-dry execution for local Forge install updates and GitHub publication contract commands after validation.
+- Added explicit self-evolution cycle report fields and non-dry execution for local Forge install updates and GitHub publication contract commands after validation, using `gh auth token` as the local credential gate.
 
 ### Safety
 
