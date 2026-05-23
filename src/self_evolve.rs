@@ -1,4 +1,4 @@
-use crate::artifact::write_json_artifact;
+use crate::artifact::{hex_sha256, write_json_artifact};
 use crate::graph::create_workflow;
 use crate::intent::parse_intent;
 use crate::request::{create_run_record, save_run_record};
@@ -9,6 +9,8 @@ use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+const SELF_EVOLUTION_PROMPT_PACKET_VERSION: &str = "forge.self_evolution.prompt.v1";
 
 #[derive(Debug, Clone)]
 pub struct SelfRunOptions {
@@ -41,10 +43,24 @@ pub struct SelfCycleReport {
     pub executor: String,
     pub status: String,
     pub prompt_path: String,
+    pub prompt_packet_version: String,
+    pub prompt_sha256: String,
     pub report_path: String,
     pub validation_passed: bool,
     pub committed: bool,
     pub commit: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SelfEvolutionPromptPacket {
+    version: String,
+    cycle: u32,
+    executor: String,
+    workflow_id: String,
+    run_id: String,
+    stop_at: String,
+    repo: String,
+    validation_commands: Vec<String>,
 }
 
 pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result<SelfRunReport> {
@@ -79,7 +95,10 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             break;
         }
         let executor = executors[((cycle - 1) as usize) % executors.len()].clone();
-        let prompt = render_prompt(cycle, &executor, &workflow.id, &run.run_id, &options);
+        let prompt_packet =
+            SelfEvolutionPromptPacket::new(cycle, &executor, &workflow.id, &run.run_id, &options);
+        let prompt = render_prompt(&prompt_packet);
+        let prompt_sha256 = hex_sha256(prompt.as_bytes());
         let prompt_path = format!(
             "artifacts/{}/self-evolution-cycle-{:03}-prompt.md",
             workflow.id, cycle
@@ -112,6 +131,8 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             executor,
             status,
             prompt_path: prompt_path.clone(),
+            prompt_packet_version: prompt_packet.version,
+            prompt_sha256,
             report_path: report_path.clone(),
             validation_passed,
             committed,
@@ -150,21 +171,43 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
     })
 }
 
-fn render_prompt(
-    cycle: u32,
-    executor: &str,
-    workflow_id: &str,
-    run_id: &str,
-    options: &SelfRunOptions,
-) -> String {
+impl SelfEvolutionPromptPacket {
+    fn new(
+        cycle: u32,
+        executor: &str,
+        workflow_id: &str,
+        run_id: &str,
+        options: &SelfRunOptions,
+    ) -> Self {
+        Self {
+            version: SELF_EVOLUTION_PROMPT_PACKET_VERSION.to_string(),
+            cycle,
+            executor: executor.to_string(),
+            workflow_id: workflow_id.to_string(),
+            run_id: run_id.to_string(),
+            stop_at: options.until.clone(),
+            repo: options.repo.display().to_string(),
+            validation_commands: vec![
+                "cargo fmt --check".to_string(),
+                "cargo clippy --all-targets --all-features -- -D warnings".to_string(),
+                "cargo test".to_string(),
+                "cargo build --release".to_string(),
+            ],
+        }
+    }
+}
+
+fn render_prompt(packet: &SelfEvolutionPromptPacket) -> String {
     format!(
         r#"# Improve Forge Core
 
-You are executing Forge self-evolution cycle {cycle}.
+Prompt packet version: `{}`
 
-Run id: `{run_id}`
-Workflow id: `{workflow_id}`
-Executor: `{executor}`
+You are executing Forge self-evolution cycle {}.
+
+Run id: `{}`
+Workflow id: `{}`
+Executor: `{}`
 Stop date: `{}`
 
 Goal:
@@ -178,10 +221,13 @@ Constraints:
 - Do not install Knative or modify user infrastructure.
 - Keep changes scoped to Forge Core.
 - Use tests first when adding behavior.
-- Run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`, and `cargo build --release`.
+- Run the required validation commands listed in this prompt packet.
 - If validation fails, fix or report the blocker without pretending the cycle completed.
 - Generate or update a strong changelog/report artifact when the version behavior changes.
 - Codex/OpenCode should treat Forge as the source of truth: update goals/artifacts through Forge CLI if runtime state changes.
+
+Required validation commands:
+{}
 
 Return a concise final report with:
 - files changed;
@@ -189,8 +235,19 @@ Return a concise final report with:
 - validation result;
 - next recommended cycle.
 "#,
-        options.until,
-        options.repo.display()
+        packet.version,
+        packet.cycle,
+        packet.run_id,
+        packet.workflow_id,
+        packet.executor,
+        packet.stop_at,
+        packet.repo,
+        packet
+            .validation_commands
+            .iter()
+            .map(|command| format!("- `{command}`"))
+            .collect::<Vec<_>>()
+            .join("\n")
     )
 }
 

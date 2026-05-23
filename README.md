@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.0`
+Current version: `0.4.1`
 
 This is the first functional CLI + Skill version:
 
@@ -44,6 +44,7 @@ This is the first functional CLI + Skill version:
 - async workflow substrate policy with scope guards for Forge-owned resources
 - async request handoff for skill callers: submit a goal, receive `run_id`, continue later with Forge
 - self-evolution runner for bounded Codex/OpenCode cycles until a stop date
+- versioned self-evolution prompt packets with SHA-256 checksums in cycle reports
 - versioned improvement artifacts with strong changelog generation
 
 ## Install
@@ -128,6 +129,7 @@ forge self run \
 ```
 
 `forge self run` creates a run id and workflow id, writes prompt/report artifacts for every cycle, runs validation before committing, and only pushes when `--push` is passed.
+Each self-evolution cycle report includes the prompt packet version and SHA-256 checksum so executor runs can be replayed and audited against the exact instructions given to Codex/OpenCode.
 
 Example autonomous mixed objective:
 

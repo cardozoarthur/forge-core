@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use forge_core::artifact::hex_sha256;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
@@ -1296,6 +1297,54 @@ fn self_run_dry_run_creates_bounded_self_evolution_workflow_and_artifacts() {
     assert!(prompt.contains("Codex/OpenCode"));
     assert!(prompt.contains("cargo test"));
     assert!(prompt.contains("Do not mutate external Docker/Kubernetes/Knative resources"));
+}
+
+#[test]
+fn self_run_prompt_packet_is_versioned_and_checksummed_for_executor_replay() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("README.md"), "# Repo\n").unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2026-05-25T10:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--executor",
+            "codex",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let cycle_report = &json["cycle_reports"][0];
+    assert_eq!(
+        cycle_report["prompt_packet_version"],
+        "forge.self_evolution.prompt.v1"
+    );
+
+    let prompt_path = temp
+        .path()
+        .join(cycle_report["prompt_path"].as_str().unwrap());
+    let prompt = fs::read_to_string(prompt_path).unwrap();
+    assert!(prompt.contains("Prompt packet version: `forge.self_evolution.prompt.v1`"));
+    assert!(prompt.contains("Executor: `codex`"));
+    assert_eq!(cycle_report["prompt_sha256"], hex_sha256(prompt.as_bytes()));
 }
 
 #[test]

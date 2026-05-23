@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.1 - 2026-05-23
+
+### Added
+
+- Added versioned self-evolution prompt packets:
+  - prompt packet version: `forge.self_evolution.prompt.v1`;
+  - required validation commands embedded in each executor prompt;
+  - SHA-256 prompt checksum persisted in each cycle report.
+
+### Changed
+
+- `forge self run --dry-run` now emits replayable executor prompt metadata so Codex/OpenCode runs can be audited against the exact prompt packet they received.
+
 ## 0.4.0 - 2026-05-23
 
 ### Added
