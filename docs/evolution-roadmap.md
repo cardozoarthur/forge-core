@@ -169,6 +169,19 @@ Goal: make future work real, not just represented in the graph.
 - Add notification dispatch adapters.
 - Keep email/Telegram/webhook dispatch behind explicit configuration and dry-run defaults.
 
+### Phase 3.5: Workflow Registry, Inspect And Recursive Subflows
+
+Goal: make Forge observable and composable as a long-running runtime.
+
+- Add `forge list` to show running and non-running workflows with stable ids, lifecycle state and the original initial request description.
+- Add lifecycle state that distinguishes running, idle, completed, blocked, failed, scaled-to-zero and infinite/daemon-style workflows.
+- Implement scale-to-zero semantics for finite workflows when no runnable or scheduled work remains.
+- Add `forge inspect <id>` to render the workflow graph in the terminal.
+- Add `forge inspect <id> --verbose` to include subflows and descriptions of each process and subprocess/subflow.
+- Add recursive subflow records so a workflow can contain many subflows and each subflow can contain child subflows.
+- Add infinite subflow metadata so idle long-lived subflows remain schedulable instead of being incorrectly marked complete.
+- Before creating a new workflow, search available workflow definitions and prior workflows for compatible reusable flows, then integrate compatible ones as child subflows when appropriate.
+
 ### Phase 4: Native CLI Coupling
 
 Goal: make Forge feel simple inside daily coding tools.
@@ -202,6 +215,10 @@ Goal: let Forge improve workflows structurally without unrestricted self-modific
 9. Add native integration spike for the easiest open-source CLI.
 10. Add real Knative node adapter with ownership labels and namespace guard.
 11. Add runtime mutation propagation so changed goals invalidate stale downstream context.
+12. Add `forge list` with running/non-running lifecycle and original request descriptions.
+13. Add `forge inspect` graph rendering with verbose recursive subflow descriptions.
+14. Add recursive finite/infinite subflow records and scale-to-zero lifecycle semantics.
+15. Add available-flow discovery so new workflows can reuse compatible existing flows as child subflows.
 
 ## Non-Goals
 

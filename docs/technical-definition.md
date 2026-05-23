@@ -175,6 +175,24 @@ Mutation rules:
 
 Codex CLI and OpenCode CLI are therefore human interfaces for Forge as well as possible executor adapters. They can update Forge state through CLI commands while Forge remains the persistent source of truth.
 
+## Workflow Registry, Inspect And Subflows
+
+Forge must expose the workflow registry as an operational runtime surface, not only as raw SQLite state.
+
+Required user-facing goals:
+
+- `forge list` lists workflows/runs that are currently running and workflows/runs that are not running.
+- Each list row includes a stable id, lifecycle state and the original initial request description, even after later goal mutations.
+- Non-infinite workflows should scale to zero when no runnable or scheduled work remains.
+- Infinite workflows and infinite subflows remain eligible for scheduling instead of being treated as completed one-shot graphs.
+- `forge inspect <id>` renders the workflow graph in the terminal.
+- `forge inspect <id> --verbose` includes subflows and a description of each process and subprocess/subflow.
+- Workflows may contain subflows recursively. A flow can own many subflows, and each subflow can own many child subflows.
+- Subflows can be finite or infinite. Infinite subflows require explicit lifecycle metadata so Forge can distinguish "idle but alive" from "completed".
+- Running workflows must remain mutable: list gives stable ids, inspect shows the current graph, and goal/artifact mutations appear as revisions.
+
+Before creating a new workflow from scratch, Forge should inspect available workflows and reusable flow definitions. If an existing flow can satisfy part of the new objective, Forge should propose or attach it as a child subflow instead of duplicating orchestration logic.
+
 ## Async Request Contract
 
 When Codex/OpenCode use Forge as a skill, they should not hold the user interaction open for long-running work.

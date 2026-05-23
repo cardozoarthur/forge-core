@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.7 - 2026-05-23
+
+### Added
+
+- Added persistent runtime goals for workflow registry visibility, terminal graph inspection, recursive subflows, infinite subflows, scale-to-zero lifecycle state and flow composition/reuse.
+- Added the same goals to the self-evolution prompt so future cycles prioritize `forge list`, `forge inspect`, subflow lifecycle and compatible-flow reuse.
+
+### Direction
+
+- `forge list` should show running and non-running workflows with stable ids and the original initial request description.
+- `forge inspect <id>` should render the graph in the terminal, with `--verbose` showing subflows and process/subprocess descriptions.
+- Forge should inspect available flows before creating new ones and integrate compatible existing flows as child subflows when possible.
+
 ## 0.4.6 - 2026-05-23
 
 ### Added

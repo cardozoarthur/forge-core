@@ -427,6 +427,8 @@ Goal:
 - Improve Forge Core itself in a small, validated, production-quality increment.
 - Prefer structural improvements over cosmetic changes.
 - Good candidates: async run records, task leases, executor adapter contracts, prompt packet versioning, runtime mutation propagation, changelog/report quality, validation gates.
+- Strategic runtime goals now include workflow listing, terminal inspection, recursive subflows, infinite subflows, scale-to-zero lifecycle state and flow composition/reuse.
+- Prefer increments that move toward `forge list` for running and non-running workflows, `forge inspect` for terminal DAG/subflow visualization, and a workflow registry that can reuse compatible existing flows as child subflows before creating new work.
 
 Constraints:
 - Use the repository at `{}`.
