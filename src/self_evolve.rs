@@ -5,12 +5,15 @@ use crate::request::{create_run_record, save_run_record};
 use crate::storage::ForgeStore;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SELF_EVOLUTION_PROMPT_PACKET_VERSION: &str = "forge.self_evolution.prompt.v1";
+const GH_AUTH_TIMEOUT_SECONDS: &str = "120";
+const GH_REPO_VIEW_TIMEOUT_SECONDS: &str = "120";
+const GIT_PUSH_TIMEOUT_SECONDS: &str = "300";
 
 #[derive(Debug, Clone)]
 pub struct SelfRunOptions {
@@ -47,8 +50,35 @@ pub struct SelfCycleReport {
     pub prompt_sha256: String,
     pub report_path: String,
     pub validation_passed: bool,
+    pub self_update: SelfUpdateReport,
     pub committed: bool,
     pub commit: Option<String>,
+    pub public_project_update: PublicProjectUpdateReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SelfUpdateReport {
+    pub status: String,
+    pub command: Vec<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PublicProjectUpdateReport {
+    pub status: String,
+    pub uses_gh: bool,
+    pub gh_auth_command: Vec<String>,
+    pub repo_view_command: Vec<String>,
+    pub push_command: Vec<String>,
+    pub url: Option<String>,
+    pub visibility: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhRepoView {
+    url: Option<String>,
+    visibility: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -111,18 +141,35 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
 
         let mut status = "planned".to_string();
         let mut validation_passed = false;
+        let mut self_update = SelfUpdateReport::planned();
         let mut committed = false;
         let mut commit = None;
+        let mut public_project_update = PublicProjectUpdateReport::planned(options.push);
 
         if !options.dry_run {
             status = execute_cycle(&options.repo, &executor, &prompt)?;
             validation_passed = run_validation(&options.repo)?;
-            if validation_passed && has_changes(&options.repo)? {
-                commit = commit_changes(&options.repo, cycle)?;
-                committed = commit.is_some();
-                if committed && options.push {
-                    run_git(&options.repo, &["push"])?;
+            if validation_passed {
+                self_update = run_self_update(&options.repo)?;
+                if has_changes(&options.repo)? {
+                    commit = commit_changes(&options.repo, cycle)?;
+                    committed = commit.is_some();
+                    if committed && options.push {
+                        public_project_update = publish_public_project_with_gh(&options.repo)?;
+                    } else if !options.push {
+                        public_project_update = PublicProjectUpdateReport::skipped(
+                            options.push,
+                            "push flag not requested",
+                        );
+                    }
+                } else {
+                    public_project_update =
+                        PublicProjectUpdateReport::skipped(options.push, "no changes to publish");
                 }
+            } else {
+                self_update = SelfUpdateReport::skipped("validation failed");
+                public_project_update =
+                    PublicProjectUpdateReport::skipped(options.push, "validation failed");
             }
         }
 
@@ -135,8 +182,10 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             prompt_sha256,
             report_path: report_path.clone(),
             validation_passed,
+            self_update,
             committed,
             commit,
+            public_project_update,
         };
         write_json_artifact(
             &store.base_dir(),
@@ -197,6 +246,76 @@ impl SelfEvolutionPromptPacket {
     }
 }
 
+impl SelfUpdateReport {
+    fn planned() -> Self {
+        Self {
+            status: "planned".to_string(),
+            command: self_update_command(),
+            reason: None,
+        }
+    }
+
+    fn completed() -> Self {
+        Self {
+            status: "completed".to_string(),
+            command: self_update_command(),
+            reason: None,
+        }
+    }
+
+    fn skipped(reason: &str) -> Self {
+        Self {
+            status: "skipped".to_string(),
+            command: self_update_command(),
+            reason: Some(reason.to_string()),
+        }
+    }
+}
+
+impl PublicProjectUpdateReport {
+    fn planned(push: bool) -> Self {
+        if !push {
+            return Self::skipped(false, "push flag not requested");
+        }
+        Self {
+            status: "planned".to_string(),
+            uses_gh: true,
+            gh_auth_command: gh_auth_command(),
+            repo_view_command: gh_repo_view_command(),
+            push_command: git_push_command(),
+            url: None,
+            visibility: None,
+            reason: None,
+        }
+    }
+
+    fn completed(repo: GhRepoView) -> Self {
+        Self {
+            status: "completed".to_string(),
+            uses_gh: true,
+            gh_auth_command: gh_auth_command(),
+            repo_view_command: gh_repo_view_command(),
+            push_command: git_push_command(),
+            url: repo.url,
+            visibility: repo.visibility,
+            reason: None,
+        }
+    }
+
+    fn skipped(push: bool, reason: &str) -> Self {
+        Self {
+            status: "skipped".to_string(),
+            uses_gh: push,
+            gh_auth_command: gh_auth_command(),
+            repo_view_command: gh_repo_view_command(),
+            push_command: git_push_command(),
+            url: None,
+            visibility: None,
+            reason: Some(reason.to_string()),
+        }
+    }
+}
+
 fn render_prompt(packet: &SelfEvolutionPromptPacket) -> String {
     format!(
         r#"# Improve Forge Core
@@ -225,6 +344,8 @@ Constraints:
 - If validation fails, fix or report the blocker without pretending the cycle completed.
 - Generate or update a strong changelog/report artifact when the version behavior changes.
 - Codex/OpenCode should treat Forge as the source of truth: update goals/artifacts through Forge CLI if runtime state changes.
+- After validation passes, update the local Forge installation with `cargo install --path . --force`.
+- Publish validated commits through the GitHub CLI contract: `gh auth status`, `gh repo view --json url,visibility`, then `git push`.
 
 Required validation commands:
 {}
@@ -321,6 +442,45 @@ fn run_validation(repo: &Path) -> Result<bool> {
     Ok(status.success())
 }
 
+fn run_self_update(repo: &Path) -> Result<SelfUpdateReport> {
+    run_program(repo, "cargo", &["install", "--path", ".", "--force"])
+        .context("failed to update local Forge installation")?;
+    Ok(SelfUpdateReport::completed())
+}
+
+fn publish_public_project_with_gh(repo: &Path) -> Result<PublicProjectUpdateReport> {
+    run_program(
+        repo,
+        "timeout",
+        &[GH_AUTH_TIMEOUT_SECONDS, "gh", "auth", "status"],
+    )
+    .context("failed to validate GitHub CLI authentication")?;
+    let repo_json = run_program(
+        repo,
+        "timeout",
+        &[
+            GH_REPO_VIEW_TIMEOUT_SECONDS,
+            "gh",
+            "repo",
+            "view",
+            "--json",
+            "url,visibility",
+        ],
+    )
+    .context("failed to inspect GitHub repository through gh")?;
+    let repo_view: GhRepoView = serde_json::from_str(&repo_json)
+        .with_context(|| format!("failed to parse gh repo view JSON: {repo_json}"))?;
+    if repo_view.visibility.as_deref() != Some("PUBLIC") {
+        bail!(
+            "GitHub repository is not public according to gh: {:?}",
+            repo_view.visibility
+        );
+    }
+    run_program(repo, "timeout", &[GIT_PUSH_TIMEOUT_SECONDS, "git", "push"])
+        .context("failed to push validated Forge update")?;
+    Ok(PublicProjectUpdateReport::completed(repo_view))
+}
+
 fn has_changes(repo: &Path) -> Result<bool> {
     let output = run_git(repo, &["status", "--short"])?;
     Ok(!output.trim().is_empty())
@@ -341,13 +501,58 @@ fn commit_changes(repo: &Path, cycle: u32) -> Result<Option<String>> {
 }
 
 fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git").args(args).current_dir(repo).output()?;
+    run_program(repo, "git", args)
+}
+
+fn run_program(repo: &Path, program: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(repo)
+        .output()?;
     if !output.status.success() {
         bail!(
-            "git {:?} failed: {}",
+            "{} {:?} failed: {}{}",
+            program,
             args,
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn self_update_command() -> Vec<String> {
+    ["cargo", "install", "--path", ".", "--force"]
+        .iter()
+        .map(|part| part.to_string())
+        .collect()
+}
+
+fn gh_auth_command() -> Vec<String> {
+    ["timeout", GH_AUTH_TIMEOUT_SECONDS, "gh", "auth", "status"]
+        .iter()
+        .map(|part| part.to_string())
+        .collect()
+}
+
+fn gh_repo_view_command() -> Vec<String> {
+    [
+        "timeout",
+        GH_REPO_VIEW_TIMEOUT_SECONDS,
+        "gh",
+        "repo",
+        "view",
+        "--json",
+        "url,visibility",
+    ]
+    .iter()
+    .map(|part| part.to_string())
+    .collect()
+}
+
+fn git_push_command() -> Vec<String> {
+    ["timeout", GIT_PUSH_TIMEOUT_SECONDS, "git", "push"]
+        .iter()
+        .map(|part| part.to_string())
+        .collect()
 }

@@ -8,6 +8,16 @@ pub struct ForgeStore {
     connection: Connection,
 }
 
+pub struct TaskLeaseWrite<'a> {
+    pub workflow_id: &'a str,
+    pub task_id: &'a str,
+    pub lease_id: &'a str,
+    pub executor: &'a str,
+    pub acquired_at: &'a str,
+    pub expires_at: &'a str,
+    pub data: &'a serde_json::Value,
+}
+
 impl ForgeStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
@@ -72,6 +82,16 @@ impl ForgeStore {
                 data_json TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS task_leases (
+                workflow_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                lease_id TEXT NOT NULL,
+                executor TEXT NOT NULL,
+                acquired_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                PRIMARY KEY (workflow_id, task_id)
             );
             "#,
         )?;
@@ -211,5 +231,74 @@ impl ForgeStore {
             .optional()?;
         let data_json = data_json.with_context(|| format!("run not found: {id}"))?;
         Ok(serde_json::from_str(&data_json)?)
+    }
+
+    pub fn try_save_task_lease(&self, lease: TaskLeaseWrite<'_>) -> Result<bool> {
+        let changed = self.connection.execute(
+            r#"
+            INSERT INTO task_leases (
+                workflow_id,
+                task_id,
+                lease_id,
+                executor,
+                acquired_at,
+                expires_at,
+                data_json
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(workflow_id, task_id) DO UPDATE SET
+                lease_id=excluded.lease_id,
+                executor=excluded.executor,
+                acquired_at=excluded.acquired_at,
+                expires_at=excluded.expires_at,
+                data_json=excluded.data_json
+            WHERE task_leases.expires_at <= ?8
+            "#,
+            params![
+                lease.workflow_id,
+                lease.task_id,
+                lease.lease_id,
+                lease.executor,
+                lease.acquired_at,
+                lease.expires_at,
+                serde_json::to_string(lease.data)?,
+                lease.acquired_at
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn load_task_lease(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let data_json: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT data_json FROM task_leases WHERE workflow_id = ?1 AND task_id = ?2",
+                params![workflow_id, task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        data_json
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
+    }
+
+    pub fn delete_task_lease(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+        lease_id: &str,
+    ) -> Result<bool> {
+        let changed = self.connection.execute(
+            r#"
+            DELETE FROM task_leases
+            WHERE workflow_id = ?1 AND task_id = ?2 AND lease_id = ?3
+            "#,
+            params![workflow_id, task_id, lease_id],
+        )?;
+        Ok(changed == 1)
     }
 }

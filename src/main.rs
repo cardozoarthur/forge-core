@@ -7,6 +7,7 @@ use forge_core::executor::{load_executors, sync_executors, ExecutorSyncOptions};
 use forge_core::graph::create_workflow;
 use forge_core::improve::generate_improvement;
 use forge_core::intent::parse_intent;
+use forge_core::lease::{acquire_task_lease, release_task_lease};
 use forge_core::request::{load_run_record, start_async_request};
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
@@ -104,6 +105,10 @@ enum Commands {
     Workflow {
         #[command(subcommand)]
         command: WorkflowCommands,
+    },
+    Task {
+        #[command(subcommand)]
+        command: TaskCommands,
     },
     Request {
         #[command(subcommand)]
@@ -227,6 +232,34 @@ enum WorkflowCommands {
         kind: String,
         #[arg(long)]
         origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TaskCommands {
+    Acquire {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        executor: String,
+        #[arg(long, default_value_t = 900)]
+        ttl_seconds: u64,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Release {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        lease: String,
+        #[arg(long)]
+        executor: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -576,6 +609,34 @@ fn run() -> Result<i32> {
                 let report = attach_workflow_artifact(&store, &workflow, &path, &kind, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
+            }
+        },
+        Commands::Task { command } => match command {
+            TaskCommands::Acquire {
+                workflow,
+                task,
+                executor,
+                ttl_seconds,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = acquire_task_lease(&store, &workflow, &task, &executor, ttl_seconds)?;
+                let exit_code = if report.allowed { 0 } else { 1 };
+                print_response(output, &report)?;
+                Ok(exit_code)
+            }
+            TaskCommands::Release {
+                workflow,
+                task,
+                lease,
+                executor,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = release_task_lease(&store, &workflow, &task, &lease, &executor)?;
+                let exit_code = if report.released { 0 } else { 1 };
+                print_response(output, &report)?;
+                Ok(exit_code)
             }
         },
         Commands::Request { command } => match command {

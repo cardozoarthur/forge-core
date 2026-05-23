@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.2 - 2026-05-23
+
+### Added
+
+- Added persisted task leases:
+  - `forge task acquire`;
+  - `forge task release`;
+  - SQLite-backed `task_leases` records keyed by workflow task;
+  - JSON lease conflict reports when a second executor attempts to acquire an unexpired task lease.
+- Added explicit self-evolution cycle report fields and non-dry execution for local Forge install updates and GitHub publication contract commands after validation.
+
+### Safety
+
+- Lease acquisition is guarded by Forge-owned workflow state and records acquisition, conflict and release events.
+- Expired task leases may be replaced, but active leases block concurrent executor ownership until released or expired.
+- Self-evolution prompts now declare post-validation local install and GitHub publication obligations instead of leaving them implicit.
+- Public project publishing uses `gh auth status`, `gh repo view --json url,visibility` and a timed `git push`; non-public repositories are not pushed by that path.
+
 ## 0.4.1 - 2026-05-23
 
 ### Added

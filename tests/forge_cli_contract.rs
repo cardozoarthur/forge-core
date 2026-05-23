@@ -1348,6 +1348,77 @@ fn self_run_prompt_packet_is_versioned_and_checksummed_for_executor_replay() {
 }
 
 #[test]
+fn self_run_declares_self_update_and_gh_publication_after_validation_contract() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("README.md"), "# Repo\n").unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2026-05-25T10:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--executor",
+            "codex",
+            "--push",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let cycle_report = &json["cycle_reports"][0];
+    assert_eq!(cycle_report["self_update"]["status"], "planned");
+    assert_eq!(
+        cycle_report["self_update"]["command"],
+        serde_json::json!(["cargo", "install", "--path", ".", "--force"])
+    );
+    assert_eq!(cycle_report["public_project_update"]["status"], "planned");
+    assert_eq!(cycle_report["public_project_update"]["uses_gh"], true);
+    assert_eq!(
+        cycle_report["public_project_update"]["gh_auth_command"],
+        serde_json::json!(["timeout", "120", "gh", "auth", "status"])
+    );
+    assert_eq!(
+        cycle_report["public_project_update"]["repo_view_command"],
+        serde_json::json!([
+            "timeout",
+            "120",
+            "gh",
+            "repo",
+            "view",
+            "--json",
+            "url,visibility"
+        ])
+    );
+    assert_eq!(
+        cycle_report["public_project_update"]["push_command"],
+        serde_json::json!(["timeout", "300", "git", "push"])
+    );
+
+    let prompt_path = temp
+        .path()
+        .join(cycle_report["prompt_path"].as_str().unwrap());
+    let prompt = fs::read_to_string(prompt_path).unwrap();
+    assert!(prompt.contains("After validation passes, update the local Forge installation"));
+    assert!(prompt.contains("Publish validated commits through the GitHub CLI contract"));
+}
+
+#[test]
 fn request_start_returns_async_run_identifier_for_skill_callers() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -1391,6 +1462,128 @@ fn request_start_returns_async_run_identifier_for_skill_callers() {
         .assert()
         .success()
         .stdout(predicates::str::contains("Improve Forge asynchronously"));
+}
+
+#[test]
+fn task_lease_prevents_two_executors_from_acquiring_same_task() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run async task leasing for multiple executors",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let task_id = json["tasks"][0]["id"].as_str().unwrap();
+
+    let acquired = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "acquire",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let acquired_json: Value = serde_json::from_slice(&acquired).unwrap();
+    assert_eq!(acquired_json["status"], "lease_acquired");
+    assert_eq!(acquired_json["allowed"], true);
+    assert_eq!(acquired_json["lease"]["executor"], "codex");
+    assert_eq!(acquired_json["lease"]["workflow_id"], workflow_id);
+    assert_eq!(acquired_json["lease"]["task_id"], task_id);
+
+    let conflict = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "acquire",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "opencode",
+            "--ttl-seconds",
+            "600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let conflict_json: Value = serde_json::from_slice(&conflict).unwrap();
+    assert_eq!(conflict_json["status"], "lease_conflict");
+    assert_eq!(conflict_json["allowed"], false);
+    assert_eq!(conflict_json["current_lease"]["executor"], "codex");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "release",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--lease",
+            acquired_json["lease"]["lease_id"].as_str().unwrap(),
+            "--executor",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("lease_released"));
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "acquire",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "opencode",
+            "--ttl-seconds",
+            "600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("\"executor\": \"opencode\""));
 }
 
 #[test]

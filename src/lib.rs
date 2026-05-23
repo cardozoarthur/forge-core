@@ -5,6 +5,7 @@ pub mod executor;
 pub mod graph;
 pub mod improve;
 pub mod intent;
+pub mod lease;
 pub mod request;
 pub mod runtime;
 pub mod self_evolve;

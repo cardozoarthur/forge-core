@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.1`
+Current version: `0.4.2`
 
 This is the first functional CLI + Skill version:
 
@@ -43,6 +43,7 @@ This is the first functional CLI + Skill version:
 - runtime workflow mutation for goals and artifacts with origin trace from `codex`, `opencode`, `forge_cli` or skills
 - async workflow substrate policy with scope guards for Forge-owned resources
 - async request handoff for skill callers: submit a goal, receive `run_id`, continue later with Forge
+- persisted task leases so two executors cannot acquire the same workflow task concurrently
 - self-evolution runner for bounded Codex/OpenCode cycles until a stop date
 - versioned self-evolution prompt packets with SHA-256 checksums in cycle reports
 - versioned improvement artifacts with strong changelog generation
