@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.14`
+Current version: `0.4.16`
 
 This is the first functional CLI + Skill version:
 
@@ -77,14 +77,17 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v3`) with a deterministic
-`task_local_revisioned_persona_budget_v3` routing policy. The packet keeps the legacy
-`content` body for executors, and also returns workflow revision, artifact count,
-persona routing metadata for human-facing nodes, lineage hashes and a shard manifest
-with included/omitted sections, source labels, priorities, byte counts, summaries and
-SHA-256 checksums so runs can be replayed against the exact context that was selected.
-Runtime goal, artifact and persona routing state are included in the context lineage
-so executors can detect stale context before resuming work.
+`forge context` emits a versioned context packet (`forge.context.v5`) with a deterministic
+`task_local_revisioned_persona_compressed_executor_profile_budget_v5` routing policy.
+The packet keeps the legacy `content` body for executors, and also returns workflow
+revision, artifact count, persona routing metadata for human-facing nodes, executor
+profile metadata, lineage hashes and a shard manifest with included/omitted sections,
+profile exclusions, compression flags, source labels, priorities, byte counts,
+summaries and SHA-256 checksums. Deterministic command and wait nodes receive a smaller
+no-AI context envelope that preserves local objective and validation context before
+lower-priority narrative sections, while AI and mixed nodes keep richer reasoning
+context. Runtime goal, artifact and persona routing state are included in the context
+lineage so executors can detect stale context before resuming work.
 
 Skill-style async handoff:
 
@@ -191,7 +194,7 @@ The current test suite validates:
 
 - planning creates a persistent atomic graph;
 - validation blocks promotion until tasks are complete;
-- context packages stay task-local, budget-bounded, versioned and sharded;
+- context packages stay task-local, budget-bounded, executor-profiled, versioned and sharded;
 - controlled improvement never auto-promotes without validation;
 - artifact listing returns SHA-256 hashed outputs;
 - workflow registry listing preserves initial requests and lifecycle state;

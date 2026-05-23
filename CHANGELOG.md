@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.16 - 2026-05-23
+
+### Added
+
+- `forge context` now emits schema `forge.context.v5` with routing policy `task_local_revisioned_persona_compressed_executor_profile_budget_v5`.
+- Added executor-aware context profiles to every context packet, including executor kind, deterministic/no-AI flag, reasoning allowance, profile section allow-list and profile-specific byte cap.
+- Added `requested_budget`, `effective_budget` and `profile_omitted_sections` so operators can see when Forge deliberately shrinks deterministic executor context below the caller's maximum budget.
+- Context shard manifests now expose `profile_excluded` to distinguish profile-based omissions from budget pressure.
+
+### Changed
+
+- Deterministic `command` and `wait` nodes now use a no-AI context profile that preserves local objective, validation rules, task context requirements and dependencies before lower-priority narrative context.
+- Notification nodes use a smaller deterministic profile while still allowing persona routing for human-facing payloads.
+- AI and mixed nodes keep the richer reasoning-oriented context profile.
+
+### Safety
+
+- Executor profiles only affect context selection. They do not authorize external CLIs, change workflow state, mutate runtime substrates or bypass validation gates.
+- Profile omissions are auditable in the context packet and shard manifest.
+
+### Validation
+
+- Added a CLI contract test proving that a deterministic no-AI task receives the `no_ai_deterministic` profile, a reduced effective budget and profile-audited omissions for nonessential sections.
+- Updated context contract tests for schema `forge.context.v5` and profile-aware compression coverage.
+
 ## 0.4.15 - 2026-05-23
 
 ### Added

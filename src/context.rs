@@ -1,10 +1,37 @@
 use crate::artifact::hex_sha256;
-use crate::graph::{PersonaRoutingSpec, Workflow};
+use crate::graph::{AtomicTask, ExecutorKind, PersonaRoutingSpec, Workflow};
 use anyhow::{bail, Result};
 use serde::Serialize;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v4";
-const ROUTING_POLICY: &str = "task_local_revisioned_persona_compressed_budget_v4";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v5";
+const ROUTING_POLICY: &str = "task_local_revisioned_persona_compressed_executor_profile_budget_v5";
+const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
+const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
+const ALL_CONTEXT_SECTIONS: &[&str] = &[
+    "local_objective",
+    "workflow_goal",
+    "persona_routing",
+    "context_requirements",
+    "validation_rules",
+    "dependencies",
+    "work_item",
+    "constraints",
+];
+const NO_AI_CONTEXT_SECTIONS: &[&str] = &[
+    "local_objective",
+    "workflow_goal",
+    "context_requirements",
+    "validation_rules",
+    "dependencies",
+];
+const NOTIFICATION_CONTEXT_SECTIONS: &[&str] = &[
+    "local_objective",
+    "workflow_goal",
+    "persona_routing",
+    "context_requirements",
+    "validation_rules",
+    "dependencies",
+];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ContextPackage {
@@ -16,10 +43,14 @@ pub struct ContextPackage {
     pub artifact_count: usize,
     pub lineage: ContextLineage,
     pub persona: Option<PersonaRoutingSpec>,
+    pub executor_profile: ContextExecutorProfile,
+    pub requested_budget: usize,
+    pub effective_budget: usize,
     pub context_bytes: usize,
     pub context_sha256: String,
     pub included_sections: Vec<String>,
     pub omitted_sections: Vec<String>,
+    pub profile_omitted_sections: Vec<String>,
     pub shards: Vec<ContextShard>,
     pub content: String,
 }
@@ -44,10 +75,30 @@ pub struct ContextShard {
     pub priority: u8,
     pub included: bool,
     pub compressed: bool,
+    pub profile_excluded: bool,
     pub bytes: usize,
     pub original_bytes: usize,
     pub content_sha256: String,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextExecutorProfile {
+    pub id: String,
+    pub executor: String,
+    pub reasoning_allowed: bool,
+    pub deterministic: bool,
+    pub max_context_bytes: Option<usize>,
+    pub allowed_sections: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExecutorContextProfile {
+    id: &'static str,
+    reasoning_allowed: bool,
+    deterministic: bool,
+    max_context_bytes: Option<usize>,
+    allowed_sections: &'static [&'static str],
 }
 
 struct ContextShardCandidate {
@@ -85,6 +136,11 @@ pub fn build_context_package(
         bail!("context budget must be at least 128 bytes");
     }
 
+    let profile = executor_context_profile(task);
+    let effective_budget = profile
+        .max_context_bytes
+        .map(|max_bytes| budget.min(max_bytes))
+        .unwrap_or(budget);
     let workflow_revision = workflow
         .revisions
         .last()
@@ -111,7 +167,7 @@ pub fn build_context_package(
         ContextShardCandidate {
             section: "local_objective",
             source: "task",
-            priority: 100,
+            priority: priority_for_profile(&profile, "local_objective", 100),
             content: format!(
                 "Task {}: {}\nGoal: {}\nExpected output: {}\nDefinition of ready: {}\n",
                 task.id,
@@ -124,7 +180,7 @@ pub fn build_context_package(
         ContextShardCandidate {
             section: "workflow_goal",
             source: "workflow",
-            priority: 95,
+            priority: priority_for_profile(&profile, "workflow_goal", 95),
             content: format!(
                 "Current workflow goal: {}\nInitial workflow goal: {}\nWorkflow revision: {}\nArtifact count: {}\n",
                 workflow.goal,
@@ -139,7 +195,7 @@ pub fn build_context_package(
         ContextShardCandidate {
             section: "persona_routing",
             source: "persona",
-            priority: 92,
+            priority: priority_for_profile(&profile, "persona_routing", 92),
             content: persona
                 .as_ref()
                 .map(render_persona_context)
@@ -148,7 +204,7 @@ pub fn build_context_package(
         ContextShardCandidate {
             section: "context_requirements",
             source: "task",
-            priority: 90,
+            priority: priority_for_profile(&profile, "context_requirements", 90),
             content: format!(
                 "Context requirements: {}\n",
                 task.context_requirements.join("; ")
@@ -157,7 +213,7 @@ pub fn build_context_package(
         ContextShardCandidate {
             section: "validation_rules",
             source: "validation",
-            priority: 80,
+            priority: priority_for_profile(&profile, "validation_rules", 80),
             content: format!(
                 "Validation rules: {}\n",
                 serde_json::to_string(&task.validation_rules)?
@@ -166,13 +222,13 @@ pub fn build_context_package(
         ContextShardCandidate {
             section: "dependencies",
             source: "graph",
-            priority: 70,
+            priority: priority_for_profile(&profile, "dependencies", 70),
             content: format!("Dependencies: {}\n", task.dependencies.join(", ")),
         },
         ContextShardCandidate {
             section: "work_item",
             source: "task",
-            priority: 60,
+            priority: priority_for_profile(&profile, "work_item", 60),
             content: format!(
                 "Backlog state: {}\nImpediments: {}\nAcceptance criteria: {}\n",
                 task.work_item.backlog_state,
@@ -183,7 +239,7 @@ pub fn build_context_package(
         ContextShardCandidate {
             section: "constraints",
             source: "intent",
-            priority: 40,
+            priority: priority_for_profile(&profile, "constraints", 40),
             content: format!("Constraints: {}\n", workflow.intent.constraints.join("; ")),
         },
     ];
@@ -191,6 +247,7 @@ pub fn build_context_package(
     let mut content = String::new();
     let mut included_sections = Vec::new();
     let mut omitted_sections = Vec::new();
+    let mut profile_omitted_sections = Vec::new();
     let mut shards = Vec::new();
 
     candidates.sort_by(|left, right| {
@@ -206,12 +263,30 @@ pub fn build_context_package(
         }
         let summary = summarize_shard(&candidate.content);
         let original_bytes = candidate.content.len();
+        if !profile.allowed_sections.contains(&candidate.section) {
+            omitted_sections.push(candidate.section.to_string());
+            profile_omitted_sections.push(candidate.section.to_string());
+            shards.push(ContextShard {
+                section: candidate.section.to_string(),
+                source: candidate.source.to_string(),
+                priority: candidate.priority,
+                included: false,
+                compressed: false,
+                profile_excluded: true,
+                bytes: 0,
+                original_bytes,
+                content_sha256: hex_sha256(b""),
+                summary,
+            });
+            continue;
+        }
+
         let compressed_content = compress_shard(&candidate, &summary);
         let (included, compressed, selected_content) =
-            if content.len() + candidate.content.len() <= budget {
+            if content.len() + candidate.content.len() <= effective_budget {
                 (true, false, candidate.content.clone())
             } else if compressed_content.len() < original_bytes
-                && content.len() + compressed_content.len() <= budget
+                && content.len() + compressed_content.len() <= effective_budget
             {
                 (true, true, compressed_content)
             } else {
@@ -231,6 +306,7 @@ pub fn build_context_package(
             priority: candidate.priority,
             included,
             compressed,
+            profile_excluded: false,
             bytes: selected_content.len(),
             original_bytes,
             content_sha256: hex_sha256(selected_content.as_bytes()),
@@ -247,10 +323,14 @@ pub fn build_context_package(
         artifact_count: workflow.artifacts.len(),
         lineage,
         persona,
+        executor_profile: profile.to_public(&task.executor),
+        requested_budget: budget,
+        effective_budget,
         context_bytes: content.len(),
         context_sha256: hex_sha256(content.as_bytes()),
         included_sections,
         omitted_sections,
+        profile_omitted_sections,
         shards,
         content,
     })
@@ -323,4 +403,91 @@ fn summarize_shard(content: &str) -> String {
 
 fn compress_shard(candidate: &ContextShardCandidate, summary: &str) -> String {
     format!("[compressed {}]\n{}\n", candidate.section, summary)
+}
+
+fn executor_context_profile(task: &AtomicTask) -> ExecutorContextProfile {
+    match task.executor {
+        ExecutorKind::Command | ExecutorKind::Wait => ExecutorContextProfile {
+            id: "no_ai_deterministic",
+            reasoning_allowed: false,
+            deterministic: true,
+            max_context_bytes: Some(DETERMINISTIC_CONTEXT_BUDGET),
+            allowed_sections: NO_AI_CONTEXT_SECTIONS,
+        },
+        ExecutorKind::Notification => ExecutorContextProfile {
+            id: "no_ai_notification",
+            reasoning_allowed: false,
+            deterministic: true,
+            max_context_bytes: Some(NOTIFICATION_CONTEXT_BUDGET),
+            allowed_sections: NOTIFICATION_CONTEXT_SECTIONS,
+        },
+        ExecutorKind::Ai => ExecutorContextProfile {
+            id: "ai_reasoning",
+            reasoning_allowed: true,
+            deterministic: false,
+            max_context_bytes: None,
+            allowed_sections: ALL_CONTEXT_SECTIONS,
+        },
+        ExecutorKind::Mixed => ExecutorContextProfile {
+            id: "mixed_execution",
+            reasoning_allowed: true,
+            deterministic: false,
+            max_context_bytes: None,
+            allowed_sections: ALL_CONTEXT_SECTIONS,
+        },
+    }
+}
+
+impl ExecutorContextProfile {
+    fn to_public(self, executor: &ExecutorKind) -> ContextExecutorProfile {
+        ContextExecutorProfile {
+            id: self.id.to_string(),
+            executor: executor_kind(executor).to_string(),
+            reasoning_allowed: self.reasoning_allowed,
+            deterministic: self.deterministic,
+            max_context_bytes: self.max_context_bytes,
+            allowed_sections: self
+                .allowed_sections
+                .iter()
+                .map(|section| (*section).to_string())
+                .collect(),
+        }
+    }
+}
+
+fn executor_kind(executor: &ExecutorKind) -> &'static str {
+    match executor {
+        ExecutorKind::Ai => "ai",
+        ExecutorKind::Command => "command",
+        ExecutorKind::Wait => "wait",
+        ExecutorKind::Notification => "notification",
+        ExecutorKind::Mixed => "mixed",
+    }
+}
+
+fn priority_for_profile(
+    profile: &ExecutorContextProfile,
+    section: &'static str,
+    default_priority: u8,
+) -> u8 {
+    match profile.id {
+        "no_ai_deterministic" => match section {
+            "local_objective" => 100,
+            "validation_rules" => 96,
+            "context_requirements" => 90,
+            "dependencies" => 85,
+            "workflow_goal" => 75,
+            _ => default_priority,
+        },
+        "no_ai_notification" => match section {
+            "local_objective" => 100,
+            "persona_routing" => 96,
+            "validation_rules" => 90,
+            "workflow_goal" => 85,
+            "context_requirements" => 80,
+            "dependencies" => 70,
+            _ => default_priority,
+        },
+        _ => default_priority,
+    }
 }
