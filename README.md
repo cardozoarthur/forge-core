@@ -74,11 +74,13 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v1`) with a deterministic
-`task_local_priority_budget_v1` routing policy. The packet keeps the legacy `content`
-body for executors, and also returns a shard manifest with included/omitted sections,
-source labels, priorities, byte counts, summaries and SHA-256 checksums so runs can be
-replayed against the exact context that was selected.
+`forge context` emits a versioned context packet (`forge.context.v2`) with a deterministic
+`task_local_revisioned_budget_v2` routing policy. The packet keeps the legacy `content`
+body for executors, and also returns workflow revision, artifact count, lineage hashes
+and a shard manifest with included/omitted sections, source labels, priorities, byte
+counts, summaries and SHA-256 checksums so runs can be replayed against the exact
+context that was selected. Runtime goal and artifact mutations are included in the
+context lineage so executors can detect stale context before resuming work.
 
 Skill-style async handoff:
 

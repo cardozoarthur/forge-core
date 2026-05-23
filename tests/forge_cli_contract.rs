@@ -313,15 +313,19 @@ fn context_controller_returns_versioned_shard_manifest() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v1");
-    assert_eq!(context["routing_policy"], "task_local_priority_budget_v1");
+    assert_eq!(context["schema_version"], "forge.context.v2");
+    assert_eq!(context["routing_policy"], "task_local_revisioned_budget_v2");
     assert_eq!(context["workflow_id"], workflow_id);
     assert_eq!(context["task_id"], task_id);
+    assert_eq!(context["workflow_revision"], 0);
+    assert_eq!(context["artifact_count"], 0);
+    assert_eq!(context["lineage"]["workflow_revision"], 0);
+    assert_eq!(context["lineage"]["artifact_count"], 0);
     assert!(context["context_bytes"].as_u64().unwrap() <= 360);
     assert_eq!(context["context_sha256"].as_str().unwrap().len(), 64);
 
     let shards = context["shards"].as_array().unwrap();
-    assert!(shards.len() >= 6);
+    assert!(shards.len() >= 7);
     assert!(shards.iter().any(|shard| {
         shard["section"] == "local_objective"
             && shard["source"] == "task"
@@ -331,8 +335,126 @@ fn context_controller_returns_versioned_shard_manifest() {
     assert!(shards
         .iter()
         .any(|shard| shard["section"] == "context_requirements"));
+    assert!(shards
+        .iter()
+        .any(|shard| shard["section"] == "workflow_goal" && shard["source"] == "workflow"));
     assert!(shards.iter().any(|shard| shard["included"] == false));
     assert!(!context["omitted_sections"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn context_package_tracks_runtime_mutation_lineage_and_current_goal() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let artifact = temp.path().join("operator-note.md");
+    fs::write(
+        &artifact,
+        "# Operator note\n\nRuntime artifact attached while routing context.\n",
+    )
+    .unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build context that survives runtime mutations",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let task_id = json["tasks"][0]["id"].as_str().unwrap();
+
+    let updated_goal = "Build revision-aware context that survives runtime mutations";
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "update-goal",
+            "--workflow",
+            workflow_id,
+            "--goal",
+            updated_goal,
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "attach-artifact",
+            "--workflow",
+            workflow_id,
+            "--path",
+            artifact.to_str().unwrap(),
+            "--kind",
+            "operator_note",
+            "--origin",
+            "opencode",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--budget",
+            "900",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+    assert_eq!(context["schema_version"], "forge.context.v2");
+    assert_eq!(context["routing_policy"], "task_local_revisioned_budget_v2");
+    assert_eq!(context["workflow_revision"], 2);
+    assert_eq!(context["artifact_count"], 1);
+    assert_eq!(context["lineage"]["workflow_revision"], 2);
+    assert_eq!(
+        context["lineage"]["workflow_goal_sha256"],
+        hex_sha256(updated_goal.as_bytes())
+    );
+    assert_eq!(context["lineage"]["artifact_count"], 1);
+    assert_eq!(
+        context["lineage"]["revision_sources"],
+        serde_json::json!(["codex", "opencode"])
+    );
+    assert_eq!(
+        context["lineage"]["lineage_sha256"].as_str().unwrap().len(),
+        64
+    );
+    assert!(context["content"].as_str().unwrap().contains(updated_goal));
+    assert!(context["included_sections"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("workflow_goal".to_string())));
 }
 
 #[test]

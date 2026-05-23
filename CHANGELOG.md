@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.11 - 2026-05-23
+
+### Added
+
+- `forge context` now emits schema `forge.context.v2` with routing policy `task_local_revisioned_budget_v2`.
+- Added top-level `workflow_revision`, `artifact_count` and `lineage` fields to context packages.
+- Added lineage hashes for the current workflow goal, task goal and artifact manifest so executor context can be replayed and checked for staleness.
+- Added a `workflow_goal` shard so runtime goal mutations are visible in the executor-facing context body.
+
+### Changed
+
+- Context routing now includes the current workflow goal, initial goal, revision and artifact count alongside task-local objective data.
+- `forge context` reflects `workflow update-goal` and `workflow attach-artifact` mutations without requiring callers to inspect status separately.
+
+### Safety
+
+- The legacy executor-facing `content` field remains present.
+- No external runtime substrate is touched; lineage is derived from Forge's SQLite workflow state and artifact records.
+
 ## 0.4.10 - 2026-05-23
 
 ### Added

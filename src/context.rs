@@ -3,8 +3,8 @@ use crate::graph::Workflow;
 use anyhow::{bail, Result};
 use serde::Serialize;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v1";
-const ROUTING_POLICY: &str = "task_local_priority_budget_v1";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v2";
+const ROUTING_POLICY: &str = "task_local_revisioned_budget_v2";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ContextPackage {
@@ -12,12 +12,26 @@ pub struct ContextPackage {
     pub routing_policy: String,
     pub workflow_id: String,
     pub task_id: String,
+    pub workflow_revision: u64,
+    pub artifact_count: usize,
+    pub lineage: ContextLineage,
     pub context_bytes: usize,
     pub context_sha256: String,
     pub included_sections: Vec<String>,
     pub omitted_sections: Vec<String>,
     pub shards: Vec<ContextShard>,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextLineage {
+    pub workflow_revision: u64,
+    pub workflow_goal_sha256: String,
+    pub task_goal_sha256: String,
+    pub artifact_manifest_sha256: String,
+    pub artifact_count: usize,
+    pub revision_sources: Vec<String>,
+    pub lineage_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,6 +52,18 @@ struct ContextShardCandidate {
     content: String,
 }
 
+#[derive(Serialize)]
+struct ContextLineageSeed {
+    workflow_id: String,
+    task_id: String,
+    workflow_revision: u64,
+    workflow_goal_sha256: String,
+    task_goal_sha256: String,
+    artifact_manifest_sha256: String,
+    artifact_count: usize,
+    revision_sources: Vec<String>,
+}
+
 pub fn build_context_package(
     workflow: &Workflow,
     task_id: &str,
@@ -52,6 +78,26 @@ pub fn build_context_package(
         bail!("context budget must be at least 128 bytes");
     }
 
+    let workflow_revision = workflow
+        .revisions
+        .last()
+        .map(|revision| revision.revision)
+        .unwrap_or(0);
+    let artifact_manifest = serde_json::to_string(&workflow.artifacts)?;
+    let revision_sources = workflow
+        .revisions
+        .iter()
+        .map(|revision| revision.origin.clone())
+        .collect::<Vec<_>>();
+    let lineage = build_lineage(
+        workflow,
+        task_id,
+        &task.goal,
+        workflow_revision,
+        revision_sources,
+        &artifact_manifest,
+    )?;
+
     let mut candidates = vec![
         ContextShardCandidate {
             section: "local_objective",
@@ -64,6 +110,21 @@ pub fn build_context_package(
                 task.goal,
                 task.expected_output,
                 task.work_item.goal_validation.evidence_required.join("; ")
+            ),
+        },
+        ContextShardCandidate {
+            section: "workflow_goal",
+            source: "workflow",
+            priority: 95,
+            content: format!(
+                "Current workflow goal: {}\nInitial workflow goal: {}\nWorkflow revision: {}\nArtifact count: {}\n",
+                workflow.goal,
+                workflow
+                    .initial_goal
+                    .as_deref()
+                    .unwrap_or(workflow.goal.as_str()),
+                workflow_revision,
+                workflow.artifacts.len()
             ),
         },
         ContextShardCandidate {
@@ -146,12 +207,45 @@ pub fn build_context_package(
         routing_policy: ROUTING_POLICY.to_string(),
         workflow_id: workflow.id.clone(),
         task_id: task.id.clone(),
+        workflow_revision,
+        artifact_count: workflow.artifacts.len(),
+        lineage,
         context_bytes: content.len(),
         context_sha256: hex_sha256(content.as_bytes()),
         included_sections,
         omitted_sections,
         shards,
         content,
+    })
+}
+
+fn build_lineage(
+    workflow: &Workflow,
+    task_id: &str,
+    task_goal: &str,
+    workflow_revision: u64,
+    revision_sources: Vec<String>,
+    artifact_manifest: &str,
+) -> Result<ContextLineage> {
+    let seed = ContextLineageSeed {
+        workflow_id: workflow.id.clone(),
+        task_id: task_id.to_string(),
+        workflow_revision,
+        workflow_goal_sha256: hex_sha256(workflow.goal.as_bytes()),
+        task_goal_sha256: hex_sha256(task_goal.as_bytes()),
+        artifact_manifest_sha256: hex_sha256(artifact_manifest.as_bytes()),
+        artifact_count: workflow.artifacts.len(),
+        revision_sources,
+    };
+    let lineage_sha256 = hex_sha256(serde_json::to_string(&seed)?.as_bytes());
+    Ok(ContextLineage {
+        workflow_revision: seed.workflow_revision,
+        workflow_goal_sha256: seed.workflow_goal_sha256,
+        task_goal_sha256: seed.task_goal_sha256,
+        artifact_manifest_sha256: seed.artifact_manifest_sha256,
+        artifact_count: seed.artifact_count,
+        revision_sources: seed.revision_sources,
+        lineage_sha256,
     })
 }
 
