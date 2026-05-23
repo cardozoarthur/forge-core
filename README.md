@@ -21,14 +21,14 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.9`
+Current version: `0.4.10`
 
 This is the first functional CLI + Skill version:
 
 - Rust CLI binary: `forge`
 - SQLite persistence
 - deterministic atomic task graph generation
-- bounded context package generation
+- versioned, sharded bounded context package generation
 - validation gates
 - simulated execution runtime
 - autonomous mixed AI/non-AI workflow planning
@@ -36,7 +36,7 @@ This is the first functional CLI + Skill version:
 - notification payloads with final workflow cost reporting
 - artifact listing
 - workflow registry listing with lifecycle state
-- context routing, deterministic code-node and long-running cognition goals
+- context routing with deterministic shard manifests, deterministic code-node and long-running cognition goals
 - controlled improvement proposal generation
 - Codex/OpenCode-compatible `forge-core` skill
 - executor sync that detects installed/configured CLIs and persists human authorization policy
@@ -73,6 +73,12 @@ forge validate --workflow <workflow-id> --output json
 forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
+
+`forge context` emits a versioned context packet (`forge.context.v1`) with a deterministic
+`task_local_priority_budget_v1` routing policy. The packet keeps the legacy `content`
+body for executors, and also returns a shard manifest with included/omitted sections,
+source labels, priorities, byte counts, summaries and SHA-256 checksums so runs can be
+replayed against the exact context that was selected.
 
 Skill-style async handoff:
 
@@ -178,7 +184,7 @@ The current test suite validates:
 
 - planning creates a persistent atomic graph;
 - validation blocks promotion until tasks are complete;
-- context packages stay task-local and budget-bounded;
+- context packages stay task-local, budget-bounded, versioned and sharded;
 - controlled improvement never auto-promotes without validation;
 - artifact listing returns SHA-256 hashed outputs;
 - workflow registry listing preserves initial requests and lifecycle state;

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.10 - 2026-05-23
+
+### Added
+
+- `forge context` now returns a versioned context packet with `schema_version = "forge.context.v1"`.
+- Added deterministic `task_local_priority_budget_v1` routing metadata to each context response.
+- Added a context shard manifest with section, source, priority, inclusion decision, byte count, summary and SHA-256 checksum for every candidate shard.
+- Added whole-packet `context_sha256` plus explicit `omitted_sections` so executor runs can be replayed and audited against the exact bounded context selected for the task.
+
+### Changed
+
+- Context selection now uses task-local priority ordering across local objective, context requirements, validation rules, dependencies, work item metadata and workflow constraints.
+- The legacy `content` and `included_sections` fields remain available for executor compatibility.
+
+### Validation
+
+- Added a CLI contract test that verifies `forge context` emits the versioned shard manifest and stays within the requested budget.
+
 ## 0.4.9 - 2026-05-23
 
 ### Fixed

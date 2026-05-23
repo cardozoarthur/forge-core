@@ -190,6 +190,13 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
+Current `forge context` packets use schema `forge.context.v1` and routing policy
+`task_local_priority_budget_v1`. Each packet includes the executor-facing content,
+the full context checksum, included and omitted sections, and a deterministic shard
+manifest with source, priority, byte count, summary and shard checksum. This keeps
+the first implementation replayable while leaving room for persisted summaries,
+artifact shards and subflow-aware routing in later versions.
+
 ## Deterministic + AI Hybrid Graph
 
 Forge workflows should mix AI and non-AI execution in one graph.

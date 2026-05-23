@@ -270,6 +270,72 @@ fn context_controller_returns_minimal_task_local_context() {
 }
 
 #[test]
+fn context_controller_returns_versioned_shard_manifest() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build context routing for deterministic code nodes and AI executors without unrelated history",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let task_id = json["tasks"][0]["id"].as_str().unwrap();
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--budget",
+            "360",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+    assert_eq!(context["schema_version"], "forge.context.v1");
+    assert_eq!(context["routing_policy"], "task_local_priority_budget_v1");
+    assert_eq!(context["workflow_id"], workflow_id);
+    assert_eq!(context["task_id"], task_id);
+    assert!(context["context_bytes"].as_u64().unwrap() <= 360);
+    assert_eq!(context["context_sha256"].as_str().unwrap().len(), 64);
+
+    let shards = context["shards"].as_array().unwrap();
+    assert!(shards.len() >= 6);
+    assert!(shards.iter().any(|shard| {
+        shard["section"] == "local_objective"
+            && shard["source"] == "task"
+            && shard["included"] == true
+            && shard["content_sha256"].as_str().unwrap().len() == 64
+    }));
+    assert!(shards
+        .iter()
+        .any(|shard| shard["section"] == "context_requirements"));
+    assert!(shards.iter().any(|shard| shard["included"] == false));
+    assert!(!context["omitted_sections"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn improve_creates_controlled_experiment_and_never_promotes_without_validation() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
