@@ -430,6 +430,7 @@ Goal:
 - Strategic runtime goals now include workflow listing, terminal inspection, recursive subflows, infinite subflows, scale-to-zero lifecycle state and flow composition/reuse.
 - Prefer increments that move toward `forge list` for running and non-running workflows, `forge inspect` for terminal DAG/subflow visualization, and a workflow registry that can reuse compatible existing flows as child subflows before creating new work.
 - Prioritize the Context Routing Engine: compress, summarize, select, version and shard the minimum correct context for each executor to reduce irrelevant context, redundant reasoning and cost.
+- Add Personality/Soul Routing for human-facing artifacts: inspect how Codex handles developer/personality instructions and how Paperclip models soul, voice, tone or persona, then allow specific workflow moments to switch persona mode explicitly, scoped to the node, auditable in lineage and validation-gated.
 - Preserve deterministic + AI hybrid graph semantics: AI tasks, deterministic code tasks, waits, cron, approvals, validation, rollback and deployment should coexist in the same graph.
 - Improve long-running cognition: pause/resume, async continuation, durable execution, checkpointing, partial retry and resumable context.
 - Add execution policy that can choose no-AI deterministic nodes for repeated or frequent work, including local Python or Node.js code nodes, instead of spending model calls.

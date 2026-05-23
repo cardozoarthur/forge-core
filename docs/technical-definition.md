@@ -199,6 +199,26 @@ the context lineage, which gives long-running executors a deterministic stale-co
 signal while leaving room for persisted summaries, artifact shards and subflow-aware
 routing in later versions.
 
+## Personality/Soul Routing
+
+Some workflow outputs are not only machine artifacts. Reports, research summaries,
+strategy documents, teaching material and operator updates are read by humans, so
+Forge should be able to route a node through an explicit personality, voice or
+"soul" profile when that improves clarity.
+
+This capability must remain operationally bounded:
+
+- the persona is a node-level execution setting, not hidden global behavior;
+- the context packet records which persona profile was selected and why;
+- Codex-style developer/personality instructions and Paperclip-style soul, voice,
+  tone or persona models are inputs to the profile contract;
+- the persona switch is included in lineage so results are replayable;
+- validation gates can reject artifacts that drift away from the requested role,
+  audience, constraints or factual content.
+
+The intent is to improve human-facing artifacts without letting personality override
+Forge goals, validation rules, safety constraints or source-of-truth state.
+
 ## Deterministic + AI Hybrid Graph
 
 Forge workflows should mix AI and non-AI execution in one graph.

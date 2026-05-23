@@ -1484,6 +1484,10 @@ fn self_run_dry_run_creates_bounded_self_evolution_workflow_and_artifacts() {
     let prompt = fs::read_to_string(prompt_path).unwrap();
     assert!(prompt.contains("Improve Forge Core"));
     assert!(prompt.contains("Codex/OpenCode"));
+    assert!(prompt.contains("Personality/Soul Routing"));
+    assert!(prompt.contains("Codex handles developer/personality instructions"));
+    assert!(prompt.contains("Paperclip models soul, voice, tone or persona"));
+    assert!(prompt.contains("auditable in lineage and validation-gated"));
     assert!(prompt.contains("cargo test"));
     assert!(prompt.contains("Do not mutate external Docker/Kubernetes/Knative resources"));
 }

@@ -37,6 +37,7 @@ This is the first functional CLI + Skill version:
 - artifact listing
 - workflow registry listing with lifecycle state
 - context routing with deterministic shard manifests, deterministic code-node and long-running cognition goals
+- explicit Personality/Soul Routing goals for human-facing artifacts
 - controlled improvement proposal generation
 - Codex/OpenCode-compatible `forge-core` skill
 - executor sync that detects installed/configured CLIs and persists human authorization policy

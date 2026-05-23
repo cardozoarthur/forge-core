@@ -167,6 +167,16 @@ Goal: make minimal correct context a first-class runtime product.
 - Add context lineage to executor results for replay and cost accounting.
 - Add stale-context detection when goals or artifacts change during runtime.
 
+### Phase 2.6: Personality/Soul Routing
+
+Goal: make human-facing artifacts adaptable without making executor behavior implicit.
+
+- Inspect Codex developer/personality instruction handling and the local Paperclip soul, voice, tone or persona model.
+- Add a persona profile contract that can be selected per workflow node.
+- Include selected persona profile id, rationale and checksum in context lineage.
+- Keep persona routing explicit, node-scoped, auditable and validation-gated.
+- Add reviewer checks for audience fit, factual drift and constraint drift.
+
 ### Phase 3: Durable Scheduling
 
 Goal: make future work real, not just represented in the graph.

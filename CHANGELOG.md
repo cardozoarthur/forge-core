@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.12 - 2026-05-23
+
+### Added
+
+- Added a persistent Personality/Soul Routing goal to Forge self-evolution prompts.
+- Documented the future persona profile contract for human-facing artifacts: node-scoped, explicit, auditable in context lineage and validation-gated.
+- Added roadmap coverage for inspecting Codex developer/personality instructions and Paperclip soul, voice, tone or persona models before implementation.
+
+### Validation
+
+- Added a CLI contract assertion so `forge self run --dry-run` must include the Personality/Soul Routing goal in the executor prompt.
+
 ## 0.4.11 - 2026-05-23
 
 ### Added
