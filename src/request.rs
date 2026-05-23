@@ -1,9 +1,11 @@
+use crate::artifact::list_workflow_artifacts;
 use crate::graph::{create_workflow, TaskStatus, Workflow};
 use crate::intent::parse_intent;
 use crate::storage::ForgeStore;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fs;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +46,7 @@ pub struct RequestStatusReport {
     pub workflow_revision: u64,
     pub artifact_count: usize,
     pub task_summary: TaskStatusSummary,
+    pub latest_validation_evidence: Option<ValidationEvidenceSummary>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -56,6 +59,44 @@ pub struct TaskStatusSummary {
     pub completed: usize,
     pub blocked: usize,
     pub failed: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ValidationEvidenceSummary {
+    pub artifact_path: String,
+    pub artifact_sha256: String,
+    pub schema_version: String,
+    pub prompt_packet_version: String,
+    pub status: String,
+    pub validation_passed: bool,
+    pub cycle: u32,
+    pub executor: String,
+    pub command_summary: ValidationCommandSummary,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ValidationCommandSummary {
+    pub total: usize,
+    pub planned: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub skipped: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct ValidationEvidenceArtifact {
+    schema_version: String,
+    prompt_packet_version: String,
+    status: String,
+    validation_passed: bool,
+    cycle: u32,
+    executor: String,
+    commands: Vec<ValidationCommandArtifact>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ValidationCommandArtifact {
+    status: String,
 }
 
 pub fn start_async_request(
@@ -112,6 +153,7 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
     let run = load_run_record(store, run_id)?;
     let workflow = store.load_workflow(&run.workflow_id)?;
     let task_summary = summarize_tasks(&workflow);
+    let latest_validation_evidence = load_latest_validation_evidence(store, &workflow.id)?;
     let workflow_revision = workflow
         .revisions
         .last()
@@ -129,6 +171,7 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
         workflow_revision,
         artifact_count: workflow.artifacts.len(),
         task_summary,
+        latest_validation_evidence,
         created_at: run.created_at,
         updated_at: run.updated_at,
     })
@@ -146,6 +189,55 @@ fn summarize_tasks(workflow: &Workflow) -> TaskStatusSummary {
             TaskStatus::Completed => summary.completed += 1,
             TaskStatus::Blocked => summary.blocked += 1,
             TaskStatus::Failed => summary.failed += 1,
+        }
+    }
+    summary
+}
+
+fn load_latest_validation_evidence(
+    store: &ForgeStore,
+    workflow_id: &str,
+) -> Result<Option<ValidationEvidenceSummary>> {
+    let artifacts = list_workflow_artifacts(&store.base_dir(), workflow_id)?;
+    let Some(artifact) = artifacts.into_iter().rev().find(|artifact| {
+        artifact.path.contains("/self-evolution-cycle-")
+            && artifact.path.ends_with("-validation.json")
+    }) else {
+        return Ok(None);
+    };
+
+    let bytes = fs::read(store.base_dir().join(&artifact.path))
+        .with_context(|| format!("failed to read validation artifact {}", artifact.path))?;
+    let payload: ValidationEvidenceArtifact = serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to parse validation artifact {}", artifact.path))?;
+
+    Ok(Some(ValidationEvidenceSummary {
+        artifact_path: artifact.path,
+        artifact_sha256: artifact.sha256,
+        schema_version: payload.schema_version,
+        prompt_packet_version: payload.prompt_packet_version,
+        status: payload.status,
+        validation_passed: payload.validation_passed,
+        cycle: payload.cycle,
+        executor: payload.executor,
+        command_summary: summarize_validation_commands(&payload.commands),
+    }))
+}
+
+fn summarize_validation_commands(
+    commands: &[ValidationCommandArtifact],
+) -> ValidationCommandSummary {
+    let mut summary = ValidationCommandSummary {
+        total: commands.len(),
+        ..ValidationCommandSummary::default()
+    };
+    for command in commands {
+        match command.status.as_str() {
+            "planned" => summary.planned += 1,
+            "passed" => summary.passed += 1,
+            "failed" => summary.failed += 1,
+            "skipped" => summary.skipped += 1,
+            _ => {}
         }
     }
     summary

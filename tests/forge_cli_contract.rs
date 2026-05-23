@@ -1481,6 +1481,88 @@ fn self_run_writes_validation_evidence_contract_artifact() {
 }
 
 #[test]
+fn request_status_surfaces_latest_validation_evidence_for_async_callers() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("README.md"), "# Repo\n").unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2026-05-25T10:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--executor",
+            "codex",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let run_id = json["run_id"].as_str().unwrap();
+    let cycle_report = &json["cycle_reports"][0];
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    let validation = &status_json["latest_validation_evidence"];
+    assert_eq!(
+        validation["artifact_path"],
+        cycle_report["validation_report_path"]
+    );
+    assert_eq!(
+        validation["artifact_sha256"],
+        cycle_report["validation_report_sha256"]
+    );
+    assert_eq!(
+        validation["schema_version"],
+        "forge.self_evolution.validation.v1"
+    );
+    assert_eq!(
+        validation["prompt_packet_version"],
+        "forge.self_evolution.prompt.v1"
+    );
+    assert_eq!(validation["status"], "planned");
+    assert_eq!(validation["validation_passed"], false);
+    assert_eq!(validation["cycle"], 1);
+    assert_eq!(validation["executor"], "codex");
+    assert_eq!(validation["command_summary"]["total"], 4);
+    assert_eq!(validation["command_summary"]["planned"], 4);
+    assert_eq!(validation["command_summary"]["passed"], 0);
+    assert_eq!(validation["command_summary"]["failed"], 0);
+    assert_eq!(validation["command_summary"]["skipped"], 0);
+}
+
+#[test]
 fn request_start_returns_async_run_identifier_for_skill_callers() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

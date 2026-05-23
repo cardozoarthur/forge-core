@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.6 - 2026-05-23
+
+### Added
+
+- Added `latest_validation_evidence` to `forge request status` so async callers can see the latest self-evolution validation artifact without manually listing files.
+- The compact evidence summary includes artifact path, SHA-256, schema version, prompt packet version, cycle, executor, validation status and command counts.
+
+### Changed
+
+- Request status now derives validation evidence from persisted workflow artifacts at read time, preserving Forge as the source of truth instead of copying validation state into run records.
+
+### Safety
+
+- The original validation artifact remains the canonical evidence. `request status` only projects a compact summary and keeps the full report auditable through the persisted artifact path and checksum.
+
 ## 0.4.5 - 2026-05-23
 
 ### Added
