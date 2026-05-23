@@ -51,6 +51,18 @@ pub struct NotificationSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonaRoutingSpec {
+    pub mode: String,
+    pub scope: String,
+    pub instruction_source: String,
+    pub voice: String,
+    pub tone: String,
+    pub validation_gate: String,
+    pub source_models: Vec<String>,
+    pub auditable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubtaskSpec {
     pub id: String,
     pub title: String,
@@ -111,6 +123,8 @@ pub struct AtomicTask {
     pub schedule: Option<ScheduleSpec>,
     pub cost: CostEstimate,
     pub notification: Option<NotificationSpec>,
+    #[serde(default)]
+    pub persona: Option<PersonaRoutingSpec>,
     pub work_item: WorkItemSpec,
     #[serde(default)]
     pub async_policy: AsyncPolicy,
@@ -208,6 +222,7 @@ fn task(
             cost_model: "static_v0_estimate".to_string(),
         },
         notification: None,
+        persona: None,
         work_item,
         async_policy: AsyncPolicy::default(),
         status: TaskStatus::Pending,
@@ -380,18 +395,21 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
             "Artifact manifest",
             (ExecutorKind::Command, 0.0004),
         ),
-        task(
-            "task-008",
-            "Generate documentation",
-            &["task-007"],
-            &["artifact manifest", "workflow summary"],
-            vec![rule(
-                "documentation",
-                "operator can replay the workflow from documented state",
-                None,
-            )],
-            "Operational report",
-            (ExecutorKind::Ai, 0.015),
+        with_persona(
+            task(
+                "task-008",
+                "Generate documentation",
+                &["task-007"],
+                &["artifact manifest", "workflow summary"],
+                vec![rule(
+                    "documentation",
+                    "operator can replay the workflow from documented state",
+                    None,
+                )],
+                "Operational report",
+                (ExecutorKind::Ai, 0.015),
+            ),
+            operator_report_persona(),
         ),
     ];
 
@@ -442,18 +460,21 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         ));
 
         if let Some(email) = extract_email(&intent.goal) {
-            let mut notification = task(
-                "task-012",
-                "Send workflow cost email",
-                &["task-011"],
-                &["workflow costs", "notification target"],
-                vec![rule(
-                    "notification",
-                    "email payload includes workflow cost report",
-                    None,
-                )],
-                "Email notification payload",
-                (ExecutorKind::Notification, 0.0001),
+            let mut notification = with_persona(
+                task(
+                    "task-012",
+                    "Send workflow cost email",
+                    &["task-011"],
+                    &["workflow costs", "notification target"],
+                    vec![rule(
+                        "notification",
+                        "email payload includes workflow cost report",
+                        None,
+                    )],
+                    "Email notification payload",
+                    (ExecutorKind::Notification, 0.0001),
+                ),
+                stakeholder_notice_persona(),
             );
             notification.notification = Some(NotificationSpec {
                 channel: "email".to_string(),
@@ -480,6 +501,43 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
     }
 
     tasks
+}
+
+fn with_persona(mut task: AtomicTask, persona: PersonaRoutingSpec) -> AtomicTask {
+    task.persona = Some(persona);
+    task
+}
+
+fn operator_report_persona() -> PersonaRoutingSpec {
+    persona(
+        "operator_report",
+        "operational reporter",
+        "direct, auditable and evidence-bound",
+    )
+}
+
+fn stakeholder_notice_persona() -> PersonaRoutingSpec {
+    persona(
+        "stakeholder_notice",
+        "stakeholder communicator",
+        "concise, traceable and action-oriented",
+    )
+}
+
+fn persona(mode: &str, voice: &str, tone: &str) -> PersonaRoutingSpec {
+    PersonaRoutingSpec {
+        mode: mode.to_string(),
+        scope: "node".to_string(),
+        instruction_source: "forge_personality_soul_routing_v1".to_string(),
+        voice: voice.to_string(),
+        tone: tone.to_string(),
+        validation_gate: "persona_routing_required".to_string(),
+        source_models: vec![
+            "codex_developer_personality_instructions".to_string(),
+            "paperclip_soul_voice_tone_persona".to_string(),
+        ],
+        auditable: true,
+    }
 }
 
 fn requires_async_runtime(goal: &str) -> bool {

@@ -190,14 +190,15 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v2` and routing policy
-`task_local_revisioned_budget_v2`. Each packet includes the executor-facing content,
-the full context checksum, workflow revision, artifact count, lineage hashes, included
-and omitted sections, and a deterministic shard manifest with source, priority, byte
-count, summary and shard checksum. Runtime goal and artifact mutations are part of
-the context lineage, which gives long-running executors a deterministic stale-context
-signal while leaving room for persisted summaries, artifact shards and subflow-aware
-routing in later versions.
+Current `forge context` packets use schema `forge.context.v3` and routing policy
+`task_local_revisioned_persona_budget_v3`. Each packet includes the executor-facing
+content, the full context checksum, workflow revision, artifact count, node-scoped
+persona routing metadata for human-facing tasks, lineage hashes, included and omitted
+sections, and a deterministic shard manifest with source, priority, byte count,
+summary and shard checksum. Runtime goal, artifact and persona routing state are part
+of the context lineage, which gives long-running executors a deterministic
+stale-context signal while leaving room for persisted summaries, artifact shards and
+subflow-aware routing in later versions.
 
 ## Personality/Soul Routing
 
@@ -209,7 +210,8 @@ Forge should be able to route a node through an explicit personality, voice or
 This capability must remain operationally bounded:
 
 - the persona is a node-level execution setting, not hidden global behavior;
-- the context packet records which persona profile was selected and why;
+- the task graph records mode, scope, source models, voice, tone and validation gate;
+- the context packet records which persona profile was selected and includes it as a shard;
 - Codex-style developer/personality instructions and Paperclip-style soul, voice,
   tone or persona models are inputs to the profile contract;
 - the persona switch is included in lineage so results are replayable;

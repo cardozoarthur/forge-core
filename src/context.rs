@@ -1,10 +1,10 @@
 use crate::artifact::hex_sha256;
-use crate::graph::Workflow;
+use crate::graph::{PersonaRoutingSpec, Workflow};
 use anyhow::{bail, Result};
 use serde::Serialize;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v2";
-const ROUTING_POLICY: &str = "task_local_revisioned_budget_v2";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v3";
+const ROUTING_POLICY: &str = "task_local_revisioned_persona_budget_v3";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ContextPackage {
@@ -15,6 +15,7 @@ pub struct ContextPackage {
     pub workflow_revision: u64,
     pub artifact_count: usize,
     pub lineage: ContextLineage,
+    pub persona: Option<PersonaRoutingSpec>,
     pub context_bytes: usize,
     pub context_sha256: String,
     pub included_sections: Vec<String>,
@@ -30,6 +31,8 @@ pub struct ContextLineage {
     pub task_goal_sha256: String,
     pub artifact_manifest_sha256: String,
     pub artifact_count: usize,
+    pub persona_mode_sha256: String,
+    pub persona_scope: String,
     pub revision_sources: Vec<String>,
     pub lineage_sha256: String,
 }
@@ -61,6 +64,8 @@ struct ContextLineageSeed {
     task_goal_sha256: String,
     artifact_manifest_sha256: String,
     artifact_count: usize,
+    persona_mode_sha256: String,
+    persona_scope: String,
     revision_sources: Vec<String>,
 }
 
@@ -89,10 +94,12 @@ pub fn build_context_package(
         .iter()
         .map(|revision| revision.origin.clone())
         .collect::<Vec<_>>();
+    let persona = task.persona.clone();
     let lineage = build_lineage(
         workflow,
         task_id,
         &task.goal,
+        persona.as_ref(),
         workflow_revision,
         revision_sources,
         &artifact_manifest,
@@ -126,6 +133,15 @@ pub fn build_context_package(
                 workflow_revision,
                 workflow.artifacts.len()
             ),
+        },
+        ContextShardCandidate {
+            section: "persona_routing",
+            source: "persona",
+            priority: 92,
+            content: persona
+                .as_ref()
+                .map(render_persona_context)
+                .unwrap_or_default(),
         },
         ContextShardCandidate {
             section: "context_requirements",
@@ -183,6 +199,9 @@ pub fn build_context_package(
     });
 
     for candidate in candidates {
+        if candidate.content.is_empty() {
+            continue;
+        }
         let included = content.len() + candidate.content.len() <= budget;
         if included {
             content.push_str(&candidate.content);
@@ -210,6 +229,7 @@ pub fn build_context_package(
         workflow_revision,
         artifact_count: workflow.artifacts.len(),
         lineage,
+        persona,
         context_bytes: content.len(),
         context_sha256: hex_sha256(content.as_bytes()),
         included_sections,
@@ -223,10 +243,17 @@ fn build_lineage(
     workflow: &Workflow,
     task_id: &str,
     task_goal: &str,
+    persona: Option<&PersonaRoutingSpec>,
     workflow_revision: u64,
     revision_sources: Vec<String>,
     artifact_manifest: &str,
 ) -> Result<ContextLineage> {
+    let persona_mode = persona
+        .map(|persona| persona.mode.as_str())
+        .unwrap_or("none");
+    let persona_scope = persona
+        .map(|persona| persona.scope.clone())
+        .unwrap_or_else(|| "none".to_string());
     let seed = ContextLineageSeed {
         workflow_id: workflow.id.clone(),
         task_id: task_id.to_string(),
@@ -235,6 +262,8 @@ fn build_lineage(
         task_goal_sha256: hex_sha256(task_goal.as_bytes()),
         artifact_manifest_sha256: hex_sha256(artifact_manifest.as_bytes()),
         artifact_count: workflow.artifacts.len(),
+        persona_mode_sha256: hex_sha256(persona_mode.as_bytes()),
+        persona_scope,
         revision_sources,
     };
     let lineage_sha256 = hex_sha256(serde_json::to_string(&seed)?.as_bytes());
@@ -244,9 +273,25 @@ fn build_lineage(
         task_goal_sha256: seed.task_goal_sha256,
         artifact_manifest_sha256: seed.artifact_manifest_sha256,
         artifact_count: seed.artifact_count,
+        persona_mode_sha256: seed.persona_mode_sha256,
+        persona_scope: seed.persona_scope,
         revision_sources: seed.revision_sources,
         lineage_sha256,
     })
+}
+
+fn render_persona_context(persona: &PersonaRoutingSpec) -> String {
+    format!(
+        "Persona mode: {}\nPersona scope: {}\nInstruction source: {}\nVoice: {}\nTone: {}\nValidation gate: {}\nSource models: {}\nAuditable: {}\n",
+        persona.mode,
+        persona.scope,
+        persona.instruction_source,
+        persona.voice,
+        persona.tone,
+        persona.validation_gate,
+        persona.source_models.join(", "),
+        persona.auditable
+    )
 }
 
 fn summarize_shard(content: &str) -> String {

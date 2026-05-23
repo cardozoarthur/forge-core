@@ -313,8 +313,11 @@ fn context_controller_returns_versioned_shard_manifest() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v2");
-    assert_eq!(context["routing_policy"], "task_local_revisioned_budget_v2");
+    assert_eq!(context["schema_version"], "forge.context.v3");
+    assert_eq!(
+        context["routing_policy"],
+        "task_local_revisioned_persona_budget_v3"
+    );
     assert_eq!(context["workflow_id"], workflow_id);
     assert_eq!(context["task_id"], task_id);
     assert_eq!(context["workflow_revision"], 0);
@@ -432,8 +435,11 @@ fn context_package_tracks_runtime_mutation_lineage_and_current_goal() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v2");
-    assert_eq!(context["routing_policy"], "task_local_revisioned_budget_v2");
+    assert_eq!(context["schema_version"], "forge.context.v3");
+    assert_eq!(
+        context["routing_policy"],
+        "task_local_revisioned_persona_budget_v3"
+    );
     assert_eq!(context["workflow_revision"], 2);
     assert_eq!(context["artifact_count"], 1);
     assert_eq!(context["lineage"]["workflow_revision"], 2);
@@ -455,6 +461,130 @@ fn context_package_tracks_runtime_mutation_lineage_and_current_goal() {
         .as_array()
         .unwrap()
         .contains(&Value::String("workflow_goal".to_string())));
+}
+
+#[test]
+fn planned_human_facing_tasks_include_node_scoped_persona_routing() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Create an operator report and email a stakeholder summary to ops@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tasks = json["tasks"].as_array().unwrap();
+    let documentation_task = find_task(tasks, "Generate documentation");
+    assert_eq!(documentation_task["persona"]["mode"], "operator_report");
+    assert_eq!(documentation_task["persona"]["scope"], "node");
+    assert_eq!(
+        documentation_task["persona"]["instruction_source"],
+        "forge_personality_soul_routing_v1"
+    );
+    assert_eq!(
+        documentation_task["persona"]["validation_gate"],
+        "persona_routing_required"
+    );
+    assert_eq!(documentation_task["persona"]["auditable"], true);
+    assert!(documentation_task["persona"]["source_models"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(
+            "codex_developer_personality_instructions".to_string()
+        )));
+    assert!(documentation_task["persona"]["source_models"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(
+            "paperclip_soul_voice_tone_persona".to_string()
+        )));
+
+    let notification_task = find_task(tasks, "Send workflow cost email");
+    assert_eq!(notification_task["persona"]["mode"], "stakeholder_notice");
+    assert_eq!(notification_task["persona"]["scope"], "node");
+}
+
+#[test]
+fn context_package_includes_persona_routing_lineage_for_human_facing_task() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Generate a human-facing operational report with auditable persona routing",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let documentation_task = find_task(json["tasks"].as_array().unwrap(), "Generate documentation");
+    let task_id = documentation_task["id"].as_str().unwrap();
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--budget",
+            "1600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+    assert_eq!(context["schema_version"], "forge.context.v3");
+    assert_eq!(
+        context["routing_policy"],
+        "task_local_revisioned_persona_budget_v3"
+    );
+    assert_eq!(context["persona"]["mode"], "operator_report");
+    assert_eq!(context["persona"]["scope"], "node");
+    assert_eq!(
+        context["lineage"]["persona_mode_sha256"],
+        hex_sha256("operator_report".as_bytes())
+    );
+    assert_eq!(context["lineage"]["persona_scope"], "node");
+    assert!(context["included_sections"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("persona_routing".to_string())));
+    assert!(context["shards"].as_array().unwrap().iter().any(|shard| {
+        shard["section"] == "persona_routing"
+            && shard["source"] == "persona"
+            && shard["included"] == true
+    }));
+    assert!(context["content"]
+        .as_str()
+        .unwrap()
+        .contains("Persona mode: operator_report"));
 }
 
 #[test]
@@ -2256,6 +2386,10 @@ fn find_workflow<'a>(json: &'a Value, id: &str) -> &'a Value {
         .iter()
         .find(|workflow| workflow["workflow_id"] == id)
         .unwrap()
+}
+
+fn find_task<'a>(tasks: &'a [Value], title: &str) -> &'a Value {
+    tasks.iter().find(|task| task["title"] == title).unwrap()
 }
 
 fn remove_legacy_fields_from_stored_workflow(store: &Path, workflow_id: &str) {

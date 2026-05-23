@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.10`
+Current version: `0.4.13`
 
 This is the first functional CLI + Skill version:
 
@@ -37,7 +37,7 @@ This is the first functional CLI + Skill version:
 - artifact listing
 - workflow registry listing with lifecycle state
 - context routing with deterministic shard manifests, deterministic code-node and long-running cognition goals
-- explicit Personality/Soul Routing goals for human-facing artifacts
+- node-scoped Personality/Soul Routing metadata for human-facing artifacts
 - controlled improvement proposal generation
 - Codex/OpenCode-compatible `forge-core` skill
 - executor sync that detects installed/configured CLIs and persists human authorization policy
@@ -75,13 +75,14 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v2`) with a deterministic
-`task_local_revisioned_budget_v2` routing policy. The packet keeps the legacy `content`
-body for executors, and also returns workflow revision, artifact count, lineage hashes
-and a shard manifest with included/omitted sections, source labels, priorities, byte
-counts, summaries and SHA-256 checksums so runs can be replayed against the exact
-context that was selected. Runtime goal and artifact mutations are included in the
-context lineage so executors can detect stale context before resuming work.
+`forge context` emits a versioned context packet (`forge.context.v3`) with a deterministic
+`task_local_revisioned_persona_budget_v3` routing policy. The packet keeps the legacy
+`content` body for executors, and also returns workflow revision, artifact count,
+persona routing metadata for human-facing nodes, lineage hashes and a shard manifest
+with included/omitted sections, source labels, priorities, byte counts, summaries and
+SHA-256 checksums so runs can be replayed against the exact context that was selected.
+Runtime goal, artifact and persona routing state are included in the context lineage
+so executors can detect stale context before resuming work.
 
 Skill-style async handoff:
 

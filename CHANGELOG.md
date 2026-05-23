@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.13 - 2026-05-23
+
+### Added
+
+- Added `PersonaRoutingSpec` to atomic tasks so human-facing nodes can declare an explicit node-scoped persona mode.
+- Added default `operator_report` persona routing for documentation tasks and `stakeholder_notice` for workflow cost email notifications.
+- `forge context` now emits schema `forge.context.v3` with routing policy `task_local_revisioned_persona_budget_v3`.
+- Context packages include top-level persona metadata, a `persona_routing` shard and persona mode/scope data in lineage.
+
+### Safety
+
+- Persona routing remains node-scoped, explicit and auditable; it does not change workflow goals, validation rules, executor policy or runtime substrate authorization.
+- Source-model metadata records the local contract inputs for Codex developer/personality instructions and Paperclip-style soul, voice, tone or persona modeling.
+
+### Validation
+
+- Added CLI contract tests proving that planned human-facing tasks carry persona routing metadata and that `forge context` exposes persona lineage for those nodes.
+
 ## 0.4.12 - 2026-05-23
 
 ### Added
