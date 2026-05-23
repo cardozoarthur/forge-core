@@ -208,13 +208,13 @@ fn execute_cycle(repo: &Path, executor: &str, prompt: &str) -> Result<String> {
         "codex" => {
             let output = Command::new("codex")
                 .args([
+                    "--ask-for-approval",
+                    "never",
                     "exec",
                     "--cd",
                     repo.to_str().unwrap_or("."),
                     "--sandbox",
                     "workspace-write",
-                    "--ask-for-approval",
-                    "never",
                     "--output-last-message",
                     ".forge/last-codex-self-evolution.md",
                     prompt,

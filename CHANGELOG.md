@@ -16,6 +16,7 @@
 
 - Codex/OpenCode skill flow now prefers returning a `run_id` instead of waiting for long work inline.
 - Forge self-evolution can alternate authorized Codex/OpenCode executors while preserving validation gates.
+- Fixed Codex self-evolution invocation to pass approval policy as a top-level Codex CLI option.
 
 ## 0.3.0 - 2026-05-23
 
