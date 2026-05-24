@@ -21,6 +21,7 @@ const PROMPT_PACKET_SCHEMA_VERSION: &str = "forge.context.prompt_packet.v2";
 const EXECUTOR_PROMPT_PACKET_VERSION: &str = "forge.executor.prompt_packet.v2";
 const CONTEXT_REPLAY_MANIFEST_SCHEMA_VERSION: &str = "forge.context.replay_manifest.v1";
 const CONTEXT_SELECTION_RECEIPT_SCHEMA_VERSION: &str = "forge.context.selection_receipt.v1";
+const EXECUTION_POLICY_DECISION_SCHEMA_VERSION: &str = "forge.context.execution_policy_decision.v1";
 const CONTEXT_SELECTOR_VERSION: &str = "forge.context.selector.v1";
 const EXECUTOR_PROFILE_SCHEMA_VERSION: &str = "forge.context.executor_profile.v1";
 const CONTEXT_NEXT_ACTION_SCHEMA_VERSION: &str = "forge.inspect_context_action.v1";
@@ -104,6 +105,7 @@ pub struct ContextPackage {
     pub persona_contract: Option<ContextPersonaContract>,
     pub executor_profile: ContextExecutorProfile,
     pub execution_policy: ExecutionPolicySpec,
+    pub execution_policy_decision: ContextExecutionPolicyDecision,
     pub dependency_summary: ContextDependencySummary,
     pub dependency_refs: Vec<ContextDependencyRef>,
     pub handoff_ready: bool,
@@ -241,6 +243,31 @@ pub struct ContextSelectionReceipt {
     pub shard_count: usize,
     pub included_shard_count: usize,
     pub receipt_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextExecutionPolicyDecision {
+    pub schema_version: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub workflow_revision: u64,
+    pub task_executor: String,
+    pub executor_profile_id: String,
+    pub policy_mode: String,
+    pub route_class: String,
+    pub ai_allowed: bool,
+    pub deterministic: bool,
+    pub model_call_required: bool,
+    pub model_call_avoided: bool,
+    pub reusable_as_child_subflow: bool,
+    pub reuse_hint: String,
+    pub reuse_key: Option<String>,
+    pub code_runtime_language: Option<String>,
+    pub code_runtime_entrypoint: Option<String>,
+    pub code_runtime_sandbox: Option<String>,
+    pub selection_reason: String,
+    pub validation_gate: String,
+    pub decision_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -739,6 +766,30 @@ struct ContextSelectionReceiptSeed<'a> {
     included_shard_count: usize,
 }
 
+#[derive(Serialize)]
+struct ContextExecutionPolicyDecisionSeed {
+    schema_version: &'static str,
+    workflow_id: String,
+    task_id: String,
+    workflow_revision: u64,
+    task_executor: String,
+    executor_profile_id: String,
+    policy_mode: String,
+    route_class: String,
+    ai_allowed: bool,
+    deterministic: bool,
+    model_call_required: bool,
+    model_call_avoided: bool,
+    reusable_as_child_subflow: bool,
+    reuse_hint: String,
+    reuse_key: Option<String>,
+    code_runtime_language: Option<String>,
+    code_runtime_entrypoint: Option<String>,
+    code_runtime_sandbox: Option<String>,
+    selection_reason: String,
+    validation_gate: String,
+}
+
 struct RoutingFingerprintInput<'a> {
     workflow_id: &'a str,
     task_id: &'a str,
@@ -759,6 +810,7 @@ struct RoutingFingerprintInput<'a> {
     budget_plan: &'a ContextBudgetPlan,
     routing_economy: &'a ContextRoutingEconomy,
     routing_quality: &'a ContextRoutingQuality,
+    execution_policy_decision: &'a ContextExecutionPolicyDecision,
     replay_manifest: &'a ContextReplayManifest,
     selection_receipt: &'a ContextSelectionReceipt,
     persona_profile: Option<&'a ContextPersonaProfile>,
@@ -1216,6 +1268,8 @@ pub fn build_context_package_with_checkpoint(
         &missing_required_sections,
         &profile_omitted_sections,
     );
+    let execution_policy_decision =
+        build_execution_policy_decision(&workflow.id, task, &profile, workflow_revision)?;
     let replay_manifest = build_replay_manifest(ReplayManifestInput {
         workflow_id: &workflow.id,
         task_id: &task.id,
@@ -1279,6 +1333,7 @@ pub fn build_context_package_with_checkpoint(
         budget_plan: &budget_plan,
         routing_economy: &routing_economy,
         routing_quality: &routing_quality,
+        execution_policy_decision: &execution_policy_decision,
         replay_manifest: &replay_manifest,
         selection_receipt: &selection_receipt,
         persona_profile: persona_profile.as_ref(),
@@ -1326,6 +1381,7 @@ pub fn build_context_package_with_checkpoint(
         persona_contract,
         executor_profile: profile.to_public(&task.executor, &required_sections),
         execution_policy: task.execution_policy.clone(),
+        execution_policy_decision,
         dependency_summary,
         dependency_refs,
         handoff_ready,
@@ -1898,6 +1954,98 @@ fn build_selection_receipt(input: SelectionReceiptInput<'_>) -> Result<ContextSe
         included_shard_count,
         receipt_sha256,
     })
+}
+
+fn build_execution_policy_decision(
+    workflow_id: &str,
+    task: &AtomicTask,
+    profile: &ExecutorContextProfile,
+    workflow_revision: u64,
+) -> Result<ContextExecutionPolicyDecision> {
+    let policy = &task.execution_policy;
+    let runtime = policy.code_runtime.as_ref();
+    let reusable_as_child_subflow = policy.mode == "local_code_node"
+        && policy.reuse_hint == "reuse_compatible_code_node"
+        && !policy.ai_allowed
+        && policy.deterministic
+        && runtime.is_some();
+    let model_call_required = policy.ai_allowed && !policy.deterministic;
+    let seed = ContextExecutionPolicyDecisionSeed {
+        schema_version: EXECUTION_POLICY_DECISION_SCHEMA_VERSION,
+        workflow_id: workflow_id.to_string(),
+        task_id: task.id.clone(),
+        workflow_revision,
+        task_executor: executor_kind(&task.executor).to_string(),
+        executor_profile_id: profile.id.to_string(),
+        policy_mode: policy.mode.clone(),
+        route_class: execution_policy_route_class(task, profile),
+        ai_allowed: policy.ai_allowed,
+        deterministic: policy.deterministic,
+        model_call_required,
+        model_call_avoided: !model_call_required && !policy.ai_allowed,
+        reusable_as_child_subflow,
+        reuse_hint: policy.reuse_hint.clone(),
+        reuse_key: execution_policy_reuse_key(policy),
+        code_runtime_language: runtime.map(|runtime| runtime.language.clone()),
+        code_runtime_entrypoint: runtime.map(|runtime| runtime.entrypoint.clone()),
+        code_runtime_sandbox: runtime.map(|runtime| runtime.sandbox.clone()),
+        selection_reason: policy.selection_reason.clone(),
+        validation_gate: policy.validation_gate.clone(),
+    };
+    let decision_sha256 = hex_sha256(serde_json::to_string(&seed)?.as_bytes());
+
+    Ok(ContextExecutionPolicyDecision {
+        schema_version: seed.schema_version.to_string(),
+        workflow_id: seed.workflow_id,
+        task_id: seed.task_id,
+        workflow_revision: seed.workflow_revision,
+        task_executor: seed.task_executor,
+        executor_profile_id: seed.executor_profile_id,
+        policy_mode: seed.policy_mode,
+        route_class: seed.route_class,
+        ai_allowed: seed.ai_allowed,
+        deterministic: seed.deterministic,
+        model_call_required: seed.model_call_required,
+        model_call_avoided: seed.model_call_avoided,
+        reusable_as_child_subflow: seed.reusable_as_child_subflow,
+        reuse_hint: seed.reuse_hint,
+        reuse_key: seed.reuse_key,
+        code_runtime_language: seed.code_runtime_language,
+        code_runtime_entrypoint: seed.code_runtime_entrypoint,
+        code_runtime_sandbox: seed.code_runtime_sandbox,
+        selection_reason: seed.selection_reason,
+        validation_gate: seed.validation_gate,
+        decision_sha256,
+    })
+}
+
+fn execution_policy_route_class(task: &AtomicTask, profile: &ExecutorContextProfile) -> String {
+    if task.execution_policy.mode == "local_code_node" {
+        return "local_code_node".to_string();
+    }
+
+    match task.executor {
+        ExecutorKind::Notification => "no_ai_notification".to_string(),
+        ExecutorKind::Mixed => "mixed_executor".to_string(),
+        ExecutorKind::Ai if profile.reasoning_allowed => "model_reasoning".to_string(),
+        ExecutorKind::Command | ExecutorKind::Wait
+            if !profile.reasoning_allowed && profile.deterministic =>
+        {
+            "no_ai_deterministic".to_string()
+        }
+        _ => "executor_adapter".to_string(),
+    }
+}
+
+fn execution_policy_reuse_key(policy: &ExecutionPolicySpec) -> Option<String> {
+    if policy.mode != "local_code_node" || policy.ai_allowed || !policy.deterministic {
+        return None;
+    }
+    let runtime = policy.code_runtime.as_ref()?;
+    Some(format!(
+        "{}:{}:{}:{}",
+        policy.mode, runtime.language, runtime.entrypoint, policy.validation_gate
+    ))
 }
 
 fn prompt_packet_instruction_sources(persona: Option<&PersonaRoutingSpec>) -> Vec<String> {
@@ -2500,6 +2648,7 @@ fn build_routing_fingerprint(
     let budget_plan = serde_json::to_string(input.budget_plan)?;
     let routing_economy = serde_json::to_string(input.routing_economy)?;
     let routing_quality = serde_json::to_string(input.routing_quality)?;
+    let execution_policy_decision = input.execution_policy_decision.decision_sha256.clone();
     let replay_manifest = input.replay_manifest.manifest_sha256.clone();
     let selection_receipt = input.selection_receipt.receipt_sha256.clone();
     let persona_profile = serde_json::to_string(&input.persona_profile)?;
@@ -2563,6 +2712,7 @@ fn build_routing_fingerprint(
         fingerprint_component("budget_plan", budget_plan),
         fingerprint_component("routing_economy", routing_economy),
         fingerprint_component("routing_quality", routing_quality),
+        fingerprint_component("execution_policy_decision", execution_policy_decision),
         fingerprint_component("replay_manifest", replay_manifest),
         fingerprint_component("selection_receipt", selection_receipt),
         fingerprint_component("persona_profile", persona_profile),

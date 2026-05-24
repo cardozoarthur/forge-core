@@ -1579,6 +1579,131 @@ fn frequent_local_code_goals_select_deterministic_node_without_schedule_scaffold
 }
 
 #[test]
+fn context_package_exposes_execution_policy_decision_for_adapter_routing() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run frequent local Node.js invoice normalization",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let code_task = find_task(
+        json["tasks"].as_array().unwrap(),
+        "Run deterministic non-AI step",
+    );
+    let task_id = code_task["id"].as_str().unwrap();
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--budget",
+            "1600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+    let decision = &context["execution_policy_decision"];
+    assert_eq!(
+        decision["schema_version"],
+        "forge.context.execution_policy_decision.v1"
+    );
+    assert_eq!(decision["workflow_id"], workflow_id);
+    assert_eq!(decision["task_id"], task_id);
+    assert_eq!(decision["workflow_revision"], 0);
+    assert_eq!(decision["task_executor"], "command");
+    assert_eq!(decision["executor_profile_id"], "no_ai_deterministic");
+    assert_eq!(decision["policy_mode"], "local_code_node");
+    assert_eq!(decision["route_class"], "local_code_node");
+    assert_eq!(decision["ai_allowed"], false);
+    assert_eq!(decision["deterministic"], true);
+    assert_eq!(decision["model_call_required"], false);
+    assert_eq!(decision["model_call_avoided"], true);
+    assert_eq!(decision["reusable_as_child_subflow"], true);
+    assert_eq!(decision["reuse_hint"], "reuse_compatible_code_node");
+    assert_eq!(
+        decision["reuse_key"],
+        "local_code_node:nodejs:forge_local_node_code_node:deterministic_code_node_validation_required"
+    );
+    assert_eq!(decision["code_runtime_language"], "nodejs");
+    assert_eq!(
+        decision["code_runtime_entrypoint"],
+        "forge_local_node_code_node"
+    );
+    assert_eq!(decision["code_runtime_sandbox"], "local_process_no_network");
+    assert_eq!(
+        decision["validation_gate"],
+        "deterministic_code_node_validation_required"
+    );
+    assert!(decision["selection_reason"]
+        .as_str()
+        .unwrap()
+        .contains("without routing the repeated step through a model"));
+    assert_eq!(decision["decision_sha256"].as_str().unwrap().len(), 64);
+    assert!(context["routing_fingerprint"]["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|component| component["name"] == "execution_policy_decision"
+            && component["value"] == decision["decision_sha256"]));
+
+    let inspect_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspection: Value = serde_json::from_slice(&inspect_output).unwrap();
+    let inspected_task = find_task(
+        inspection["nodes"].as_array().unwrap(),
+        "Run deterministic non-AI step",
+    );
+    assert_eq!(
+        inspected_task["context_route"]["execution_policy_decision"]["decision_sha256"],
+        decision["decision_sha256"]
+    );
+    assert_eq!(
+        inspected_task["context_route"]["execution_policy_decision"]["route_class"],
+        "local_code_node"
+    );
+    assert!(inspection["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("decision local_code_node"));
+}
+
+#[test]
 fn context_package_tracks_runtime_mutation_lineage_and_current_goal() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

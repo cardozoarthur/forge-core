@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.65 - 2026-05-24
+
+### Added
+
+- `forge context` now emits a versioned `execution_policy_decision` contract with schema `forge.context.execution_policy_decision.v1`.
+- Execution policy decisions bind workflow/task identity, workflow revision, executor profile, task executor, policy mode, route class, AI/deterministic flags, model-call requirement/avoidance, reusable child-subflow eligibility, reuse key, local code runtime metadata, selection reason and validation gate into a stable decision checksum.
+- Context routing fingerprints now include an `execution_policy_decision` component, so executor cache keys change when Forge's model-vs-deterministic route decision changes.
+- `forge inspect --output json` now projects the execution policy decision for each inspected node, and the terminal diagram prints a compact decision class/hash plus model-call requirement marker.
+- Added CLI contract coverage proving deterministic local Node.js code nodes expose the decision record through `forge context`, bind it into the routing fingerprint and surface it through `forge inspect`.
+
+### Changed
+
+- The package version is now `0.4.65`.
+
+### Safety
+
+- Execution policy decisions are read-only metadata derived from Forge-owned workflow/task execution policy and context profile state.
+- This change does not execute local Python/Node.js code, complete tasks, promote workflows, authorize CLIs, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules, task leases, persona gates, child-subflow validation gates and continuation plans.
+
 ## 0.4.64 - 2026-05-24
 
 ### Added

@@ -1,10 +1,10 @@
 use crate::checkpoint::load_workflow_checkpoints;
 use crate::context::{
     build_context_package_with_checkpoint, context_next_action, summarize_context_handoff_tasks,
-    ContextBudgetPlan, ContextContinuationPlan, ContextDelta, ContextHandoffBlocker,
-    ContextHandoffSummary, ContextHandoffTask, ContextNextAction, ContextPackage,
-    ContextRoutingEconomy, ContextRoutingQuality, ContextRoutingRepair, ContextRoutingSummary,
-    DEFAULT_CONTEXT_BUDGET,
+    ContextBudgetPlan, ContextContinuationPlan, ContextDelta, ContextExecutionPolicyDecision,
+    ContextHandoffBlocker, ContextHandoffSummary, ContextHandoffTask, ContextNextAction,
+    ContextPackage, ContextRoutingEconomy, ContextRoutingQuality, ContextRoutingRepair,
+    ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
 };
 use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, SubtaskSpec, TaskStatus,
@@ -80,6 +80,7 @@ pub struct ContextInspectionRoute {
     pub selection_receipt_sha256: String,
     pub selection_route_status: String,
     pub selection_required_complete: bool,
+    pub execution_policy_decision: ContextExecutionPolicyDecision,
     pub profile_id: String,
     pub reasoning_allowed: bool,
     pub deterministic: bool,
@@ -342,6 +343,7 @@ fn context_route(package: &ContextPackage) -> ContextInspectionRoute {
         selection_receipt_sha256: package.selection_receipt.receipt_sha256.clone(),
         selection_route_status: package.selection_receipt.route_status.clone(),
         selection_required_complete: package.selection_receipt.required_complete,
+        execution_policy_decision: package.execution_policy_decision.clone(),
         profile_id: package.executor_profile.id.clone(),
         reasoning_allowed: package.executor_profile.reasoning_allowed,
         deterministic: package.executor_profile.deterministic,
@@ -627,7 +629,7 @@ fn render_diagram(
             node.context_route.budget_plan.status
         );
         let execution_policy = format!(
-            " policy {} {} {} {} {}",
+            " policy {} {} {} {} {} decision {} {} model_call {}",
             node.execution_policy.mode,
             if node.execution_policy.ai_allowed {
                 "ai"
@@ -643,7 +645,18 @@ fn render_diagram(
                 .code_runtime_language
                 .as_deref()
                 .unwrap_or("adapter"),
-            node.execution_policy.reuse_hint
+            node.execution_policy.reuse_hint,
+            node.context_route.execution_policy_decision.route_class,
+            short_hash(&node.context_route.execution_policy_decision.decision_sha256),
+            if node
+                .context_route
+                .execution_policy_decision
+                .model_call_required
+            {
+                "required"
+            } else {
+                "avoided"
+            }
         );
         let economy = format!(
             " economy {} avoided {} reduction_bps {}",
