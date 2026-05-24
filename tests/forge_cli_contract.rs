@@ -1410,6 +1410,76 @@ fn inspect_renders_terminal_dag_with_lifecycle_persona_and_verbose_subtasks() {
 }
 
 #[test]
+fn inspect_exposes_context_route_summary_for_each_terminal_node() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with repeated local Python cost calculations without AI and email ops@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+
+    let inspect_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let inspection: Value = serde_json::from_slice(&inspect_output).unwrap();
+    assert!(inspection["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("context no_ai_deterministic blocked_missing_context_and_dependencies"));
+
+    let nodes = inspection["nodes"].as_array().unwrap();
+    let deterministic = find_task(nodes, "Run deterministic non-AI step");
+    let route = &deterministic["context_route"];
+    assert_eq!(route["schema_version"], "forge.context.v14");
+    assert_eq!(route["routing_policy"], "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_v14");
+    assert_eq!(route["profile_id"], "no_ai_deterministic");
+    assert_eq!(route["reasoning_allowed"], false);
+    assert_eq!(route["deterministic"], true);
+    assert_eq!(route["requested_budget"], 1200);
+    assert!(route["effective_budget"].as_u64().unwrap() < 1200);
+    assert_eq!(route["context_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        route["handoff_status"],
+        "blocked_missing_context_and_dependencies"
+    );
+    assert_eq!(route["resume_context_status"], "no_checkpoint");
+    assert!(route["routing_summary"]["total_shards"].as_u64().unwrap() >= 7);
+    assert!(route["included_sections"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("execution_policy".to_string())));
+    assert!(!route["missing_required_sections"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn improve_creates_controlled_experiment_and_never_promotes_without_validation() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.31 - 2026-05-24
+
+### Added
+
+- `forge inspect --output json` now includes a compact `context_route` projection on every DAG node.
+- Each route reuses the Context Routing Engine packet and reports schema/routing policy, executor profile, effective budget, context SHA-256, context readiness, handoff status, resume status, missing required sections, included/omitted sections and the shard `routing_summary`.
+- Human terminal diagrams now annotate every node with context profile, handoff state and selected/effective context bytes.
+
+### Changed
+
+- Workflow inspection no longer exposes only high-level handoff status; it now carries enough context-routing evidence for operators to distinguish dependency blockers, missing required context and budget pressure directly from `forge inspect`.
+- The `forge.context.v14` packet stays unchanged; this release projects the existing versioned packet into inspection rather than introducing a new context schema.
+
+### Safety
+
+- The inspection route projection is read-only and derived from Forge-owned workflow graph, checkpoint and deterministic context-routing state.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by `forge task handoff`, strict context readiness and task leases.
+
 ## 0.4.30 - 2026-05-24
 
 ### Added

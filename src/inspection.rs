@@ -1,7 +1,7 @@
 use crate::checkpoint::load_workflow_checkpoints;
 use crate::context::{
-    build_context_handoff_summary, ContextHandoffBlocker, ContextHandoffSummary,
-    ContextHandoffTask, DEFAULT_CONTEXT_BUDGET,
+    build_context_package_with_checkpoint, ContextHandoffBlocker, ContextHandoffSummary,
+    ContextHandoffTask, ContextPackage, ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
 };
 use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutorKind, SubtaskSpec, TaskStatus, ValidationRule,
@@ -10,6 +10,7 @@ use crate::registry::{list_workflows, WorkflowRegistryRow};
 use crate::storage::ForgeStore;
 use anyhow::{Context, Result};
 use serde::Serialize;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowInspectionReport {
@@ -37,6 +38,7 @@ pub struct TaskInspectionNode {
     pub dependencies: Vec<String>,
     pub executor: String,
     pub persona_mode: Option<String>,
+    pub context_route: ContextInspectionRoute,
     pub goal: String,
     pub expected_output: String,
     pub handoff_ready: bool,
@@ -45,6 +47,27 @@ pub struct TaskInspectionNode {
     pub subtasks: Vec<SubtaskSpec>,
     pub validation_rules: Vec<ValidationRule>,
     pub subflow_refs: Vec<ChildSubflowRef>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextInspectionRoute {
+    pub schema_version: String,
+    pub routing_policy: String,
+    pub profile_id: String,
+    pub reasoning_allowed: bool,
+    pub deterministic: bool,
+    pub requested_budget: usize,
+    pub effective_budget: usize,
+    pub context_bytes: usize,
+    pub context_sha256: String,
+    pub context_ready: bool,
+    pub handoff_ready: bool,
+    pub handoff_status: String,
+    pub resume_context_status: String,
+    pub missing_required_sections: Vec<String>,
+    pub included_sections: Vec<String>,
+    pub omitted_sections: Vec<String>,
+    pub routing_summary: ContextRoutingSummary,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,20 +93,25 @@ pub fn inspect_workflow(
         .find(|row| row.workflow_id == workflow.id)
         .with_context(|| format!("workflow not found in registry: {}", workflow.id))?;
     let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
-    let handoff_summary =
-        build_context_handoff_summary(&workflow, DEFAULT_CONTEXT_BUDGET, &checkpoints)?;
-    let nodes = workflow
-        .tasks
-        .iter()
-        .map(|task| {
-            let handoff = handoff_summary
-                .tasks
-                .iter()
-                .find(|candidate| candidate.task_id == task.id)
-                .expect("handoff summary should include every workflow task");
-            task_node(task, handoff, verbose)
-        })
-        .collect::<Vec<_>>();
+    let mut nodes = Vec::new();
+    let mut handoff_tasks = Vec::new();
+    for task in &workflow.tasks {
+        let latest_checkpoint = checkpoints
+            .iter()
+            .rev()
+            .find(|checkpoint| checkpoint.task_id == task.id)
+            .cloned();
+        let context_package = build_context_package_with_checkpoint(
+            &workflow,
+            &task.id,
+            DEFAULT_CONTEXT_BUDGET,
+            latest_checkpoint,
+        )?;
+        let handoff = handoff_task(task, &context_package);
+        nodes.push(task_node(task, &handoff, &context_package, verbose));
+        handoff_tasks.push(handoff);
+    }
+    let handoff_summary = summarize_handoff_tasks(handoff_tasks);
     let subflows = collect_subflows(&nodes);
     let diagram = render_diagram(&registry_row, &nodes, &subflows, verbose);
 
@@ -105,7 +133,63 @@ pub fn inspect_workflow(
     })
 }
 
-fn task_node(task: &AtomicTask, handoff: &ContextHandoffTask, verbose: bool) -> TaskInspectionNode {
+fn handoff_task(task: &AtomicTask, package: &ContextPackage) -> ContextHandoffTask {
+    let blocking_refs = package
+        .handoff_blockers
+        .iter()
+        .flat_map(|blocker| blocker.refs.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    ContextHandoffTask {
+        task_id: task.id.clone(),
+        title: task.title.clone(),
+        executor: executor_kind(&task.executor).to_string(),
+        context_ready: package.context_ready,
+        dependency_ready: package.dependency_summary.ready,
+        handoff_ready: package.handoff_ready,
+        handoff_status: package.handoff_status.clone(),
+        handoff_blockers: package.handoff_blockers.clone(),
+        blocking_refs,
+        context_sha256: package.context_sha256.clone(),
+        resume_context_status: package.resume_context_status.clone(),
+    }
+}
+
+fn summarize_handoff_tasks(tasks: Vec<ContextHandoffTask>) -> ContextHandoffSummary {
+    let ready = tasks.iter().filter(|task| task.handoff_ready).count();
+    let blocked_missing_context = tasks
+        .iter()
+        .filter(|task| task.handoff_status == "blocked_missing_context")
+        .count();
+    let blocked_dependencies = tasks
+        .iter()
+        .filter(|task| task.handoff_status == "blocked_dependencies")
+        .count();
+    let blocked_missing_context_and_dependencies = tasks
+        .iter()
+        .filter(|task| task.handoff_status == "blocked_missing_context_and_dependencies")
+        .count();
+    let total = tasks.len();
+
+    ContextHandoffSummary {
+        total,
+        ready,
+        blocked: total.saturating_sub(ready),
+        blocked_missing_context,
+        blocked_dependencies,
+        blocked_missing_context_and_dependencies,
+        tasks,
+    }
+}
+
+fn task_node(
+    task: &AtomicTask,
+    handoff: &ContextHandoffTask,
+    context_package: &ContextPackage,
+    verbose: bool,
+) -> TaskInspectionNode {
     TaskInspectionNode {
         id: task.id.clone(),
         title: task.title.clone(),
@@ -113,6 +197,7 @@ fn task_node(task: &AtomicTask, handoff: &ContextHandoffTask, verbose: bool) -> 
         dependencies: task.dependencies.clone(),
         executor: executor_kind(&task.executor).to_string(),
         persona_mode: task.persona.as_ref().map(|persona| persona.mode.clone()),
+        context_route: context_route(context_package),
         goal: task.goal.clone(),
         expected_output: task.expected_output.clone(),
         handoff_ready: handoff.handoff_ready,
@@ -129,6 +214,28 @@ fn task_node(task: &AtomicTask, handoff: &ContextHandoffTask, verbose: bool) -> 
             Vec::new()
         },
         subflow_refs: task.child_subflows.clone(),
+    }
+}
+
+fn context_route(package: &ContextPackage) -> ContextInspectionRoute {
+    ContextInspectionRoute {
+        schema_version: package.schema_version.clone(),
+        routing_policy: package.routing_policy.clone(),
+        profile_id: package.executor_profile.id.clone(),
+        reasoning_allowed: package.executor_profile.reasoning_allowed,
+        deterministic: package.executor_profile.deterministic,
+        requested_budget: package.requested_budget,
+        effective_budget: package.effective_budget,
+        context_bytes: package.context_bytes,
+        context_sha256: package.context_sha256.clone(),
+        context_ready: package.context_ready,
+        handoff_ready: package.handoff_ready,
+        handoff_status: package.handoff_status.clone(),
+        resume_context_status: package.resume_context_status.clone(),
+        missing_required_sections: package.missing_required_sections.clone(),
+        included_sections: package.included_sections.clone(),
+        omitted_sections: package.omitted_sections.clone(),
+        routing_summary: package.routing_summary.clone(),
     }
 }
 
@@ -193,8 +300,15 @@ fn render_diagram(
                     .join(",")
             )
         };
+        let context_route = format!(
+            " context {} {} {}/{}",
+            node.context_route.profile_id,
+            node.context_route.handoff_status,
+            node.context_route.context_bytes,
+            node.context_route.effective_budget
+        );
         lines.push(format!(
-            "{} {} [{}] {}{}{} handoff {} executor {}",
+            "{} {} [{}] {}{}{} handoff {} executor {}{}",
             node.id,
             node.title,
             node.status,
@@ -202,7 +316,8 @@ fn render_diagram(
             persona,
             subflow_refs,
             node.handoff_status,
-            node.executor
+            node.executor,
+            context_route
         ));
 
         if verbose {

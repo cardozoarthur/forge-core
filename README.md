@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.30`
+Current version: `0.4.31`
 
 This is the first functional CLI + Skill version:
 
@@ -37,7 +37,7 @@ This is the first functional CLI + Skill version:
 - notification payloads with final workflow cost reporting
 - artifact listing
 - workflow registry listing with lifecycle state
-- terminal workflow DAG inspection with lifecycle, dependency and persona annotations
+- terminal workflow DAG inspection with lifecycle, dependency, persona and context-route annotations
 - handoff readiness summaries in workflow inspection and async request status
 - proposed child-subflow links for compatible deterministic code-node reuse
 - context routing with deterministic shard manifests, deterministic code-node and long-running cognition goals
@@ -106,6 +106,12 @@ compact `child_subflows` shard so the executor sees Forge's reuse decision witho
 reconstructing it from history. Runtime goal, artifact and persona routing state are
 included in the context lineage so executors can detect stale context before resuming
 work.
+
+`forge inspect --output json` projects a compact `context_route` for every DAG node.
+The route reuses the same versioned context package and includes the executor profile,
+effective budget, context checksum, handoff status, resume status, missing required
+sections and routing summary. Human terminal diagrams also show the profile, handoff
+state and selected/effective context bytes for each node.
 
 Use strict context mode when handing a package to an executor:
 
