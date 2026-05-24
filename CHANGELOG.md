@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.23 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v10` with routing policy `task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_summary_v10`.
+- Context packets include a top-level `routing_summary` derived from the shard manifest, including total, included, omitted, compressed, profile-omitted and budget-omitted shard counts.
+- The routing summary reports selected bytes, original bytes, omitted bytes, compression savings, effective budget, remaining budget and budget utilization in basis points.
+
+### Changed
+
+- Executor adapters and operators can audit context cost and routing pressure from one bounded summary instead of recomputing aggregate metrics from every shard.
+- Context contract tests now target schema `forge.context.v10`.
+
+### Safety
+
+- Routing summaries are read-only metadata derived from the selected shard manifest. They do not change workflow state, select executors, authorize CLIs, execute local code, mutate Docker/Kubernetes/Knative resources or promote subflows.
+- The summary is computed after deterministic shard routing, so it cannot bypass profile omissions, budget omissions, checkpoint freshness or validation gates.
+
+### Validation
+
+- Added CLI contract coverage proving `routing_summary` matches the emitted shard manifest and reports compression savings plus omitted-byte pressure for constrained context packages.
+
 ## 0.4.22 - 2026-05-24
 
 ### Added

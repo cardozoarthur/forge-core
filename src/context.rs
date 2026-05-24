@@ -6,9 +6,9 @@ use crate::graph::{
 use anyhow::{bail, Result};
 use serde::Serialize;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v9";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v10";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_decisions_v9";
+    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_summary_v10";
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
 const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
 const ALL_CONTEXT_SECTIONS: &[&str] = &[
@@ -67,6 +67,7 @@ pub struct ContextPackage {
     pub effective_budget: usize,
     pub context_bytes: usize,
     pub context_sha256: String,
+    pub routing_summary: ContextRoutingSummary,
     pub included_sections: Vec<String>,
     pub omitted_sections: Vec<String>,
     pub profile_omitted_sections: Vec<String>,
@@ -101,6 +102,23 @@ pub struct ContextShard {
     pub original_bytes: usize,
     pub content_sha256: String,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextRoutingSummary {
+    pub total_shards: usize,
+    pub included_shards: usize,
+    pub omitted_shards: usize,
+    pub compressed_shards: usize,
+    pub profile_omitted_shards: usize,
+    pub budget_omitted_shards: usize,
+    pub selected_bytes: usize,
+    pub original_bytes: usize,
+    pub omitted_bytes: usize,
+    pub compression_saved_bytes: usize,
+    pub effective_budget: usize,
+    pub remaining_budget: usize,
+    pub budget_utilization_bps: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -392,6 +410,8 @@ pub fn build_context_package_with_checkpoint(
         });
     }
 
+    let routing_summary = build_routing_summary(&shards, effective_budget, content.len());
+
     Ok(ContextPackage {
         schema_version: CONTEXT_SCHEMA_VERSION.to_string(),
         routing_policy: ROUTING_POLICY.to_string(),
@@ -412,12 +432,63 @@ pub fn build_context_package_with_checkpoint(
         effective_budget,
         context_bytes: content.len(),
         context_sha256: hex_sha256(content.as_bytes()),
+        routing_summary,
         included_sections,
         omitted_sections,
         profile_omitted_sections,
         shards,
         content,
     })
+}
+
+fn build_routing_summary(
+    shards: &[ContextShard],
+    effective_budget: usize,
+    selected_bytes: usize,
+) -> ContextRoutingSummary {
+    let total_shards = shards.len();
+    let included_shards = shards.iter().filter(|shard| shard.included).count();
+    let compressed_shards = shards.iter().filter(|shard| shard.compressed).count();
+    let profile_omitted_shards = shards.iter().filter(|shard| shard.profile_excluded).count();
+    let budget_omitted_shards = shards
+        .iter()
+        .filter(|shard| shard.routing_decision == "omitted_budget")
+        .count();
+    let original_bytes = shards.iter().map(|shard| shard.original_bytes).sum();
+    let omitted_bytes = shards
+        .iter()
+        .filter(|shard| !shard.included)
+        .map(|shard| shard.original_bytes)
+        .sum();
+    let compression_saved_bytes = shards
+        .iter()
+        .filter(|shard| shard.included && shard.compressed)
+        .map(|shard| shard.original_bytes.saturating_sub(shard.bytes))
+        .sum();
+    let budget_utilization_bps = if effective_budget == 0 {
+        0
+    } else {
+        ((selected_bytes as u128 * 10_000) / effective_budget as u128)
+            .min(10_000)
+            .try_into()
+            .unwrap_or(10_000)
+    };
+
+    ContextRoutingSummary {
+        total_shards,
+        included_shards,
+        omitted_shards: total_shards.saturating_sub(included_shards),
+        compressed_shards,
+        profile_omitted_shards,
+        budget_omitted_shards,
+        selected_bytes,
+        original_bytes,
+        omitted_bytes,
+        compression_saved_bytes,
+        effective_budget,
+        remaining_budget: effective_budget.saturating_sub(selected_bytes),
+        budget_utilization_bps,
+    }
 }
 
 fn build_lineage(
