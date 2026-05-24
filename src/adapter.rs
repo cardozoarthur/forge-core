@@ -1,6 +1,8 @@
 use crate::artifact::hex_sha256;
+use crate::graph::{TaskStatus, Workflow, WorkflowRevision};
 use crate::storage::ForgeStore;
 use anyhow::{Context, Result};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -79,7 +81,7 @@ pub fn validate_executor_response_file(
     task_id: &str,
     response_path: &Path,
 ) -> Result<ExecutorResponseValidationReport> {
-    let workflow = store.load_workflow(workflow_id)?;
+    let mut workflow = store.load_workflow(workflow_id)?;
     workflow
         .tasks
         .iter()
@@ -95,13 +97,127 @@ pub fn validate_executor_response_file(
     let response_sha256 = hex_sha256(&response_bytes);
     let response: ExecutorResponse = serde_json::from_slice(&response_bytes)
         .with_context(|| format!("invalid executor response JSON {}", response_path.display()))?;
-    let report = validate_executor_response(workflow_id, task_id, &response, response_sha256);
+    let report =
+        validate_executor_response(workflow_id, task_id, &response, response_sha256.clone());
     store.record_event(
         workflow_id,
         "executor_response_validated",
         &serde_json::to_value(&report)?,
     )?;
+    if report.accepted {
+        let revision = promote_validated_task(&mut workflow, task_id, &response);
+        store.save_workflow(&workflow)?;
+        store.record_event(
+            workflow_id,
+            "executor_response_promoted",
+            &serde_json::json!({
+                "task_id": task_id,
+                "response_status": response.status,
+                "response_sha256": response_sha256,
+                "revision": revision
+            }),
+        )?;
+    }
     Ok(report)
+}
+
+fn promote_validated_task(
+    workflow: &mut Workflow,
+    task_id: &str,
+    response: &ExecutorResponse,
+) -> u64 {
+    let previous_workflow_status = workflow.status.clone();
+    let Some(task) = workflow.tasks.iter_mut().find(|task| task.id == task_id) else {
+        return latest_revision(workflow);
+    };
+    let previous_task_status = task_status_slug(&task.status);
+    match response.status.as_str() {
+        "completed" => {
+            task.status = TaskStatus::Completed;
+            task.work_item.backlog_state = "done".to_string();
+            task.work_item.goal_validation.definitively_ready = true;
+            for subtask in &mut task.work_item.subtasks {
+                subtask.status = TaskStatus::Completed;
+            }
+        }
+        "failed" => {
+            task.status = TaskStatus::Failed;
+            task.work_item.backlog_state = "blocked".to_string();
+            task.work_item.goal_validation.definitively_ready = false;
+        }
+        "needs_retry" => {
+            task.status = TaskStatus::Pending;
+            task.work_item.backlog_state = "ready".to_string();
+            task.work_item.goal_validation.definitively_ready = false;
+        }
+        _ => {}
+    }
+    let new_task_status = task_status_slug(&task.status);
+
+    if workflow
+        .tasks
+        .iter()
+        .all(|task| task.status == TaskStatus::Completed)
+    {
+        workflow.status = "completed".to_string();
+    } else if workflow
+        .tasks
+        .iter()
+        .any(|task| task.status == TaskStatus::Failed)
+    {
+        workflow.status = "failed".to_string();
+    } else if workflow
+        .tasks
+        .iter()
+        .any(|task| task.status == TaskStatus::Completed)
+    {
+        workflow.status = "running".to_string();
+    }
+
+    push_revision(
+        &mut workflow.revisions,
+        "executor_response",
+        "executor_response_promoted",
+        &format!(
+            "validated executor response promoted task {task_id} from {previous_task_status} to {new_task_status}; workflow status changed from {previous_workflow_status} to {}",
+            workflow.status
+        ),
+    )
+}
+
+fn latest_revision(workflow: &Workflow) -> u64 {
+    workflow
+        .revisions
+        .last()
+        .map(|revision| revision.revision)
+        .unwrap_or(0)
+}
+
+fn push_revision(
+    revisions: &mut Vec<WorkflowRevision>,
+    origin: &str,
+    change_type: &str,
+    summary: &str,
+) -> u64 {
+    let revision = revisions.last().map(|item| item.revision + 1).unwrap_or(1);
+    revisions.push(WorkflowRevision {
+        revision,
+        origin: origin.to_string(),
+        change_type: change_type.to_string(),
+        summary: summary.to_string(),
+        created_at: Utc::now(),
+    });
+    revision
+}
+
+fn task_status_slug(status: &TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Pending => "pending",
+        TaskStatus::Running => "running",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Blocked => "blocked",
+        TaskStatus::Failed => "failed",
+    }
 }
 
 pub fn validate_executor_response(

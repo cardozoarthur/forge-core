@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.83 - 2026-05-24
+
+### Added
+
+- Accepted executor responses with passing validation evidence now promote the task in the persisted workflow state.
+- Completed executor responses mark the task, subtasks and goal readiness as done so long-running workflows can advance through validated gates instead of only recording validation events.
+- Accepted executor-response promotions now append a workflow revision with origin `executor_response` and change type `executor_response_promoted`.
+- Added CLI contract coverage proving `forge task validate-response` changes task status to `completed` and marks the work item done.
+
+### Changed
+
+- The package version is now `0.4.83`.
+- `forge task validate-response` now acts as the validated task advancement point for asynchronous executor work.
+
+### Safety
+
+- Tasks are promoted only after the executor response schema is accepted and at least one validation evidence item passes.
+- Failed or retry-needed responses do not mark the task definitively ready.
+- The promotion is traced through workflow revisions and an `executor_response_promoted` event containing the response hash.
+
 ## 0.4.82 - 2026-05-24
 
 ### Added
