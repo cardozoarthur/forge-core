@@ -5446,14 +5446,14 @@ fn self_run_prompt_packet_is_versioned_and_checksummed_for_executor_replay() {
     let cycle_report = &json["cycle_reports"][0];
     assert_eq!(
         cycle_report["prompt_packet_version"],
-        "forge.self_evolution.prompt.v1"
+        "forge.self_evolution.prompt.v2"
     );
 
     let prompt_path = temp
         .path()
         .join(cycle_report["prompt_path"].as_str().unwrap());
     let prompt = fs::read_to_string(prompt_path).unwrap();
-    assert!(prompt.contains("Prompt packet version: `forge.self_evolution.prompt.v1`"));
+    assert!(prompt.contains("Prompt packet version: `forge.self_evolution.prompt.v2`"));
     assert!(prompt.contains("Executor: `codex`"));
     assert_eq!(cycle_report["prompt_sha256"], hex_sha256(prompt.as_bytes()));
 }
@@ -5580,7 +5580,7 @@ fn self_run_writes_validation_evidence_contract_artifact() {
     );
     assert_eq!(
         validation_report["prompt_packet_version"],
-        "forge.self_evolution.prompt.v1"
+        "forge.self_evolution.prompt.v2"
     );
     assert_eq!(validation_report["status"], "planned");
     assert_eq!(validation_report["validation_passed"], false);
@@ -5660,7 +5660,7 @@ fn request_status_surfaces_latest_validation_evidence_for_async_callers() {
     );
     assert_eq!(
         validation["prompt_packet_version"],
-        "forge.self_evolution.prompt.v1"
+        "forge.self_evolution.prompt.v2"
     );
     assert_eq!(validation["status"], "planned");
     assert_eq!(validation["validation_passed"], false);
@@ -9045,6 +9045,108 @@ fn self_run_rejects_stop_date_in_the_past() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("stop date is in the past"));
+}
+
+#[test]
+fn self_run_prompt_uses_persisted_self_evolution_goal_updates() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let base_goal =
+        "Improve Forge Core autonomously with bounded executor cycles, validation gates, artifacts and changelog";
+    let updated_goal = format!(
+        "{base_goal}. Prioritize persisted goal propagation, clusterization and n8n node research before generic context-routing backlog."
+    );
+
+    let planned_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            base_goal,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned: Value = serde_json::from_slice(&planned_output).unwrap();
+    let strategic_workflow_id = planned["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "update-goal",
+            "--workflow",
+            strategic_workflow_id,
+            "--origin",
+            "codex",
+            "--goal",
+            &updated_goal,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let self_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2999-01-01T00:00:00-03:00",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let self_report: Value = serde_json::from_slice(&self_output).unwrap();
+    assert_eq!(self_report["status"], "planned");
+    assert_eq!(
+        self_report["cycle_reports"][0]["prompt_packet_version"],
+        "forge.self_evolution.prompt.v2"
+    );
+
+    let prompt_path = self_report["cycle_reports"][0]["prompt_path"]
+        .as_str()
+        .unwrap();
+    let prompt = fs::read_to_string(temp.path().join(prompt_path)).unwrap();
+    assert!(prompt.contains("Persisted Forge workflow goal (authoritative):"));
+    assert!(prompt.contains(&updated_goal));
+    assert!(prompt.contains("future self-evolution cycles must honor it before generic guidance"));
+
+    let self_workflow_id = self_report["workflow_id"].as_str().unwrap();
+    let status_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "status",
+            "--workflow",
+            self_workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: Value = serde_json::from_slice(&status_output).unwrap();
+    assert_eq!(status["goal"], updated_goal);
 }
 
 fn find_executor<'a>(json: &'a Value, id: &str) -> &'a Value {

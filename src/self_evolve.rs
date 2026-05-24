@@ -1,5 +1,5 @@
 use crate::artifact::{hex_sha256, write_json_artifact};
-use crate::graph::create_workflow;
+use crate::graph::{create_workflow, Workflow};
 use crate::intent::parse_intent;
 use crate::request::{create_run_record, save_run_record};
 use crate::storage::ForgeStore;
@@ -11,8 +11,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-const SELF_EVOLUTION_PROMPT_PACKET_VERSION: &str = "forge.self_evolution.prompt.v1";
+const SELF_EVOLUTION_PROMPT_PACKET_VERSION: &str = "forge.self_evolution.prompt.v2";
 const SELF_EVOLUTION_VALIDATION_REPORT_VERSION: &str = "forge.self_evolution.validation.v1";
+const BASE_SELF_EVOLUTION_GOAL: &str =
+    "Improve Forge Core autonomously with bounded executor cycles, validation gates, artifacts and changelog";
 const GH_AUTH_TIMEOUT_SECONDS: &str = "20";
 const GIT_PUSH_TIMEOUT_SECONDS: &str = "300";
 const VALIDATION_COMMANDS: [&str; 4] = [
@@ -91,6 +93,9 @@ struct SelfEvolutionPromptPacket {
     executor: String,
     workflow_id: String,
     run_id: String,
+    workflow_goal: String,
+    initial_workflow_goal: String,
+    workflow_revision: u64,
     stop_at: String,
     repo: String,
     validation_commands: Vec<String>,
@@ -142,9 +147,9 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         options.executors.clone()
     };
 
-    let workflow = create_workflow(parse_intent(
-        "Improve Forge Core autonomously with bounded executor cycles, validation gates, artifacts and changelog",
-    ));
+    let self_evolution_goal = load_persisted_self_evolution_goal(store)?
+        .unwrap_or_else(|| BASE_SELF_EVOLUTION_GOAL.to_string());
+    let workflow = create_workflow(parse_intent(&self_evolution_goal));
     let run = create_run_record(&workflow, "forge_cli", "planned");
     store.save_workflow(&workflow)?;
     save_run_record(store, &run)?;
@@ -155,8 +160,16 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             break;
         }
         let executor = executors[((cycle - 1) as usize) % executors.len()].clone();
-        let prompt_packet =
-            SelfEvolutionPromptPacket::new(cycle, &executor, &workflow.id, &run.run_id, &options);
+        let current_workflow = store
+            .load_workflow(&workflow.id)
+            .unwrap_or_else(|_| workflow.clone());
+        let prompt_packet = SelfEvolutionPromptPacket::new(
+            cycle,
+            &executor,
+            &current_workflow,
+            &run.run_id,
+            &options,
+        );
         let prompt = render_prompt(&prompt_packet);
         let prompt_sha256 = hex_sha256(prompt.as_bytes());
         let prompt_path = format!(
@@ -269,7 +282,7 @@ impl SelfEvolutionPromptPacket {
     fn new(
         cycle: u32,
         executor: &str,
-        workflow_id: &str,
+        workflow: &Workflow,
         run_id: &str,
         options: &SelfRunOptions,
     ) -> Self {
@@ -277,8 +290,14 @@ impl SelfEvolutionPromptPacket {
             version: SELF_EVOLUTION_PROMPT_PACKET_VERSION.to_string(),
             cycle,
             executor: executor.to_string(),
-            workflow_id: workflow_id.to_string(),
+            workflow_id: workflow.id.clone(),
             run_id: run_id.to_string(),
+            workflow_goal: workflow.goal.clone(),
+            initial_workflow_goal: workflow
+                .initial_goal
+                .clone()
+                .unwrap_or_else(|| workflow.goal.clone()),
+            workflow_revision: workflow.revisions.len() as u64,
             stop_at: options.until.clone(),
             repo: options.repo.display().to_string(),
             validation_commands: vec![
@@ -410,6 +429,24 @@ impl PublicProjectUpdateReport {
     }
 }
 
+fn load_persisted_self_evolution_goal(store: &ForgeStore) -> Result<Option<String>> {
+    let workflows = store.load_workflows()?;
+    Ok(workflows
+        .into_iter()
+        .filter(is_self_evolution_workflow)
+        .map(|workflow| workflow.goal.trim().to_string())
+        .filter(|goal| !goal.is_empty())
+        .max_by_key(|goal| goal.len()))
+}
+
+fn is_self_evolution_workflow(workflow: &Workflow) -> bool {
+    workflow.goal.contains(BASE_SELF_EVOLUTION_GOAL)
+        || workflow
+            .initial_goal
+            .as_deref()
+            .is_some_and(|goal| goal.contains(BASE_SELF_EVOLUTION_GOAL))
+}
+
 fn render_prompt(packet: &SelfEvolutionPromptPacket) -> String {
     format!(
         r#"# Improve Forge Core
@@ -423,8 +460,17 @@ Workflow id: `{}`
 Executor: `{}`
 Stop date: `{}`
 
-Goal:
+Persisted Forge workflow goal (authoritative):
+{}
+
+Initial workflow goal:
+{}
+
+Workflow revision: `{}`
+
+Strategic goal guidance:
 - Improve Forge Core itself in a small, validated, production-quality increment.
+- The persisted Forge workflow goal above is runtime state. If a human updates that goal with `forge workflow update-goal`, future self-evolution cycles must honor it before generic guidance.
 - Prefer structural improvements over cosmetic changes.
 - Good candidates: async run records, task leases, executor adapter contracts, prompt packet versioning, runtime mutation propagation, changelog/report quality, validation gates.
 - Strategic runtime goals now include workflow listing, terminal inspection, recursive subflows, infinite subflows, scale-to-zero lifecycle state and flow composition/reuse.
@@ -463,6 +509,9 @@ Return a concise final report with:
         packet.workflow_id,
         packet.executor,
         packet.stop_at,
+        packet.workflow_goal,
+        packet.initial_workflow_goal,
+        packet.workflow_revision,
         packet.repo,
         packet
             .validation_commands

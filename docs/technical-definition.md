@@ -405,6 +405,8 @@ Forge may work on Forge itself only through bounded cycles:
 
 - stop date is mandatory;
 - every cycle writes prompt/report artifacts;
+- prompt packets are versioned and must load the persisted Forge workflow goal before generic strategic guidance;
+- if a human or adapter mutates the self-evolution goal through `forge workflow update-goal`, the next cycle must carry that current goal, initial goal and workflow revision into the executor prompt;
 - authorized executors are selected from local policy;
 - validation must pass before commit;
 - push is explicit;

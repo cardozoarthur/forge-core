@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.73 - 2026-05-24
+
+### Added
+
+- `forge self run` now loads the most specific persisted Forge self-evolution goal before creating a new self-evolution workflow.
+- Self-evolution prompt packets now use `forge.self_evolution.prompt.v2` and include the current persisted workflow goal, initial workflow goal and workflow revision before generic strategic guidance.
+- Added CLI contract coverage proving a runtime `forge workflow update-goal` mutation, including clusterization and n8n research priorities, appears in the next dry-run self-evolution prompt artifact and in the new workflow state.
+
+### Changed
+
+- The package version is now `0.4.73`.
+- README and technical definition now document persisted-goal propagation for self-evolution cycles.
+
+### Safety
+
+- The change only alters self-evolution planning/prompt generation and does not execute local Python/Node.js code, complete tasks, promote workflows, authorize CLIs, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Generic self-evolution guidance remains in the prompt, but the persisted Forge workflow goal is now explicitly authoritative for future cycles.
+
 ## 0.4.72 - 2026-05-24
 
 ### Added

@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.72`
+Current version: `0.4.73`
 
 This is the first functional CLI + Skill version:
 
@@ -63,6 +63,7 @@ This is the first functional CLI + Skill version:
 - executor response validation for adapter outputs before Forge accepts completion evidence
 - self-evolution runner for bounded Codex/OpenCode cycles until a stop date
 - versioned self-evolution prompt packets with SHA-256 checksums in cycle reports
+- self-evolution prompt packets load the persisted Forge workflow goal before generic guidance, so runtime `workflow update-goal` changes drive future cycles
 - versioned improvement artifacts with strong changelog generation
 
 ## Install
@@ -276,7 +277,7 @@ forge self run \
 ```
 
 `forge self run` creates a run id and workflow id, writes prompt/report artifacts for every cycle, runs validation before committing, and only pushes when `--push` is passed.
-Each self-evolution cycle report includes the prompt packet version and SHA-256 checksum so executor runs can be replayed and audited against the exact instructions given to Codex/OpenCode.
+Each self-evolution cycle report includes the prompt packet version and SHA-256 checksum so executor runs can be replayed and audited against the exact instructions given to Codex/OpenCode. Prompt packet `forge.self_evolution.prompt.v2` includes the current persisted workflow goal, the initial goal and the workflow revision before the generic strategic backlog, so human goal mutations such as clusterization or n8n node research are carried into subsequent self-evolution runs.
 
 Example autonomous mixed objective:
 
