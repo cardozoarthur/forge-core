@@ -1,7 +1,7 @@
 use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{
     build_context_package_with_checkpoint, ContextDelta, ContextHandoffBlocker, ContextPackage,
-    ContextRoutingQuality,
+    ContextPersonaSourceModelSummary, ContextRoutingQuality,
 };
 use crate::graph::{ExecutionPolicySpec, ExecutorKind, PersonaRoutingSpec, ValidationRule};
 use crate::lease::{acquire_task_lease, TaskLease};
@@ -10,8 +10,8 @@ use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-const EXECUTOR_HANDOFF_SCHEMA_VERSION: &str = "forge.executor_handoff.v6";
-const PERSONA_HANDOFF_SCHEMA_VERSION: &str = "forge.persona_handoff.v1";
+const EXECUTOR_HANDOFF_SCHEMA_VERSION: &str = "forge.executor_handoff.v7";
+const PERSONA_HANDOFF_SCHEMA_VERSION: &str = "forge.persona_handoff.v2";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskHandoffReport {
@@ -58,6 +58,8 @@ pub struct ExecutorHandoffPacket {
     pub execution_policy_mode: String,
     pub execution_policy: ExecutionPolicySpec,
     pub persona_mode: Option<String>,
+    pub persona_profile_id: Option<String>,
+    pub persona_profile_sha256: Option<String>,
     pub persona_contract: Option<ExecutorHandoffPersonaContract>,
     pub resume_context_status: String,
     pub resume_plan: ExecutorHandoffResumePlan,
@@ -66,14 +68,18 @@ pub struct ExecutorHandoffPacket {
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecutorHandoffPersonaContract {
     pub schema_version: String,
+    pub profile_id: String,
     pub mode: String,
     pub scope: String,
     pub instruction_source: String,
     pub voice: String,
     pub tone: String,
     pub validation_gate: String,
+    pub routing_rationale: String,
     pub source_models: Vec<String>,
+    pub source_model_summaries: Vec<ContextPersonaSourceModelSummary>,
     pub auditable: bool,
+    pub profile_sha256: String,
     pub lineage_sha256: String,
     pub persona_mode_sha256: String,
 }
@@ -194,6 +200,16 @@ pub fn build_task_handoff(
 impl ExecutorHandoffPacket {
     fn from_parts(parts: PacketParts<'_>) -> Self {
         let persona_mode = parts.persona.as_ref().map(|persona| persona.mode.clone());
+        let persona_profile_id = parts
+            .context
+            .persona_profile
+            .as_ref()
+            .map(|profile| profile.profile_id.clone());
+        let persona_profile_sha256 = parts
+            .context
+            .persona_profile
+            .as_ref()
+            .map(|profile| profile.profile_sha256.clone());
         let persona_contract = parts
             .persona
             .as_ref()
@@ -236,6 +252,8 @@ impl ExecutorHandoffPacket {
             execution_policy_mode: parts.execution_policy.mode.clone(),
             execution_policy: parts.execution_policy,
             persona_mode,
+            persona_profile_id,
+            persona_profile_sha256,
             persona_contract,
             resume_context_status: parts.context.resume_context_status.clone(),
             resume_plan: build_resume_plan(parts.context),
@@ -247,16 +265,24 @@ fn build_persona_contract(
     persona: &PersonaRoutingSpec,
     context: &ContextPackage,
 ) -> ExecutorHandoffPersonaContract {
+    let profile = context
+        .persona_profile
+        .as_ref()
+        .expect("persona profile should be derived when persona routing exists");
     ExecutorHandoffPersonaContract {
         schema_version: PERSONA_HANDOFF_SCHEMA_VERSION.to_string(),
+        profile_id: profile.profile_id.clone(),
         mode: persona.mode.clone(),
         scope: persona.scope.clone(),
         instruction_source: persona.instruction_source.clone(),
         voice: persona.voice.clone(),
         tone: persona.tone.clone(),
         validation_gate: persona.validation_gate.clone(),
+        routing_rationale: profile.routing_rationale.clone(),
         source_models: persona.source_models.clone(),
+        source_model_summaries: profile.source_model_summaries.clone(),
         auditable: persona.auditable,
+        profile_sha256: profile.profile_sha256.clone(),
         lineage_sha256: context.lineage.lineage_sha256.clone(),
         persona_mode_sha256: context.lineage.persona_mode_sha256.clone(),
     }

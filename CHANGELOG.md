@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.54 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v24` with a derived `persona_profile` object for human-facing nodes.
+- Persona profiles use schema `forge.context.persona_profile.v1` and carry a stable profile id, node mode/scope, voice, tone, validation gate, routing rationale, source-model summaries and profile checksum.
+- Context lineage now includes `persona_profile_sha256`, and routing fingerprints include a `persona_profile` component so executor cache keys change when the selected persona profile changes.
+- `forge task handoff` now emits `forge.executor_handoff.v7` and `forge.persona_handoff.v2`, projecting the persona profile id/checksum and source-model summaries in the executor-facing contract.
+- `forge inspect` terminal output now annotates persona nodes with the selected profile id.
+- Added CLI contract coverage proving context packets derive the persona profile from Codex developer/personality instructions plus Paperclip soul/voice/tone/persona inputs.
+
+### Changed
+
+- The context routing policy is now `task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_v24`.
+- Context persona contracts now use schema `forge.context.persona_contract.v2` and bind the profile checksum/rationale to lineage.
+- The package version is now `0.4.54`.
+
+### Safety
+
+- Persona profiles are derived read-only metadata from Forge-owned task persona routing state; they do not override workflow goals, validation rules or executor policy.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules, task leases and validation-before-promotion semantics.
+
 ## 0.4.53 - 2026-05-24
 
 ### Added

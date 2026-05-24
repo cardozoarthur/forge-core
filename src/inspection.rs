@@ -44,6 +44,7 @@ pub struct TaskInspectionNode {
     pub executor: String,
     pub execution_policy: ExecutionPolicyInspection,
     pub persona_mode: Option<String>,
+    pub persona_profile_id: Option<String>,
     pub context_route: ContextInspectionRoute,
     pub goal: String,
     pub expected_output: String,
@@ -204,6 +205,10 @@ fn task_node(
         executor: executor_kind(&task.executor).to_string(),
         execution_policy: execution_policy_inspection(&task.execution_policy),
         persona_mode: task.persona.as_ref().map(|persona| persona.mode.clone()),
+        persona_profile_id: context_package
+            .persona_profile
+            .as_ref()
+            .map(|profile| profile.profile_id.clone()),
         context_route: context_route(context_package),
         goal: task.goal.clone(),
         expected_output: task.expected_output.clone(),
@@ -322,7 +327,14 @@ fn render_diagram(
         let persona = node
             .persona_mode
             .as_ref()
-            .map(|mode| format!(" persona {mode}"))
+            .map(|mode| {
+                let profile = node
+                    .persona_profile_id
+                    .as_deref()
+                    .map(|profile_id| format!(" profile {profile_id}"))
+                    .unwrap_or_default();
+                format!(" persona {mode}{profile}")
+            })
             .unwrap_or_default();
         let subflow_refs = if node.subflow_refs.is_empty() {
             String::new()

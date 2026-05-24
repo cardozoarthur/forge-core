@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.50`
+Current version: `0.4.54`
 
 This is the first functional CLI + Skill version:
 
@@ -45,7 +45,7 @@ This is the first functional CLI + Skill version:
 - context routing quality scores and warnings for budget pressure, missing required context and profile filtering
 - registry-level context quality summaries and workflow `quality_action` recommendations
 - Forge-owned execution policy metadata for deterministic local Python/Node.js code nodes
-- node-scoped Personality/Soul Routing metadata and validation gates for human-facing artifacts
+- node-scoped Personality/Soul Routing profiles, metadata and validation gates for human-facing artifacts
 - controlled improvement proposal generation
 - Codex/OpenCode-compatible `forge-core` skill
 - executor sync that detects installed/configured CLIs and persists human authorization policy
@@ -89,11 +89,11 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v23`) with a deterministic
-`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_v23` routing policy.
+`forge context` emits a versioned context packet (`forge.context.v24`) with a deterministic
+`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_v24` routing policy.
 The packet keeps the legacy `content` body for executors, and also returns workflow
 revision, artifact count, persona routing metadata for human-facing nodes, a versioned
-persona contract, executor profile metadata, a versioned routing contract, execution policy metadata, dependency readiness summaries, proposed
+persona profile and persona contract, executor profile metadata, a versioned routing contract, execution policy metadata, dependency readiness summaries, proposed
 child-subflow bindings, lineage hashes and a shard manifest with included/omitted sections, profile exclusions,
 compression flags, required/missing-required markers, source labels, priorities,
 content-addressed shard IDs, source hashes, remaining-budget before/after values,
@@ -101,7 +101,7 @@ byte counts, summaries and SHA-256 checksums. The packet also exposes `context_r
 `required_sections`, `missing_required_sections`, `handoff_ready`, `handoff_status`,
 `handoff_blockers`, a `routing_summary`, a versioned `routing_contract`, a versioned
 `routing_repair` budget recommendation, a versioned `routing_quality` score/warning contract,
-a node-scoped `persona_contract` for human-facing artifacts, a versioned `next_action`
+a node-scoped `persona_profile` and `persona_contract` for human-facing artifacts, a versioned `next_action`
 resume/handoff decision and a versioned `routing_fingerprint`
 with component hashes and a cache key so executor adapters can reuse or invalidate
 bounded context without reparsing full packets. Adapters can block handoff when the
@@ -151,14 +151,14 @@ forge task handoff --workflow <workflow-id> --task task-001 --executor codex --b
 ```
 
 The command reuses the strict context readiness contract, acquires a Forge task
-lease only when `handoff_ready=true`, and returns `forge.executor_handoff.v6`
+lease only when `handoff_ready=true`, and returns `forge.executor_handoff.v7`
 with the selected executor, task executor kind, lease id, context SHA-256,
 routing fingerprint schema, routing cache key, lineage hash, expected output,
 context routing quality, execution policy mode, full execution policy and validation gate. Human-facing
-persona nodes also carry a versioned `persona_contract` with the node-scoped
-mode, voice, tone, instruction source, source models, persona validation gate and
-lineage hashes so adapters do not have to infer soul/personality routing from the
-nested context body.
+persona nodes also carry a versioned `persona_contract` with the derived profile id,
+profile checksum, node-scoped mode, voice, tone, instruction source, source model
+summaries, persona validation gate and lineage hashes so adapters do not have to
+infer soul/personality routing from the nested context body.
 
 Skill-style async handoff:
 

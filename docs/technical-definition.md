@@ -190,10 +190,11 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v23` and routing policy
-`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_v23`. Each packet
+Current `forge context` packets use schema `forge.context.v24` and routing policy
+`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_v24`. Each packet
 includes the executor-facing content, the full context checksum, workflow revision,
-artifact count, node-scoped persona routing metadata and a versioned persona contract for human-facing tasks, executor
+artifact count, node-scoped persona routing metadata plus a versioned persona profile
+and persona contract for human-facing tasks, executor
 profile metadata, a versioned routing contract, execution policy metadata, dependency
 readiness summaries, proposed child-subflow bindings, requested and effective budgets,
 lineage hashes, included and omitted sections, profile-driven omissions, and a deterministic shard manifest with
@@ -214,9 +215,11 @@ operators can retry with the smallest known budget increase instead of guessing.
 budget plan exposes the required context floor, selected bytes, optional pressure,
 missing required sections and recommended budget so executor adapters can choose the
 smallest correct handoff budget before spending model or runtime work. The
-persona contract binds the node's mode, scope, voice, tone, instruction source,
-source models, validation gate and audit flag to the context lineage hash and
-persona-mode hash before executor handoff. The quality contract scores each packet and emits explicit warnings for missing required
+persona profile gives the selected profile id, routing rationale, source-model
+summaries and profile checksum. The persona contract binds the node's mode, scope,
+voice, tone, instruction source, source models, validation gate, audit flag and
+profile checksum to the context lineage hash and persona-mode hash before executor
+handoff. The quality contract scores each packet and emits explicit warnings for missing required
 context, budget pressure, compressed summaries and profile-filtered optional context,
 so adapters and operators can audit routing risk without reconstructing shard
 decisions. Handoff policy can still block incomplete context or pending dependencies
@@ -257,11 +260,11 @@ This capability must remain operationally bounded:
 
 - the persona is a node-level execution setting, not hidden global behavior;
 - the task graph records mode, scope, source models, voice, tone and validation gate;
-- the context packet records which persona profile was selected and includes it as a shard;
+- the context packet records which persona profile was selected, includes it as a shard and hashes it into lineage;
 - executor handoff packets project the selected persona as a versioned contract so
   adapters can enforce the node mode without parsing unrelated context;
 - Codex-style developer/personality instructions and Paperclip-style soul, voice,
-  tone or persona models are inputs to the profile contract;
+  tone or persona models are summarized as explicit inputs to the profile contract;
 - the persona switch is included in lineage so results are replayable;
 - promotion validation rejects persona switches that are not node-scoped,
   auditable, source-model backed and gated by `persona_routing_required`;

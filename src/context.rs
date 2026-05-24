@@ -8,12 +8,13 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v23";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v24";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
 const ROUTING_CONTRACT_SCHEMA_VERSION: &str = "forge.context.routing_contract.v1";
 const ROUTING_REPAIR_SCHEMA_VERSION: &str = "forge.context.routing_repair.v1";
 const BUDGET_PLAN_SCHEMA_VERSION: &str = "forge.context.budget_plan.v1";
-const PERSONA_CONTRACT_SCHEMA_VERSION: &str = "forge.context.persona_contract.v1";
+const PERSONA_PROFILE_SCHEMA_VERSION: &str = "forge.context.persona_profile.v1";
+const PERSONA_CONTRACT_SCHEMA_VERSION: &str = "forge.context.persona_contract.v2";
 const CONTEXT_DELTA_SCHEMA_VERSION: &str = "forge.context.delta.v1";
 const CONTEXT_SELECTOR_VERSION: &str = "forge.context.selector.v1";
 const EXECUTOR_PROFILE_SCHEMA_VERSION: &str = "forge.context.executor_profile.v1";
@@ -22,7 +23,7 @@ const CONTEXT_ROUTING_QUALITY_SCHEMA_VERSION: &str = "forge.context_routing_qual
 const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
     "forge.context_routing_quality_summary.v1";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_v23";
+    "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_v24";
 const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
@@ -93,6 +94,7 @@ pub struct ContextPackage {
     pub artifact_count: usize,
     pub lineage: ContextLineage,
     pub persona: Option<PersonaRoutingSpec>,
+    pub persona_profile: Option<ContextPersonaProfile>,
     pub persona_contract: Option<ContextPersonaContract>,
     pub executor_profile: ContextExecutorProfile,
     pub execution_policy: ExecutionPolicySpec,
@@ -207,14 +209,39 @@ pub struct ContextLineage {
     pub artifact_manifest_sha256: String,
     pub artifact_count: usize,
     pub persona_mode_sha256: String,
+    pub persona_profile_sha256: String,
     pub persona_scope: String,
     pub revision_sources: Vec<String>,
     pub lineage_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ContextPersonaProfile {
+    pub schema_version: String,
+    pub profile_id: String,
+    pub mode: String,
+    pub scope: String,
+    pub instruction_source: String,
+    pub voice: String,
+    pub tone: String,
+    pub validation_gate: String,
+    pub routing_rationale: String,
+    pub source_model_summaries: Vec<ContextPersonaSourceModelSummary>,
+    pub auditable: bool,
+    pub profile_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextPersonaSourceModelSummary {
+    pub model_id: String,
+    pub source_kind: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ContextPersonaContract {
     pub schema_version: String,
+    pub profile_id: String,
     pub mode: String,
     pub scope: String,
     pub persona_scope: String,
@@ -222,8 +249,11 @@ pub struct ContextPersonaContract {
     pub voice: String,
     pub tone: String,
     pub validation_gate: String,
+    pub routing_rationale: String,
     pub source_models: Vec<String>,
+    pub source_model_summaries: Vec<ContextPersonaSourceModelSummary>,
     pub auditable: bool,
+    pub profile_sha256: String,
     pub lineage_sha256: String,
     pub persona_mode_sha256: String,
 }
@@ -442,8 +472,35 @@ struct ContextLineageSeed {
     artifact_manifest_sha256: String,
     artifact_count: usize,
     persona_mode_sha256: String,
+    persona_profile_sha256: String,
     persona_scope: String,
     revision_sources: Vec<String>,
+}
+
+struct ContextLineageInput<'a> {
+    workflow: &'a Workflow,
+    task_id: &'a str,
+    task_goal: &'a str,
+    persona: Option<&'a PersonaRoutingSpec>,
+    persona_profile_sha256: &'a str,
+    workflow_revision: u64,
+    revision_sources: Vec<String>,
+    artifact_manifest: &'a str,
+}
+
+#[derive(Serialize)]
+struct ContextPersonaProfileSeed {
+    schema_version: &'static str,
+    profile_id: String,
+    mode: String,
+    scope: String,
+    instruction_source: String,
+    voice: String,
+    tone: String,
+    validation_gate: String,
+    routing_rationale: String,
+    source_model_summaries: Vec<ContextPersonaSourceModelSummary>,
+    auditable: bool,
 }
 
 #[derive(Serialize)]
@@ -480,6 +537,7 @@ struct RoutingFingerprintInput<'a> {
     routing_repair: &'a ContextRoutingRepair,
     budget_plan: &'a ContextBudgetPlan,
     routing_quality: &'a ContextRoutingQuality,
+    persona_profile: Option<&'a ContextPersonaProfile>,
     persona_contract: Option<&'a ContextPersonaContract>,
     context_sha256: &'a str,
 }
@@ -598,22 +656,29 @@ pub fn build_context_package_with_checkpoint(
         .map(|revision| revision.origin.clone())
         .collect::<Vec<_>>();
     let persona = task.persona.clone();
-    let lineage = build_lineage(
+    let persona_profile = persona.as_ref().map(build_persona_profile).transpose()?;
+    let persona_profile_sha256 = persona_profile
+        .as_ref()
+        .map(|profile| profile.profile_sha256.clone())
+        .unwrap_or_else(|| hex_sha256(b"none"));
+    let lineage = build_lineage(ContextLineageInput {
         workflow,
         task_id,
-        &task.goal,
-        persona.as_ref(),
+        task_goal: &task.goal,
+        persona: persona.as_ref(),
+        persona_profile_sha256: &persona_profile_sha256,
         workflow_revision,
         revision_sources,
-        &artifact_manifest,
-    )?;
+        artifact_manifest: &artifact_manifest,
+    })?;
     let (resume_context_status, resume_context_reason) =
         resume_context_status(latest_checkpoint.as_ref(), workflow_revision);
     let dependency_refs = build_dependency_refs(workflow, task);
     let dependency_summary = summarize_dependency_refs(&dependency_refs);
     let persona_contract = persona
         .as_ref()
-        .map(|persona| build_persona_contract(persona, &lineage));
+        .zip(persona_profile.as_ref())
+        .map(|(persona, profile)| build_persona_contract(persona, profile, &lineage));
 
     let mut candidates = vec![
         ContextShardCandidate {
@@ -650,7 +715,8 @@ pub fn build_context_package_with_checkpoint(
             priority: priority_for_profile(&profile, "persona_routing", 92),
             content: persona
                 .as_ref()
-                .map(render_persona_context)
+                .zip(persona_profile.as_ref())
+                .map(|(persona, profile)| render_persona_context(persona, profile))
                 .unwrap_or_default(),
         },
         ContextShardCandidate {
@@ -897,6 +963,7 @@ pub fn build_context_package_with_checkpoint(
         routing_repair: &routing_repair,
         budget_plan: &budget_plan,
         routing_quality: &routing_quality,
+        persona_profile: persona_profile.as_ref(),
         persona_contract: persona_contract.as_ref(),
         context_sha256: &context_sha256,
     })?;
@@ -927,6 +994,7 @@ pub fn build_context_package_with_checkpoint(
         artifact_count: workflow.artifacts.len(),
         lineage,
         persona,
+        persona_profile,
         persona_contract,
         executor_profile: profile.to_public(&task.executor, &required_sections),
         execution_policy: task.execution_policy.clone(),
@@ -1667,6 +1735,7 @@ fn build_routing_fingerprint(
     let routing_repair = serde_json::to_string(input.routing_repair)?;
     let budget_plan = serde_json::to_string(input.budget_plan)?;
     let routing_quality = serde_json::to_string(input.routing_quality)?;
+    let persona_profile = serde_json::to_string(&input.persona_profile)?;
     let persona_contract = serde_json::to_string(&input.persona_contract)?;
     let source_shards = input
         .shards
@@ -1726,6 +1795,7 @@ fn build_routing_fingerprint(
         fingerprint_component("routing_repair", routing_repair),
         fingerprint_component("budget_plan", budget_plan),
         fingerprint_component("routing_quality", routing_quality),
+        fingerprint_component("persona_profile", persona_profile),
         fingerprint_component("persona_contract", persona_contract),
         fingerprint_component("context_payload", input.context_sha256.to_string()),
     ];
@@ -1860,32 +1930,27 @@ fn summarize_dependency_refs(dependencies: &[ContextDependencyRef]) -> ContextDe
     }
 }
 
-fn build_lineage(
-    workflow: &Workflow,
-    task_id: &str,
-    task_goal: &str,
-    persona: Option<&PersonaRoutingSpec>,
-    workflow_revision: u64,
-    revision_sources: Vec<String>,
-    artifact_manifest: &str,
-) -> Result<ContextLineage> {
-    let persona_mode = persona
+fn build_lineage(input: ContextLineageInput<'_>) -> Result<ContextLineage> {
+    let persona_mode = input
+        .persona
         .map(|persona| persona.mode.as_str())
         .unwrap_or("none");
-    let persona_scope = persona
+    let persona_scope = input
+        .persona
         .map(|persona| persona.scope.clone())
         .unwrap_or_else(|| "none".to_string());
     let seed = ContextLineageSeed {
-        workflow_id: workflow.id.clone(),
-        task_id: task_id.to_string(),
-        workflow_revision,
-        workflow_goal_sha256: hex_sha256(workflow.goal.as_bytes()),
-        task_goal_sha256: hex_sha256(task_goal.as_bytes()),
-        artifact_manifest_sha256: hex_sha256(artifact_manifest.as_bytes()),
-        artifact_count: workflow.artifacts.len(),
+        workflow_id: input.workflow.id.clone(),
+        task_id: input.task_id.to_string(),
+        workflow_revision: input.workflow_revision,
+        workflow_goal_sha256: hex_sha256(input.workflow.goal.as_bytes()),
+        task_goal_sha256: hex_sha256(input.task_goal.as_bytes()),
+        artifact_manifest_sha256: hex_sha256(input.artifact_manifest.as_bytes()),
+        artifact_count: input.workflow.artifacts.len(),
         persona_mode_sha256: hex_sha256(persona_mode.as_bytes()),
+        persona_profile_sha256: input.persona_profile_sha256.to_string(),
         persona_scope,
-        revision_sources,
+        revision_sources: input.revision_sources,
     };
     let lineage_sha256 = hex_sha256(serde_json::to_string(&seed)?.as_bytes());
     Ok(ContextLineage {
@@ -1895,18 +1960,99 @@ fn build_lineage(
         artifact_manifest_sha256: seed.artifact_manifest_sha256,
         artifact_count: seed.artifact_count,
         persona_mode_sha256: seed.persona_mode_sha256,
+        persona_profile_sha256: seed.persona_profile_sha256,
         persona_scope: seed.persona_scope,
         revision_sources: seed.revision_sources,
         lineage_sha256,
     })
 }
 
+fn build_persona_profile(persona: &PersonaRoutingSpec) -> Result<ContextPersonaProfile> {
+    let source_model_summaries = persona
+        .source_models
+        .iter()
+        .map(|model_id| persona_source_model_summary(model_id))
+        .collect::<Vec<_>>();
+    let profile_id = persona_profile_id(&persona.mode);
+    let routing_rationale = persona_routing_rationale(persona);
+    let seed = ContextPersonaProfileSeed {
+        schema_version: PERSONA_PROFILE_SCHEMA_VERSION,
+        profile_id: profile_id.clone(),
+        mode: persona.mode.clone(),
+        scope: persona.scope.clone(),
+        instruction_source: persona.instruction_source.clone(),
+        voice: persona.voice.clone(),
+        tone: persona.tone.clone(),
+        validation_gate: persona.validation_gate.clone(),
+        routing_rationale: routing_rationale.clone(),
+        source_model_summaries: source_model_summaries.clone(),
+        auditable: persona.auditable,
+    };
+    let profile_sha256 = hex_sha256(serde_json::to_string(&seed)?.as_bytes());
+
+    Ok(ContextPersonaProfile {
+        schema_version: PERSONA_PROFILE_SCHEMA_VERSION.to_string(),
+        profile_id,
+        mode: persona.mode.clone(),
+        scope: persona.scope.clone(),
+        instruction_source: persona.instruction_source.clone(),
+        voice: persona.voice.clone(),
+        tone: persona.tone.clone(),
+        validation_gate: persona.validation_gate.clone(),
+        routing_rationale,
+        source_model_summaries,
+        auditable: persona.auditable,
+        profile_sha256,
+    })
+}
+
+fn persona_profile_id(mode: &str) -> String {
+    let sanitized = mode
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("persona.{sanitized}.v1")
+}
+
+fn persona_routing_rationale(_persona: &PersonaRoutingSpec) -> String {
+    "node-scoped human-facing artifact uses explicit Codex developer/personality instructions and Paperclip soul, voice, tone and persona inputs while Forge keeps goals, validation and state authority".to_string()
+}
+
+fn persona_source_model_summary(model_id: &str) -> ContextPersonaSourceModelSummary {
+    match model_id {
+        "codex_developer_personality_instructions" => ContextPersonaSourceModelSummary {
+            model_id: model_id.to_string(),
+            source_kind: "developer_instructions".to_string(),
+            summary: "Codex developer/personality instructions shape pragmatic voice, collaboration style and completion discipline for executor-facing behavior".to_string(),
+        },
+        "paperclip_soul_voice_tone_persona" => ContextPersonaSourceModelSummary {
+            model_id: model_id.to_string(),
+            source_kind: "soul_voice_tone_persona".to_string(),
+            summary: "Paperclip soul, voice, tone and persona inputs shape human-facing artifact style without changing Forge state authority".to_string(),
+        },
+        _ => ContextPersonaSourceModelSummary {
+            model_id: model_id.to_string(),
+            source_kind: "declared_persona_source".to_string(),
+            summary: "Declared persona source model contributes style constraints to this node-scoped profile".to_string(),
+        },
+    }
+}
+
 fn build_persona_contract(
     persona: &PersonaRoutingSpec,
+    profile: &ContextPersonaProfile,
     lineage: &ContextLineage,
 ) -> ContextPersonaContract {
     ContextPersonaContract {
         schema_version: PERSONA_CONTRACT_SCHEMA_VERSION.to_string(),
+        profile_id: profile.profile_id.clone(),
         mode: persona.mode.clone(),
         scope: persona.scope.clone(),
         persona_scope: lineage.persona_scope.clone(),
@@ -1914,23 +2060,29 @@ fn build_persona_contract(
         voice: persona.voice.clone(),
         tone: persona.tone.clone(),
         validation_gate: persona.validation_gate.clone(),
+        routing_rationale: profile.routing_rationale.clone(),
         source_models: persona.source_models.clone(),
+        source_model_summaries: profile.source_model_summaries.clone(),
         auditable: persona.auditable,
+        profile_sha256: profile.profile_sha256.clone(),
         lineage_sha256: lineage.lineage_sha256.clone(),
         persona_mode_sha256: lineage.persona_mode_sha256.clone(),
     }
 }
 
-fn render_persona_context(persona: &PersonaRoutingSpec) -> String {
+fn render_persona_context(persona: &PersonaRoutingSpec, profile: &ContextPersonaProfile) -> String {
     format!(
-        "Persona mode: {}\nPersona scope: {}\nInstruction source: {}\nVoice: {}\nTone: {}\nValidation gate: {}\nSource models: {}\nAuditable: {}\n",
+        "Persona mode: {}\nPersona profile: {}\nPersona scope: {}\nInstruction source: {}\nVoice: {}\nTone: {}\nValidation gate: {}\nRouting rationale: {}\nSource models: {}\nPersona profile sha256: {}\nAuditable: {}\n",
         persona.mode,
+        profile.profile_id,
         persona.scope,
         persona.instruction_source,
         persona.voice,
         persona.tone,
         persona.validation_gate,
+        profile.routing_rationale,
         persona.source_models.join(", "),
+        profile.profile_sha256,
         persona.auditable
     )
 }
