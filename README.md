@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.80`
+Current version: `0.4.82`
 
 This is the first functional CLI + Skill version:
 
@@ -57,6 +57,7 @@ This is the first functional CLI + Skill version:
 - local cluster node registry with capability/trust metadata, dry-run placement decisions and distributed handoff manifests
 - cluster registry scheduling posture that exposes per-node active/expired lease pressure without remote execution
 - lease-aware cluster placement that exposes active lease counts and prefers idle eligible nodes
+- remote AI cluster placement is blocked until explicit authorization enables cluster cognitive executors
 - n8n-aware research planning that catalogs workflow primitives and evaluates Forge primitive candidates before graph promotion
 - goal-oriented tasks with subtasks, impediments, acceptance criteria and rework readiness checks
 - runtime workflow mutation for goals and artifacts with origin trace from `codex`, `opencode`, `forge_cli` or skills

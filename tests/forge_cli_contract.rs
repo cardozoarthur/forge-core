@@ -188,6 +188,108 @@ fn plan_for_n8n_research_requires_catalog_before_forge_primitive_promotion() {
 }
 
 #[test]
+fn plan_for_hackathon_mvp_software_factory_gates_idea_pdf_telegram_and_improvement() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Create a hackathon MVP software factory for Ideathon Energia para Todos. Input includes the regulation, the user wants to build GreenRoute AI using OSM and OSRM for collaborative logistics, the official final deadline is 2026-05-31T23:59:00-03:00, use a customizable 36 hour buffer, generate the final idea PDF and send the explanation to Telegram.",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert!(json["intent"]["deliverables"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(
+            "hackathon regulation compliance matrix".to_string()
+        )));
+    assert!(json["intent"]["deliverables"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("final idea PDF artifact".to_string())));
+    assert!(json["intent"]["constraints"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(
+            "final package deadline buffer before official submission".to_string()
+        )));
+
+    let tasks = json["tasks"].as_array().unwrap();
+    let regulation = find_task(tasks, "Parse hackathon regulation");
+    let deadline = find_task(tasks, "Calculate buffered hackathon deadline");
+    let viability = find_task(tasks, "Evaluate user idea viability against regulation");
+    let brainstorm = find_task(tasks, "Brainstorm and score hackathon MVP concepts");
+    let final_idea = find_task(tasks, "Select final idea and MVP scope");
+    let pdf = find_task(tasks, "Generate final idea PDF and explanation artifact");
+    let telegram = find_task(tasks, "Send final idea PDF to Telegram");
+    let backlog = find_task(tasks, "Build hackathon MVP software factory backlog");
+    let osrm_plan = find_task(tasks, "Prepare OSM OSRM MVP build plan");
+    let validation = find_task(tasks, "Validate MVP, pitch and judging package");
+    let improvement = find_task(tasks, "Run continuous improvement until buffered deadline");
+
+    assert_eq!(regulation["executor"], "ai");
+    assert_eq!(deadline["executor"], "command");
+    assert_eq!(viability["executor"], "ai");
+    assert_eq!(brainstorm["executor"], "ai");
+    assert_eq!(final_idea["executor"], "ai");
+    assert_eq!(pdf["executor"], "command");
+    assert_eq!(telegram["executor"], "notification");
+    assert_eq!(backlog["executor"], "command");
+    assert_eq!(osrm_plan["executor"], "mixed");
+    assert_eq!(validation["executor"], "command");
+    assert_eq!(improvement["executor"], "wait");
+
+    assert!(deadline["validation_rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| rule["kind"] == "deadline_buffer"
+            && rule["expected"].as_str().unwrap().contains("customizable")));
+    assert!(viability["validation_rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| rule["kind"] == "viability_gate"
+            && rule["expected"]
+                .as_str()
+                .unwrap()
+                .contains("not_viable_with_alternative")));
+    assert!(brainstorm["validation_rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| rule["kind"] == "weighted_scoring"
+            && rule["expected"].as_str().unwrap().contains("20% pitch")));
+    assert_eq!(telegram["notification"]["channel"], "telegram");
+    assert_eq!(telegram["notification"]["to"], "configured_telegram_chat");
+    assert_eq!(telegram["notification"]["include_cost_report"], false);
+    assert_eq!(improvement["schedule"]["timezone"], "America/Sao_Paulo");
+    assert_eq!(improvement["schedule"]["cron"], "0 */6 * * *");
+    assert!(osrm_plan["context_requirements"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("OSRM routing requirements".to_string())));
+    assert!(validation["validation_rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| rule["kind"] == "pitch_validation"
+            && rule["expected"].as_str().unwrap().contains("five minutes")));
+}
+
+#[test]
 fn validation_blocks_promotion_until_required_gates_pass() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -9431,6 +9533,129 @@ fn cluster_registry_records_nodes_and_places_deterministic_code_task_by_capabili
         .as_array()
         .unwrap()
         .contains(&Value::String("missing capability python".to_string())));
+}
+
+#[test]
+fn cluster_placement_blocks_remote_ai_tasks_without_explicit_authorization() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "register",
+            "--node-id",
+            "lan-ai-worker",
+            "--name",
+            "LAN AI Worker",
+            "--endpoint",
+            "ssh://forge@lan-ai",
+            "--os",
+            "linux",
+            "--arch",
+            "x86_64",
+            "--cpu-cores",
+            "32",
+            "--memory-gb",
+            "128",
+            "--gpu",
+            "nvidia-rtx-4090",
+            "--software",
+            "python3",
+            "--capability",
+            "ai",
+            "--capability",
+            "gpu",
+            "--capability",
+            "python",
+            "--python",
+            "--gpu-available",
+            "--network-reachable",
+            "--status",
+            "online",
+            "--trust",
+            "trusted_lan",
+            "--sandbox",
+            "local_process_no_network",
+            "--latency-ms",
+            "3",
+            "--reliability",
+            "0.99",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let planned_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Research a distributed runtime strategy with AI analysis",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned: Value = serde_json::from_slice(&planned_output).unwrap();
+    let workflow_id = planned["workflow_id"].as_str().unwrap();
+    let ai_task = find_task(planned["tasks"].as_array().unwrap(), "Extract requirements");
+
+    let placement_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "place",
+            "--workflow",
+            workflow_id,
+            "--task",
+            ai_task["id"].as_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let placement: Value = serde_json::from_slice(&placement_output).unwrap();
+
+    assert_eq!(placement["schema_version"], "forge.cluster_placement.v1");
+    assert_eq!(placement["status"], "placement_blocked");
+    assert_eq!(
+        placement["requirements"]["schema_version"],
+        "forge.cluster_placement_requirements.v2"
+    );
+    assert_eq!(placement["requirements"]["executor"], "ai");
+    assert_eq!(placement["requirements"]["policy_mode"], "model_executor");
+    assert_eq!(placement["requirements"]["reasoning_required"], true);
+    assert_eq!(
+        placement["requirements"]["remote_ai_execution_allowed"],
+        false
+    );
+    assert_eq!(placement["selected_node"], Value::Null);
+
+    let candidate = placement["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["node_id"] == "lan-ai-worker")
+        .unwrap();
+    assert_eq!(candidate["eligible"], false);
+    assert!(candidate["reasons"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(
+            "remote AI execution requires explicit authorization".to_string()
+        )));
 }
 
 #[test]

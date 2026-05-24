@@ -527,6 +527,10 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         }
     }
 
+    if requires_hackathon_factory(&intent.goal) {
+        append_hackathon_factory_tasks(&mut tasks);
+    }
+
     if let (false, Some(policy)) = (
         autonomous_extensions_required,
         reusable_local_code_policy(local_code_policy.as_ref()),
@@ -620,6 +624,293 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
     tasks
 }
 
+fn append_hackathon_factory_tasks(tasks: &mut Vec<AtomicTask>) {
+    let regulation_id = next_task_id(tasks);
+    let regulation = with_persona(
+        task(
+            &regulation_id,
+            "Parse hackathon regulation",
+            &["task-001"],
+            &[
+                "regulation text",
+                "eligibility rules",
+                "accepted themes",
+                "deliverables",
+                "judging weights",
+                "schedule",
+            ],
+            vec![rule(
+                "regulation_matrix",
+                "matrix captures themes, eligibility, team format, required deliverables, final deadline, defense limits and judging weights",
+                None,
+            )],
+            "Hackathon regulation compliance matrix",
+            (ExecutorKind::Ai, 0.018),
+        ),
+        hackathon_operator_persona(),
+    );
+    tasks.push(regulation);
+
+    let deadline_id = next_task_id(tasks);
+    let regulation_dep = [regulation_id.as_str()];
+    let deadline = task(
+        &deadline_id,
+        "Calculate buffered hackathon deadline",
+        &regulation_dep,
+        &[
+            "official final delivery deadline",
+            "preferred buffer hours",
+            "team organization time",
+            "timezone",
+        ],
+        vec![rule(
+            "deadline_buffer",
+            "buffered stop is computed before the official submission deadline and remains customizable per run",
+            None,
+        )],
+        "Buffered deadline plan",
+        (ExecutorKind::Command, 0.0002),
+    );
+    tasks.push(deadline);
+
+    let viability_id = next_task_id(tasks);
+    let viability_deps = [deadline_id.as_str(), "task-002"];
+    let viability = with_persona(
+        task(
+            &viability_id,
+            "Evaluate user idea viability against regulation",
+            &viability_deps,
+            &[
+                "user build request",
+                "regulation compliance matrix",
+                "judging rubric",
+                "technical feasibility constraints",
+                "deadline buffer",
+            ],
+            vec![
+                rule(
+                    "viability_gate",
+                    "decision is viable, viable_with_reframe or not_viable_with_alternative; off-theme ideas must receive a stronger aligned alternative",
+                    None,
+                ),
+                rule(
+                    "judging_fit",
+                    "evaluation maps the idea to adherence, innovation, technical viability, social/environmental impact, business model and pitch quality",
+                    None,
+                ),
+            ],
+            "Idea viability decision",
+            (ExecutorKind::Ai, 0.02),
+        ),
+        hackathon_judge_persona(),
+    );
+    tasks.push(viability);
+
+    let brainstorm_id = next_task_id(tasks);
+    let viability_dep = [viability_id.as_str()];
+    let brainstorm = with_persona(
+        task(
+            &brainstorm_id,
+            "Brainstorm and score hackathon MVP concepts",
+            &viability_dep,
+            &[
+                "viability decision",
+                "theme fit",
+                "OSM/OSRM logistics concept",
+                "energy inclusion angle",
+                "rubric weights",
+            ],
+            vec![rule(
+                "weighted_scoring",
+                "concept scores use the hackathon weights: 10% adherence, 20% innovation, 20% technical viability, 20% social/environmental impact, 10% business/funding and 20% pitch quality",
+                None,
+            )],
+            "Ranked concept shortlist",
+            (ExecutorKind::Ai, 0.024),
+        ),
+        creative_strategy_persona(),
+    );
+    tasks.push(brainstorm);
+
+    let final_idea_id = next_task_id(tasks);
+    let brainstorm_dep = [brainstorm_id.as_str()];
+    let final_idea = with_persona(
+        task(
+            &final_idea_id,
+            "Select final idea and MVP scope",
+            &brainstorm_dep,
+            &[
+                "ranked concept shortlist",
+                "deadline buffer",
+                "team size constraints",
+                "MVP complexity limit",
+            ],
+            vec![rule(
+                "mvp_scope",
+                "selected idea is regulation-aligned, technically buildable as an MVP and pitchable in five minutes with up to ten slides",
+                None,
+            )],
+            "Final hackathon idea and MVP scope",
+            (ExecutorKind::Ai, 0.018),
+        ),
+        product_strategy_persona(),
+    );
+    tasks.push(final_idea);
+
+    let pdf_id = next_task_id(tasks);
+    let final_idea_dep = [final_idea_id.as_str()];
+    let pdf = with_persona(
+        task(
+            &pdf_id,
+            "Generate final idea PDF and explanation artifact",
+            &final_idea_dep,
+            &[
+                "final idea",
+                "problem statement",
+                "MVP scope",
+                "rubric fit",
+                "pitch narrative",
+            ],
+            vec![rule(
+                "pdf_artifact",
+                "PDF artifact includes idea explanation, regulation fit, MVP scope, technical approach, impact, business model and pitch guidance",
+                None,
+            )],
+            "Final idea PDF artifact",
+            (ExecutorKind::Command, 0.0004),
+        ),
+        stakeholder_notice_persona(),
+    );
+    tasks.push(pdf);
+
+    let telegram_id = next_task_id(tasks);
+    let pdf_dep = [pdf_id.as_str()];
+    let mut telegram = with_persona(
+        task(
+            &telegram_id,
+            "Send final idea PDF to Telegram",
+            &pdf_dep,
+            &["final idea PDF", "explanation artifact", "Telegram delivery target"],
+            vec![rule(
+                "telegram_delivery",
+                "Telegram document payload references the PDF artifact and does not expose bot token or raw chat id",
+                None,
+            )],
+            "Telegram delivery payload",
+            (ExecutorKind::Notification, 0.0001),
+        ),
+        stakeholder_notice_persona(),
+    );
+    telegram.notification = Some(NotificationSpec {
+        channel: "telegram".to_string(),
+        to: "configured_telegram_chat".to_string(),
+        subject: "Forge Hackathon MVP Factory - final idea PDF".to_string(),
+        include_cost_report: false,
+    });
+    tasks.push(telegram);
+
+    let backlog_id = next_task_id(tasks);
+    let backlog_deps = [final_idea_id.as_str(), deadline_id.as_str()];
+    let backlog = task(
+        &backlog_id,
+        "Build hackathon MVP software factory backlog",
+        &backlog_deps,
+        &[
+            "final MVP scope",
+            "buffered deadline plan",
+            "software factory stages",
+            "team coordination needs",
+        ],
+        vec![rule(
+            "backlog",
+            "backlog covers problem understanding, brainstorm, artifacts, development, tests, pitch and continuous improvement",
+            None,
+        )],
+        "Hackathon MVP backlog",
+        (ExecutorKind::Command, 0.0006),
+    );
+    tasks.push(backlog);
+
+    let build_plan_id = next_task_id(tasks);
+    let backlog_dep = [backlog_id.as_str()];
+    let build_plan = task(
+        &build_plan_id,
+        "Prepare OSM OSRM MVP build plan",
+        &backlog_dep,
+        &[
+            "MVP backlog",
+            "OSM map requirements",
+            "OSRM routing requirements",
+            "emissions and energy saving calculator",
+            "collaborative capacity matching model",
+        ],
+        vec![rule(
+            "technical_plan",
+            "plan separates demo-safe MVP features from future production integrations and defines testable OSM/OSRM routing assumptions",
+            None,
+        )],
+        "OSM/OSRM MVP technical plan",
+        (ExecutorKind::Mixed, 0.012),
+    );
+    tasks.push(build_plan);
+
+    let test_plan_id = next_task_id(tasks);
+    let build_plan_dep = [build_plan_id.as_str()];
+    let test_plan = task(
+        &test_plan_id,
+        "Validate MVP, pitch and judging package",
+        &build_plan_dep,
+        &[
+            "technical plan",
+            "pitch story",
+            "rubric compliance",
+            "test plan",
+            "delivery checklist",
+        ],
+        vec![
+            rule(
+                "mvp_validation",
+                "MVP package has smoke tests, core user flow, no deadline-blocking scope creep and clear demo data",
+                None,
+            ),
+            rule(
+                "pitch_validation",
+                "pitch package fits five minutes and ten slides while addressing the weighted judging criteria",
+                None,
+            ),
+        ],
+        "Validated MVP and pitch package",
+        (ExecutorKind::Command, 0.0008),
+    );
+    tasks.push(test_plan);
+
+    let improvement_id = next_task_id(tasks);
+    let test_plan_dep = [test_plan_id.as_str()];
+    let mut improvement = task(
+        &improvement_id,
+        "Run continuous improvement until buffered deadline",
+        &test_plan_dep,
+        &[
+            "validated MVP package",
+            "buffered deadline",
+            "open impediments",
+            "rubric weak spots",
+        ],
+        vec![rule(
+            "improvement_loop",
+            "loop stops at the buffered deadline and prioritizes highest scoring rubric gaps before extra features",
+            None,
+        )],
+        "Continuous improvement checkpoint",
+        (ExecutorKind::Wait, 0.0),
+    );
+    improvement.schedule = Some(ScheduleSpec {
+        cron: "0 */6 * * *".to_string(),
+        timezone: "America/Sao_Paulo".to_string(),
+    });
+    tasks.push(improvement);
+}
+
 fn deterministic_non_ai_task(
     id: &str,
     dependencies: &[&str],
@@ -665,6 +956,38 @@ fn stakeholder_notice_persona() -> PersonaRoutingSpec {
         "stakeholder_notice",
         "stakeholder communicator",
         "concise, traceable and action-oriented",
+    )
+}
+
+fn hackathon_operator_persona() -> PersonaRoutingSpec {
+    persona(
+        "hackathon_operator",
+        "regulation-aware hackathon operator",
+        "deadline-conscious, practical and evidence-bound",
+    )
+}
+
+fn hackathon_judge_persona() -> PersonaRoutingSpec {
+    persona(
+        "hackathon_judge",
+        "strict hackathon judge",
+        "rubric-weighted, skeptical and constructive",
+    )
+}
+
+fn creative_strategy_persona() -> PersonaRoutingSpec {
+    persona(
+        "creative_strategy",
+        "creative product strategist",
+        "inventive, focused and feasibility-aware",
+    )
+}
+
+fn product_strategy_persona() -> PersonaRoutingSpec {
+    persona(
+        "product_strategy",
+        "MVP product strategist",
+        "clear, scoped and execution-oriented",
     )
 }
 
@@ -770,6 +1093,15 @@ fn reusable_local_code_policy(
 
 fn requires_n8n_research(goal: &str) -> bool {
     goal.to_lowercase().contains("n8n")
+}
+
+fn requires_hackathon_factory(goal: &str) -> bool {
+    let lower = goal.to_lowercase();
+    (lower.contains("hackathon") || lower.contains("ideathon") || lower.contains("maratona"))
+        && (lower.contains("mvp")
+            || lower.contains("software factory")
+            || lower.contains("fábrica")
+            || lower.contains("factory"))
 }
 
 fn next_task_id(tasks: &[AtomicTask]) -> String {

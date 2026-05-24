@@ -50,7 +50,7 @@ Close coupling is still valuable when it reduces friction. The target architectu
 
 ## v0 Boundary
 
-The current version is a local Rust CLI and skill package. It includes SQLite persistence, simulated execution, AI/non-AI/wait/notification task kinds, executor sync/policy, runtime substrate sync/policy, goal-oriented work items, rework validation, runtime goal/artifact mutation, cluster registry/placement metadata, per-node cluster scheduling posture, cluster handoff manifests, cost report generation and controlled improvement artifacts with changelog generation. It does not yet include remote distributed execution, real provider adapters, SaaS UI or WASM plugins.
+The current version is a local Rust CLI and skill package. It includes SQLite persistence, simulated execution, AI/non-AI/wait/notification task kinds, executor sync/policy, runtime substrate sync/policy, goal-oriented work items, rework validation, runtime goal/artifact mutation, cluster registry/placement metadata, per-node cluster scheduling posture, explicit remote-AI placement blocking, cluster handoff manifests, cost report generation and controlled improvement artifacts with changelog generation. It does not yet include remote distributed execution, real provider adapters, SaaS UI or WASM plugins.
 
 ## Executor Contract Direction
 
