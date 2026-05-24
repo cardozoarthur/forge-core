@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.38 - 2026-05-24
+
+### Added
+
+- `forge task handoff` now emits `forge.executor_handoff.v4`.
+- Human-facing nodes with Personality/Soul Routing now include a versioned `persona_contract` in the executor handoff packet.
+- The contract uses schema `forge.persona_handoff.v1` and carries persona mode, node scope, instruction source, voice, tone, source models, validation gate, auditable flag, workflow context lineage hash and persona mode hash.
+- Added CLI contract coverage proving a Codex handoff for a persona-routed documentation node receives the complete contract outside the nested context body.
+
+### Changed
+
+- Executor adapters no longer need to parse the full context package to enforce node-scoped persona routing before generating human-facing artifacts.
+- The legacy `persona_mode` field remains in the handoff packet for compact routing checks and backwards-compatible operator projections.
+
+### Safety
+
+- The persona handoff contract is read-only metadata derived from Forge-owned task persona routing and context lineage state.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Persona promotion remains validation-gated by `persona_routing_required` and existing `forge validate` checks for node scope, source models and auditability.
+
 ## 0.4.37 - 2026-05-24
 
 ### Added

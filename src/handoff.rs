@@ -2,14 +2,15 @@ use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{
     build_context_package_with_checkpoint, ContextHandoffBlocker, ContextPackage,
 };
-use crate::graph::{ExecutorKind, ValidationRule};
+use crate::graph::{ExecutorKind, PersonaRoutingSpec, ValidationRule};
 use crate::lease::{acquire_task_lease, TaskLease};
 use crate::storage::ForgeStore;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-const EXECUTOR_HANDOFF_SCHEMA_VERSION: &str = "forge.executor_handoff.v3";
+const EXECUTOR_HANDOFF_SCHEMA_VERSION: &str = "forge.executor_handoff.v4";
+const PERSONA_HANDOFF_SCHEMA_VERSION: &str = "forge.persona_handoff.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskHandoffReport {
@@ -53,8 +54,24 @@ pub struct ExecutorHandoffPacket {
     pub validation_rules: Vec<ValidationRule>,
     pub execution_policy_mode: String,
     pub persona_mode: Option<String>,
+    pub persona_contract: Option<ExecutorHandoffPersonaContract>,
     pub resume_context_status: String,
     pub resume_plan: ExecutorHandoffResumePlan,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutorHandoffPersonaContract {
+    pub schema_version: String,
+    pub mode: String,
+    pub scope: String,
+    pub instruction_source: String,
+    pub voice: String,
+    pub tone: String,
+    pub validation_gate: String,
+    pub source_models: Vec<String>,
+    pub auditable: bool,
+    pub lineage_sha256: String,
+    pub persona_mode_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,7 +97,7 @@ struct PacketParts<'a> {
     validation_gate: String,
     validation_rules: Vec<ValidationRule>,
     execution_policy_mode: String,
-    persona_mode: Option<String>,
+    persona: Option<PersonaRoutingSpec>,
 }
 
 pub fn build_task_handoff(
@@ -118,7 +135,7 @@ pub fn build_task_handoff(
             validation_gate: task.execution_policy.validation_gate.clone(),
             validation_rules: task.validation_rules.clone(),
             execution_policy_mode: task.execution_policy.mode.clone(),
-            persona_mode: task.persona.as_ref().map(|persona| persona.mode.clone()),
+            persona: task.persona.clone(),
         });
         return Ok(TaskHandoffReport {
             status: "handoff_blocked".to_string(),
@@ -148,7 +165,7 @@ pub fn build_task_handoff(
         validation_gate: task.execution_policy.validation_gate.clone(),
         validation_rules: task.validation_rules.clone(),
         execution_policy_mode: task.execution_policy.mode.clone(),
-        persona_mode: task.persona.as_ref().map(|persona| persona.mode.clone()),
+        persona: task.persona.clone(),
     });
     let allowed = lease_report.allowed;
     Ok(TaskHandoffReport {
@@ -172,6 +189,12 @@ pub fn build_task_handoff(
 
 impl ExecutorHandoffPacket {
     fn from_parts(parts: PacketParts<'_>) -> Self {
+        let persona_mode = parts.persona.as_ref().map(|persona| persona.mode.clone());
+        let persona_contract = parts
+            .persona
+            .as_ref()
+            .map(|persona| build_persona_contract(persona, parts.context));
+
         Self {
             schema_version: EXECUTOR_HANDOFF_SCHEMA_VERSION.to_string(),
             workflow_id: parts.context.workflow_id.clone(),
@@ -205,10 +228,30 @@ impl ExecutorHandoffPacket {
             validation_gate: parts.validation_gate,
             validation_rules: parts.validation_rules,
             execution_policy_mode: parts.execution_policy_mode,
-            persona_mode: parts.persona_mode,
+            persona_mode,
+            persona_contract,
             resume_context_status: parts.context.resume_context_status.clone(),
             resume_plan: build_resume_plan(parts.context),
         }
+    }
+}
+
+fn build_persona_contract(
+    persona: &PersonaRoutingSpec,
+    context: &ContextPackage,
+) -> ExecutorHandoffPersonaContract {
+    ExecutorHandoffPersonaContract {
+        schema_version: PERSONA_HANDOFF_SCHEMA_VERSION.to_string(),
+        mode: persona.mode.clone(),
+        scope: persona.scope.clone(),
+        instruction_source: persona.instruction_source.clone(),
+        voice: persona.voice.clone(),
+        tone: persona.tone.clone(),
+        validation_gate: persona.validation_gate.clone(),
+        source_models: persona.source_models.clone(),
+        auditable: persona.auditable,
+        lineage_sha256: context.lineage.lineage_sha256.clone(),
+        persona_mode_sha256: context.lineage.persona_mode_sha256.clone(),
     }
 }
 

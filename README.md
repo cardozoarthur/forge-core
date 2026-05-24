@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.37`
+Current version: `0.4.38`
 
 This is the first functional CLI + Skill version:
 
@@ -135,10 +135,14 @@ forge task handoff --workflow <workflow-id> --task task-001 --executor codex --b
 ```
 
 The command reuses the strict context readiness contract, acquires a Forge task
-lease only when `handoff_ready=true`, and returns `forge.executor_handoff.v3`
+lease only when `handoff_ready=true`, and returns `forge.executor_handoff.v4`
 with the selected executor, task executor kind, lease id, context SHA-256,
 routing fingerprint schema, routing cache key, lineage hash, expected output,
-execution policy mode and validation gate.
+execution policy mode and validation gate. Human-facing persona nodes also carry
+a versioned `persona_contract` with the node-scoped mode, voice, tone,
+instruction source, source models, persona validation gate and lineage hashes so
+adapters do not have to infer soul/personality routing from the nested context
+body.
 
 Skill-style async handoff:
 

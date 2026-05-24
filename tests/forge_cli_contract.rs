@@ -4567,7 +4567,7 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
     assert_eq!(handoff_json["context"]["handoff_status"], "ready");
 
     let packet = &handoff_json["packet"];
-    assert_eq!(packet["schema_version"], "forge.executor_handoff.v3");
+    assert_eq!(packet["schema_version"], "forge.executor_handoff.v4");
     assert_eq!(packet["workflow_id"], workflow_id);
     assert_eq!(packet["task_id"], task_id);
     assert_eq!(packet["selected_executor"], "codex");
@@ -4786,7 +4786,7 @@ fn task_handoff_packet_exposes_resume_plan_from_checkpoint_route_key() {
     let resumed_packet = &resumed_handoff_json["packet"];
     assert_eq!(
         resumed_packet["schema_version"],
-        "forge.executor_handoff.v3"
+        "forge.executor_handoff.v4"
     );
     assert_eq!(
         resumed_packet["resume_context_status"],
@@ -4824,6 +4824,100 @@ fn task_handoff_packet_exposes_resume_plan_from_checkpoint_route_key() {
         resumed_packet["resume_plan"]["reason"],
         "checkpoint route differs from current handoff route"
     );
+}
+
+#[test]
+fn task_handoff_packet_carries_node_scoped_persona_contract() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Create an operator report with auditable persona routing",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let documentation_task = find_task(json["tasks"].as_array().unwrap(), "Generate documentation");
+    let task_id = documentation_task["id"].as_str().unwrap();
+
+    for dependency in documentation_task["dependencies"].as_array().unwrap() {
+        set_task_status_in_stored_workflow(
+            &store,
+            workflow_id,
+            dependency.as_str().unwrap(),
+            "completed",
+        );
+    }
+
+    let handoff = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "2400",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
+    let packet = &handoff_json["packet"];
+    let contract = &packet["persona_contract"];
+
+    assert_eq!(packet["schema_version"], "forge.executor_handoff.v4");
+    assert_eq!(packet["persona_mode"], "operator_report");
+    assert_eq!(contract["schema_version"], "forge.persona_handoff.v1");
+    assert_eq!(contract["mode"], "operator_report");
+    assert_eq!(contract["scope"], "node");
+    assert_eq!(
+        contract["instruction_source"],
+        "forge_personality_soul_routing_v1"
+    );
+    assert_eq!(contract["validation_gate"], "persona_routing_required");
+    assert_eq!(contract["auditable"], true);
+    assert_eq!(
+        contract["lineage_sha256"],
+        handoff_json["context"]["lineage"]["lineage_sha256"]
+    );
+    assert_eq!(
+        contract["persona_mode_sha256"],
+        handoff_json["context"]["lineage"]["persona_mode_sha256"]
+    );
+    assert!(contract["source_models"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(
+            "codex_developer_personality_instructions".to_string()
+        )));
+    assert!(contract["source_models"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(
+            "paperclip_soul_voice_tone_persona".to_string()
+        )));
 }
 
 #[test]

@@ -239,6 +239,8 @@ This capability must remain operationally bounded:
 - the persona is a node-level execution setting, not hidden global behavior;
 - the task graph records mode, scope, source models, voice, tone and validation gate;
 - the context packet records which persona profile was selected and includes it as a shard;
+- executor handoff packets project the selected persona as a versioned contract so
+  adapters can enforce the node mode without parsing unrelated context;
 - Codex-style developer/personality instructions and Paperclip-style soul, voice,
   tone or persona models are inputs to the profile contract;
 - the persona switch is included in lineage so results are replayable;
