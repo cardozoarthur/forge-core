@@ -8,12 +8,13 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v22";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v23";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
 const ROUTING_CONTRACT_SCHEMA_VERSION: &str = "forge.context.routing_contract.v1";
 const ROUTING_REPAIR_SCHEMA_VERSION: &str = "forge.context.routing_repair.v1";
 const BUDGET_PLAN_SCHEMA_VERSION: &str = "forge.context.budget_plan.v1";
 const PERSONA_CONTRACT_SCHEMA_VERSION: &str = "forge.context.persona_contract.v1";
+const CONTEXT_DELTA_SCHEMA_VERSION: &str = "forge.context.delta.v1";
 const CONTEXT_SELECTOR_VERSION: &str = "forge.context.selector.v1";
 const EXECUTOR_PROFILE_SCHEMA_VERSION: &str = "forge.context.executor_profile.v1";
 const CONTEXT_NEXT_ACTION_SCHEMA_VERSION: &str = "forge.inspect_context_action.v1";
@@ -21,7 +22,7 @@ const CONTEXT_ROUTING_QUALITY_SCHEMA_VERSION: &str = "forge.context_routing_qual
 const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
     "forge.context_routing_quality_summary.v1";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_v22";
+    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_v23";
 const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
@@ -116,6 +117,7 @@ pub struct ContextPackage {
     pub routing_summary: ContextRoutingSummary,
     pub routing_quality: ContextRoutingQuality,
     pub next_action: ContextNextAction,
+    pub context_delta: ContextDelta,
     pub context_ready: bool,
     pub required_sections: Vec<String>,
     pub missing_required_sections: Vec<String>,
@@ -382,6 +384,23 @@ pub struct ContextNextAction {
     pub current_context_routing_cache_key: String,
     pub reason: String,
     pub blocking_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextDelta {
+    pub schema_version: String,
+    pub status: String,
+    pub can_reuse_checkpoint_context: bool,
+    pub partial_retry_recommended: bool,
+    pub checkpoint_id: Option<String>,
+    pub checkpoint_workflow_revision: Option<u64>,
+    pub current_workflow_revision: u64,
+    pub checkpoint_context_sha256: Option<String>,
+    pub current_context_sha256: String,
+    pub checkpoint_context_routing_cache_key: Option<String>,
+    pub current_context_routing_cache_key: String,
+    pub changed_components: Vec<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -890,6 +909,14 @@ pub fn build_context_package_with_checkpoint(
         resume_context_status,
         resume_context_reason,
     );
+    let context_delta = build_context_delta(
+        latest_checkpoint.as_ref(),
+        workflow_revision,
+        &context_sha256,
+        &routing_fingerprint.cache_key,
+        resume_context_status,
+        resume_context_reason,
+    );
 
     Ok(ContextPackage {
         schema_version: CONTEXT_SCHEMA_VERSION.to_string(),
@@ -924,6 +951,7 @@ pub fn build_context_package_with_checkpoint(
         routing_summary,
         routing_quality,
         next_action,
+        context_delta,
         context_ready,
         required_sections,
         missing_required_sections,
@@ -1056,6 +1084,93 @@ fn build_context_next_action(
         current_context_routing_cache_key: current_route.to_string(),
         reason: reason.to_string(),
         blocking_refs,
+    }
+}
+
+fn build_context_delta(
+    checkpoint: Option<&TaskCheckpoint>,
+    workflow_revision: u64,
+    context_sha256: &str,
+    context_routing_cache_key: &str,
+    resume_context_status: &str,
+    resume_context_reason: &str,
+) -> ContextDelta {
+    let Some(checkpoint) = checkpoint else {
+        return ContextDelta {
+            schema_version: CONTEXT_DELTA_SCHEMA_VERSION.to_string(),
+            status: "no_checkpoint".to_string(),
+            can_reuse_checkpoint_context: false,
+            partial_retry_recommended: false,
+            checkpoint_id: None,
+            checkpoint_workflow_revision: None,
+            current_workflow_revision: workflow_revision,
+            checkpoint_context_sha256: None,
+            current_context_sha256: context_sha256.to_string(),
+            checkpoint_context_routing_cache_key: None,
+            current_context_routing_cache_key: context_routing_cache_key.to_string(),
+            changed_components: Vec::new(),
+            reason: "no checkpoint recorded for this workflow task".to_string(),
+        };
+    };
+
+    let mut changed_components = Vec::new();
+    if checkpoint.workflow_revision != workflow_revision {
+        changed_components.push("workflow_revision".to_string());
+    }
+    if checkpoint.context_sha256 != context_sha256 {
+        changed_components.push("context_payload".to_string());
+    }
+    match checkpoint.context_routing_cache_key.as_deref() {
+        Some(cache_key) if cache_key != context_routing_cache_key => {
+            changed_components.push("routing_cache_key".to_string());
+        }
+        None => changed_components.push("checkpoint_route_missing".to_string()),
+        _ => {}
+    }
+
+    let status = if resume_context_status == "checkpoint_stale" {
+        "checkpoint_stale"
+    } else if checkpoint.context_routing_cache_key.is_none() {
+        "checkpoint_route_unknown"
+    } else if changed_components.is_empty() {
+        "unchanged"
+    } else if changed_components
+        .iter()
+        .any(|component| component == "routing_cache_key")
+    {
+        "route_changed"
+    } else if changed_components
+        .iter()
+        .any(|component| component == "context_payload")
+    {
+        "content_changed"
+    } else {
+        "changed"
+    };
+    let reason = match status {
+        "checkpoint_stale" => resume_context_reason,
+        "checkpoint_route_unknown" => "checkpoint does not carry a context routing cache key",
+        "unchanged" => "checkpoint context route matches the current context route",
+        "route_changed" => "checkpoint context route differs from the current context route",
+        "content_changed" => "checkpoint context payload differs from the current context payload",
+        "changed" => "checkpoint context differs from current context",
+        _ => "no checkpoint recorded for this workflow task",
+    };
+
+    ContextDelta {
+        schema_version: CONTEXT_DELTA_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        can_reuse_checkpoint_context: status == "unchanged",
+        partial_retry_recommended: status == "route_changed",
+        checkpoint_id: Some(checkpoint.checkpoint_id.clone()),
+        checkpoint_workflow_revision: Some(checkpoint.workflow_revision),
+        current_workflow_revision: workflow_revision,
+        checkpoint_context_sha256: Some(checkpoint.context_sha256.clone()),
+        current_context_sha256: context_sha256.to_string(),
+        checkpoint_context_routing_cache_key: checkpoint.context_routing_cache_key.clone(),
+        current_context_routing_cache_key: context_routing_cache_key.to_string(),
+        changed_components,
+        reason: reason.to_string(),
     }
 }
 

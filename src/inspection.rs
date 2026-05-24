@@ -1,9 +1,9 @@
 use crate::checkpoint::load_workflow_checkpoints;
 use crate::context::{
     build_context_package_with_checkpoint, context_next_action, summarize_context_handoff_tasks,
-    ContextBudgetPlan, ContextHandoffBlocker, ContextHandoffSummary, ContextHandoffTask,
-    ContextNextAction, ContextPackage, ContextRoutingQuality, ContextRoutingRepair,
-    ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
+    ContextBudgetPlan, ContextDelta, ContextHandoffBlocker, ContextHandoffSummary,
+    ContextHandoffTask, ContextNextAction, ContextPackage, ContextRoutingQuality,
+    ContextRoutingRepair, ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
 };
 use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, SubtaskSpec, TaskStatus,
@@ -81,6 +81,7 @@ pub struct ContextInspectionRoute {
     pub budget_plan: ContextBudgetPlan,
     pub routing_quality: ContextRoutingQuality,
     pub next_action: ContextNextAction,
+    pub context_delta: ContextDelta,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -273,6 +274,7 @@ fn context_route(package: &ContextPackage) -> ContextInspectionRoute {
         budget_plan: package.budget_plan.clone(),
         routing_quality: package.routing_quality.clone(),
         next_action: context_next_action(package),
+        context_delta: package.context_delta.clone(),
     }
 }
 
@@ -338,13 +340,14 @@ fn render_diagram(
             )
         };
         let context_route = format!(
-            " context {} {} {}/{} cache {} next {} budget_plan {}/{} {}",
+            " context {} {} {}/{} cache {} next {} delta {} budget_plan {}/{} {}",
             node.context_route.profile_id,
             node.context_route.handoff_status,
             node.context_route.context_bytes,
             node.context_route.effective_budget,
             short_hash(&node.context_route.routing_cache_key),
             node.context_route.next_action.action,
+            node.context_route.context_delta.status,
             node.context_route.budget_plan.minimum_correct_budget_bytes,
             node.context_route.budget_plan.recommended_budget_bytes,
             node.context_route.budget_plan.status

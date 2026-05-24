@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.52 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v23` with a versioned `context_delta` object for resumable context reuse decisions.
+- The delta contract uses schema `forge.context.delta.v1` and compares the current context payload, routing cache key and workflow revision with the latest task checkpoint.
+- Delta output reports checkpoint ids, checkpoint/current context hashes, checkpoint/current routing keys, changed components, `can_reuse_checkpoint_context` and `partial_retry_recommended`.
+- `forge inspect --output json` now projects `context_delta` for each terminal node, and the human diagram prints a compact `delta <status>` marker.
+- `forge task handoff` packets now carry the same context delta next to routing quality so executor adapters can avoid redundant reasoning or choose partial retry from the adapter envelope.
+- Added CLI contract coverage proving `forge context` reports `no_checkpoint` before checkpointing and `route_changed` with changed components after a checkpointed route diverges.
+
+### Changed
+
+- The context routing policy is now `task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_v23`.
+- The package version is now `0.4.52`.
+
+### Safety
+
+- Context deltas are read-only metadata derived from Forge-owned workflow/task/checkpoint state and deterministic context routing.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules, task leases and validation-before-promotion semantics.
+
 ## 0.4.51 - 2026-05-24
 
 ### Added

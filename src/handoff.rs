@@ -1,6 +1,6 @@
 use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{
-    build_context_package_with_checkpoint, ContextHandoffBlocker, ContextPackage,
+    build_context_package_with_checkpoint, ContextDelta, ContextHandoffBlocker, ContextPackage,
     ContextRoutingQuality,
 };
 use crate::graph::{ExecutionPolicySpec, ExecutorKind, PersonaRoutingSpec, ValidationRule};
@@ -48,6 +48,7 @@ pub struct ExecutorHandoffPacket {
     pub context_routing_lineage_sha256: String,
     pub context_bytes: usize,
     pub context_routing_quality: ContextRoutingQuality,
+    pub context_delta: ContextDelta,
     pub handoff_ready: bool,
     pub handoff_status: String,
     pub handoff_blockers: Vec<ContextHandoffBlocker>,
@@ -225,6 +226,7 @@ impl ExecutorHandoffPacket {
                 .clone(),
             context_bytes: parts.context.context_bytes,
             context_routing_quality: parts.context.routing_quality.clone(),
+            context_delta: parts.context.context_delta.clone(),
             handoff_ready: parts.context.handoff_ready,
             handoff_status: parts.context.handoff_status.clone(),
             handoff_blockers: parts.context.handoff_blockers.clone(),
