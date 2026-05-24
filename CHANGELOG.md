@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.64 - 2026-05-24
+
+### Added
+
+- `forge context` now emits a versioned `selection_receipt` with schema `forge.context.selection_receipt.v1`.
+- Selection receipts summarize the exact context route in a compact audit contract: selector version, executor profile, reasoning/deterministic mode, requested/effective budget, selected bytes, minimum-correct budget, selected sections, required sections, missing required sections, compressed sections, budget-omitted sections, profile-omitted sections, route status and handoff status.
+- Context routing fingerprints now include a `selection_receipt` component, so cache keys account for the receipt that executor adapters can audit before reuse.
+- `forge inspect --output json` now projects the selection receipt checksum, route status and required-complete flag for each inspected node, and the terminal diagram prints a compact `receipt <hash>` marker.
+- Added CLI contract coverage proving receipts are emitted by `forge context`, are bound into routing fingerprints and are visible through `forge inspect`.
+
+### Changed
+
+- The package version is now `0.4.64`.
+
+### Safety
+
+- Selection receipts are read-only metadata derived from deterministic context routing. They do not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules, task leases, persona gates, child-subflow validation gates and continuation plans.
+
 ## 0.4.63 - 2026-05-24
 
 ### Added

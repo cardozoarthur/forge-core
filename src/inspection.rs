@@ -77,6 +77,9 @@ pub struct ContextInspectionRoute {
     pub prompt_packet_version: String,
     pub prompt_packet_sha256: String,
     pub replay_manifest_sha256: String,
+    pub selection_receipt_sha256: String,
+    pub selection_route_status: String,
+    pub selection_required_complete: bool,
     pub profile_id: String,
     pub reasoning_allowed: bool,
     pub deterministic: bool,
@@ -336,6 +339,9 @@ fn context_route(package: &ContextPackage) -> ContextInspectionRoute {
         prompt_packet_version: package.prompt_packet.packet_version.clone(),
         prompt_packet_sha256: package.prompt_packet.packet_sha256.clone(),
         replay_manifest_sha256: package.replay_manifest.manifest_sha256.clone(),
+        selection_receipt_sha256: package.selection_receipt.receipt_sha256.clone(),
+        selection_route_status: package.selection_receipt.route_status.clone(),
+        selection_required_complete: package.selection_receipt.required_complete,
         profile_id: package.executor_profile.id.clone(),
         reasoning_allowed: package.executor_profile.reasoning_allowed,
         deterministic: package.executor_profile.deterministic,
@@ -601,7 +607,7 @@ fn render_diagram(
             )
         };
         let context_route = format!(
-            " context {} {} {}/{} cache {} packet {} replay {} next {} delta {} continue {} {} budget_plan {}/{} {}",
+            " context {} {} {}/{} cache {} packet {} replay {} receipt {} select {} required_complete {} next {} delta {} continue {} {} budget_plan {}/{} {}",
             node.context_route.profile_id,
             node.context_route.handoff_status,
             node.context_route.context_bytes,
@@ -609,6 +615,9 @@ fn render_diagram(
             short_hash(&node.context_route.routing_cache_key),
             short_hash(&node.context_route.prompt_packet_sha256),
             short_hash(&node.context_route.replay_manifest_sha256),
+            short_hash(&node.context_route.selection_receipt_sha256),
+            node.context_route.selection_route_status,
+            node.context_route.selection_required_complete,
             node.context_route.next_action.action,
             node.context_route.context_delta.status,
             node.context_route.continuation_plan.action,

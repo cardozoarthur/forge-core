@@ -20,6 +20,7 @@ const ROUTING_ECONOMY_SCHEMA_VERSION: &str = "forge.context.routing_economy.v1";
 const PROMPT_PACKET_SCHEMA_VERSION: &str = "forge.context.prompt_packet.v2";
 const EXECUTOR_PROMPT_PACKET_VERSION: &str = "forge.executor.prompt_packet.v2";
 const CONTEXT_REPLAY_MANIFEST_SCHEMA_VERSION: &str = "forge.context.replay_manifest.v1";
+const CONTEXT_SELECTION_RECEIPT_SCHEMA_VERSION: &str = "forge.context.selection_receipt.v1";
 const CONTEXT_SELECTOR_VERSION: &str = "forge.context.selector.v1";
 const EXECUTOR_PROFILE_SCHEMA_VERSION: &str = "forge.context.executor_profile.v1";
 const CONTEXT_NEXT_ACTION_SCHEMA_VERSION: &str = "forge.inspect_context_action.v1";
@@ -118,6 +119,7 @@ pub struct ContextPackage {
     pub context_bytes: usize,
     pub context_sha256: String,
     pub replay_manifest: ContextReplayManifest,
+    pub selection_receipt: ContextSelectionReceipt,
     pub prompt_packet: ContextPromptPacket,
     pub routing_fingerprint: ContextRoutingFingerprint,
     pub routing_contract: ContextRoutingContract,
@@ -210,6 +212,35 @@ pub struct ContextReplayCommand {
     pub args: Vec<String>,
     pub requires_store_path: bool,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextSelectionReceipt {
+    pub schema_version: String,
+    pub selector_version: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub workflow_revision: u64,
+    pub executor_profile_id: String,
+    pub reasoning_allowed: bool,
+    pub deterministic: bool,
+    pub requested_budget: usize,
+    pub effective_budget: usize,
+    pub selected_bytes: usize,
+    pub minimum_correct_budget_bytes: usize,
+    pub route_status: String,
+    pub context_ready: bool,
+    pub required_complete: bool,
+    pub handoff_status: String,
+    pub selected_sections: Vec<String>,
+    pub required_sections: Vec<String>,
+    pub missing_required_sections: Vec<String>,
+    pub compressed_sections: Vec<String>,
+    pub budget_omitted_sections: Vec<String>,
+    pub profile_omitted_sections: Vec<String>,
+    pub shard_count: usize,
+    pub included_shard_count: usize,
+    pub receipt_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -680,6 +711,34 @@ struct ContextReplayManifestSeed<'a> {
     shard_refs: &'a [ContextReplayShardRef],
 }
 
+#[derive(Serialize)]
+struct ContextSelectionReceiptSeed<'a> {
+    schema_version: &'static str,
+    selector_version: &'static str,
+    workflow_id: &'a str,
+    task_id: &'a str,
+    workflow_revision: u64,
+    executor_profile_id: &'static str,
+    reasoning_allowed: bool,
+    deterministic: bool,
+    requested_budget: usize,
+    effective_budget: usize,
+    selected_bytes: usize,
+    minimum_correct_budget_bytes: usize,
+    route_status: &'a str,
+    context_ready: bool,
+    required_complete: bool,
+    handoff_status: &'a str,
+    selected_sections: &'a [String],
+    required_sections: &'a [String],
+    missing_required_sections: &'a [String],
+    compressed_sections: &'a [String],
+    budget_omitted_sections: &'a [String],
+    profile_omitted_sections: &'a [String],
+    shard_count: usize,
+    included_shard_count: usize,
+}
+
 struct RoutingFingerprintInput<'a> {
     workflow_id: &'a str,
     task_id: &'a str,
@@ -701,6 +760,7 @@ struct RoutingFingerprintInput<'a> {
     routing_economy: &'a ContextRoutingEconomy,
     routing_quality: &'a ContextRoutingQuality,
     replay_manifest: &'a ContextReplayManifest,
+    selection_receipt: &'a ContextSelectionReceipt,
     persona_profile: Option<&'a ContextPersonaProfile>,
     persona_contract: Option<&'a ContextPersonaContract>,
     prompt_packet: &'a ContextPromptPacket,
@@ -733,6 +793,24 @@ struct ReplayManifestInput<'a> {
     included_sections: &'a [String],
     missing_required_sections: &'a [String],
     shards: &'a [ContextShard],
+}
+
+struct SelectionReceiptInput<'a> {
+    workflow_id: &'a str,
+    task_id: &'a str,
+    workflow_revision: u64,
+    profile: &'a ExecutorContextProfile,
+    requested_budget: usize,
+    effective_budget: usize,
+    routing_summary: &'a ContextRoutingSummary,
+    budget_plan: &'a ContextBudgetPlan,
+    shards: &'a [ContextShard],
+    included_sections: &'a [String],
+    required_sections: &'a [String],
+    missing_required_sections: &'a [String],
+    profile_omitted_sections: &'a [String],
+    context_ready: bool,
+    handoff_status: &'a str,
 }
 
 pub fn build_context_package(
@@ -1151,6 +1229,23 @@ pub fn build_context_package_with_checkpoint(
         missing_required_sections: &missing_required_sections,
         shards: &shards,
     })?;
+    let selection_receipt = build_selection_receipt(SelectionReceiptInput {
+        workflow_id: &workflow.id,
+        task_id: &task.id,
+        workflow_revision,
+        profile: &profile,
+        requested_budget: budget,
+        effective_budget,
+        routing_summary: &routing_summary,
+        budget_plan: &budget_plan,
+        shards: &shards,
+        included_sections: &included_sections,
+        required_sections: &required_sections,
+        missing_required_sections: &missing_required_sections,
+        profile_omitted_sections: &profile_omitted_sections,
+        context_ready,
+        handoff_status,
+    })?;
     let prompt_packet = build_prompt_packet(PromptPacketInput {
         workflow_id: &workflow.id,
         task,
@@ -1185,6 +1280,7 @@ pub fn build_context_package_with_checkpoint(
         routing_economy: &routing_economy,
         routing_quality: &routing_quality,
         replay_manifest: &replay_manifest,
+        selection_receipt: &selection_receipt,
         persona_profile: persona_profile.as_ref(),
         persona_contract: persona_contract.as_ref(),
         prompt_packet: &prompt_packet,
@@ -1245,6 +1341,7 @@ pub fn build_context_package_with_checkpoint(
         context_bytes: content.len(),
         context_sha256,
         replay_manifest,
+        selection_receipt,
         prompt_packet,
         routing_fingerprint,
         routing_contract,
@@ -1708,6 +1805,98 @@ fn build_replay_manifest(input: ReplayManifestInput<'_>) -> Result<ContextReplay
         replay_command,
         shard_refs,
         manifest_sha256,
+    })
+}
+
+fn build_selection_receipt(input: SelectionReceiptInput<'_>) -> Result<ContextSelectionReceipt> {
+    let compressed_sections = unique_sections(
+        input
+            .shards
+            .iter()
+            .filter(|shard| shard.included && shard.compressed)
+            .map(|shard| shard.section.as_str()),
+    );
+    let budget_omitted_sections = unique_sections(
+        input
+            .shards
+            .iter()
+            .filter(|shard| shard.routing_decision == "omitted_budget")
+            .map(|shard| shard.section.as_str()),
+    );
+    let required_complete = input.missing_required_sections.is_empty();
+    let included_shard_count = input.shards.iter().filter(|shard| shard.included).count();
+    let (
+        receipt_sha256,
+        selected_sections,
+        required_sections,
+        missing_required_sections,
+        profile_omitted_sections,
+        route_status,
+        handoff_status,
+    ) = {
+        let seed = ContextSelectionReceiptSeed {
+            schema_version: CONTEXT_SELECTION_RECEIPT_SCHEMA_VERSION,
+            selector_version: CONTEXT_SELECTOR_VERSION,
+            workflow_id: input.workflow_id,
+            task_id: input.task_id,
+            workflow_revision: input.workflow_revision,
+            executor_profile_id: input.profile.id,
+            reasoning_allowed: input.profile.reasoning_allowed,
+            deterministic: input.profile.deterministic,
+            requested_budget: input.requested_budget,
+            effective_budget: input.effective_budget,
+            selected_bytes: input.routing_summary.selected_bytes,
+            minimum_correct_budget_bytes: input.budget_plan.minimum_correct_budget_bytes,
+            route_status: &input.budget_plan.status,
+            context_ready: input.context_ready,
+            required_complete,
+            handoff_status: input.handoff_status,
+            selected_sections: input.included_sections,
+            required_sections: input.required_sections,
+            missing_required_sections: input.missing_required_sections,
+            compressed_sections: &compressed_sections,
+            budget_omitted_sections: &budget_omitted_sections,
+            profile_omitted_sections: input.profile_omitted_sections,
+            shard_count: input.shards.len(),
+            included_shard_count,
+        };
+        (
+            hex_sha256(serde_json::to_string(&seed)?.as_bytes()),
+            seed.selected_sections.to_vec(),
+            seed.required_sections.to_vec(),
+            seed.missing_required_sections.to_vec(),
+            seed.profile_omitted_sections.to_vec(),
+            seed.route_status.to_string(),
+            seed.handoff_status.to_string(),
+        )
+    };
+
+    Ok(ContextSelectionReceipt {
+        schema_version: CONTEXT_SELECTION_RECEIPT_SCHEMA_VERSION.to_string(),
+        selector_version: CONTEXT_SELECTOR_VERSION.to_string(),
+        workflow_id: input.workflow_id.to_string(),
+        task_id: input.task_id.to_string(),
+        workflow_revision: input.workflow_revision,
+        executor_profile_id: input.profile.id.to_string(),
+        reasoning_allowed: input.profile.reasoning_allowed,
+        deterministic: input.profile.deterministic,
+        requested_budget: input.requested_budget,
+        effective_budget: input.effective_budget,
+        selected_bytes: input.routing_summary.selected_bytes,
+        minimum_correct_budget_bytes: input.budget_plan.minimum_correct_budget_bytes,
+        route_status,
+        context_ready: input.context_ready,
+        required_complete,
+        handoff_status,
+        selected_sections,
+        required_sections,
+        missing_required_sections,
+        compressed_sections,
+        budget_omitted_sections,
+        profile_omitted_sections,
+        shard_count: input.shards.len(),
+        included_shard_count,
+        receipt_sha256,
     })
 }
 
@@ -2312,6 +2501,7 @@ fn build_routing_fingerprint(
     let routing_economy = serde_json::to_string(input.routing_economy)?;
     let routing_quality = serde_json::to_string(input.routing_quality)?;
     let replay_manifest = input.replay_manifest.manifest_sha256.clone();
+    let selection_receipt = input.selection_receipt.receipt_sha256.clone();
     let persona_profile = serde_json::to_string(&input.persona_profile)?;
     let persona_contract = serde_json::to_string(&input.persona_contract)?;
     let source_shards = input
@@ -2374,6 +2564,7 @@ fn build_routing_fingerprint(
         fingerprint_component("routing_economy", routing_economy),
         fingerprint_component("routing_quality", routing_quality),
         fingerprint_component("replay_manifest", replay_manifest),
+        fingerprint_component("selection_receipt", selection_receipt),
         fingerprint_component("persona_profile", persona_profile),
         fingerprint_component("persona_contract", persona_contract),
         fingerprint_component("prompt_packet", input.prompt_packet.packet_sha256.clone()),

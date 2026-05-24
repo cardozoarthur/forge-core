@@ -2134,6 +2134,127 @@ fn context_package_exposes_versioned_routing_contract_for_executor_adapters() {
 }
 
 #[test]
+fn context_package_exposes_selection_receipt_for_auditable_context_routing() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let goal = format!(
+        "Build auditable context selection receipts {}",
+        "with repeated operational routing inputs ".repeat(40)
+    );
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            &goal,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let task = find_task(json["tasks"].as_array().unwrap(), "Extract requirements");
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task["id"].as_str().unwrap(),
+            "--budget",
+            "420",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+
+    let receipt = &context["selection_receipt"];
+    assert_eq!(
+        receipt["schema_version"],
+        "forge.context.selection_receipt.v1"
+    );
+    assert_eq!(receipt["selector_version"], "forge.context.selector.v1");
+    assert_eq!(receipt["workflow_id"], workflow_id);
+    assert_eq!(receipt["task_id"], task["id"]);
+    assert_eq!(receipt["workflow_revision"], context["workflow_revision"]);
+    assert_eq!(receipt["executor_profile_id"], "ai_reasoning");
+    assert_eq!(receipt["requested_budget"], 420);
+    assert_eq!(receipt["effective_budget"], context["effective_budget"]);
+    assert_eq!(
+        receipt["minimum_correct_budget_bytes"],
+        context["budget_plan"]["minimum_correct_budget_bytes"]
+    );
+    assert_eq!(receipt["selected_sections"], context["included_sections"]);
+    assert_eq!(receipt["required_sections"], context["required_sections"]);
+    assert_eq!(
+        receipt["missing_required_sections"],
+        context["missing_required_sections"]
+    );
+    assert_eq!(receipt["required_complete"], context["context_ready"]);
+    assert_eq!(receipt["route_status"], context["budget_plan"]["status"]);
+    assert_eq!(receipt["handoff_status"], context["handoff_status"]);
+    assert!(receipt["compressed_sections"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("workflow_goal".to_string())));
+    assert!(!receipt["budget_omitted_sections"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(receipt["receipt_sha256"].as_str().unwrap().len(), 64);
+    assert!(context["routing_fingerprint"]["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|component| component["name"] == "selection_receipt"
+            && component["value"] == receipt["receipt_sha256"]
+            && component["sha256"].as_str().unwrap().len() == 64));
+
+    let inspect_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspection: Value = serde_json::from_slice(&inspect_output).unwrap();
+    let inspected_task = find_task(
+        inspection["nodes"].as_array().unwrap(),
+        "Extract requirements",
+    );
+    assert_eq!(
+        inspected_task["context_route"]["selection_receipt_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert!(inspected_task["context_route"]["selection_route_status"].is_string());
+    assert!(inspected_task["context_route"]["selection_required_complete"].is_boolean());
+    assert!(inspection["diagram"].as_str().unwrap().contains("receipt "));
+}
+
+#[test]
 fn context_package_scores_routing_quality_for_budget_pressure() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
