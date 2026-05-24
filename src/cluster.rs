@@ -14,7 +14,7 @@ const CLUSTER_REGISTRY_SCHEMA_VERSION: &str = "forge.cluster_registry.v2";
 const CLUSTER_NODE_SCHEDULING_SCHEMA_VERSION: &str = "forge.cluster_node_scheduling.v1";
 const CLUSTER_PLACEMENT_SCHEMA_VERSION: &str = "forge.cluster_placement.v1";
 const CLUSTER_PLACEMENT_REQUIREMENTS_SCHEMA_VERSION: &str =
-    "forge.cluster_placement_requirements.v2";
+    "forge.cluster_placement_requirements.v3";
 const CLUSTER_PLACEMENT_POLICY_SCHEMA_VERSION: &str = "forge.cluster_placement_policy.v1";
 const CLUSTER_TASK_HANDOFF_SCHEMA_VERSION: &str = "forge.cluster_task_handoff.v1";
 const CLUSTER_SYNC_MANIFEST_SCHEMA_VERSION: &str = "forge.cluster_sync_manifest.v1";
@@ -131,7 +131,9 @@ pub struct ClusterPlacementRequirements {
     pub policy_mode: String,
     pub reasoning_required: bool,
     pub remote_ai_execution_allowed: bool,
+    pub required_os: Option<String>,
     pub required_capabilities: Vec<String>,
+    pub required_software: Vec<String>,
     pub required_sandbox_permissions: Vec<String>,
     pub required_trust: String,
     pub mutation_allowed: bool,
@@ -815,11 +817,16 @@ fn summarize_nodes(
 
 fn placement_requirements(workflow_id: &str, task: &AtomicTask) -> ClusterPlacementRequirements {
     let mut required_capabilities = Vec::new();
+    let mut required_software = Vec::new();
     let mut required_sandbox_permissions = Vec::new();
-    if task.execution_policy.mode == "local_code_node" {
-        if let Some(runtime) = &task.execution_policy.code_runtime {
-            required_capabilities.push(normalize_token(&runtime.language));
-            required_sandbox_permissions.push(normalize_token(&runtime.sandbox));
+    let mut required_os = None;
+    if let Some(runtime) = &task.execution_policy.code_runtime {
+        let runtime_language = normalize_token(&runtime.language);
+        required_capabilities.push(runtime_language.clone());
+        required_sandbox_permissions.push(normalize_token(&runtime.sandbox));
+        if runtime_language == "metatrader5" {
+            required_os = Some("windows".to_string());
+            required_software.push("metatrader5".to_string());
         }
     }
     if required_capabilities.is_empty() {
@@ -835,7 +842,9 @@ fn placement_requirements(workflow_id: &str, task: &AtomicTask) -> ClusterPlacem
         reasoning_required: task.execution_policy.ai_allowed
             && !task.execution_policy.deterministic,
         remote_ai_execution_allowed: false,
+        required_os,
         required_capabilities,
+        required_software,
         required_sandbox_permissions,
         required_trust: "trusted_lan_or_local".to_string(),
         mutation_allowed: false,
@@ -857,9 +866,22 @@ fn evaluate_candidate(
     if !trusted_for_placement(&node.trust_level) {
         reasons.push(format!("trust level {} is not allowed", node.trust_level));
     }
+    if let Some(required_os) = &requirements.required_os {
+        if !node.os.contains(required_os) {
+            reasons.push(format!(
+                "os {} does not satisfy required os {required_os}",
+                node.os
+            ));
+        }
+    }
     for capability in &requirements.required_capabilities {
         if !has_capability(node, capability) {
             reasons.push(format!("missing capability {capability}"));
+        }
+    }
+    for software in &requirements.required_software {
+        if !has_software(node, software) {
+            reasons.push(format!("missing software {software}"));
         }
     }
     for sandbox_permission in &requirements.required_sandbox_permissions {
@@ -987,6 +1009,13 @@ fn has_capability(node: &ClusterNode, capability: &str) -> bool {
     node.capabilities.iter().any(|item| item == &capability)
 }
 
+fn has_software(node: &ClusterNode, software: &str) -> bool {
+    let expected = normalize_compact_token(software);
+    node.installed_software
+        .iter()
+        .any(|item| normalize_compact_token(item) == expected)
+}
+
 fn trusted_for_placement(trust_level: &str) -> bool {
     matches!(
         trust_level,
@@ -1022,6 +1051,10 @@ fn normalize_set(values: &[String]) -> BTreeSet<String> {
 
 fn normalize_token(value: &str) -> String {
     value.trim().to_lowercase().replace(' ', "_")
+}
+
+fn normalize_compact_token(value: &str) -> String {
+    normalize_token(value).replace(['_', '-'], "")
 }
 
 fn normalize_node_filter(value: &str) -> String {
