@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.46 - 2026-05-24
+
+### Added
+
+- `forge list --quality-actions` now emits a versioned catalog of registry quality-action filter values.
+- The catalog uses schema `forge.registry_quality_action_catalog.v1` and lists each action, filter value, possible priorities, description and trigger.
+- Added CLI contract coverage proving operators can discover `increase_context_budget` and `start_executor_handoff` before filtering workflow inventory with `--quality-action`.
+
+### Changed
+
+- Registry quality-action taxonomy is now exposed through a read-only CLI contract instead of requiring operators to infer valid filter keys from current workflow rows or changelog text.
+- The package version is now `0.4.46`.
+
+### Safety
+
+- Quality-action catalog discovery is static, read-only metadata derived from Forge's registry recommendation contract.
+- This change does not open or mutate workflow stores, acquire leases, complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by `forge task handoff`, strict context readiness, dependency readiness and task leases.
+
 ## 0.4.45 - 2026-05-24
 
 ### Added

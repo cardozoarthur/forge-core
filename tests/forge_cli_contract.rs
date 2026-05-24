@@ -4446,6 +4446,65 @@ fn list_filters_workflow_registry_by_quality_action_and_lifecycle() {
 }
 
 #[test]
+fn list_surfaces_quality_action_catalog_for_filter_discovery() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let catalog = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--quality-actions",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let catalog_json: Value = serde_json::from_slice(&catalog).unwrap();
+    assert_eq!(catalog_json["status"], "quality_actions_loaded");
+    assert_eq!(
+        catalog_json["schema_version"],
+        "forge.registry_quality_action_catalog.v1"
+    );
+    assert_eq!(catalog_json["filter_field"], "quality_action");
+    assert!(catalog_json["actions"].as_array().unwrap().len() >= 6);
+
+    let increase_context_budget = find_quality_action(&catalog_json, "increase_context_budget");
+    assert_eq!(
+        increase_context_budget["filter_value"],
+        "increase_context_budget"
+    );
+    assert!(increase_context_budget["possible_priorities"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("blocking".to_string())));
+    assert!(increase_context_budget["possible_priorities"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("warning".to_string())));
+    assert!(increase_context_budget["description"]
+        .as_str()
+        .unwrap()
+        .contains("context budget"));
+
+    let start_handoff = find_quality_action(&catalog_json, "start_executor_handoff");
+    assert_eq!(start_handoff["filter_value"], "start_executor_handoff");
+    assert_eq!(
+        start_handoff["possible_priorities"],
+        serde_json::json!(["ready"])
+    );
+    assert!(start_handoff["trigger"]
+        .as_str()
+        .unwrap()
+        .contains("context quality and dependencies allow executor handoff"));
+}
+
+#[test]
 fn list_surfaces_reusable_code_node_subflows_with_compatibility_keys() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -5878,6 +5937,15 @@ fn find_workflow<'a>(json: &'a Value, id: &str) -> &'a Value {
         .unwrap()
         .iter()
         .find(|workflow| workflow["workflow_id"] == id)
+        .unwrap()
+}
+
+fn find_quality_action<'a>(json: &'a Value, action: &str) -> &'a Value {
+    json["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["action"] == action)
         .unwrap()
 }
 

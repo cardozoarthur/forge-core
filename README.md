@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.44`
+Current version: `0.4.46`
 
 This is the first functional CLI + Skill version:
 
@@ -37,6 +37,7 @@ This is the first functional CLI + Skill version:
 - notification payloads with final workflow cost reporting
 - artifact listing
 - workflow registry listing with lifecycle state and `running`/`non-running` filters
+- workflow registry quality-action catalog discovery for Context Routing Engine triage filters
 - terminal workflow DAG inspection with lifecycle, dependency, persona, context-route, execution-policy and next-action annotations
 - handoff readiness summaries in workflow inspection and async request status
 - proposed child-subflow links for compatible deterministic code-node reuse
@@ -77,6 +78,8 @@ Use the returned `workflow_id`:
 forge list --output json
 forge list --lifecycle running --output json
 forge list --lifecycle non-running --output json
+forge list --quality-actions --output json
+forge list --quality-action increase_context_budget --output json
 forge inspect <workflow-id> --verbose --output json
 forge status --workflow <workflow-id> --output json
 forge context --workflow <workflow-id> --task task-001 --budget 1200 --output json

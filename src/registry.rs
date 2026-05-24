@@ -18,6 +18,8 @@ const REGISTRY_CONTEXT_HANDOFF_SCHEMA_VERSION: &str = "forge.registry_context_ha
 const REGISTRY_CONTEXT_ACTION_SCHEMA_VERSION: &str = "forge.registry_context_action.v1";
 const REGISTRY_CONTEXT_QUALITY_SCHEMA_VERSION: &str = "forge.registry_context_quality.v1";
 const REGISTRY_QUALITY_ACTION_SCHEMA_VERSION: &str = "forge.registry_quality_action.v1";
+const REGISTRY_QUALITY_ACTION_CATALOG_SCHEMA_VERSION: &str =
+    "forge.registry_quality_action_catalog.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowRegistryReport {
@@ -147,6 +149,23 @@ pub struct RegistryQualityAction {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct RegistryQualityActionCatalog {
+    pub status: String,
+    pub schema_version: String,
+    pub filter_field: String,
+    pub actions: Vec<RegistryQualityActionCatalogEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RegistryQualityActionCatalogEntry {
+    pub action: String,
+    pub filter_value: String,
+    pub possible_priorities: Vec<String>,
+    pub description: String,
+    pub trigger: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ReusableSubflowRef {
     pub workflow_id: String,
     pub task_id: String,
@@ -254,6 +273,70 @@ pub fn list_workflows_with_filters(
         summary,
         workflows: rows,
     })
+}
+
+pub fn quality_action_catalog() -> RegistryQualityActionCatalog {
+    RegistryQualityActionCatalog {
+        status: "quality_actions_loaded".to_string(),
+        schema_version: REGISTRY_QUALITY_ACTION_CATALOG_SCHEMA_VERSION.to_string(),
+        filter_field: "quality_action".to_string(),
+        actions: vec![
+            quality_action_catalog_entry(
+                "repair_context_and_wait_for_dependencies",
+                &["blocking"],
+                "Repair required context while waiting for dependency tasks to become ready.",
+                "required context is missing and dependency tasks are not ready",
+            ),
+            quality_action_catalog_entry(
+                "increase_context_budget",
+                &["blocking", "warning"],
+                "Increase the context budget or reduce routed context pressure before executor handoff.",
+                "required context was omitted or routing quality reports budget pressure",
+            ),
+            quality_action_catalog_entry(
+                "wait_for_dependencies",
+                &["blocking"],
+                "Wait for prerequisite tasks before attempting executor handoff.",
+                "dependency tasks must complete before executor handoff",
+            ),
+            quality_action_catalog_entry(
+                "verify_executor_profile",
+                &["advisory"],
+                "Review executor profile selection when optional context is filtered by policy.",
+                "executor profile filtered optional context sections",
+            ),
+            quality_action_catalog_entry(
+                "review_context_summary_before_reuse",
+                &["advisory"],
+                "Review compressed context summaries before reuse or long-running continuation.",
+                "one or more context shards were compressed to fit the route",
+            ),
+            quality_action_catalog_entry(
+                "start_executor_handoff",
+                &["ready"],
+                "Start a bounded executor handoff for tasks whose context and dependencies are ready.",
+                "context quality and dependencies allow executor handoff",
+            ),
+        ],
+    }
+}
+
+fn quality_action_catalog_entry(
+    action: &str,
+    possible_priorities: &[&str],
+    description: &str,
+    trigger: &str,
+) -> RegistryQualityActionCatalogEntry {
+    RegistryQualityActionCatalogEntry {
+        action: action.to_string(),
+        filter_value: action.to_string(),
+        possible_priorities: possible_priorities
+            .iter()
+            .map(|priority| (*priority).to_string())
+            .collect(),
+        description: description.to_string(),
+        trigger: trigger.to_string(),
+    }
 }
 
 impl WorkflowRegistryFilters {

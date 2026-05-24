@@ -15,7 +15,7 @@ use forge_core::intent::parse_intent;
 use forge_core::lease::{acquire_task_lease, release_task_lease};
 use forge_core::registry::{
     attach_reuse_candidates_as_child_subflows, find_reuse_candidates, list_workflows_with_filters,
-    WorkflowLifecycleFilter, WorkflowRegistryFilters,
+    quality_action_catalog, WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
 use forge_core::request::{load_request_status, start_async_request};
 use forge_core::runtime::{
@@ -52,6 +52,8 @@ enum Commands {
         lifecycle: WorkflowLifecycleArg,
         #[arg(long = "quality-action")]
         quality_action: Option<String>,
+        #[arg(long = "quality-actions")]
+        quality_actions: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -429,8 +431,15 @@ fn run() -> Result<i32> {
         Commands::List {
             lifecycle,
             quality_action,
+            quality_actions,
             output,
         } => {
+            if quality_actions {
+                let catalog = quality_action_catalog();
+                print_response(output, &catalog)?;
+                return Ok(0);
+            }
+
             let store = ForgeStore::open(cli.store)?;
             let quality_action = quality_action
                 .map(|action| action.trim().to_string())
