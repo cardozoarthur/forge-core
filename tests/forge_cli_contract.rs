@@ -1505,6 +1505,80 @@ fn deterministic_code_nodes_carry_no_ai_execution_policy_in_context() {
 }
 
 #[test]
+fn frequent_local_code_goals_select_deterministic_node_without_schedule_scaffolding() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run frequent local Node.js invoice normalization",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let tasks = json["tasks"].as_array().unwrap();
+    let code_task = find_task(tasks, "Run deterministic non-AI step");
+
+    assert_eq!(code_task["id"], "task-009");
+    assert_eq!(code_task["executor"], "command");
+    assert_eq!(code_task["execution_policy"]["mode"], "local_code_node");
+    assert_eq!(code_task["execution_policy"]["ai_allowed"], false);
+    assert_eq!(code_task["execution_policy"]["deterministic"], true);
+    assert_eq!(
+        code_task["execution_policy"]["reuse_hint"],
+        "reuse_compatible_code_node"
+    );
+    assert_eq!(
+        code_task["execution_policy"]["code_runtime"]["language"],
+        "nodejs"
+    );
+    assert_eq!(
+        code_task["execution_policy"]["code_runtime"]["entrypoint"],
+        "forge_local_node_code_node"
+    );
+    assert!(!tasks
+        .iter()
+        .any(|task| task["title"] == "Wait for scheduled continuation"));
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            code_task["id"].as_str().unwrap(),
+            "--budget",
+            "1600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+    assert_eq!(context["executor_profile"]["id"], "no_ai_deterministic");
+    assert_eq!(context["routing_economy"]["model_call_avoided"], true);
+    assert_eq!(
+        context["routing_economy"]["cost_decision"],
+        "no_ai_deterministic_route"
+    );
+}
+
+#[test]
 fn context_package_tracks_runtime_mutation_lineage_and_current_goal() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

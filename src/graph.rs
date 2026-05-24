@@ -367,6 +367,8 @@ fn work_item(
 }
 
 pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
+    let local_code_policy = local_code_execution_policy(&intent.goal);
+    let autonomous_extensions_required = requires_autonomous_extensions(&intent.goal);
     let mut tasks = vec![
         task(
             "task-001",
@@ -465,7 +467,18 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         ),
     ];
 
-    if requires_autonomous_extensions(&intent.goal) {
+    if let (false, Some(policy)) = (
+        autonomous_extensions_required,
+        reusable_local_code_policy(local_code_policy.as_ref()),
+    ) {
+        tasks.push(deterministic_non_ai_task(
+            "task-009",
+            &["task-003"],
+            policy.clone(),
+        ));
+    }
+
+    if autonomous_extensions_required {
         let mut immediate = task(
             "task-009",
             "Execute immediate workflow action",
@@ -497,25 +510,10 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         });
         tasks.push(wait);
 
-        let mut deterministic = task(
-            "task-011",
-            "Run deterministic non-AI step",
-            &["task-010"],
-            &["workflow metrics", "artifact state"],
-            vec![rule(
-                "deterministic",
-                "step does not require live model call",
-                None,
-            )],
-            "Non-AI execution result",
-            (ExecutorKind::Command, 0.0002),
-        );
-        if let Some(policy) = local_code_execution_policy(&intent.goal) {
-            deterministic.execution_policy = policy;
-            deterministic
-                .context_requirements
-                .push("local deterministic code-node policy".to_string());
-        }
+        let deterministic_policy =
+            local_code_policy.unwrap_or_else(|| default_execution_policy(&ExecutorKind::Command));
+        let deterministic =
+            deterministic_non_ai_task("task-011", &["task-010"], deterministic_policy);
         tasks.push(deterministic);
 
         if let Some(email) = extract_email(&intent.goal) {
@@ -560,6 +558,33 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
     }
 
     tasks
+}
+
+fn deterministic_non_ai_task(
+    id: &str,
+    dependencies: &[&str],
+    execution_policy: ExecutionPolicySpec,
+) -> AtomicTask {
+    let mut deterministic = task(
+        id,
+        "Run deterministic non-AI step",
+        dependencies,
+        &["workflow metrics", "artifact state"],
+        vec![rule(
+            "deterministic",
+            "step does not require live model call",
+            None,
+        )],
+        "Non-AI execution result",
+        (ExecutorKind::Command, 0.0002),
+    );
+    deterministic.execution_policy = execution_policy;
+    if deterministic.execution_policy.mode == "local_code_node" {
+        deterministic
+            .context_requirements
+            .push("local deterministic code-node policy".to_string());
+    }
+    deterministic
 }
 
 fn with_persona(mut task: AtomicTask, persona: PersonaRoutingSpec) -> AtomicTask {
@@ -675,6 +700,12 @@ fn local_code_execution_policy(goal: &str) -> Option<ExecutionPolicySpec> {
         reuse_hint,
         validation_gate: "deterministic_code_node_validation_required".to_string(),
     })
+}
+
+fn reusable_local_code_policy(
+    policy: Option<&ExecutionPolicySpec>,
+) -> Option<&ExecutionPolicySpec> {
+    policy.filter(|policy| policy.reuse_hint == "reuse_compatible_code_node")
 }
 
 fn requires_async_runtime(goal: &str) -> bool {

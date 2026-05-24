@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.63 - 2026-05-24
+
+### Added
+
+- Forge now selects a standalone deterministic `local_code_node` when a goal asks for repeated or frequent local Python/Node.js work, even when the workflow does not also request cron, email or another autonomous extension.
+- Standalone local code nodes use the existing no-AI execution policy, local process/no-network runtime contract, reusable code-node hint and deterministic validation gate.
+- Added CLI contract coverage proving a frequent local Node.js goal creates the deterministic code node, avoids scheduled-continuation scaffolding and routes context through the no-AI deterministic profile with a model call marked as avoided.
+
+### Changed
+
+- The package version is now `0.4.63`.
+
+### Safety
+
+- This change only affects graph planning metadata and context routing. It does not execute local Python/Node.js code, complete tasks, promote workflows, authorize CLIs, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Existing cron/email autonomous extension behavior remains unchanged; scheduled continuation tasks are not added for standalone local code goals.
+
 ## 0.4.62 - 2026-05-24
 
 ### Added
