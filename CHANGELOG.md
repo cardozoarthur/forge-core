@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.47 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v18` with a versioned `routing_contract` object.
+- The routing contract uses schema `forge.context.routing_contract.v1` and records selector version, executor profile version, profile id, selection strategy, requested/effective budgets, minimum budget, max profile budget, compression allowance, allowed/required/optional sections and a stable profile hash.
+- Context routing fingerprints now include a `routing_contract` component, so executor cache keys account for selector/profile contract changes instead of only final content and shard outcomes.
+- Added CLI contract coverage proving deterministic no-AI code nodes receive the routing contract and that the fingerprint binds it.
+
+### Changed
+
+- The context routing policy is now `task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_v18`.
+- Context routing profile details are now auditable as an explicit adapter-facing contract rather than requiring adapters to infer the selector profile from scattered fields.
+- The package version is now `0.4.47`.
+
+### Safety
+
+- The routing contract is read-only metadata derived from Forge-owned workflow/task state and deterministic selector configuration.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules and task leases.
+
 ## 0.4.46 - 2026-05-24
 
 ### Added

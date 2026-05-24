@@ -8,14 +8,18 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v17";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v18";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
+const ROUTING_CONTRACT_SCHEMA_VERSION: &str = "forge.context.routing_contract.v1";
+const CONTEXT_SELECTOR_VERSION: &str = "forge.context.selector.v1";
+const EXECUTOR_PROFILE_SCHEMA_VERSION: &str = "forge.context.executor_profile.v1";
 const CONTEXT_NEXT_ACTION_SCHEMA_VERSION: &str = "forge.inspect_context_action.v1";
 const CONTEXT_ROUTING_QUALITY_SCHEMA_VERSION: &str = "forge.context_routing_quality.v1";
 const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
     "forge.context_routing_quality_summary.v1";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_v17";
+    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_v18";
+const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
 const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
@@ -102,6 +106,7 @@ pub struct ContextPackage {
     pub context_bytes: usize,
     pub context_sha256: String,
     pub routing_fingerprint: ContextRoutingFingerprint,
+    pub routing_contract: ContextRoutingContract,
     pub routing_summary: ContextRoutingSummary,
     pub routing_quality: ContextRoutingQuality,
     pub context_ready: bool,
@@ -130,6 +135,24 @@ pub struct ContextRoutingFingerprintComponent {
     pub name: String,
     pub value: String,
     pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextRoutingContract {
+    pub schema_version: String,
+    pub selector_version: String,
+    pub profile_version: String,
+    pub profile_id: String,
+    pub selection_strategy: String,
+    pub requested_budget: usize,
+    pub effective_budget: usize,
+    pub minimum_budget_bytes: usize,
+    pub max_context_bytes: Option<usize>,
+    pub compression_allowed: bool,
+    pub allowed_sections: Vec<String>,
+    pub required_sections: Vec<String>,
+    pub optional_sections: Vec<String>,
+    pub profile_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -346,6 +369,21 @@ struct ContextLineageSeed {
     revision_sources: Vec<String>,
 }
 
+#[derive(Serialize)]
+struct ContextRoutingContractProfileSeed {
+    schema_version: &'static str,
+    selector_version: &'static str,
+    profile_version: &'static str,
+    profile_id: String,
+    selection_strategy: &'static str,
+    reasoning_allowed: bool,
+    deterministic: bool,
+    max_context_bytes: Option<usize>,
+    compression_allowed: bool,
+    allowed_sections: Vec<String>,
+    required_sections: Vec<String>,
+}
+
 struct RoutingFingerprintInput<'a> {
     workflow_id: &'a str,
     task_id: &'a str,
@@ -361,6 +399,7 @@ struct RoutingFingerprintInput<'a> {
     shards: &'a [ContextShard],
     child_subflows: &'a [ChildSubflowRef],
     resume_context_status: &'a str,
+    routing_contract: &'a ContextRoutingContract,
     routing_quality: &'a ContextRoutingQuality,
     context_sha256: &'a str,
 }
@@ -455,8 +494,11 @@ pub fn build_context_package_with_checkpoint(
         .iter()
         .find(|candidate| candidate.id == task_id)
         .ok_or_else(|| anyhow::anyhow!("task not found: {task_id}"))?;
-    if budget < 128 {
-        bail!("context budget must be at least 128 bytes");
+    if budget < MINIMUM_CONTEXT_BUDGET_BYTES {
+        bail!(
+            "context budget must be at least {} bytes",
+            MINIMUM_CONTEXT_BUDGET_BYTES
+        );
     }
 
     let profile = executor_context_profile(task);
@@ -732,6 +774,8 @@ pub fn build_context_package_with_checkpoint(
     let handoff_ready = handoff_blockers.is_empty();
     let handoff_status = derive_handoff_status(&handoff_blockers);
     let context_sha256 = hex_sha256(content.as_bytes());
+    let routing_contract =
+        build_routing_contract(&profile, budget, effective_budget, &required_sections)?;
     let routing_quality = build_routing_quality(
         &routing_summary,
         &shards,
@@ -753,6 +797,7 @@ pub fn build_context_package_with_checkpoint(
         shards: &shards,
         child_subflows: &task.child_subflows,
         resume_context_status,
+        routing_contract: &routing_contract,
         routing_quality: &routing_quality,
         context_sha256: &context_sha256,
     })?;
@@ -783,6 +828,7 @@ pub fn build_context_package_with_checkpoint(
         context_bytes: content.len(),
         context_sha256,
         routing_fingerprint,
+        routing_contract,
         routing_summary,
         routing_quality,
         context_ready,
@@ -1095,6 +1141,59 @@ fn build_routing_quality(
     }
 }
 
+fn build_routing_contract(
+    profile: &ExecutorContextProfile,
+    requested_budget: usize,
+    effective_budget: usize,
+    required_sections: &[String],
+) -> Result<ContextRoutingContract> {
+    let allowed_sections = profile
+        .allowed_sections
+        .iter()
+        .map(|section| (*section).to_string())
+        .collect::<Vec<_>>();
+    let required_sections = required_sections.to_vec();
+    let optional_sections = allowed_sections
+        .iter()
+        .filter(|section| {
+            !required_sections
+                .iter()
+                .any(|required| required.as_str() == section.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let seed = ContextRoutingContractProfileSeed {
+        schema_version: ROUTING_CONTRACT_SCHEMA_VERSION,
+        selector_version: CONTEXT_SELECTOR_VERSION,
+        profile_version: EXECUTOR_PROFILE_SCHEMA_VERSION,
+        profile_id: profile.id.to_string(),
+        selection_strategy: "required_first_priority_budgeted_compression",
+        reasoning_allowed: profile.reasoning_allowed,
+        deterministic: profile.deterministic,
+        max_context_bytes: profile.max_context_bytes,
+        compression_allowed: true,
+        allowed_sections: allowed_sections.clone(),
+        required_sections: required_sections.clone(),
+    };
+
+    Ok(ContextRoutingContract {
+        schema_version: ROUTING_CONTRACT_SCHEMA_VERSION.to_string(),
+        selector_version: CONTEXT_SELECTOR_VERSION.to_string(),
+        profile_version: EXECUTOR_PROFILE_SCHEMA_VERSION.to_string(),
+        profile_id: profile.id.to_string(),
+        selection_strategy: seed.selection_strategy.to_string(),
+        requested_budget,
+        effective_budget,
+        minimum_budget_bytes: MINIMUM_CONTEXT_BUDGET_BYTES,
+        max_context_bytes: profile.max_context_bytes,
+        compression_allowed: true,
+        allowed_sections,
+        required_sections,
+        optional_sections,
+        profile_sha256: hex_sha256(serde_json::to_string(&seed)?.as_bytes()),
+    })
+}
+
 fn routing_quality_warning(
     code: &str,
     severity: &str,
@@ -1168,6 +1267,7 @@ fn build_routing_fingerprint(
 ) -> Result<ContextRoutingFingerprint> {
     let dependency_state = serde_json::to_string(input.dependency_summary)?;
     let child_subflows = serde_json::to_string(input.child_subflows)?;
+    let routing_contract = serde_json::to_string(input.routing_contract)?;
     let routing_quality = serde_json::to_string(input.routing_quality)?;
     let source_shards = input
         .shards
@@ -1223,6 +1323,7 @@ fn build_routing_fingerprint(
         fingerprint_component("child_subflows", child_subflows),
         fingerprint_component("resume_context", input.resume_context_status.to_string()),
         fingerprint_component("budget_ledger", budget_ledger),
+        fingerprint_component("routing_contract", routing_contract),
         fingerprint_component("routing_quality", routing_quality),
         fingerprint_component("context_payload", input.context_sha256.to_string()),
     ];
