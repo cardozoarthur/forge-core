@@ -8,10 +8,10 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v14";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v15";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_v14";
+    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_v15";
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
 const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
@@ -142,6 +142,8 @@ pub struct ContextLineage {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ContextShard {
+    pub sequence: usize,
+    pub shard_id: String,
     pub section: String,
     pub source: String,
     pub priority: u8,
@@ -154,6 +156,7 @@ pub struct ContextShard {
     pub decision_reason: String,
     pub bytes: usize,
     pub original_bytes: usize,
+    pub source_sha256: String,
     pub content_sha256: String,
     pub summary: String,
 }
@@ -300,6 +303,7 @@ struct RoutingFingerprintInput<'a> {
     included_sections: &'a [String],
     omitted_sections: &'a [String],
     missing_required_sections: &'a [String],
+    shards: &'a [ContextShard],
     child_subflows: &'a [ChildSubflowRef],
     resume_context_status: &'a str,
     context_sha256: &'a str,
@@ -551,10 +555,23 @@ pub fn build_context_package_with_checkpoint(
         }
         let summary = summarize_shard(&candidate.content);
         let original_bytes = candidate.content.len();
+        let source_sha256 = hex_sha256(candidate.content.as_bytes());
+        let shard_id = build_shard_id(
+            &workflow.id,
+            &task.id,
+            workflow_revision,
+            &profile,
+            candidate.section,
+            candidate.source,
+            &source_sha256,
+        );
+        let sequence = shards.len();
         if !profile.allowed_sections.contains(&candidate.section) {
             omitted_sections.push(candidate.section.to_string());
             profile_omitted_sections.push(candidate.section.to_string());
             shards.push(ContextShard {
+                sequence,
+                shard_id,
                 section: candidate.section.to_string(),
                 source: candidate.source.to_string(),
                 priority: candidate.priority,
@@ -570,6 +587,7 @@ pub fn build_context_package_with_checkpoint(
                 ),
                 bytes: 0,
                 original_bytes,
+                source_sha256,
                 content_sha256: hex_sha256(b""),
                 summary,
             });
@@ -614,6 +632,8 @@ pub fn build_context_package_with_checkpoint(
         }
 
         shards.push(ContextShard {
+            sequence,
+            shard_id,
             section: candidate.section.to_string(),
             source: candidate.source.to_string(),
             priority: candidate.priority,
@@ -626,6 +646,7 @@ pub fn build_context_package_with_checkpoint(
             decision_reason: decision_reason.to_string(),
             bytes: selected_content.len(),
             original_bytes,
+            source_sha256,
             content_sha256: hex_sha256(selected_content.as_bytes()),
             summary,
         });
@@ -654,6 +675,7 @@ pub fn build_context_package_with_checkpoint(
         included_sections: &included_sections,
         omitted_sections: &omitted_sections,
         missing_required_sections: &missing_required_sections,
+        shards: &shards,
         child_subflows: &task.child_subflows,
         resume_context_status,
         context_sha256: &context_sha256,
@@ -801,6 +823,17 @@ fn build_routing_fingerprint(
 ) -> Result<ContextRoutingFingerprint> {
     let dependency_state = serde_json::to_string(input.dependency_summary)?;
     let child_subflows = serde_json::to_string(input.child_subflows)?;
+    let source_shards = input
+        .shards
+        .iter()
+        .map(|shard| {
+            format!(
+                "{}:{}:{}:{}",
+                shard.sequence, shard.section, shard.source, shard.source_sha256
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|");
     let components = vec![
         fingerprint_component("routing_policy", ROUTING_POLICY.to_string()),
         fingerprint_component(
@@ -818,6 +851,7 @@ fn build_routing_fingerprint(
                 input.requested_budget, input.effective_budget
             ),
         ),
+        fingerprint_component("source_shards", source_shards),
         fingerprint_component("selected_sections", input.included_sections.join(",")),
         fingerprint_component("omitted_sections", input.omitted_sections.join(",")),
         fingerprint_component(
@@ -850,6 +884,24 @@ fn build_routing_fingerprint(
         lineage_sha256: input.lineage.lineage_sha256.clone(),
         components,
     })
+}
+
+fn build_shard_id(
+    workflow_id: &str,
+    task_id: &str,
+    workflow_revision: u64,
+    profile: &ExecutorContextProfile,
+    section: &str,
+    source: &str,
+    source_sha256: &str,
+) -> String {
+    hex_sha256(
+        format!(
+            "{workflow_id}:{task_id}:{workflow_revision}:{}:{section}:{source}:{source_sha256}",
+            profile.id
+        )
+        .as_bytes(),
+    )
 }
 
 fn fingerprint_component(name: &str, value: String) -> ContextRoutingFingerprintComponent {

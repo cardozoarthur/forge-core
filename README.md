@@ -82,14 +82,14 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v14`) with a deterministic
-`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_v14` routing policy.
+`forge context` emits a versioned context packet (`forge.context.v15`) with a deterministic
+`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_v15` routing policy.
 The packet keeps the legacy `content` body for executors, and also returns workflow
 revision, artifact count, persona routing metadata for human-facing nodes, executor
 profile metadata, execution policy metadata, dependency readiness summaries, proposed
 child-subflow bindings, lineage hashes and a shard manifest with included/omitted sections, profile exclusions,
-compression flags, required/missing-required markers, source labels, priorities, byte
-counts, summaries and SHA-256 checksums. The packet also exposes `context_ready`,
+compression flags, required/missing-required markers, source labels, priorities,
+content-addressed shard IDs, source hashes, byte counts, summaries and SHA-256 checksums. The packet also exposes `context_ready`,
 `required_sections`, `missing_required_sections`, `handoff_ready`, `handoff_status`,
 `handoff_blockers`, a `routing_summary` and a versioned `routing_fingerprint`
 with component hashes and a cache key so executor adapters can reuse or invalidate

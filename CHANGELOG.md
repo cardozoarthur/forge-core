@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.35 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v15` with content-addressed shard metadata.
+- Each context shard includes a stable `sequence`, `shard_id` and `source_sha256` so executor adapters can audit and reuse shard identities even when a shard is omitted by budget or profile routing.
+- The context routing fingerprint now includes a `source_shards` component derived from ordered shard source hashes.
+
+### Changed
+
+- The routing policy is now `task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_v15`.
+- Executor cache keys now account for source shard content, not only the final selected context payload and included/omitted section names.
+
+### Safety
+
+- Shard addressing is read-only context metadata derived from Forge-owned workflow/task state.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+
 ## 0.4.34 - 2026-05-24
 
 ### Added
