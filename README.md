@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.70`
+Current version: `0.4.71`
 
 This is the first functional CLI + Skill version:
 
@@ -98,15 +98,16 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v29`) with a deterministic
-`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v29` routing policy.
+`forge context` emits a versioned context packet (`forge.context.v30`) with a deterministic
+`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_shard_selection_audit_v30` routing policy.
 The packet keeps the legacy `content` body for executors, and also returns workflow
 revision, artifact count, persona routing metadata for human-facing nodes, a versioned
 persona profile and persona contract, executor profile metadata, a versioned routing contract, execution policy metadata, dependency readiness summaries, proposed
 child-subflow bindings, lineage hashes and a shard manifest with included/omitted sections, profile exclusions,
 compression flags, required/missing-required markers, source labels, priorities,
 content-addressed shard IDs, source hashes, remaining-budget before/after values,
-byte counts, summaries and SHA-256 checksums. The packet also exposes `context_ready`,
+byte counts, minimum-routable byte counts, per-shard selected-cost basis points,
+selection savings, summaries and SHA-256 checksums. The packet also exposes `context_ready`,
 `required_sections`, `missing_required_sections`, `handoff_ready`, `handoff_status`,
 `handoff_blockers`, a `routing_summary`, a versioned `routing_contract`, a versioned
 `routing_repair` budget recommendation, a versioned `routing_quality` score/warning contract,

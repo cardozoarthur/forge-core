@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.71 - 2026-05-24
+
+### Added
+
+- `forge context` shard manifests now include per-shard selection cost audit fields:
+  - `minimum_routable_bytes`;
+  - `selection_saved_bytes`;
+  - `selection_cost_bps`.
+- Replay manifest shard refs carry the same audit fields, so async executors can replay and validate the cost of compressed or omitted context without rehydrating the full shard body.
+- Context routing fingerprints now include a `shard_selection_audit` component, so cache keys account for the exact per-shard selection-cost ledger used by executor adapters.
+- Added CLI contract coverage proving compressed shards report partial cost, budget-omitted shards report full savings, replay refs preserve the audit fields and the fingerprint binds the audit ledger.
+
+### Changed
+
+- The context packet schema is now `forge.context.v30`.
+- The routing policy is now `task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_shard_selection_audit_v30`.
+- The package version is now `0.4.71`.
+
+### Safety
+
+- Shard selection-cost audit fields are read-only metadata derived from deterministic context routing.
+- This change does not execute local Python/Node.js code, complete tasks, promote workflows, authorize CLIs, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules, task leases, persona gates, child-subflow validation gates and continuation plans.
+
 ## 0.4.70 - 2026-05-24
 
 ### Added

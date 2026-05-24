@@ -197,8 +197,8 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v29` and routing policy
-`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v29`. Each packet
+Current `forge context` packets use schema `forge.context.v30` and routing policy
+`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_shard_selection_audit_v30`. Each packet
 includes the executor-facing content, the full context checksum, workflow revision,
 artifact count, node-scoped persona routing metadata plus a versioned persona profile
 and persona contract for human-facing tasks, executor
@@ -206,7 +206,8 @@ profile metadata, a versioned routing contract, execution policy metadata, depen
 readiness summaries, proposed child-subflow bindings, requested and effective budgets,
 lineage hashes, included and omitted sections, profile-driven omissions, and a deterministic shard manifest with
 source, priority, compression state, profile exclusion state, required/missing-required
-state, remaining-budget before/after values, byte count, summary and shard checksum.
+state, remaining-budget before/after values, selected byte count, minimum-routable
+byte count, selected-cost basis points, selection savings, summary and shard checksum.
 Packets also include `context_ready`,
 `required_sections`, `missing_required_sections`, `handoff_ready`, `handoff_status`,
 `handoff_blockers`, aggregate `routing_summary` metrics and a versioned

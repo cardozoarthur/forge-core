@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v29";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v30";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
 const ROUTING_CONTRACT_SCHEMA_VERSION: &str = "forge.context.routing_contract.v1";
 const ROUTING_REPAIR_SCHEMA_VERSION: &str = "forge.context.routing_repair.v1";
@@ -31,7 +31,7 @@ const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
     "forge.context_routing_quality_summary.v1";
 const CONTINUATION_PLAN_SCHEMA_VERSION: &str = "forge.context.continuation_plan.v1";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v29";
+    "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_shard_selection_audit_v30";
 const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
@@ -285,6 +285,9 @@ pub struct ContextReplayShardRef {
     pub source_sha256: String,
     pub content_sha256: String,
     pub bytes: usize,
+    pub minimum_routable_bytes: usize,
+    pub selection_saved_bytes: usize,
+    pub selection_cost_bps: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -447,6 +450,9 @@ pub struct ContextShard {
     pub remaining_budget_after: usize,
     pub bytes: usize,
     pub original_bytes: usize,
+    pub minimum_routable_bytes: usize,
+    pub selection_saved_bytes: usize,
+    pub selection_cost_bps: u32,
     pub source_sha256: String,
     pub content_sha256: String,
     pub summary: String,
@@ -1184,6 +1190,8 @@ pub fn build_context_package_with_checkpoint(
         let summary = summarize_shard(&candidate.content);
         let original_bytes = candidate.content.len();
         let source_sha256 = hex_sha256(candidate.content.as_bytes());
+        let compressed_content = compress_shard(&candidate, &summary);
+        let minimum_routable_bytes = original_bytes.min(compressed_content.len());
         let shard_id = build_shard_id(
             &workflow.id,
             &task.id,
@@ -1218,6 +1226,9 @@ pub fn build_context_package_with_checkpoint(
                 remaining_budget_after: remaining_budget_before,
                 bytes: 0,
                 original_bytes,
+                minimum_routable_bytes,
+                selection_saved_bytes: original_bytes,
+                selection_cost_bps: 0,
                 source_sha256,
                 content_sha256: hex_sha256(b""),
                 summary,
@@ -1225,7 +1236,6 @@ pub fn build_context_package_with_checkpoint(
             continue;
         }
 
-        let compressed_content = compress_shard(&candidate, &summary);
         let (included, compressed, selected_content, routing_decision, decision_reason) =
             if content.len() + candidate.content.len() <= effective_budget {
                 (
@@ -1261,6 +1271,9 @@ pub fn build_context_package_with_checkpoint(
         } else {
             omitted_sections.push(candidate.section.to_string());
         }
+        let selected_bytes = selected_content.len();
+        let selection_saved_bytes = original_bytes.saturating_sub(selected_bytes);
+        let selection_cost_bps = selection_cost_bps(selected_bytes, original_bytes);
         let remaining_budget_after = remaining_budget_before.saturating_sub(selected_content.len());
 
         shards.push(ContextShard {
@@ -1278,8 +1291,11 @@ pub fn build_context_package_with_checkpoint(
             decision_reason: decision_reason.to_string(),
             remaining_budget_before,
             remaining_budget_after,
-            bytes: selected_content.len(),
+            bytes: selected_bytes,
             original_bytes,
+            minimum_routable_bytes,
+            selection_saved_bytes,
+            selection_cost_bps,
             source_sha256,
             content_sha256: hex_sha256(selected_content.as_bytes()),
             summary,
@@ -1882,6 +1898,9 @@ fn build_replay_manifest(input: ReplayManifestInput<'_>) -> Result<ContextReplay
             source_sha256: shard.source_sha256.clone(),
             content_sha256: shard.content_sha256.clone(),
             bytes: shard.bytes,
+            minimum_routable_bytes: shard.minimum_routable_bytes,
+            selection_saved_bytes: shard.selection_saved_bytes,
+            selection_cost_bps: shard.selection_cost_bps,
         })
         .collect::<Vec<_>>();
     let seed = ContextReplayManifestSeed {
@@ -2661,6 +2680,17 @@ fn minimum_routable_shard_bytes(shard: &ContextShard) -> usize {
     shard.original_bytes.min(compressed_bytes)
 }
 
+fn selection_cost_bps(selected_bytes: usize, original_bytes: usize) -> u32 {
+    if original_bytes == 0 {
+        return 0;
+    }
+
+    ((selected_bytes as u128 * 10_000) / original_bytes as u128)
+        .min(10_000)
+        .try_into()
+        .unwrap_or(10_000)
+}
+
 fn build_routing_contract(
     profile: &ExecutorContextProfile,
     requested_budget: usize,
@@ -2824,6 +2854,22 @@ fn build_routing_fingerprint(
         })
         .collect::<Vec<_>>()
         .join("|");
+    let shard_selection_audit = input
+        .shards
+        .iter()
+        .map(|shard| {
+            format!(
+                "{}:{}:{}:{}:{}:{}",
+                shard.sequence,
+                shard.section,
+                shard.bytes,
+                shard.minimum_routable_bytes,
+                shard.selection_saved_bytes,
+                shard.selection_cost_bps
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|");
     let components = vec![
         fingerprint_component("routing_policy", ROUTING_POLICY.to_string()),
         fingerprint_component(
@@ -2852,6 +2898,7 @@ fn build_routing_fingerprint(
         fingerprint_component("child_subflows", child_subflows),
         fingerprint_component("resume_context", input.resume_context_status.to_string()),
         fingerprint_component("budget_ledger", budget_ledger),
+        fingerprint_component("shard_selection_audit", shard_selection_audit),
         fingerprint_component("routing_contract", routing_contract),
         fingerprint_component("routing_repair", routing_repair),
         fingerprint_component("budget_plan", budget_plan),
