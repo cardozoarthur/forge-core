@@ -5,13 +5,16 @@ use crate::context::{
     ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
 };
 use crate::graph::{
-    AtomicTask, ChildSubflowRef, ExecutorKind, SubtaskSpec, TaskStatus, ValidationRule,
+    AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, SubtaskSpec, TaskStatus,
+    ValidationRule,
 };
 use crate::registry::{list_workflows, WorkflowRegistryRow};
 use crate::storage::ForgeStore;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
+
+const INSPECT_EXECUTION_POLICY_SCHEMA_VERSION: &str = "forge.inspect_execution_policy.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowInspectionReport {
@@ -38,6 +41,7 @@ pub struct TaskInspectionNode {
     pub status: String,
     pub dependencies: Vec<String>,
     pub executor: String,
+    pub execution_policy: ExecutionPolicyInspection,
     pub persona_mode: Option<String>,
     pub context_route: ContextInspectionRoute,
     pub goal: String,
@@ -73,6 +77,20 @@ pub struct ContextInspectionRoute {
     pub omitted_sections: Vec<String>,
     pub routing_summary: ContextRoutingSummary,
     pub next_action: ContextNextAction,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutionPolicyInspection {
+    pub schema_version: String,
+    pub mode: String,
+    pub ai_allowed: bool,
+    pub deterministic: bool,
+    pub reuse_hint: String,
+    pub selection_reason: String,
+    pub validation_gate: String,
+    pub code_runtime_language: Option<String>,
+    pub code_runtime_entrypoint: Option<String>,
+    pub code_runtime_sandbox: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -201,6 +219,7 @@ fn task_node(
         status: task_status(&task.status).to_string(),
         dependencies: task.dependencies.clone(),
         executor: executor_kind(&task.executor).to_string(),
+        execution_policy: execution_policy_inspection(&task.execution_policy),
         persona_mode: task.persona.as_ref().map(|persona| persona.mode.clone()),
         context_route: context_route(context_package),
         goal: task.goal.clone(),
@@ -219,6 +238,30 @@ fn task_node(
             Vec::new()
         },
         subflow_refs: task.child_subflows.clone(),
+    }
+}
+
+fn execution_policy_inspection(policy: &ExecutionPolicySpec) -> ExecutionPolicyInspection {
+    ExecutionPolicyInspection {
+        schema_version: INSPECT_EXECUTION_POLICY_SCHEMA_VERSION.to_string(),
+        mode: policy.mode.clone(),
+        ai_allowed: policy.ai_allowed,
+        deterministic: policy.deterministic,
+        reuse_hint: policy.reuse_hint.clone(),
+        selection_reason: policy.selection_reason.clone(),
+        validation_gate: policy.validation_gate.clone(),
+        code_runtime_language: policy
+            .code_runtime
+            .as_ref()
+            .map(|runtime| runtime.language.clone()),
+        code_runtime_entrypoint: policy
+            .code_runtime
+            .as_ref()
+            .map(|runtime| runtime.entrypoint.clone()),
+        code_runtime_sandbox: policy
+            .code_runtime
+            .as_ref()
+            .map(|runtime| runtime.sandbox.clone()),
     }
 }
 
@@ -318,8 +361,27 @@ fn render_diagram(
             short_hash(&node.context_route.routing_cache_key),
             node.context_route.next_action.action
         );
+        let execution_policy = format!(
+            " policy {} {} {} {} {}",
+            node.execution_policy.mode,
+            if node.execution_policy.ai_allowed {
+                "ai"
+            } else {
+                "no_ai"
+            },
+            if node.execution_policy.deterministic {
+                "deterministic"
+            } else {
+                "reasoning"
+            },
+            node.execution_policy
+                .code_runtime_language
+                .as_deref()
+                .unwrap_or("adapter"),
+            node.execution_policy.reuse_hint
+        );
         lines.push(format!(
-            "{} {} [{}] {}{}{} handoff {} executor {}{}",
+            "{} {} [{}] {}{}{} handoff {} executor {}{}{}",
             node.id,
             node.title,
             node.status,
@@ -328,7 +390,8 @@ fn render_diagram(
             subflow_refs,
             node.handoff_status,
             node.executor,
-            context_route
+            context_route,
+            execution_policy
         ));
 
         if verbose {

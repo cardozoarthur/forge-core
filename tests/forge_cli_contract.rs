@@ -1828,6 +1828,78 @@ fn inspect_exposes_context_route_summary_for_each_terminal_node() {
 }
 
 #[test]
+fn inspect_projects_execution_policy_for_deterministic_code_nodes() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with repeated local Python cost calculations without AI and email ops@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+
+    let inspect_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let inspection: Value = serde_json::from_slice(&inspect_output).unwrap();
+    assert!(inspection["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("policy local_code_node no_ai deterministic python reuse_compatible_code_node"));
+
+    let deterministic = find_task(
+        inspection["nodes"].as_array().unwrap(),
+        "Run deterministic non-AI step",
+    );
+    let policy = &deterministic["execution_policy"];
+    assert_eq!(
+        policy["schema_version"],
+        "forge.inspect_execution_policy.v1"
+    );
+    assert_eq!(policy["mode"], "local_code_node");
+    assert_eq!(policy["ai_allowed"], false);
+    assert_eq!(policy["deterministic"], true);
+    assert_eq!(policy["reuse_hint"], "reuse_compatible_code_node");
+    assert_eq!(
+        policy["validation_gate"],
+        "deterministic_code_node_validation_required"
+    );
+    assert_eq!(policy["code_runtime_language"], "python");
+    assert_eq!(
+        policy["code_runtime_entrypoint"],
+        "forge_local_python_code_node"
+    );
+    assert_eq!(policy["code_runtime_sandbox"], "local_process_no_network");
+    assert!(policy["selection_reason"]
+        .as_str()
+        .unwrap()
+        .contains("without routing the repeated step through a model"));
+}
+
+#[test]
 fn inspect_projects_next_context_action_for_handoff_and_resume() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

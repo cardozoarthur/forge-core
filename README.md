@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.39`
+Current version: `0.4.42`
 
 This is the first functional CLI + Skill version:
 
@@ -37,7 +37,7 @@ This is the first functional CLI + Skill version:
 - notification payloads with final workflow cost reporting
 - artifact listing
 - workflow registry listing with lifecycle state and `running`/`non-running` filters
-- terminal workflow DAG inspection with lifecycle, dependency, persona, context-route and next-action annotations
+- terminal workflow DAG inspection with lifecycle, dependency, persona, context-route, execution-policy and next-action annotations
 - handoff readiness summaries in workflow inspection and async request status
 - proposed child-subflow links for compatible deterministic code-node reuse
 - context routing with deterministic shard manifests, deterministic code-node and long-running cognition goals
@@ -112,16 +112,20 @@ reconstructing it from history. Runtime goal, artifact and persona routing state
 included in the context lineage so executors can detect stale context before resuming
 work.
 
-`forge inspect --output json` projects a compact `context_route` for every DAG node.
+`forge inspect --output json` projects compact `context_route` and `execution_policy`
+contracts for every DAG node.
 The route reuses the same versioned context package and includes the executor profile,
 effective budget, context checksum, routing fingerprint schema, routing cache key,
 lineage hash, handoff status, resume status, missing required sections and routing
 summary. It also includes a versioned `next_action` projection
 (`forge.inspect_context_action.v1`) so operators can see whether a node should start
 handoff, wait for dependencies, raise context budget, refresh stale context or retry
-from a checkpoint with fresh context. Human terminal diagrams also show the profile,
-handoff state, selected/effective context bytes, short routing cache key and next
-action for each node.
+from a checkpoint with fresh context. The execution policy projection
+(`forge.inspect_execution_policy.v1`) exposes the mode, AI allowance, deterministic
+flag, reuse hint, selection reason, validation gate and optional local code runtime
+fields before a handoff packet is requested. Human terminal diagrams also show the
+profile, handoff state, selected/effective context bytes, short routing cache key,
+next action and compact execution policy for each node.
 
 Use strict context mode when handing a package to an executor:
 
@@ -139,14 +143,14 @@ forge task handoff --workflow <workflow-id> --task task-001 --executor codex --b
 ```
 
 The command reuses the strict context readiness contract, acquires a Forge task
-lease only when `handoff_ready=true`, and returns `forge.executor_handoff.v4`
+lease only when `handoff_ready=true`, and returns `forge.executor_handoff.v5`
 with the selected executor, task executor kind, lease id, context SHA-256,
 routing fingerprint schema, routing cache key, lineage hash, expected output,
-execution policy mode and validation gate. Human-facing persona nodes also carry
-a versioned `persona_contract` with the node-scoped mode, voice, tone,
-instruction source, source models, persona validation gate and lineage hashes so
-adapters do not have to infer soul/personality routing from the nested context
-body.
+execution policy mode, full execution policy and validation gate. Human-facing
+persona nodes also carry a versioned `persona_contract` with the node-scoped
+mode, voice, tone, instruction source, source models, persona validation gate and
+lineage hashes so adapters do not have to infer soul/personality routing from the
+nested context body.
 
 Skill-style async handoff:
 

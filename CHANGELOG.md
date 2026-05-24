@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.42 - 2026-05-24
+
+### Added
+
+- `forge inspect --output json` now includes a versioned `execution_policy` projection for every terminal DAG node.
+- The projection uses schema `forge.inspect_execution_policy.v1` and exposes mode, AI allowance, deterministic flag, reuse hint, selection reason, validation gate and optional local code runtime fields.
+- Human inspection diagrams now append a compact execution policy marker such as `policy local_code_node no_ai deterministic python reuse_compatible_code_node`.
+- Added CLI contract coverage proving deterministic local Python code nodes expose their no-AI execution policy through `forge inspect` before any executor handoff is requested.
+
+### Changed
+
+- Operators can now see deterministic local runtime decisions from inspection output instead of waiting for a `forge task handoff` packet.
+- The existing context routing, next-action, lease and handoff packet contracts remain unchanged; this release adds a read-only inspection projection.
+
+### Safety
+
+- Execution policy inspection is read-only metadata derived from Forge-owned workflow/task state.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Actual execution remains gated by strict context readiness, dependency readiness, validation rules and task leases.
+
 ## 0.4.41 - 2026-05-24
 
 ### Added
