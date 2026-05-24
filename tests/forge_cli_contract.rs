@@ -9624,6 +9624,195 @@ fn cluster_registry_records_nodes_and_places_deterministic_code_task_by_capabili
 }
 
 #[test]
+fn cluster_placement_routes_metatrader5_work_to_windows_software_node() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "register",
+            "--node-id",
+            "lan-linux-command",
+            "--name",
+            "LAN Linux Command Worker",
+            "--endpoint",
+            "ssh://forge@lan-linux",
+            "--os",
+            "linux",
+            "--arch",
+            "x86_64",
+            "--cpu-cores",
+            "16",
+            "--memory-gb",
+            "64",
+            "--software",
+            "python3",
+            "--capability",
+            "command",
+            "--capability",
+            "python",
+            "--python",
+            "--network-reachable",
+            "--status",
+            "online",
+            "--trust",
+            "trusted_lan",
+            "--sandbox",
+            "local_process_no_network",
+            "--latency-ms",
+            "3",
+            "--reliability",
+            "0.99",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "register",
+            "--node-id",
+            "lan-windows-mt5",
+            "--name",
+            "LAN Windows MT5 Terminal",
+            "--endpoint",
+            "ssh://forge@lan-windows",
+            "--os",
+            "windows",
+            "--arch",
+            "x86_64",
+            "--cpu-cores",
+            "8",
+            "--memory-gb",
+            "32",
+            "--software",
+            "MetaTrader 5",
+            "--capability",
+            "metatrader5",
+            "--network-reachable",
+            "--status",
+            "online",
+            "--trust",
+            "trusted_lan",
+            "--sandbox",
+            "windows_desktop_user_session",
+            "--cost-per-hour-usd",
+            "0.20",
+            "--latency-ms",
+            "11",
+            "--reliability",
+            "0.97",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let planned_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run repeated MetaTrader 5 backtests on the real Windows machine without AI or external mutation",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned: Value = serde_json::from_slice(&planned_output).unwrap();
+    let workflow_id = planned["workflow_id"].as_str().unwrap();
+    let mt5_task = find_task(
+        planned["tasks"].as_array().unwrap(),
+        "Run MetaTrader 5 deterministic step",
+    );
+
+    assert_eq!(mt5_task["executor"], "command");
+    assert_eq!(
+        mt5_task["execution_policy"]["mode"],
+        "windows_software_node"
+    );
+    assert_eq!(mt5_task["execution_policy"]["ai_allowed"], false);
+    assert_eq!(mt5_task["execution_policy"]["deterministic"], true);
+    assert_eq!(
+        mt5_task["execution_policy"]["code_runtime"]["language"],
+        "metatrader5"
+    );
+    assert_eq!(
+        mt5_task["execution_policy"]["code_runtime"]["sandbox"],
+        "windows_desktop_user_session"
+    );
+
+    let placement_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "place",
+            "--workflow",
+            workflow_id,
+            "--task",
+            mt5_task["id"].as_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let placement: Value = serde_json::from_slice(&placement_output).unwrap();
+
+    assert_eq!(placement["schema_version"], "forge.cluster_placement.v1");
+    assert_eq!(placement["status"], "placement_selected");
+    assert_eq!(
+        placement["requirements"]["schema_version"],
+        "forge.cluster_placement_requirements.v3"
+    );
+    assert_eq!(placement["requirements"]["required_os"], "windows");
+    assert_eq!(
+        placement["requirements"]["required_capabilities"][0],
+        "metatrader5"
+    );
+    assert_eq!(
+        placement["requirements"]["required_software"][0],
+        "metatrader5"
+    );
+    assert!(placement["requirements"]["required_sandbox_permissions"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("windows_desktop_user_session".to_string())));
+    assert_eq!(placement["selected_node"]["node_id"], "lan-windows-mt5");
+
+    let rejected_linux = placement["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["node_id"] == "lan-linux-command")
+        .unwrap();
+    assert_eq!(rejected_linux["eligible"], false);
+    let reasons = rejected_linux["reasons"].as_array().unwrap();
+    assert!(reasons.contains(&Value::String("missing capability metatrader5".to_string())));
+    assert!(reasons.contains(&Value::String(
+        "os linux does not satisfy required os windows".to_string()
+    )));
+    assert!(reasons.contains(&Value::String("missing software metatrader5".to_string())));
+    assert!(reasons.contains(&Value::String(
+        "missing sandbox permission windows_desktop_user_session".to_string()
+    )));
+}
+
+#[test]
 fn cluster_placement_blocks_remote_ai_tasks_without_explicit_authorization() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -9720,7 +9909,7 @@ fn cluster_placement_blocks_remote_ai_tasks_without_explicit_authorization() {
     assert_eq!(placement["status"], "placement_blocked");
     assert_eq!(
         placement["requirements"]["schema_version"],
-        "forge.cluster_placement_requirements.v2"
+        "forge.cluster_placement_requirements.v3"
     );
     assert_eq!(placement["requirements"]["executor"], "ai");
     assert_eq!(placement["requirements"]["policy_mode"], "model_executor");

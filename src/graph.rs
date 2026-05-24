@@ -368,6 +368,7 @@ fn work_item(
 
 pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
     let local_code_policy = local_code_execution_policy(&intent.goal);
+    let windows_software_policy = windows_software_execution_policy(&intent.goal);
     let autonomous_extensions_required = requires_autonomous_extensions(&intent.goal);
     let mut tasks = vec![
         task(
@@ -531,15 +532,16 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         append_hackathon_factory_tasks(&mut tasks);
     }
 
-    if let (false, Some(policy)) = (
-        autonomous_extensions_required,
-        reusable_local_code_policy(local_code_policy.as_ref()),
-    ) {
-        tasks.push(deterministic_non_ai_task(
-            "task-009",
-            &["task-003"],
-            policy.clone(),
-        ));
+    if !autonomous_extensions_required {
+        if let Some(policy) = windows_software_policy.clone() {
+            tasks.push(windows_software_task("task-009", &["task-003"], policy));
+        } else if let Some(policy) = reusable_local_code_policy(local_code_policy.as_ref()) {
+            tasks.push(deterministic_non_ai_task(
+                "task-009",
+                &["task-003"],
+                policy.clone(),
+            ));
+        }
     }
 
     if autonomous_extensions_required {
@@ -574,10 +576,13 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         });
         tasks.push(wait);
 
-        let deterministic_policy =
-            local_code_policy.unwrap_or_else(|| default_execution_policy(&ExecutorKind::Command));
-        let deterministic =
-            deterministic_non_ai_task("task-011", &["task-010"], deterministic_policy);
+        let deterministic = if let Some(policy) = windows_software_policy {
+            windows_software_task("task-011", &["task-010"], policy)
+        } else {
+            let deterministic_policy = local_code_policy
+                .unwrap_or_else(|| default_execution_policy(&ExecutorKind::Command));
+            deterministic_non_ai_task("task-011", &["task-010"], deterministic_policy)
+        };
         tasks.push(deterministic);
 
         if let Some(email) = extract_email(&intent.goal) {
@@ -938,6 +943,36 @@ fn deterministic_non_ai_task(
     deterministic
 }
 
+fn windows_software_task(
+    id: &str,
+    dependencies: &[&str],
+    execution_policy: ExecutionPolicySpec,
+) -> AtomicTask {
+    let mut software_task = task(
+        id,
+        "Run MetaTrader 5 deterministic step",
+        dependencies,
+        &[
+            "MetaTrader 5 terminal",
+            "Windows desktop user session",
+            "cluster node registry",
+            "artifact state",
+        ],
+        vec![rule(
+            "software_runtime",
+            "MetaTrader 5 work is placed on a registered Windows node with explicit trust and sandbox permissions",
+            None,
+        )],
+        "Windows software execution result",
+        (ExecutorKind::Command, 0.0002),
+    );
+    software_task.execution_policy = execution_policy;
+    software_task
+        .context_requirements
+        .push("windows software-node policy".to_string());
+    software_task
+}
+
 fn with_persona(mut task: AtomicTask, persona: PersonaRoutingSpec) -> AtomicTask {
     task.persona = Some(persona);
     task
@@ -1082,6 +1117,40 @@ fn local_code_execution_policy(goal: &str) -> Option<ExecutionPolicySpec> {
         code_runtime: Some(runtime),
         reuse_hint,
         validation_gate: "deterministic_code_node_validation_required".to_string(),
+    })
+}
+
+fn windows_software_execution_policy(goal: &str) -> Option<ExecutionPolicySpec> {
+    let lower = goal.to_lowercase();
+    if !(lower.contains("metatrader 5") || lower.contains("metatrader5") || lower.contains("mt5")) {
+        return None;
+    }
+
+    let reuse_hint = if lower.contains("repeated")
+        || lower.contains("frequent")
+        || lower.contains("recurring")
+        || lower.contains("frequente")
+        || lower.contains("recorrente")
+    {
+        "reuse_compatible_windows_software_node"
+    } else {
+        "task_local_windows_software_node"
+    };
+
+    Some(ExecutionPolicySpec {
+        mode: "windows_software_node".to_string(),
+        ai_allowed: false,
+        deterministic: true,
+        code_runtime: Some(CodeRuntimeSpec {
+            language: "metatrader5".to_string(),
+            entrypoint: "metatrader5_terminal".to_string(),
+            sandbox: "windows_desktop_user_session".to_string(),
+        }),
+        reuse_hint: reuse_hint.to_string(),
+        selection_reason:
+            "goal requires MetaTrader 5 on a real Windows desktop session without model execution"
+                .to_string(),
+        validation_gate: "windows_software_node_validation_required".to_string(),
     })
 }
 

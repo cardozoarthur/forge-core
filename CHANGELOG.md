@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.85 - 2026-05-24
+
+### Added
+
+- Added deterministic Windows software-node planning for MetaTrader 5 goals.
+- `forge plan` now emits a `Run MetaTrader 5 deterministic step` command node with `windows_software_node` execution policy, `metatrader5_terminal` entrypoint and `windows_desktop_user_session` sandbox.
+- `forge cluster place` placement requirements now use `forge.cluster_placement_requirements.v3` and include `required_os` plus `required_software` so heterogeneous node scheduling can distinguish Windows-only software from generic command workers.
+- Added CLI contract coverage proving MetaTrader 5 work is routed to a registered Windows node with the required capability, installed software and sandbox permission while Linux command nodes are rejected with explicit reasons.
+- Added `docs/reports/forge-core-v0.4.85-report-2026-05-24.md` with the cycle report.
+
+### Changed
+
+- The package version is now `0.4.85`.
+- Cluster placement now evaluates runtime software requirements from task execution policy, not only executor kind or local code language.
+
+### Safety
+
+- MetaTrader 5 placement remains metadata-only: Forge selects a node and reports requirements, but keeps `remote_execution_enabled=false` and `external_mutation_allowed=false`.
+- The increment does not open SSH sessions, execute MetaTrader, copy artifacts to Windows, authorize remote AI, install Knative or mutate Docker/Kubernetes/Knative/user resources.
+
 ## 0.4.84 - 2026-05-24
 
 ### Added
