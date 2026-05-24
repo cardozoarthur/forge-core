@@ -1,3 +1,4 @@
+use crate::artifact::hex_sha256;
 use crate::context::ContextReplayShardRef;
 use crate::graph::{ArtifactRecord, AtomicTask, ExecutorKind};
 use crate::handoff::{build_task_handoff, TaskHandoffReport};
@@ -174,6 +175,7 @@ pub struct ClusterSyncManifest {
     pub shard_refs: Vec<ContextReplayShardRef>,
     pub artifact_refs: Vec<ArtifactRecord>,
     pub sync_mode: String,
+    pub manifest_sha256: String,
     pub remote_execution_enabled: bool,
     pub external_mutation_allowed: bool,
 }
@@ -582,7 +584,7 @@ fn build_sync_manifest(
             created_at: checkpoint.created_at,
         });
 
-    ClusterSyncManifest {
+    let mut manifest = ClusterSyncManifest {
         schema_version: CLUSTER_SYNC_MANIFEST_SCHEMA_VERSION.to_string(),
         workflow_id: task_handoff.workflow_id.clone(),
         task_id: task_handoff.task_id.clone(),
@@ -602,9 +604,35 @@ fn build_sync_manifest(
         shard_refs: task_handoff.context.replay_manifest.shard_refs.clone(),
         artifact_refs: workflow.artifacts.clone(),
         sync_mode: "content_addressed_hash_manifest_only".to_string(),
+        manifest_sha256: String::new(),
         remote_execution_enabled: false,
         external_mutation_allowed: false,
-    }
+    };
+    manifest.manifest_sha256 = sync_manifest_sha256(&manifest);
+    manifest
+}
+
+fn sync_manifest_sha256(manifest: &ClusterSyncManifest) -> String {
+    let hash_input = serde_json::json!([
+        &manifest.schema_version,
+        &manifest.workflow_id,
+        &manifest.task_id,
+        &manifest.selected_node_id,
+        &manifest.lease_id,
+        &manifest.context_sha256,
+        &manifest.context_routing_cache_key,
+        &manifest.context_routing_lineage_sha256,
+        &manifest.checkpoint_ref,
+        &manifest.shard_refs,
+        &manifest.artifact_refs,
+        &manifest.sync_mode,
+        &manifest.remote_execution_enabled,
+        &manifest.external_mutation_allowed
+    ]);
+    hex_sha256(
+        &serde_json::to_vec(&hash_input)
+            .expect("cluster sync manifest hash input should serialize"),
+    )
 }
 
 fn load_cluster_nodes(store: &ForgeStore) -> Result<Vec<ClusterNode>> {

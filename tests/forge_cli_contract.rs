@@ -9572,6 +9572,28 @@ fn cluster_handoff_selects_node_leases_task_and_returns_hash_sync_manifest() {
         sync_manifest["sync_mode"],
         "content_addressed_hash_manifest_only"
     );
+    let manifest_hash = sync_manifest["manifest_sha256"].as_str().unwrap();
+    assert_eq!(manifest_hash.len(), 64);
+    let manifest_hash_input = serde_json::json!([
+        sync_manifest["schema_version"],
+        sync_manifest["workflow_id"],
+        sync_manifest["task_id"],
+        sync_manifest["selected_node_id"],
+        sync_manifest["lease_id"],
+        sync_manifest["context_sha256"],
+        sync_manifest["context_routing_cache_key"],
+        sync_manifest["context_routing_lineage_sha256"],
+        sync_manifest["checkpoint_ref"],
+        sync_manifest["shard_refs"],
+        sync_manifest["artifact_refs"],
+        sync_manifest["sync_mode"],
+        sync_manifest["remote_execution_enabled"],
+        sync_manifest["external_mutation_allowed"]
+    ]);
+    assert_eq!(
+        manifest_hash,
+        hex_sha256(&serde_json::to_vec(&manifest_hash_input).unwrap())
+    );
     assert_eq!(sync_manifest["external_mutation_allowed"], false);
     assert!(sync_manifest["shard_refs"].as_array().unwrap().len() >= 5);
     assert!(sync_manifest["shard_refs"]

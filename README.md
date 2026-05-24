@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.76`
+Current version: `0.4.78`
 
 This is the first functional CLI + Skill version:
 
@@ -63,6 +63,7 @@ This is the first functional CLI + Skill version:
 - persisted task leases so two executors cannot acquire the same workflow task concurrently
 - executor handoff packets that combine strict context readiness, lease metadata, routing cache keys, checksums and validation gates
 - cluster handoff packets that choose an eligible node, lease the task to that node and return a content-addressed sync manifest without remote execution
+- cluster sync manifests with deterministic manifest-level SHA-256 checksums for distributed handoff auditing
 - executor response validation for adapter outputs before Forge accepts completion evidence
 - self-evolution runner for bounded Codex/OpenCode cycles until a stop date
 - versioned self-evolution prompt packets with SHA-256 checksums in cycle reports
@@ -284,9 +285,10 @@ external machines. `forge cluster handoff` layers that placement decision over t
 normal executor handoff contract: it leases the task to the selected node id and
 returns `forge.cluster_task_handoff.v1` with the placement report, executor handoff
 packet, node-scoped lease ref and `forge.cluster_sync_manifest.v1`. The sync
-manifest carries context, checkpoint, artifact and shard hashes so a future
-distributed adapter can copy or verify only content-addressed inputs after an
-explicit remote-execution policy exists. `forge cluster leases` provides the
+manifest carries context, checkpoint, artifact and shard hashes plus a
+deterministic `manifest_sha256`, so a future distributed adapter can copy or
+verify only content-addressed inputs after an explicit remote-execution policy
+exists. `forge cluster leases` provides the
 read-only audit surface for those node-scoped leases, including active/expired
 state, workflow/task identity, trust level, sandbox permissions and explicit
 `remote_execution_enabled=false` / `external_mutation_allowed=false` markers.

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.78 - 2026-05-24
+
+### Added
+
+- Added `manifest_sha256` to `forge.cluster_sync_manifest.v1`.
+- The manifest checksum is computed deterministically from the sync contract fields while excluding the hash field itself.
+- Added CLI contract coverage proving cluster handoff manifests expose a reproducible 64-character SHA-256 digest.
+- Added `docs/reports/forge-core-v0.4.78-report-2026-05-24.md` with the cycle report.
+
+### Changed
+
+- The package version is now `0.4.78`.
+- README and technical definition now document manifest-level hashing for distributed handoff auditing.
+
+### Safety
+
+- The sync manifest remains hash-only metadata. This change does not open SSH sessions, execute remote commands, copy files to external machines, authorize AI executors, install Knative or mutate Docker/Kubernetes/Knative/user resources.
+- `remote_execution_enabled=false` and `external_mutation_allowed=false` remain explicit in the cluster handoff contract.
+
 ## 0.4.77 - 2026-05-24
 
 ### Added

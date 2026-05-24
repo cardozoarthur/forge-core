@@ -158,9 +158,10 @@ permission.
 placement into a bounded handoff packet. It acquires the normal Forge task lease
 using the selected node id as the executor, returns a node-scoped lease ref and
 emits `forge.cluster_sync_manifest.v1` with context, checkpoint, artifact and
-context-shard hashes. The manifest is hash-only and declares remote execution and
-external mutation disabled, so it is an auditable staging contract rather than a
-remote runner.
+context-shard hashes. The manifest also includes a deterministic
+`manifest_sha256` over its sync fields, excluding the hash field itself. The
+manifest is hash-only and declares remote execution and external mutation
+disabled, so it is an auditable staging contract rather than a remote runner.
 `forge cluster leases --output json` lists the node-scoped leases created by
 cluster handoff. Each row includes the workflow/task identity, lease scope,
 active/expired state, selected node metadata, trust level, sandbox permissions and
