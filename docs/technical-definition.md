@@ -214,6 +214,10 @@ Python/Node.js code runtime was selected and which validation gate controls the 
 `forge context --strict` emits the same replayable JSON packet but exits non-zero when
 `handoff_ready=false`, giving adapters a deterministic readiness gate for missing
 required sections and dependency-not-ready holds without hiding routing evidence.
+`forge inspect` and `forge request status` project that same handoff decision as
+read-only summaries, so operators and async callers can see which task is ready,
+blocked by missing context or blocked by dependencies without reconstructing the
+context package manually.
 When the workflow registry has attached a proposed compatible child subflow, the
 context package carries the structured binding plus a compact `child_subflows` shard
 from `subflow_registry`, which lets executors reuse Forge's planning decision without

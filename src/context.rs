@@ -6,10 +6,12 @@ use crate::graph::{
 };
 use anyhow::{bail, Result};
 use serde::Serialize;
+use std::collections::BTreeSet;
 
 const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v13";
 const ROUTING_POLICY: &str =
     "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_v13";
+pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
 const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
 const ALL_CONTEXT_SECTIONS: &[&str] = &[
@@ -168,6 +170,32 @@ pub struct ContextHandoffBlocker {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ContextHandoffSummary {
+    pub total: usize,
+    pub ready: usize,
+    pub blocked: usize,
+    pub blocked_missing_context: usize,
+    pub blocked_dependencies: usize,
+    pub blocked_missing_context_and_dependencies: usize,
+    pub tasks: Vec<ContextHandoffTask>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextHandoffTask {
+    pub task_id: String,
+    pub title: String,
+    pub executor: String,
+    pub context_ready: bool,
+    pub dependency_ready: bool,
+    pub handoff_ready: bool,
+    pub handoff_status: String,
+    pub handoff_blockers: Vec<ContextHandoffBlocker>,
+    pub blocking_refs: Vec<String>,
+    pub context_sha256: String,
+    pub resume_context_status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ContextRoutingSummary {
     pub total_shards: usize,
     pub included_shards: usize,
@@ -234,6 +262,70 @@ pub fn build_context_package(
     budget: usize,
 ) -> Result<ContextPackage> {
     build_context_package_with_checkpoint(workflow, task_id, budget, None)
+}
+
+pub fn build_context_handoff_summary(
+    workflow: &Workflow,
+    budget: usize,
+    checkpoints: &[TaskCheckpoint],
+) -> Result<ContextHandoffSummary> {
+    let mut tasks = Vec::new();
+
+    for task in &workflow.tasks {
+        let latest_checkpoint = checkpoints
+            .iter()
+            .rev()
+            .find(|checkpoint| checkpoint.task_id == task.id)
+            .cloned();
+        let package =
+            build_context_package_with_checkpoint(workflow, &task.id, budget, latest_checkpoint)?;
+        let blocking_refs = package
+            .handoff_blockers
+            .iter()
+            .flat_map(|blocker| blocker.refs.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        tasks.push(ContextHandoffTask {
+            task_id: task.id.clone(),
+            title: task.title.clone(),
+            executor: executor_kind(&task.executor).to_string(),
+            context_ready: package.context_ready,
+            dependency_ready: package.dependency_summary.ready,
+            handoff_ready: package.handoff_ready,
+            handoff_status: package.handoff_status,
+            handoff_blockers: package.handoff_blockers,
+            blocking_refs,
+            context_sha256: package.context_sha256,
+            resume_context_status: package.resume_context_status,
+        });
+    }
+
+    let ready = tasks.iter().filter(|task| task.handoff_ready).count();
+    let blocked_missing_context = tasks
+        .iter()
+        .filter(|task| task.handoff_status == "blocked_missing_context")
+        .count();
+    let blocked_dependencies = tasks
+        .iter()
+        .filter(|task| task.handoff_status == "blocked_dependencies")
+        .count();
+    let blocked_missing_context_and_dependencies = tasks
+        .iter()
+        .filter(|task| task.handoff_status == "blocked_missing_context_and_dependencies")
+        .count();
+    let total = tasks.len();
+
+    Ok(ContextHandoffSummary {
+        total,
+        ready,
+        blocked: total.saturating_sub(ready),
+        blocked_missing_context,
+        blocked_dependencies,
+        blocked_missing_context_and_dependencies,
+        tasks,
+    })
 }
 
 pub fn build_context_package_with_checkpoint(

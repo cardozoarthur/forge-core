@@ -1,3 +1,8 @@
+use crate::checkpoint::load_workflow_checkpoints;
+use crate::context::{
+    build_context_handoff_summary, ContextHandoffBlocker, ContextHandoffSummary,
+    ContextHandoffTask, DEFAULT_CONTEXT_BUDGET,
+};
 use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutorKind, SubtaskSpec, TaskStatus, ValidationRule,
 };
@@ -19,6 +24,7 @@ pub struct WorkflowInspectionReport {
     pub verbose: bool,
     pub subflow_count: usize,
     pub subflows: Vec<SubflowInspection>,
+    pub handoff_summary: ContextHandoffSummary,
     pub nodes: Vec<TaskInspectionNode>,
     pub diagram: String,
 }
@@ -33,6 +39,9 @@ pub struct TaskInspectionNode {
     pub persona_mode: Option<String>,
     pub goal: String,
     pub expected_output: String,
+    pub handoff_ready: bool,
+    pub handoff_status: String,
+    pub handoff_blockers: Vec<ContextHandoffBlocker>,
     pub subtasks: Vec<SubtaskSpec>,
     pub validation_rules: Vec<ValidationRule>,
     pub subflow_refs: Vec<ChildSubflowRef>,
@@ -60,10 +69,20 @@ pub fn inspect_workflow(
         .into_iter()
         .find(|row| row.workflow_id == workflow.id)
         .with_context(|| format!("workflow not found in registry: {}", workflow.id))?;
+    let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
+    let handoff_summary =
+        build_context_handoff_summary(&workflow, DEFAULT_CONTEXT_BUDGET, &checkpoints)?;
     let nodes = workflow
         .tasks
         .iter()
-        .map(|task| task_node(task, verbose))
+        .map(|task| {
+            let handoff = handoff_summary
+                .tasks
+                .iter()
+                .find(|candidate| candidate.task_id == task.id)
+                .expect("handoff summary should include every workflow task");
+            task_node(task, handoff, verbose)
+        })
         .collect::<Vec<_>>();
     let subflows = collect_subflows(&nodes);
     let diagram = render_diagram(&registry_row, &nodes, &subflows, verbose);
@@ -80,12 +99,13 @@ pub fn inspect_workflow(
         verbose,
         subflow_count: subflows.len(),
         subflows,
+        handoff_summary,
         nodes,
         diagram,
     })
 }
 
-fn task_node(task: &AtomicTask, verbose: bool) -> TaskInspectionNode {
+fn task_node(task: &AtomicTask, handoff: &ContextHandoffTask, verbose: bool) -> TaskInspectionNode {
     TaskInspectionNode {
         id: task.id.clone(),
         title: task.title.clone(),
@@ -95,6 +115,9 @@ fn task_node(task: &AtomicTask, verbose: bool) -> TaskInspectionNode {
         persona_mode: task.persona.as_ref().map(|persona| persona.mode.clone()),
         goal: task.goal.clone(),
         expected_output: task.expected_output.clone(),
+        handoff_ready: handoff.handoff_ready,
+        handoff_status: handoff.handoff_status.clone(),
+        handoff_blockers: handoff.handoff_blockers.clone(),
         subtasks: if verbose {
             task.work_item.subtasks.clone()
         } else {
@@ -171,8 +194,15 @@ fn render_diagram(
             )
         };
         lines.push(format!(
-            "{} {} [{}] {}{}{} executor {}",
-            node.id, node.title, node.status, dependency, persona, subflow_refs, node.executor
+            "{} {} [{}] {}{}{} handoff {} executor {}",
+            node.id,
+            node.title,
+            node.status,
+            dependency,
+            persona,
+            subflow_refs,
+            node.handoff_status,
+            node.executor
         ));
 
         if verbose {

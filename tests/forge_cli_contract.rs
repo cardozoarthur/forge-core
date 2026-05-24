@@ -2862,6 +2862,116 @@ fn request_status_reflects_current_workflow_mutations_for_async_callers() {
 }
 
 #[test]
+fn inspect_and_request_status_project_context_handoff_readiness() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Improve Forge context handoff visibility for async operators",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+
+    let inspect_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--verbose",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspection: Value = serde_json::from_slice(&inspect_output).unwrap();
+    assert_eq!(
+        inspection["handoff_summary"]["total"],
+        inspection["task_count"]
+    );
+    assert!(
+        inspection["handoff_summary"]["blocked_dependencies"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(inspection["diagram"].as_str().unwrap().contains(
+        "task-002 Extract requirements [pending] depends_on task-001 handoff blocked_dependencies"
+    ));
+
+    let nodes = inspection["nodes"].as_array().unwrap();
+    let requirements = find_task(nodes, "Extract requirements");
+    assert_eq!(requirements["handoff_ready"], false);
+    assert_eq!(requirements["handoff_status"], "blocked_dependencies");
+    assert!(requirements["handoff_blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|blocker| {
+            blocker["kind"] == "dependency_not_ready"
+                && blocker["refs"] == serde_json::json!(["task-001"])
+        }));
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(
+        status_json["handoff_summary"]["total"],
+        status_json["task_summary"]["total"]
+    );
+    assert!(
+        status_json["handoff_summary"]["blocked_dependencies"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    let handoff_tasks = status_json["handoff_summary"]["tasks"].as_array().unwrap();
+    let requirements_handoff = find_task(handoff_tasks, "Extract requirements");
+    assert_eq!(requirements_handoff["handoff_ready"], false);
+    assert_eq!(
+        requirements_handoff["handoff_status"],
+        "blocked_dependencies"
+    );
+    assert_eq!(
+        requirements_handoff["blocking_refs"],
+        serde_json::json!(["task-001"])
+    );
+}
+
+#[test]
 fn list_surfaces_workflow_registry_with_lifecycle_and_initial_request() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

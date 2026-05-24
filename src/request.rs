@@ -1,5 +1,8 @@
 use crate::artifact::list_workflow_artifacts;
 use crate::checkpoint::{load_workflow_checkpoints, TaskCheckpoint};
+use crate::context::{
+    build_context_handoff_summary, ContextHandoffSummary, DEFAULT_CONTEXT_BUDGET,
+};
 use crate::graph::{create_workflow, TaskStatus, Workflow};
 use crate::intent::parse_intent;
 use crate::storage::ForgeStore;
@@ -49,6 +52,7 @@ pub struct RequestStatusReport {
     pub checkpoint_count: usize,
     pub latest_checkpoint: Option<TaskCheckpoint>,
     pub task_summary: TaskStatusSummary,
+    pub handoff_summary: ContextHandoffSummary,
     pub latest_validation_evidence: Option<ValidationEvidenceSummary>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -159,6 +163,8 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
     let latest_validation_evidence = load_latest_validation_evidence(store, &workflow.id)?;
     let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
     let latest_checkpoint = checkpoints.last().cloned();
+    let handoff_summary =
+        build_context_handoff_summary(&workflow, DEFAULT_CONTEXT_BUDGET, &checkpoints)?;
     let workflow_revision = workflow
         .revisions
         .last()
@@ -178,6 +184,7 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
         checkpoint_count: checkpoints.len(),
         latest_checkpoint,
         task_summary,
+        handoff_summary,
         latest_validation_evidence,
         created_at: run.created_at,
         updated_at: run.updated_at,

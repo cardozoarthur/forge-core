@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.28 - 2026-05-24
+
+### Added
+
+- `forge inspect --output json` now includes a workflow-level `handoff_summary` and per-node `handoff_ready`, `handoff_status` and `handoff_blockers` fields.
+- Terminal inspection now annotates each DAG node with the context handoff status derived from the Context Routing Engine.
+- `forge request status --output json` now includes `handoff_summary` so async callers can see ready, dependency-blocked and missing-context tasks without separately calling `forge context`.
+- Added a reusable `build_context_handoff_summary` projection that reuses the same context package readiness contract used by `forge context --strict`.
+
+### Changed
+
+- Operator surfaces now distinguish dependency-not-ready holds from missing-context holds during workflow inspection and async status polling.
+- The existing `forge.context.v13` packet remains unchanged; this release projects its handoff decision into higher-level inspection/status reports.
+
+### Safety
+
+- Handoff summaries are read-only projections over Forge-owned workflow graph, checkpoints and deterministic context routing metadata.
+- The change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative, or mutate Docker/Kubernetes/Knative resources.
+- Promotion remains controlled by `forge validate`, and executor handoff remains controlled by `forge context --strict`.
+
+### Validation
+
+- Added CLI contract coverage proving both `forge inspect` and `forge request status` surface `blocked_dependencies` for a downstream task whose prerequisite is still pending.
+
 ## 0.4.27 - 2026-05-24
 
 ### Added
