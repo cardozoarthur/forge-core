@@ -33,6 +33,7 @@ pub struct WorkflowRegistryReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowRegistryFilterReport {
     pub lifecycle: String,
+    pub context_action: Option<String>,
     pub quality_action: Option<String>,
 }
 
@@ -46,6 +47,7 @@ pub enum WorkflowLifecycleFilter {
 #[derive(Debug, Clone)]
 pub struct WorkflowRegistryFilters {
     pub lifecycle: WorkflowLifecycleFilter,
+    pub context_action: Option<String>,
     pub quality_action: Option<String>,
 }
 
@@ -297,6 +299,7 @@ pub fn list_workflows_with_filters(
         status: "loaded".to_string(),
         filter: WorkflowRegistryFilterReport {
             lifecycle: filters.lifecycle.label().to_string(),
+            context_action: filters.context_action,
             quality_action: filters.quality_action,
         },
         summary,
@@ -372,8 +375,14 @@ impl WorkflowRegistryFilters {
     pub fn new(lifecycle: WorkflowLifecycleFilter) -> Self {
         Self {
             lifecycle,
+            context_action: None,
             quality_action: None,
         }
+    }
+
+    pub fn with_context_action(mut self, context_action: Option<String>) -> Self {
+        self.context_action = context_action;
+        self
     }
 
     pub fn with_quality_action(mut self, quality_action: Option<String>) -> Self {
@@ -386,10 +395,35 @@ impl WorkflowRegistryFilters {
             return false;
         }
 
+        if let Some(action) = &self.context_action {
+            if !row_has_context_action(row, action) {
+                return false;
+            }
+        }
+
         match &self.quality_action {
             Some(action) => row.quality_action.action == *action,
             None => true,
         }
+    }
+}
+
+fn row_has_context_action(row: &WorkflowRegistryRow, action: &str) -> bool {
+    let summary = &row.context_actions;
+    match action {
+        "ready_for_handoff" => summary.ready_for_handoff > 0,
+        "blocked_tasks" => summary.blocked_tasks > 0,
+        "start_executor_handoff" => summary.start_executor_handoff > 0,
+        "wait_for_dependencies" => summary.wait_for_dependencies > 0,
+        "increase_context_budget" => summary.increase_context_budget > 0,
+        "repair_context_and_wait_for_dependencies" => {
+            summary.repair_context_and_wait_for_dependencies > 0
+        }
+        "refresh_context_before_resume" => summary.refresh_context_before_resume > 0,
+        "resume_from_checkpoint" => summary.resume_from_checkpoint > 0,
+        "partial_retry_with_fresh_context" => summary.partial_retry_with_fresh_context > 0,
+        "partial_retry_recommended" => summary.partial_retry_recommended > 0,
+        _ => false,
     }
 }
 

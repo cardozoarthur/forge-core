@@ -6154,6 +6154,107 @@ fn list_aggregates_context_next_actions_for_registry_rows() {
 }
 
 #[test]
+fn list_filters_workflow_registry_by_context_action_and_lifecycle() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let completed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build a completed workflow for context-action filtering",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let completed_json: Value = serde_json::from_slice(&completed).unwrap();
+    let completed_workflow_id = completed_json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            completed_workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let running = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build a running workflow with dependency waits for context-action filtering",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let running_json: Value = serde_json::from_slice(&running).unwrap();
+    let running_workflow_id = running_json["workflow_id"].as_str().unwrap();
+    set_task_status_in_stored_workflow(&store, running_workflow_id, "task-001", "running");
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--lifecycle",
+            "running",
+            "--context-action",
+            "wait_for_dependencies",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    assert_eq!(listed_json["filter"]["lifecycle"], "running");
+    assert_eq!(
+        listed_json["filter"]["context_action"],
+        "wait_for_dependencies"
+    );
+    assert_eq!(listed_json["filter"]["quality_action"], Value::Null);
+    assert_eq!(listed_json["summary"]["total"], 1);
+    assert_eq!(listed_json["summary"]["running"], 1);
+    assert_eq!(listed_json["summary"]["non_running"], 0);
+    assert_eq!(
+        listed_json["summary"]["context_actions"]["wait_for_dependencies"],
+        running_json["tasks"].as_array().unwrap().len() as u64 - 1
+    );
+
+    let workflows = listed_json["workflows"].as_array().unwrap();
+    assert_eq!(workflows.len(), 1);
+    assert_eq!(workflows[0]["workflow_id"], running_workflow_id);
+    assert_eq!(workflows[0]["lifecycle_state"], "running");
+    assert!(
+        workflows[0]["context_actions"]["wait_for_dependencies"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+}
+
+#[test]
 fn list_aggregates_context_quality_and_recommends_quality_actions_by_lifecycle() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

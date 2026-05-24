@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.68 - 2026-05-24
+
+### Added
+
+- `forge list` now accepts `--context-action <action>` to filter the workflow registry by the next context-routing actions already aggregated in `context_actions`.
+- The registry filter report now includes `filter.context_action`, and summaries are recomputed after lifecycle, context-action and quality-action filters are applied together.
+- Added CLI contract coverage proving `forge list --lifecycle running --context-action wait_for_dependencies --output json` returns only workflows whose context routing has dependency-wait pressure.
+
+### Changed
+
+- The package version is now `0.4.68`.
+
+### Safety
+
+- Context-action filtering is read-only metadata over Forge-owned persisted workflows and deterministic context-route summaries.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules, task leases, persona gates, child-subflow validation gates and continuation plans.
+
 ## 0.4.67 - 2026-05-24
 
 ### Added

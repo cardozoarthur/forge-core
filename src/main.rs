@@ -53,6 +53,8 @@ enum Commands {
     List {
         #[arg(long, value_enum, default_value_t = WorkflowLifecycleArg::All)]
         lifecycle: WorkflowLifecycleArg,
+        #[arg(long = "context-action")]
+        context_action: Option<String>,
         #[arg(long = "quality-action")]
         quality_action: Option<String>,
         #[arg(long = "quality-actions")]
@@ -459,6 +461,7 @@ fn run() -> Result<i32> {
         }
         Commands::List {
             lifecycle,
+            context_action,
             quality_action,
             quality_actions,
             output,
@@ -473,8 +476,12 @@ fn run() -> Result<i32> {
             let quality_action = quality_action
                 .map(|action| action.trim().to_string())
                 .filter(|action| !action.is_empty());
-            let filters =
-                WorkflowRegistryFilters::new(lifecycle.into()).with_quality_action(quality_action);
+            let context_action = context_action
+                .map(|action| action.trim().to_string())
+                .filter(|action| !action.is_empty());
+            let filters = WorkflowRegistryFilters::new(lifecycle.into())
+                .with_context_action(context_action)
+                .with_quality_action(quality_action);
             let report = list_workflows_with_filters(&store, filters)?;
             print_response(output, &report)?;
             Ok(0)
