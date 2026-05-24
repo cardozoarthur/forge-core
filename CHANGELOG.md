@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.66 - 2026-05-24
+
+### Added
+
+- `forge inspect --output json` now marks recursive child-subflow cycles explicitly instead of only terminating traversal silently.
+- Subflow inspection rows now include `terminal_reason`, `cycle_detected`, `cycle_ref` and `recursion_policy` so recursive or infinite subflow composition remains auditable from the terminal and JSON contract.
+- The terminal inspection diagram now prints a compact `cycle recursive_subflow_cycle` marker when traversal is stopped by a repeated workflow/task path.
+- Added CLI contract coverage that builds a circular child-subflow graph in the persisted workflow registry and proves inspection terminates with a structured cycle record.
+
+### Changed
+
+- The package version is now `0.4.66`.
+
+### Safety
+
+- Recursive subflow cycle detection is read-only inspection metadata over Forge-owned workflow state.
+- This change does not execute child subflows, complete tasks, promote workflows, authorize CLIs, run local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Proposed child-subflow execution remains controlled by validation, scheduling, executor handoff, task lease and continuation gates.
+
 ## 0.4.65 - 2026-05-24
 
 ### Added

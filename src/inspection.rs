@@ -17,6 +17,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 
 const INSPECT_EXECUTION_POLICY_SCHEMA_VERSION: &str = "forge.inspect_execution_policy.v1";
+const SUBFLOW_RECURSION_POLICY: &str = "stop_on_repeated_workflow_task_path";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowInspectionReport {
@@ -133,6 +134,10 @@ pub struct SubflowInspection {
     pub path: Vec<String>,
     pub reachable: bool,
     pub terminal: bool,
+    pub terminal_reason: String,
+    pub cycle_detected: bool,
+    pub cycle_ref: Option<String>,
+    pub recursion_policy: String,
     pub child_workflow_status: Option<String>,
     pub child_lifecycle_state: Option<String>,
     pub child_task_count: usize,
@@ -447,6 +452,10 @@ impl SubflowCollector<'_> {
                         path,
                         reachable: false,
                         terminal: true,
+                        terminal_reason: "child_workflow_unreachable".to_string(),
+                        cycle_detected: false,
+                        cycle_ref: None,
+                        recursion_policy: SUBFLOW_RECURSION_POLICY.to_string(),
                         child_workflow_status: None,
                         child_lifecycle_state: None,
                         child_task_count: 0,
@@ -476,7 +485,16 @@ impl SubflowCollector<'_> {
         let child_subflow_count = child_refs.len();
         let child_task_count = child_workflow.tasks.len();
         let child_lifecycle_state = derive_child_lifecycle_state(&child_workflow);
-        let terminal = child_refs.is_empty() || recursive_cycle;
+        let terminal_reason = if recursive_cycle {
+            "recursive_subflow_cycle"
+        } else if child_task.is_none() {
+            "child_task_unreachable"
+        } else if child_refs.is_empty() {
+            "child_task_has_no_subflows"
+        } else {
+            "descend_child_subflows"
+        };
+        let terminal = terminal_reason != "descend_child_subflows";
 
         self.subflows.push(SubflowInspection {
             id: current_ref,
@@ -491,6 +509,10 @@ impl SubflowCollector<'_> {
             path: path.clone(),
             reachable: child_task.is_some(),
             terminal,
+            terminal_reason: terminal_reason.to_string(),
+            cycle_detected: recursive_cycle,
+            cycle_ref: recursive_cycle.then(|| path.last().cloned()).flatten(),
+            recursion_policy: SUBFLOW_RECURSION_POLICY.to_string(),
             child_workflow_status: Some(child_workflow.status.clone()),
             child_lifecycle_state: Some(child_lifecycle_state),
             child_task_count,
@@ -699,8 +721,13 @@ fn render_diagram(
     if !subflows.is_empty() {
         lines.push("subflows:".to_string());
         for subflow in subflows {
+            let cycle = if subflow.cycle_detected {
+                format!(" cycle {}", subflow.terminal_reason)
+            } else {
+                String::new()
+            };
             lines.push(format!(
-                "  subflow depth {} {} [{}] binding {} reachable {} terminal {}",
+                "  subflow depth {} {} [{}] binding {} reachable {} terminal {} reason {}{}",
                 subflow.depth,
                 subflow.path.join(" -> "),
                 subflow
@@ -709,7 +736,9 @@ fn render_diagram(
                     .unwrap_or(subflow.lifecycle_state.as_str()),
                 subflow.binding_status,
                 subflow.reachable,
-                subflow.terminal
+                subflow.terminal,
+                subflow.terminal_reason,
+                cycle
             ));
         }
     }

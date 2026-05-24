@@ -6770,6 +6770,130 @@ fn inspect_expands_proposed_child_subflows_with_recursive_path_metadata() {
 }
 
 #[test]
+fn inspect_marks_recursive_child_subflow_cycles_as_terminal() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let first = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with repeated local Python cost calculations without AI and email ops@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first_json: Value = serde_json::from_slice(&first).unwrap();
+    let first_workflow_id = first_json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            first_workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let second = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with frequent local Python cost calculations without AI and email finance@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second_json: Value = serde_json::from_slice(&second).unwrap();
+    let second_workflow_id = second_json["workflow_id"].as_str().unwrap();
+    assert_eq!(second_json["attached_subflows"], 1);
+
+    append_child_subflow_to_stored_workflow(
+        &store,
+        first_workflow_id,
+        "task-011",
+        serde_json::json!({
+            "workflow_id": second_workflow_id,
+            "task_id": "task-011",
+            "title": "Run deterministic non-AI step",
+            "binding_status": "proposed",
+            "lifecycle_state": "idle",
+            "reuse_key": "local_code_node:python:forge_local_python_code_node:deterministic_code_node_validation_required",
+            "context_lineage_sha256": "0".repeat(64),
+            "validation_gate": "deterministic_code_node_validation_required",
+            "reason": "test-only recursive reuse edge"
+        }),
+    );
+
+    let inspection = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            second_workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let inspection_json: Value = serde_json::from_slice(&inspection).unwrap();
+    assert_eq!(inspection_json["subflow_count"], 2);
+    let subflows = inspection_json["subflows"].as_array().unwrap();
+    let recursive = subflows
+        .iter()
+        .find(|subflow| {
+            subflow["workflow_id"] == second_workflow_id && subflow["task_id"] == "task-011"
+        })
+        .unwrap();
+    assert_eq!(recursive["depth"], 2);
+    assert_eq!(recursive["reachable"], true);
+    assert_eq!(recursive["terminal"], true);
+    assert_eq!(recursive["cycle_detected"], true);
+    assert_eq!(
+        recursive["cycle_ref"],
+        format!("{second_workflow_id}/task-011")
+    );
+    assert_eq!(recursive["terminal_reason"], "recursive_subflow_cycle");
+    assert_eq!(
+        recursive["recursion_policy"],
+        "stop_on_repeated_workflow_task_path"
+    );
+    assert_eq!(
+        recursive["path"],
+        serde_json::json!([
+            format!("{second_workflow_id}/task-011"),
+            format!("{first_workflow_id}/task-011"),
+            format!("{second_workflow_id}/task-011")
+        ])
+    );
+    assert!(inspection_json["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("cycle recursive_subflow_cycle"));
+}
+
+#[test]
 fn request_start_reuses_compatible_subflows_before_persisting_async_workflow() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -8513,6 +8637,40 @@ fn make_persona_routing_non_auditable(store: &Path, workflow_id: &str, title: &s
             "codex_developer_personality_instructions".to_string(),
         )]),
     );
+    let patched = serde_json::to_string(&workflow).unwrap();
+    connection
+        .execute(
+            "UPDATE workflows SET data_json = ?1 WHERE id = ?2",
+            (&patched, workflow_id),
+        )
+        .unwrap();
+}
+
+fn append_child_subflow_to_stored_workflow(
+    store: &Path,
+    workflow_id: &str,
+    task_id: &str,
+    child_subflow: Value,
+) {
+    let connection = Connection::open(store).unwrap();
+    let data_json: String = connection
+        .query_row(
+            "SELECT data_json FROM workflows WHERE id = ?1",
+            [workflow_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut workflow: Value = serde_json::from_str(&data_json).unwrap();
+    let task = workflow["tasks"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|task| task["id"] == task_id)
+        .unwrap();
+    task["child_subflows"]
+        .as_array_mut()
+        .unwrap()
+        .push(child_subflow);
     let patched = serde_json::to_string(&workflow).unwrap();
     connection
         .execute(
