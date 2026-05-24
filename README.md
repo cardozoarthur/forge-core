@@ -21,14 +21,14 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.19`
+Current version: `0.4.20`
 
 This is the first functional CLI + Skill version:
 
 - Rust CLI binary: `forge`
 - SQLite persistence
 - deterministic atomic task graph generation
-- versioned, sharded bounded context package generation
+- versioned, sharded bounded context package generation with subflow-aware routing
 - validation gates
 - simulated execution runtime
 - autonomous mixed AI/non-AI workflow planning
@@ -79,21 +79,25 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v6`) with a deterministic
-`task_local_revisioned_persona_compressed_executor_policy_budget_v6` routing policy.
+`forge context` emits a versioned context packet (`forge.context.v7`) with a deterministic
+`task_local_revisioned_persona_compressed_executor_policy_subflow_budget_v7` routing policy.
 The packet keeps the legacy `content` body for executors, and also returns workflow
 revision, artifact count, persona routing metadata for human-facing nodes, executor
-profile metadata, execution policy metadata, lineage hashes and a shard manifest with
-included/omitted sections, profile exclusions, compression flags, source labels,
-priorities, byte counts, summaries and SHA-256 checksums. Deterministic command and
-wait nodes receive a smaller no-AI context envelope that preserves local objective,
-execution policy and validation context before lower-priority narrative sections, while
-AI and mixed nodes keep richer reasoning context. When a goal explicitly calls for
-repeated local Python or Node.js work without AI, Forge marks the deterministic step as
-a `local_code_node`, records the selected runtime and routes that policy into the task
-context without executing external code during planning. Runtime goal, artifact and
-persona routing state are included in the context lineage so executors can detect stale
-context before resuming work.
+profile metadata, execution policy metadata, proposed child-subflow bindings, lineage
+hashes and a shard manifest with included/omitted sections, profile exclusions,
+compression flags, source labels, priorities, byte counts, summaries and SHA-256
+checksums. Deterministic command and wait nodes receive a smaller no-AI context
+envelope that preserves local objective, execution policy, proposed subflow reuse and
+validation context before lower-priority narrative sections, while AI and mixed nodes
+keep richer reasoning context. When a goal explicitly calls for repeated local Python
+or Node.js work without AI, Forge marks the deterministic step as a `local_code_node`,
+records the selected runtime and routes that policy into the task context without
+executing external code during planning. If the registry attaches a compatible child
+subflow, the context packet carries both structured `child_subflows` metadata and a
+compact `child_subflows` shard so the executor sees Forge's reuse decision without
+reconstructing it from history. Runtime goal, artifact and persona routing state are
+included in the context lineage so executors can detect stale context before resuming
+work.
 
 Skill-style async handoff:
 
@@ -206,6 +210,7 @@ The current test suite validates:
 - artifact listing returns SHA-256 hashed outputs;
 - workflow registry listing preserves initial requests and lifecycle state;
 - workflow inspection renders terminal DAGs with dependency, lifecycle and persona annotations;
+- context routing carries proposed child-subflow bindings for reusable deterministic nodes;
 - simulated execution can complete the graph and unlock validation;
 - skill installation works for Codex and OpenCode paths.
 
@@ -241,6 +246,7 @@ Current structural improvement domains:
 - runtime substrates: Docker/Kubernetes/Knative require authorization and resource ownership checks;
 - runtime mutation: goals/artifacts can change while running with origin trace and revisions.
 - async request handoff: skill callers receive a `run_id` and do not need to wait for the full run.
+- context routing: proposed child-subflow reuse decisions are included in bounded task context.
 
 ## Evolution Direction
 

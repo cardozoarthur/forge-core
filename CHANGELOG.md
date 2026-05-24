@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.20 - 2026-05-23
+
+### Added
+
+- `forge context` now emits schema `forge.context.v7` with routing policy `task_local_revisioned_persona_compressed_executor_policy_subflow_budget_v7`.
+- Context packets now expose `child_subflow_count` and `child_subflows` for tasks that carry proposed reusable child-subflow bindings.
+- Added a `child_subflows` context shard sourced from the subflow registry so executor adapters receive Forge's reuse decision inside the bounded task-local context package.
+
+### Changed
+
+- Deterministic no-AI context profiles now prioritize proposed child-subflow bindings after execution policy and before validation/context narrative sections. This reduces duplicate reasoning and duplicate local code-node work when Forge has already found a compatible reusable subflow.
+- Context contract tests now target schema `forge.context.v7`.
+
+### Safety
+
+- Child-subflow routing is read-only context metadata. Forge does not execute, promote, mutate or auto-complete a reused child subflow from `forge context`.
+- The full proposed binding remains auditable through top-level structured `child_subflows`; the executor-facing text stays compact so deterministic nodes keep their bounded no-AI envelope.
+- This change does not authorize CLIs, run Python/Node.js code, or mutate Docker/Kubernetes/Knative resources.
+
+### Validation
+
+- Added CLI contract coverage proving a context package for a reused deterministic code node includes the proposed child-subflow binding, shard source, binding status and schema v7 routing policy.
+
 ## 0.4.19 - 2026-05-23
 
 ### Added

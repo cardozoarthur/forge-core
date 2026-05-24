@@ -1,10 +1,13 @@
 use crate::artifact::hex_sha256;
-use crate::graph::{AtomicTask, ExecutionPolicySpec, ExecutorKind, PersonaRoutingSpec, Workflow};
+use crate::graph::{
+    AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, PersonaRoutingSpec, Workflow,
+};
 use anyhow::{bail, Result};
 use serde::Serialize;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v6";
-const ROUTING_POLICY: &str = "task_local_revisioned_persona_compressed_executor_policy_budget_v6";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v7";
+const ROUTING_POLICY: &str =
+    "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_v7";
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
 const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
 const ALL_CONTEXT_SECTIONS: &[&str] = &[
@@ -12,6 +15,7 @@ const ALL_CONTEXT_SECTIONS: &[&str] = &[
     "workflow_goal",
     "persona_routing",
     "execution_policy",
+    "child_subflows",
     "context_requirements",
     "validation_rules",
     "dependencies",
@@ -22,6 +26,7 @@ const NO_AI_CONTEXT_SECTIONS: &[&str] = &[
     "local_objective",
     "workflow_goal",
     "execution_policy",
+    "child_subflows",
     "context_requirements",
     "validation_rules",
     "dependencies",
@@ -31,6 +36,7 @@ const NOTIFICATION_CONTEXT_SECTIONS: &[&str] = &[
     "workflow_goal",
     "persona_routing",
     "execution_policy",
+    "child_subflows",
     "context_requirements",
     "validation_rules",
     "dependencies",
@@ -48,6 +54,8 @@ pub struct ContextPackage {
     pub persona: Option<PersonaRoutingSpec>,
     pub executor_profile: ContextExecutorProfile,
     pub execution_policy: ExecutionPolicySpec,
+    pub child_subflow_count: usize,
+    pub child_subflows: Vec<ChildSubflowRef>,
     pub requested_budget: usize,
     pub effective_budget: usize,
     pub context_bytes: usize,
@@ -212,6 +220,12 @@ pub fn build_context_package(
             content: render_execution_policy_context(&task.execution_policy),
         },
         ContextShardCandidate {
+            section: "child_subflows",
+            source: "subflow_registry",
+            priority: priority_for_profile(&profile, "child_subflows", 89),
+            content: render_child_subflows_context(&task.child_subflows),
+        },
+        ContextShardCandidate {
             section: "context_requirements",
             source: "task",
             priority: priority_for_profile(&profile, "context_requirements", 90),
@@ -335,6 +349,8 @@ pub fn build_context_package(
         persona,
         executor_profile: profile.to_public(&task.executor),
         execution_policy: task.execution_policy.clone(),
+        child_subflow_count: task.child_subflows.len(),
+        child_subflows: task.child_subflows.clone(),
         requested_budget: budget,
         effective_budget,
         context_bytes: content.len(),
@@ -422,6 +438,19 @@ fn render_execution_policy_context(policy: &ExecutionPolicySpec) -> String {
     )
 }
 
+fn render_child_subflows_context(child_subflows: &[ChildSubflowRef]) -> String {
+    child_subflows
+        .iter()
+        .map(|subflow| {
+            format!(
+                "Child subflow: {}/{}\nBinding status: {}\n",
+                subflow.workflow_id, subflow.task_id, subflow.binding_status
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 fn summarize_shard(content: &str) -> String {
     content
         .lines()
@@ -505,6 +534,7 @@ fn priority_for_profile(
         "no_ai_deterministic" => match section {
             "local_objective" => 100,
             "execution_policy" => 98,
+            "child_subflows" => 97,
             "validation_rules" => 96,
             "workflow_goal" => 95,
             "context_requirements" => 90,
@@ -515,6 +545,7 @@ fn priority_for_profile(
             "local_objective" => 100,
             "persona_routing" => 96,
             "execution_policy" => 94,
+            "child_subflows" => 92,
             "validation_rules" => 90,
             "workflow_goal" => 85,
             "context_requirements" => 80,
