@@ -160,6 +160,13 @@ compatible idle node is preferred before distributed handoff. A local Python cod
 node, for example, requires a registered online and reachable node with the
 `python` capability, a trusted LAN/local trust class and the declared sandbox
 permission.
+Every placement report also includes `forge.cluster_placement_policy.v1`, a
+read-only policy receipt with authorized scope `placement_metadata_only`,
+`remote_execution_enabled=false`, `external_mutation_allowed=false`, the required
+trust class, an explicit authorization requirement and deterministic hashes for
+both the placement requirements and the policy receipt. This makes the dry-run
+placement boundary auditable before Forge creates node leases or a later adapter
+asks permission to execute remotely.
 `forge cluster handoff --workflow <id> --task <task-id>` turns an eligible
 placement into a bounded handoff packet. It acquires the normal Forge task lease
 using the selected node id as the executor, returns a node-scoped lease ref and

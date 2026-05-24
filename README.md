@@ -291,6 +291,11 @@ decision: Forge can select a node that satisfies deterministic task requirements
 but it does not connect over SSH, execute remote code or mutate external machines.
 Placement candidates also expose active node lease counts and penalize busy
 eligible nodes, so a compatible idle node is preferred before handoff.
+Each placement report includes a `forge.cluster_placement_policy.v1` receipt
+with the authorized scope `placement_metadata_only`, explicit no-remote-execution
+and no-external-mutation flags, the required trust policy and deterministic
+hashes for the requirements and policy. That receipt is the audit boundary before
+Forge creates a node lease or any future remote adapter asks for authorization.
 `forge cluster handoff` layers that placement decision over the
 normal executor handoff contract: it leases the task to the selected node id and
 returns `forge.cluster_task_handoff.v1` with the placement report, executor handoff

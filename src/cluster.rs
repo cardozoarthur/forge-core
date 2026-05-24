@@ -15,6 +15,7 @@ const CLUSTER_NODE_SCHEDULING_SCHEMA_VERSION: &str = "forge.cluster_node_schedul
 const CLUSTER_PLACEMENT_SCHEMA_VERSION: &str = "forge.cluster_placement.v1";
 const CLUSTER_PLACEMENT_REQUIREMENTS_SCHEMA_VERSION: &str =
     "forge.cluster_placement_requirements.v2";
+const CLUSTER_PLACEMENT_POLICY_SCHEMA_VERSION: &str = "forge.cluster_placement_policy.v1";
 const CLUSTER_TASK_HANDOFF_SCHEMA_VERSION: &str = "forge.cluster_task_handoff.v1";
 const CLUSTER_SYNC_MANIFEST_SCHEMA_VERSION: &str = "forge.cluster_sync_manifest.v1";
 const CLUSTER_NODE_LEASE_SCHEMA_VERSION: &str = "forge.cluster_node_lease.v1";
@@ -137,6 +138,23 @@ pub struct ClusterPlacementRequirements {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ClusterPlacementPolicy {
+    pub schema_version: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub authorized_execution_scope: String,
+    pub remote_execution_enabled: bool,
+    pub remote_ai_execution_allowed: bool,
+    pub external_mutation_allowed: bool,
+    pub mutation_allowed: bool,
+    pub trust_policy: String,
+    pub required_trust: String,
+    pub authorization_required: String,
+    pub requirements_sha256: String,
+    pub policy_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ClusterPlacementCandidate {
     pub node_id: String,
     pub eligible: bool,
@@ -152,6 +170,7 @@ pub struct ClusterPlacementReport {
     pub workflow_id: String,
     pub task_id: String,
     pub requirements: ClusterPlacementRequirements,
+    pub placement_policy: ClusterPlacementPolicy,
     pub selected_node: Option<ClusterNode>,
     pub candidates: Vec<ClusterPlacementCandidate>,
     pub reason: String,
@@ -461,6 +480,7 @@ pub fn place_task_on_cluster(
             "no registered cluster node satisfies task placement requirements".to_string()
         }
     });
+    let placement_policy = build_placement_policy(&requirements)?;
 
     Ok(ClusterPlacementReport {
         schema_version: CLUSTER_PLACEMENT_SCHEMA_VERSION.to_string(),
@@ -468,6 +488,7 @@ pub fn place_task_on_cluster(
         workflow_id: workflow_id.to_string(),
         task_id: task_id.to_string(),
         requirements,
+        placement_policy,
         selected_node,
         candidates,
         reason,
@@ -612,6 +633,49 @@ impl ClusterNode {
             updated_at,
         }
     }
+}
+
+fn build_placement_policy(
+    requirements: &ClusterPlacementRequirements,
+) -> Result<ClusterPlacementPolicy> {
+    let requirements_sha256 = hex_sha256(&serde_json::to_vec(requirements)?);
+    let mut policy = ClusterPlacementPolicy {
+        schema_version: CLUSTER_PLACEMENT_POLICY_SCHEMA_VERSION.to_string(),
+        workflow_id: requirements.workflow_id.clone(),
+        task_id: requirements.task_id.clone(),
+        authorized_execution_scope: "placement_metadata_only".to_string(),
+        remote_execution_enabled: false,
+        remote_ai_execution_allowed: requirements.remote_ai_execution_allowed,
+        external_mutation_allowed: false,
+        mutation_allowed: requirements.mutation_allowed,
+        trust_policy: "explicit_trust_required_no_external_mutation".to_string(),
+        required_trust: requirements.required_trust.clone(),
+        authorization_required:
+            "explicit_authorization_required_before_remote_execution_or_external_mutation"
+                .to_string(),
+        requirements_sha256,
+        policy_sha256: String::new(),
+    };
+    policy.policy_sha256 = placement_policy_sha256(&policy)?;
+    Ok(policy)
+}
+
+fn placement_policy_sha256(policy: &ClusterPlacementPolicy) -> Result<String> {
+    let hash_input = serde_json::json!([
+        &policy.schema_version,
+        &policy.workflow_id,
+        &policy.task_id,
+        &policy.authorized_execution_scope,
+        policy.remote_execution_enabled,
+        policy.remote_ai_execution_allowed,
+        policy.external_mutation_allowed,
+        policy.mutation_allowed,
+        &policy.trust_policy,
+        &policy.required_trust,
+        &policy.authorization_required,
+        &policy.requirements_sha256
+    ]);
+    Ok(hex_sha256(&serde_json::to_vec(&hash_input)?))
 }
 
 fn build_sync_manifest(

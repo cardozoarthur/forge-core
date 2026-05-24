@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.84 - 2026-05-24
+
+### Added
+
+- Added a versioned `forge.cluster_placement_policy.v1` receipt to `forge cluster place`.
+- Placement policy receipts now expose the authorized execution scope, remote-execution flag, remote-AI flag, external-mutation flag, required trust policy and explicit authorization requirement before any distributed handoff.
+- Added deterministic `requirements_sha256` and `policy_sha256` fields so placement decisions can be audited without opening SSH sessions or mutating external machines.
+- Added CLI contract coverage proving deterministic cluster placement includes the policy receipt and hash fields.
+- Added `docs/reports/forge-core-v0.4.84-report-2026-05-24.md` with the cycle report.
+
+### Changed
+
+- The package version is now `0.4.84`.
+- Cluster placement now carries an explicit policy receipt alongside requirements and candidates, making the dry-run scheduling boundary auditable before node leases or sync manifests are created.
+
+### Safety
+
+- Placement remains read-only metadata over Forge-owned SQLite workflows, task policy and registered node profiles.
+- The policy receipt keeps `remote_execution_enabled=false` and `external_mutation_allowed=false`; it does not authorize remote AI, SSH execution, Docker/Kubernetes/Knative mutation or user-resource mutation.
+
 ## 0.4.83 - 2026-05-24
 
 ### Added
