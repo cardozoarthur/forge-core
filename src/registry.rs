@@ -16,6 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const REGISTRY_CONTEXT_HANDOFF_SCHEMA_VERSION: &str = "forge.registry_context_handoff.v1";
 const REGISTRY_CONTEXT_ACTION_SCHEMA_VERSION: &str = "forge.registry_context_action.v1";
+const REGISTRY_CONTEXT_QUALITY_SCHEMA_VERSION: &str = "forge.registry_context_quality.v1";
+const REGISTRY_QUALITY_ACTION_SCHEMA_VERSION: &str = "forge.registry_quality_action.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowRegistryReport {
@@ -45,6 +47,7 @@ pub struct WorkflowRegistrySummary {
     pub reusable_subflows: usize,
     pub context_handoff: RegistryContextHandoffSummary,
     pub context_actions: RegistryContextActionSummary,
+    pub context_quality: RegistryContextQualitySummary,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,6 +65,8 @@ pub struct WorkflowRegistryRow {
     pub task_summary: RegistryTaskStatusSummary,
     pub context_handoff: RegistryContextHandoffSummary,
     pub context_actions: RegistryContextActionSummary,
+    pub context_quality: RegistryContextQualitySummary,
+    pub quality_action: RegistryQualityAction,
     pub reusable_subflows: Vec<ReusableSubflowRef>,
     pub created_at: DateTime<Utc>,
 }
@@ -103,6 +108,35 @@ pub struct RegistryContextActionSummary {
     pub resume_from_checkpoint: usize,
     pub partial_retry_with_fresh_context: usize,
     pub partial_retry_recommended: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RegistryContextQualitySummary {
+    pub schema_version: String,
+    pub workflows: usize,
+    pub total_tasks: usize,
+    pub passed: usize,
+    pub warning: usize,
+    pub blocked: usize,
+    pub total_warnings: usize,
+    pub blocking_warnings: usize,
+    pub warning_warnings: usize,
+    pub advisory_warnings: usize,
+    pub required_context_missing: usize,
+    pub budget_pressure: usize,
+    pub compressed_context: usize,
+    pub profile_filtered_optional_context: usize,
+    pub min_score_bps: u32,
+    pub average_score_bps: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RegistryQualityAction {
+    pub schema_version: String,
+    pub action: String,
+    pub priority: String,
+    pub affected_tasks: usize,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -181,6 +215,12 @@ pub fn list_workflows_filtered(
                 total.add(&row.context_actions);
                 total
             });
+    let context_quality =
+        rows.iter()
+            .fold(RegistryContextQualitySummary::empty(), |mut total, row| {
+                total.add(&row.context_quality);
+                total
+            });
     let summary = WorkflowRegistrySummary {
         total: rows.len(),
         running,
@@ -188,6 +228,7 @@ pub fn list_workflows_filtered(
         reusable_subflows,
         context_handoff,
         context_actions,
+        context_quality,
     };
 
     Ok(WorkflowRegistryReport {
@@ -349,6 +390,8 @@ fn registry_row(
         .map(|revision| revision.revision)
         .unwrap_or(0);
     let reusable_subflows = reusable_subflows(workflow, &lifecycle_state);
+    let context_quality = RegistryContextQualitySummary::from_handoff_summary(handoff_summary);
+    let quality_action = RegistryQualityAction::from_summaries(handoff_summary, &context_quality);
 
     WorkflowRegistryRow {
         workflow_id: workflow.id.clone(),
@@ -364,6 +407,8 @@ fn registry_row(
         task_summary,
         context_handoff: RegistryContextHandoffSummary::from_handoff_summary(handoff_summary),
         context_actions: action_summary.clone(),
+        context_quality,
+        quality_action,
         reusable_subflows,
         created_at: workflow.created_at,
     }
@@ -474,6 +519,176 @@ impl RegistryContextActionSummary {
         self.resume_from_checkpoint += other.resume_from_checkpoint;
         self.partial_retry_with_fresh_context += other.partial_retry_with_fresh_context;
         self.partial_retry_recommended += other.partial_retry_recommended;
+    }
+}
+
+impl RegistryContextQualitySummary {
+    fn empty() -> Self {
+        Self {
+            schema_version: REGISTRY_CONTEXT_QUALITY_SCHEMA_VERSION.to_string(),
+            workflows: 0,
+            total_tasks: 0,
+            passed: 0,
+            warning: 0,
+            blocked: 0,
+            total_warnings: 0,
+            blocking_warnings: 0,
+            warning_warnings: 0,
+            advisory_warnings: 0,
+            required_context_missing: 0,
+            budget_pressure: 0,
+            compressed_context: 0,
+            profile_filtered_optional_context: 0,
+            min_score_bps: 10_000,
+            average_score_bps: 0,
+        }
+    }
+
+    fn from_handoff_summary(summary: &ContextHandoffSummary) -> Self {
+        let routing_quality = &summary.routing_quality;
+        let mut quality = Self {
+            schema_version: REGISTRY_CONTEXT_QUALITY_SCHEMA_VERSION.to_string(),
+            workflows: 1,
+            total_tasks: routing_quality.tasks,
+            passed: routing_quality.passed,
+            warning: routing_quality.warning,
+            blocked: routing_quality.blocked,
+            total_warnings: routing_quality.total_warnings,
+            blocking_warnings: routing_quality.blocking_warnings,
+            warning_warnings: routing_quality.warning_warnings,
+            advisory_warnings: routing_quality.advisory_warnings,
+            required_context_missing: 0,
+            budget_pressure: 0,
+            compressed_context: 0,
+            profile_filtered_optional_context: 0,
+            min_score_bps: routing_quality.min_score_bps,
+            average_score_bps: routing_quality.average_score_bps,
+        };
+
+        for task in &summary.tasks {
+            for warning in &task.routing_quality.warnings {
+                match warning.code.as_str() {
+                    "required_context_missing" => quality.required_context_missing += 1,
+                    "budget_pressure" => quality.budget_pressure += 1,
+                    "compressed_context" => quality.compressed_context += 1,
+                    "profile_filtered_optional_context" => {
+                        quality.profile_filtered_optional_context += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        quality
+    }
+
+    fn add(&mut self, other: &Self) {
+        let previous_tasks = self.total_tasks;
+        let previous_score_total = u64::from(self.average_score_bps) * previous_tasks as u64;
+        let other_score_total = u64::from(other.average_score_bps) * other.total_tasks as u64;
+
+        self.workflows += other.workflows;
+        self.total_tasks += other.total_tasks;
+        self.passed += other.passed;
+        self.warning += other.warning;
+        self.blocked += other.blocked;
+        self.total_warnings += other.total_warnings;
+        self.blocking_warnings += other.blocking_warnings;
+        self.warning_warnings += other.warning_warnings;
+        self.advisory_warnings += other.advisory_warnings;
+        self.required_context_missing += other.required_context_missing;
+        self.budget_pressure += other.budget_pressure;
+        self.compressed_context += other.compressed_context;
+        self.profile_filtered_optional_context += other.profile_filtered_optional_context;
+
+        if other.total_tasks > 0 {
+            self.min_score_bps = self.min_score_bps.min(other.min_score_bps);
+        }
+        self.average_score_bps = if self.total_tasks == 0 {
+            0
+        } else {
+            ((previous_score_total + other_score_total) / self.total_tasks as u64) as u32
+        };
+    }
+}
+
+impl RegistryQualityAction {
+    fn from_summaries(
+        handoff: &ContextHandoffSummary,
+        quality: &RegistryContextQualitySummary,
+    ) -> Self {
+        if quality.required_context_missing > 0 && handoff.blocked_dependencies > 0 {
+            return Self::new(
+                "repair_context_and_wait_for_dependencies",
+                "blocking",
+                quality.required_context_missing,
+                "required context is missing and dependency tasks are not ready",
+            );
+        }
+
+        if quality.required_context_missing > 0 || handoff.blocked_missing_context > 0 {
+            return Self::new(
+                "increase_context_budget",
+                "blocking",
+                quality
+                    .required_context_missing
+                    .max(handoff.blocked_missing_context),
+                "required context was omitted before executor handoff",
+            );
+        }
+
+        if quality.budget_pressure > 0 {
+            return Self::new(
+                "increase_context_budget",
+                "warning",
+                quality.budget_pressure,
+                "routing quality reports budget pressure for one or more tasks",
+            );
+        }
+
+        if handoff.blocked_dependencies > 0 {
+            return Self::new(
+                "wait_for_dependencies",
+                "blocking",
+                handoff.blocked_dependencies,
+                "dependency tasks must complete before executor handoff",
+            );
+        }
+
+        if quality.profile_filtered_optional_context > 0 {
+            return Self::new(
+                "verify_executor_profile",
+                "advisory",
+                quality.profile_filtered_optional_context,
+                "executor profile filtered optional context sections",
+            );
+        }
+
+        if quality.compressed_context > 0 {
+            return Self::new(
+                "review_context_summary_before_reuse",
+                "advisory",
+                quality.compressed_context,
+                "one or more context shards were compressed to fit the route",
+            );
+        }
+
+        Self::new(
+            "start_executor_handoff",
+            "ready",
+            handoff.ready,
+            "context quality and dependencies allow executor handoff",
+        )
+    }
+
+    fn new(action: &str, priority: &str, affected_tasks: usize, reason: &str) -> Self {
+        Self {
+            schema_version: REGISTRY_QUALITY_ACTION_SCHEMA_VERSION.to_string(),
+            action: action.to_string(),
+            priority: priority.to_string(),
+            affected_tasks,
+            reason: reason.to_string(),
+        }
     }
 }
 

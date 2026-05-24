@@ -4228,6 +4228,121 @@ fn list_aggregates_context_next_actions_for_registry_rows() {
 }
 
 #[test]
+fn list_aggregates_context_quality_and_recommends_quality_actions_by_lifecycle() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let completed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build a compact completed quality workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let completed_json: Value = serde_json::from_slice(&completed).unwrap();
+    let completed_workflow_id = completed_json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            completed_workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let long_tail = (0..120)
+        .map(|index| format!("budget pressure evidence shard {index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let running_goal =
+        format!("Build registry context quality lifecycle visibility with {long_tail}");
+    let running = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .arg("plan")
+        .arg("--goal")
+        .arg(&running_goal)
+        .arg("--output")
+        .arg("json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let running_json: Value = serde_json::from_slice(&running).unwrap();
+    let running_workflow_id = running_json["workflow_id"].as_str().unwrap();
+    set_task_status_in_stored_workflow(&store, running_workflow_id, "task-001", "running");
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--lifecycle",
+            "running",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    assert_eq!(listed_json["filter"]["lifecycle"], "running");
+    assert_eq!(listed_json["summary"]["total"], 1);
+    assert_eq!(
+        listed_json["summary"]["context_quality"]["schema_version"],
+        "forge.registry_context_quality.v1"
+    );
+    assert_eq!(listed_json["summary"]["context_quality"]["workflows"], 1);
+    assert_eq!(
+        listed_json["summary"]["context_quality"]["total_tasks"],
+        running_json["tasks"].as_array().unwrap().len()
+    );
+    assert!(
+        listed_json["summary"]["context_quality"]["budget_pressure"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+
+    let row = find_workflow(&listed_json, running_workflow_id);
+    assert_eq!(row["lifecycle_state"], "running");
+    assert_eq!(
+        row["context_quality"]["schema_version"],
+        "forge.registry_context_quality.v1"
+    );
+    assert_eq!(
+        row["context_quality"]["total_tasks"],
+        row["task_summary"]["total"]
+    );
+    assert!(row["context_quality"]["budget_pressure"].as_u64().unwrap() > 0);
+    assert_eq!(
+        row["quality_action"]["schema_version"],
+        "forge.registry_quality_action.v1"
+    );
+    assert_eq!(row["quality_action"]["action"], "increase_context_budget");
+    assert_eq!(row["quality_action"]["priority"], "warning");
+    assert!(row["quality_action"]["affected_tasks"].as_u64().unwrap() > 0);
+}
+
+#[test]
 fn list_surfaces_reusable_code_node_subflows_with_compatibility_keys() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

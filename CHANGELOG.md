@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.44 - 2026-05-24
+
+### Added
+
+- `forge list --output json` now includes a versioned `context_quality` projection on each workflow row and on the filtered registry summary.
+- The projection uses schema `forge.registry_context_quality.v1` and aggregates routing quality status, score, warning severity and warning codes across the current lifecycle slice.
+- Workflow rows now include a versioned `quality_action` recommendation using schema `forge.registry_quality_action.v1`, so operators can distinguish budget/profile routing pressure from dependency waits without opening full context packets.
+- Added CLI contract coverage proving `forge list --lifecycle running` aggregates context quality only over the filtered running workflows and recommends `increase_context_budget` when routing quality reports budget pressure.
+
+### Changed
+
+- Registry triage now reuses the existing Context Routing Engine quality contract derived for handoff summaries instead of recomputing shard quality in `forge list`.
+
+### Safety
+
+- Registry quality actions are read-only recommendations derived from Forge-owned workflow/task state and deterministic context routing.
+- This change does not acquire leases, complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by `forge task handoff`, strict context readiness, dependency readiness and task leases.
+
 ## 0.4.43 - 2026-05-24
 
 ### Added
