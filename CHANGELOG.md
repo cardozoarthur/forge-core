@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.58 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v26` with a versioned `prompt_packet` contract for bounded executor adapters.
+- The prompt packet uses schema `forge.context.prompt_packet.v1` and packet version `forge.executor.prompt_packet.v1`, binding context schema, routing policy, workflow/task ids, workflow revision, executor profile, executor kind, persona mode/profile, instruction sources, validation gates, context checksum, lineage checksum, budget status, routing-quality status and handoff status into a stable packet hash.
+- Context routing fingerprints now include a `prompt_packet` component, so executor cache keys account for prompt-packet versioning and gate/source changes alongside context payload, economy, quality, budget, persona and delta contracts.
+- `forge inspect --output json` now projects `prompt_packet_version` and `prompt_packet_sha256` for each terminal node, and the human diagram prints a compact `packet <hash>` marker.
+- Added CLI contract coverage proving a persona-aware documentation node exposes the prompt packet and that inspection projects the same packet hash when using the default context route.
+
+### Changed
+
+- The context routing policy is now `task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_v26`.
+- The package version is now `0.4.58`.
+
+### Safety
+
+- Prompt packets are read-only metadata derived from Forge-owned workflow/task state and deterministic context routing.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules, task leases, persona gates and child-subflow validation gates.
+
 ## 0.4.57 - 2026-05-24
 
 ### Added

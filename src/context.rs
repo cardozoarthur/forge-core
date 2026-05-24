@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v25";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v26";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
 const ROUTING_CONTRACT_SCHEMA_VERSION: &str = "forge.context.routing_contract.v1";
 const ROUTING_REPAIR_SCHEMA_VERSION: &str = "forge.context.routing_repair.v1";
@@ -17,6 +17,8 @@ const PERSONA_PROFILE_SCHEMA_VERSION: &str = "forge.context.persona_profile.v1";
 const PERSONA_CONTRACT_SCHEMA_VERSION: &str = "forge.context.persona_contract.v2";
 const CONTEXT_DELTA_SCHEMA_VERSION: &str = "forge.context.delta.v1";
 const ROUTING_ECONOMY_SCHEMA_VERSION: &str = "forge.context.routing_economy.v1";
+const PROMPT_PACKET_SCHEMA_VERSION: &str = "forge.context.prompt_packet.v1";
+const EXECUTOR_PROMPT_PACKET_VERSION: &str = "forge.executor.prompt_packet.v1";
 const CONTEXT_SELECTOR_VERSION: &str = "forge.context.selector.v1";
 const EXECUTOR_PROFILE_SCHEMA_VERSION: &str = "forge.context.executor_profile.v1";
 const CONTEXT_NEXT_ACTION_SCHEMA_VERSION: &str = "forge.inspect_context_action.v1";
@@ -24,7 +26,7 @@ const CONTEXT_ROUTING_QUALITY_SCHEMA_VERSION: &str = "forge.context_routing_qual
 const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
     "forge.context_routing_quality_summary.v1";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_v25";
+    "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_v26";
 const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
@@ -113,6 +115,7 @@ pub struct ContextPackage {
     pub effective_budget: usize,
     pub context_bytes: usize,
     pub context_sha256: String,
+    pub prompt_packet: ContextPromptPacket,
     pub routing_fingerprint: ContextRoutingFingerprint,
     pub routing_contract: ContextRoutingContract,
     pub routing_repair: ContextRoutingRepair,
@@ -148,6 +151,31 @@ pub struct ContextRoutingFingerprintComponent {
     pub name: String,
     pub value: String,
     pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextPromptPacket {
+    pub schema_version: String,
+    pub packet_version: String,
+    pub context_schema_version: String,
+    pub routing_policy: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub workflow_revision: u64,
+    pub executor_profile_id: String,
+    pub task_executor: String,
+    pub reasoning_allowed: bool,
+    pub deterministic: bool,
+    pub persona_mode: Option<String>,
+    pub persona_profile_id: Option<String>,
+    pub instruction_sources: Vec<String>,
+    pub validation_gates: Vec<String>,
+    pub context_sha256: String,
+    pub lineage_sha256: String,
+    pub budget_status: String,
+    pub routing_quality_status: String,
+    pub handoff_status: String,
+    pub packet_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -539,6 +567,30 @@ struct ContextRoutingContractProfileSeed {
     required_sections: Vec<String>,
 }
 
+#[derive(Serialize)]
+struct ContextPromptPacketSeed {
+    schema_version: &'static str,
+    packet_version: &'static str,
+    context_schema_version: &'static str,
+    routing_policy: &'static str,
+    workflow_id: String,
+    task_id: String,
+    workflow_revision: u64,
+    executor_profile_id: String,
+    task_executor: String,
+    reasoning_allowed: bool,
+    deterministic: bool,
+    persona_mode: Option<String>,
+    persona_profile_id: Option<String>,
+    instruction_sources: Vec<String>,
+    validation_gates: Vec<String>,
+    context_sha256: String,
+    lineage_sha256: String,
+    budget_status: String,
+    routing_quality_status: String,
+    handoff_status: String,
+}
+
 struct RoutingFingerprintInput<'a> {
     workflow_id: &'a str,
     task_id: &'a str,
@@ -561,7 +613,21 @@ struct RoutingFingerprintInput<'a> {
     routing_quality: &'a ContextRoutingQuality,
     persona_profile: Option<&'a ContextPersonaProfile>,
     persona_contract: Option<&'a ContextPersonaContract>,
+    prompt_packet: &'a ContextPromptPacket,
     context_sha256: &'a str,
+}
+
+struct PromptPacketInput<'a> {
+    workflow_id: &'a str,
+    task: &'a AtomicTask,
+    profile: &'a ExecutorContextProfile,
+    persona_profile: Option<&'a ContextPersonaProfile>,
+    lineage: &'a ContextLineage,
+    workflow_revision: u64,
+    context_sha256: &'a str,
+    budget_plan: &'a ContextBudgetPlan,
+    routing_quality: &'a ContextRoutingQuality,
+    handoff_status: &'a str,
 }
 
 pub fn build_context_package(
@@ -967,6 +1033,18 @@ pub fn build_context_package_with_checkpoint(
         &missing_required_sections,
         &profile_omitted_sections,
     );
+    let prompt_packet = build_prompt_packet(PromptPacketInput {
+        workflow_id: &workflow.id,
+        task,
+        profile: &profile,
+        persona_profile: persona_profile.as_ref(),
+        lineage: &lineage,
+        workflow_revision,
+        context_sha256: &context_sha256,
+        budget_plan: &budget_plan,
+        routing_quality: &routing_quality,
+        handoff_status,
+    })?;
     let routing_fingerprint = build_routing_fingerprint(RoutingFingerprintInput {
         workflow_id: &workflow.id,
         task_id: &task.id,
@@ -989,6 +1067,7 @@ pub fn build_context_package_with_checkpoint(
         routing_quality: &routing_quality,
         persona_profile: persona_profile.as_ref(),
         persona_contract: persona_contract.as_ref(),
+        prompt_packet: &prompt_packet,
         context_sha256: &context_sha256,
     })?;
     let next_action = build_context_next_action(
@@ -1036,6 +1115,7 @@ pub fn build_context_package_with_checkpoint(
         effective_budget,
         context_bytes: content.len(),
         context_sha256,
+        prompt_packet,
         routing_fingerprint,
         routing_contract,
         routing_repair,
@@ -1265,6 +1345,101 @@ fn build_context_delta(
         changed_components,
         reason: reason.to_string(),
     }
+}
+
+fn build_prompt_packet(input: PromptPacketInput<'_>) -> Result<ContextPromptPacket> {
+    let persona = input.task.persona.as_ref();
+    let seed = ContextPromptPacketSeed {
+        schema_version: PROMPT_PACKET_SCHEMA_VERSION,
+        packet_version: EXECUTOR_PROMPT_PACKET_VERSION,
+        context_schema_version: CONTEXT_SCHEMA_VERSION,
+        routing_policy: ROUTING_POLICY,
+        workflow_id: input.workflow_id.to_string(),
+        task_id: input.task.id.clone(),
+        workflow_revision: input.workflow_revision,
+        executor_profile_id: input.profile.id.to_string(),
+        task_executor: executor_kind(&input.task.executor).to_string(),
+        reasoning_allowed: input.profile.reasoning_allowed,
+        deterministic: input.profile.deterministic,
+        persona_mode: persona.map(|persona| persona.mode.clone()),
+        persona_profile_id: input
+            .persona_profile
+            .map(|profile| profile.profile_id.clone()),
+        instruction_sources: prompt_packet_instruction_sources(persona),
+        validation_gates: prompt_packet_validation_gates(input.task, persona),
+        context_sha256: input.context_sha256.to_string(),
+        lineage_sha256: input.lineage.lineage_sha256.clone(),
+        budget_status: input.budget_plan.status.clone(),
+        routing_quality_status: input.routing_quality.status.clone(),
+        handoff_status: input.handoff_status.to_string(),
+    };
+    let packet_sha256 = hex_sha256(serde_json::to_string(&seed)?.as_bytes());
+
+    Ok(ContextPromptPacket {
+        schema_version: seed.schema_version.to_string(),
+        packet_version: seed.packet_version.to_string(),
+        context_schema_version: seed.context_schema_version.to_string(),
+        routing_policy: seed.routing_policy.to_string(),
+        workflow_id: seed.workflow_id,
+        task_id: seed.task_id,
+        workflow_revision: seed.workflow_revision,
+        executor_profile_id: seed.executor_profile_id,
+        task_executor: seed.task_executor,
+        reasoning_allowed: seed.reasoning_allowed,
+        deterministic: seed.deterministic,
+        persona_mode: seed.persona_mode,
+        persona_profile_id: seed.persona_profile_id,
+        instruction_sources: seed.instruction_sources,
+        validation_gates: seed.validation_gates,
+        context_sha256: seed.context_sha256,
+        lineage_sha256: seed.lineage_sha256,
+        budget_status: seed.budget_status,
+        routing_quality_status: seed.routing_quality_status,
+        handoff_status: seed.handoff_status,
+        packet_sha256,
+    })
+}
+
+fn prompt_packet_instruction_sources(persona: Option<&PersonaRoutingSpec>) -> Vec<String> {
+    let mut sources = BTreeSet::from([
+        "forge_context_router".to_string(),
+        "forge_executor_policy".to_string(),
+    ]);
+
+    if let Some(persona) = persona {
+        if !persona.instruction_source.trim().is_empty() {
+            sources.insert(persona.instruction_source.clone());
+        }
+        for model in &persona.source_models {
+            if !model.trim().is_empty() {
+                sources.insert(model.clone());
+            }
+        }
+    }
+
+    sources.into_iter().collect()
+}
+
+fn prompt_packet_validation_gates(
+    task: &AtomicTask,
+    persona: Option<&PersonaRoutingSpec>,
+) -> Vec<String> {
+    let mut gates = BTreeSet::new();
+    if !task.execution_policy.validation_gate.trim().is_empty() {
+        gates.insert(task.execution_policy.validation_gate.clone());
+    }
+    if let Some(persona) = persona {
+        if !persona.validation_gate.trim().is_empty() {
+            gates.insert(persona.validation_gate.clone());
+        }
+    }
+    for rule in &task.validation_rules {
+        if !rule.kind.trim().is_empty() {
+            gates.insert(format!("validation_rule:{}", rule.kind));
+        }
+    }
+
+    gates.into_iter().collect()
 }
 
 fn build_handoff_blockers(
@@ -1888,6 +2063,7 @@ fn build_routing_fingerprint(
         fingerprint_component("routing_quality", routing_quality),
         fingerprint_component("persona_profile", persona_profile),
         fingerprint_component("persona_contract", persona_contract),
+        fingerprint_component("prompt_packet", input.prompt_packet.packet_sha256.clone()),
         fingerprint_component("context_payload", input.context_sha256.to_string()),
     ];
     let seed = ContextRoutingFingerprintSeed {

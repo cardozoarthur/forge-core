@@ -190,8 +190,8 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v25` and routing policy
-`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_v25`. Each packet
+Current `forge context` packets use schema `forge.context.v26` and routing policy
+`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_v26`. Each packet
 includes the executor-facing content, the full context checksum, workflow revision,
 artifact count, node-scoped persona routing metadata plus a versioned persona profile
 and persona contract for human-facing tasks, executor
@@ -207,7 +207,10 @@ Packets also include `context_ready`,
 `routing_quality` contract. Packets also carry a versioned `next_action` decision so executor adapters
 can distinguish fresh handoff, dependency waits, context-budget repair, stale
 checkpoint refresh and partial retry with fresh context without first asking for a
-separate inspection projection. The routing contract names the selector version, executor profile version,
+separate inspection projection. Packets now include a versioned `prompt_packet`
+contract that binds the context schema, routing policy, executor profile, persona
+mode/profile, instruction sources, validation gates, context checksum and lineage
+checksum into a stable adapter-facing hash. The routing contract names the selector version, executor profile version,
 profile id, selection strategy, requested and effective budget, minimum budget,
 allowed/required/optional section set and profile hash. The repair contract turns
 missing required sections into a deterministic action and recommended budget so

@@ -63,6 +63,8 @@ pub struct ContextInspectionRoute {
     pub routing_fingerprint_schema_version: String,
     pub routing_cache_key: String,
     pub routing_lineage_sha256: String,
+    pub prompt_packet_version: String,
+    pub prompt_packet_sha256: String,
     pub profile_id: String,
     pub reasoning_allowed: bool,
     pub deterministic: bool,
@@ -271,6 +273,8 @@ fn context_route(package: &ContextPackage) -> ContextInspectionRoute {
         routing_fingerprint_schema_version: package.routing_fingerprint.schema_version.clone(),
         routing_cache_key: package.routing_fingerprint.cache_key.clone(),
         routing_lineage_sha256: package.routing_fingerprint.lineage_sha256.clone(),
+        prompt_packet_version: package.prompt_packet.packet_version.clone(),
+        prompt_packet_sha256: package.prompt_packet.packet_sha256.clone(),
         profile_id: package.executor_profile.id.clone(),
         reasoning_allowed: package.executor_profile.reasoning_allowed,
         deterministic: package.executor_profile.deterministic,
@@ -527,12 +531,13 @@ fn render_diagram(
             )
         };
         let context_route = format!(
-            " context {} {} {}/{} cache {} next {} delta {} budget_plan {}/{} {}",
+            " context {} {} {}/{} cache {} packet {} next {} delta {} budget_plan {}/{} {}",
             node.context_route.profile_id,
             node.context_route.handoff_status,
             node.context_route.context_bytes,
             node.context_route.effective_budget,
             short_hash(&node.context_route.routing_cache_key),
+            short_hash(&node.context_route.prompt_packet_sha256),
             node.context_route.next_action.action,
             node.context_route.context_delta.status,
             node.context_route.budget_plan.minimum_correct_budget_bytes,
