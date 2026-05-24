@@ -1828,6 +1828,168 @@ fn inspect_exposes_context_route_summary_for_each_terminal_node() {
 }
 
 #[test]
+fn inspect_projects_next_context_action_for_handoff_and_resume() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build inspectable context continuation actions",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+
+    let initial_inspect = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let initial_inspection: Value = serde_json::from_slice(&initial_inspect).unwrap();
+    assert!(initial_inspection["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("next start_executor_handoff"));
+
+    let nodes = initial_inspection["nodes"].as_array().unwrap();
+    let parse = find_task(nodes, "Parse intent");
+    assert_eq!(
+        parse["context_route"]["next_action"]["schema_version"],
+        "forge.inspect_context_action.v1"
+    );
+    assert_eq!(
+        parse["context_route"]["next_action"]["action"],
+        "start_executor_handoff"
+    );
+    assert_eq!(
+        parse["context_route"]["next_action"]["ready_for_handoff"],
+        true
+    );
+    assert_eq!(
+        parse["context_route"]["next_action"]["partial_retry_recommended"],
+        false
+    );
+
+    let requirements = find_task(nodes, "Extract requirements");
+    assert_eq!(
+        requirements["context_route"]["next_action"]["action"],
+        "wait_for_dependencies"
+    );
+    assert_eq!(
+        requirements["context_route"]["next_action"]["blocking_refs"],
+        serde_json::json!(["task-001"])
+    );
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "checkpoint",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--executor",
+            "codex",
+            "--state",
+            "paused",
+            "--summary",
+            "Paused after initial context route",
+            "--context-sha256",
+            context["context_sha256"].as_str().unwrap(),
+            "--context-routing-cache-key",
+            context["routing_fingerprint"]["cache_key"]
+                .as_str()
+                .unwrap(),
+            "--workflow-revision",
+            "0",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let resumed_inspect = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let resumed_inspection: Value = serde_json::from_slice(&resumed_inspect).unwrap();
+    assert!(resumed_inspection["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("next partial_retry_with_fresh_context"));
+
+    let resumed_parse = find_task(
+        resumed_inspection["nodes"].as_array().unwrap(),
+        "Parse intent",
+    );
+    let next_action = &resumed_parse["context_route"]["next_action"];
+    assert_eq!(next_action["action"], "partial_retry_with_fresh_context");
+    assert_eq!(next_action["partial_retry_recommended"], true);
+    assert_eq!(
+        next_action["checkpoint_context_routing_cache_key"],
+        context["routing_fingerprint"]["cache_key"]
+    );
+    assert_eq!(
+        next_action["current_context_routing_cache_key"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+}
+
+#[test]
 fn improve_creates_controlled_experiment_and_never_promotes_without_validation() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

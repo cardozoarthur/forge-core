@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.39 - 2026-05-24
+
+### Added
+
+- `forge inspect --output json` now includes a versioned `context_route.next_action` projection for every terminal DAG node.
+- The projection uses schema `forge.inspect_context_action.v1` and reports the operator action, readiness for handoff, checkpoint route keys, partial-retry recommendation, blocking refs and a short reason.
+- Human inspection diagrams now append `next <action>` to each node's context route so terminal operators can distinguish fresh handoff, dependency waits, context-budget repair and resumable checkpoint retries without opening full context packets.
+- Added CLI contract coverage proving fresh handoff, dependency-wait and checkpoint route-change actions are surfaced through `forge inspect`.
+
+### Changed
+
+- Workflow inspection now turns Context Routing Engine and checkpoint state into explicit operator guidance instead of exposing only raw handoff and resume statuses.
+- The `forge.context.v16` packet remains unchanged; this release adds a read-only inspection projection derived from the existing context, dependency and checkpoint contracts.
+
+### Safety
+
+- Next-action projections are read-only metadata derived from Forge-owned workflow/task/checkpoint state and deterministic context routing.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by `forge task handoff`, strict context readiness and task leases.
+
 ## 0.4.38 - 2026-05-24
 
 ### Added
