@@ -7,7 +7,7 @@ use crate::context::{
 };
 use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, SubtaskSpec, TaskStatus,
-    ValidationRule,
+    ValidationRule, Workflow,
 };
 use crate::registry::{list_workflows, WorkflowRegistryRow};
 use crate::storage::ForgeStore;
@@ -107,6 +107,16 @@ pub struct SubflowInspection {
     pub title: String,
     pub lifecycle_state: String,
     pub binding_status: String,
+    pub depth: usize,
+    pub parent_workflow_id: String,
+    pub parent_task_id: String,
+    pub path: Vec<String>,
+    pub reachable: bool,
+    pub terminal: bool,
+    pub child_workflow_status: Option<String>,
+    pub child_lifecycle_state: Option<String>,
+    pub child_task_count: usize,
+    pub child_subflow_count: usize,
 }
 
 pub fn inspect_workflow(
@@ -141,7 +151,7 @@ pub fn inspect_workflow(
         handoff_tasks.push(handoff);
     }
     let handoff_summary = summarize_handoff_tasks(handoff_tasks);
-    let subflows = collect_subflows(&nodes);
+    let subflows = collect_subflows(store, workflow_id, &nodes);
     let diagram = render_diagram(&registry_row, &nodes, &subflows, verbose);
 
     Ok(WorkflowInspectionReport {
@@ -283,20 +293,183 @@ fn context_route(package: &ContextPackage) -> ContextInspectionRoute {
     }
 }
 
-fn collect_subflows(nodes: &[TaskInspectionNode]) -> Vec<SubflowInspection> {
-    nodes
+fn collect_subflows(
+    store: &ForgeStore,
+    root_workflow_id: &str,
+    nodes: &[TaskInspectionNode],
+) -> Vec<SubflowInspection> {
+    let mut collector = SubflowCollector {
+        store,
+        visited_edges: BTreeSet::new(),
+        subflows: Vec::new(),
+    };
+
+    for node in nodes {
+        let root_path = vec![format!("{root_workflow_id}/{}", node.id)];
+        collector.collect_refs(
+            SubflowParentFrame {
+                workflow_id: root_workflow_id,
+                task_id: &node.id,
+                path: &root_path,
+                depth: 1,
+            },
+            &node.subflow_refs,
+        );
+    }
+
+    collector.subflows
+}
+
+struct SubflowCollector<'a> {
+    store: &'a ForgeStore,
+    visited_edges: BTreeSet<String>,
+    subflows: Vec<SubflowInspection>,
+}
+
+struct SubflowParentFrame<'a> {
+    workflow_id: &'a str,
+    task_id: &'a str,
+    path: &'a [String],
+    depth: usize,
+}
+
+impl SubflowCollector<'_> {
+    fn collect_refs(&mut self, parent: SubflowParentFrame<'_>, refs: &[ChildSubflowRef]) {
+        for subflow in refs {
+            let current_ref = format!("{}/{}", subflow.workflow_id, subflow.task_id);
+            let edge_key = format!("{}/{}->{current_ref}", parent.workflow_id, parent.task_id);
+            if !self.visited_edges.insert(edge_key) {
+                continue;
+            }
+
+            let mut path = parent.path.to_vec();
+            path.push(current_ref.clone());
+            let recursive_cycle = parent.path.iter().any(|ancestor| ancestor == &current_ref);
+
+            match self.store.load_workflow(&subflow.workflow_id) {
+                Ok(child_workflow) => {
+                    self.collect_loaded_ref(
+                        &parent,
+                        subflow,
+                        current_ref,
+                        path,
+                        recursive_cycle,
+                        child_workflow,
+                    );
+                }
+                Err(_) => {
+                    self.subflows.push(SubflowInspection {
+                        id: current_ref,
+                        workflow_id: subflow.workflow_id.clone(),
+                        task_id: subflow.task_id.clone(),
+                        title: subflow.title.clone(),
+                        lifecycle_state: subflow.lifecycle_state.clone(),
+                        binding_status: subflow.binding_status.clone(),
+                        depth: parent.depth,
+                        parent_workflow_id: parent.workflow_id.to_string(),
+                        parent_task_id: parent.task_id.to_string(),
+                        path,
+                        reachable: false,
+                        terminal: true,
+                        child_workflow_status: None,
+                        child_lifecycle_state: None,
+                        child_task_count: 0,
+                        child_subflow_count: 0,
+                    });
+                }
+            }
+        }
+    }
+
+    fn collect_loaded_ref(
+        &mut self,
+        parent: &SubflowParentFrame<'_>,
+        subflow: &ChildSubflowRef,
+        current_ref: String,
+        path: Vec<String>,
+        recursive_cycle: bool,
+        child_workflow: Workflow,
+    ) {
+        let child_task = child_workflow
+            .tasks
+            .iter()
+            .find(|task| task.id == subflow.task_id);
+        let child_refs = child_task
+            .map(|task| task.child_subflows.clone())
+            .unwrap_or_default();
+        let child_subflow_count = child_refs.len();
+        let child_task_count = child_workflow.tasks.len();
+        let child_lifecycle_state = derive_child_lifecycle_state(&child_workflow);
+        let terminal = child_refs.is_empty() || recursive_cycle;
+
+        self.subflows.push(SubflowInspection {
+            id: current_ref,
+            workflow_id: subflow.workflow_id.clone(),
+            task_id: subflow.task_id.clone(),
+            title: subflow.title.clone(),
+            lifecycle_state: subflow.lifecycle_state.clone(),
+            binding_status: subflow.binding_status.clone(),
+            depth: parent.depth,
+            parent_workflow_id: parent.workflow_id.to_string(),
+            parent_task_id: parent.task_id.to_string(),
+            path: path.clone(),
+            reachable: child_task.is_some(),
+            terminal,
+            child_workflow_status: Some(child_workflow.status.clone()),
+            child_lifecycle_state: Some(child_lifecycle_state),
+            child_task_count,
+            child_subflow_count,
+        });
+
+        if !terminal {
+            self.collect_refs(
+                SubflowParentFrame {
+                    workflow_id: &child_workflow.id,
+                    task_id: &subflow.task_id,
+                    path: &path,
+                    depth: parent.depth + 1,
+                },
+                &child_refs,
+            );
+        }
+    }
+}
+
+fn derive_child_lifecycle_state(workflow: &Workflow) -> String {
+    if workflow.status == "failed"
+        || workflow
+            .tasks
+            .iter()
+            .any(|task| task.status == TaskStatus::Failed)
+    {
+        return "failed".to_string();
+    }
+    if workflow.status == "blocked"
+        || workflow
+            .tasks
+            .iter()
+            .any(|task| task.status == TaskStatus::Blocked)
+    {
+        return "blocked".to_string();
+    }
+    if workflow
+        .tasks
         .iter()
-        .flat_map(|node| {
-            node.subflow_refs.iter().map(|subflow| SubflowInspection {
-                id: format!("{}/{}", subflow.workflow_id, subflow.task_id),
-                workflow_id: subflow.workflow_id.clone(),
-                task_id: subflow.task_id.clone(),
-                title: subflow.title.clone(),
-                lifecycle_state: subflow.lifecycle_state.clone(),
-                binding_status: subflow.binding_status.clone(),
-            })
-        })
-        .collect()
+        .any(|task| task.status == TaskStatus::Running)
+    {
+        return "running".to_string();
+    }
+    if workflow.status == "completed" {
+        let all_completed = workflow
+            .tasks
+            .iter()
+            .all(|task| task.status == TaskStatus::Completed);
+        if all_completed {
+            return "scaled_to_zero".to_string();
+        }
+        return "completed".to_string();
+    }
+    "idle".to_string()
 }
 
 fn render_diagram(
@@ -411,6 +584,24 @@ fn render_diagram(
                     task_status(&subtask.status)
                 ));
             }
+        }
+    }
+
+    if !subflows.is_empty() {
+        lines.push("subflows:".to_string());
+        for subflow in subflows {
+            lines.push(format!(
+                "  subflow depth {} {} [{}] binding {} reachable {} terminal {}",
+                subflow.depth,
+                subflow.path.join(" -> "),
+                subflow
+                    .child_lifecycle_state
+                    .as_deref()
+                    .unwrap_or(subflow.lifecycle_state.as_str()),
+                subflow.binding_status,
+                subflow.reachable,
+                subflow.terminal
+            ));
         }
     }
 

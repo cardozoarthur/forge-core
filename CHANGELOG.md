@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.55 - 2026-05-24
+
+### Added
+
+- `forge inspect --output json` now expands proposed child-subflow links with recursive path metadata.
+- Subflow inspection rows include parent workflow/task ids, depth, path, reachability, terminal status, loaded child workflow status, derived child lifecycle state and child task/subflow counts.
+- Human `forge inspect` diagrams now include a compact `subflows:` section with each proposed child-subflow path, making recursive reuse auditable from the terminal before execution.
+- Added CLI contract coverage proving a reused deterministic Python code-node subflow is inspectable by parent path and loaded child lifecycle metadata.
+
+### Changed
+
+- The package version is now `0.4.55`.
+
+### Safety
+
+- Subflow expansion is read-only inspection metadata over Forge-owned workflow state.
+- This change does not execute child subflows, complete tasks, promote workflows, authorize CLIs, run local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Proposed child-subflow execution remains future work behind validation, scheduling and executor handoff gates.
+
 ## 0.4.54 - 2026-05-24
 
 ### Added

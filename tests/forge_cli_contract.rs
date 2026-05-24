@@ -5579,6 +5579,106 @@ fn plan_persists_reuse_candidates_as_proposed_child_subflows_for_inspection() {
 }
 
 #[test]
+fn inspect_expands_proposed_child_subflows_with_recursive_path_metadata() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let first = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with repeated local Python cost calculations without AI and email ops@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first_json: Value = serde_json::from_slice(&first).unwrap();
+    let first_workflow_id = first_json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            first_workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let second = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with frequent local Python cost calculations without AI and email finance@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second_json: Value = serde_json::from_slice(&second).unwrap();
+    let second_workflow_id = second_json["workflow_id"].as_str().unwrap();
+    assert_eq!(second_json["attached_subflows"], 1);
+
+    let inspection = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            second_workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let inspection_json: Value = serde_json::from_slice(&inspection).unwrap();
+    assert_eq!(inspection_json["subflow_count"], 1);
+    let subflow = &inspection_json["subflows"][0];
+    assert_eq!(subflow["workflow_id"], first_workflow_id);
+    assert_eq!(subflow["task_id"], "task-011");
+    assert_eq!(subflow["parent_workflow_id"], second_workflow_id);
+    assert_eq!(subflow["parent_task_id"], "task-011");
+    assert_eq!(subflow["depth"], 1);
+    assert_eq!(
+        subflow["path"],
+        serde_json::json!([
+            format!("{second_workflow_id}/task-011"),
+            format!("{first_workflow_id}/task-011")
+        ])
+    );
+    assert_eq!(subflow["reachable"], true);
+    assert_eq!(subflow["terminal"], true);
+    assert_eq!(subflow["child_workflow_status"], "completed");
+    assert_eq!(subflow["child_lifecycle_state"], "scaled_to_zero");
+    assert!(subflow["child_task_count"].as_u64().unwrap() >= 8);
+    assert_eq!(subflow["child_subflow_count"], 0);
+    assert!(inspection_json["diagram"]
+        .as_str()
+        .unwrap()
+        .contains(&format!(
+            "subflow depth 1 {second_workflow_id}/task-011 -> {first_workflow_id}/task-011"
+        )));
+}
+
+#[test]
 fn request_start_reuses_compatible_subflows_before_persisting_async_workflow() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

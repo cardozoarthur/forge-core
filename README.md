@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.54`
+Current version: `0.4.55`
 
 This is the first functional CLI + Skill version:
 
@@ -38,7 +38,7 @@ This is the first functional CLI + Skill version:
 - artifact listing
 - workflow registry listing with lifecycle state and `running`/`non-running` filters
 - workflow registry quality-action catalog discovery for Context Routing Engine triage filters
-- terminal workflow DAG inspection with lifecycle, dependency, persona, context-route, execution-policy and next-action annotations
+- terminal workflow DAG inspection with lifecycle, dependency, persona, context-route, execution-policy, next-action and recursive child-subflow annotations
 - handoff readiness summaries in workflow inspection and async request status
 - proposed child-subflow links for compatible deterministic code-node reuse
 - context routing with deterministic shard manifests, deterministic code-node and long-running cognition goals
@@ -121,7 +121,8 @@ included in the context lineage so executors can detect stale context before res
 work.
 
 `forge inspect --output json` projects compact `context_route` and `execution_policy`
-contracts for every DAG node.
+contracts for every DAG node and expands proposed child-subflow links into auditable
+path metadata.
 The route reuses the same versioned context package and includes the executor profile,
 effective budget, context checksum, routing fingerprint schema, routing cache key,
 lineage hash, handoff status, resume status, missing required sections and routing
@@ -133,7 +134,10 @@ from a checkpoint with fresh context. The execution policy projection
 flag, reuse hint, selection reason, validation gate and optional local code runtime
 fields before a handoff packet is requested. Human terminal diagrams also show the
 profile, handoff state, selected/effective context bytes, short routing cache key,
-next action and compact execution policy for each node.
+next action and compact execution policy for each node. When a node has proposed
+child subflows, inspection also reports each subflow's parent node, depth, path,
+reachability, terminal status and loaded child workflow/task counts so operators can
+audit recursive reuse without executing or promoting the child flow.
 
 Use strict context mode when handing a package to an executor:
 

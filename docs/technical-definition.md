@@ -249,6 +249,12 @@ remain part of the context lineage, which gives long-running executors a determi
 stale-context signal while leaving room for persisted summaries, artifact shards and
 active child-subflow execution gates in later versions.
 
+Inspection expands those proposed child-subflow bindings as read-only topology
+metadata. `forge inspect --output json` records the parent workflow/task, depth,
+path, reachability, terminal flag and loaded child workflow/task counts for each
+linked subflow, and the terminal diagram prints the same path. This makes recursive
+reuse auditable before Forge schedules, executes or promotes a child flow.
+
 ## Personality/Soul Routing
 
 Some workflow outputs are not only machine artifacts. Reports, research summaries,
