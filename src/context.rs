@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v26";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v27";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
 const ROUTING_CONTRACT_SCHEMA_VERSION: &str = "forge.context.routing_contract.v1";
 const ROUTING_REPAIR_SCHEMA_VERSION: &str = "forge.context.routing_repair.v1";
@@ -17,8 +17,9 @@ const PERSONA_PROFILE_SCHEMA_VERSION: &str = "forge.context.persona_profile.v1";
 const PERSONA_CONTRACT_SCHEMA_VERSION: &str = "forge.context.persona_contract.v2";
 const CONTEXT_DELTA_SCHEMA_VERSION: &str = "forge.context.delta.v1";
 const ROUTING_ECONOMY_SCHEMA_VERSION: &str = "forge.context.routing_economy.v1";
-const PROMPT_PACKET_SCHEMA_VERSION: &str = "forge.context.prompt_packet.v1";
-const EXECUTOR_PROMPT_PACKET_VERSION: &str = "forge.executor.prompt_packet.v1";
+const PROMPT_PACKET_SCHEMA_VERSION: &str = "forge.context.prompt_packet.v2";
+const EXECUTOR_PROMPT_PACKET_VERSION: &str = "forge.executor.prompt_packet.v2";
+const CONTEXT_REPLAY_MANIFEST_SCHEMA_VERSION: &str = "forge.context.replay_manifest.v1";
 const CONTEXT_SELECTOR_VERSION: &str = "forge.context.selector.v1";
 const EXECUTOR_PROFILE_SCHEMA_VERSION: &str = "forge.context.executor_profile.v1";
 const CONTEXT_NEXT_ACTION_SCHEMA_VERSION: &str = "forge.inspect_context_action.v1";
@@ -26,7 +27,7 @@ const CONTEXT_ROUTING_QUALITY_SCHEMA_VERSION: &str = "forge.context_routing_qual
 const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
     "forge.context_routing_quality_summary.v1";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_v26";
+    "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27";
 const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
@@ -115,6 +116,7 @@ pub struct ContextPackage {
     pub effective_budget: usize,
     pub context_bytes: usize,
     pub context_sha256: String,
+    pub replay_manifest: ContextReplayManifest,
     pub prompt_packet: ContextPromptPacket,
     pub routing_fingerprint: ContextRoutingFingerprint,
     pub routing_contract: ContextRoutingContract,
@@ -172,10 +174,55 @@ pub struct ContextPromptPacket {
     pub validation_gates: Vec<String>,
     pub context_sha256: String,
     pub lineage_sha256: String,
+    pub replay_manifest_sha256: String,
     pub budget_status: String,
     pub routing_quality_status: String,
     pub handoff_status: String,
     pub packet_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextReplayManifest {
+    pub schema_version: String,
+    pub context_schema_version: String,
+    pub routing_policy: String,
+    pub selector_version: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub workflow_revision: u64,
+    pub executor_profile_id: String,
+    pub requested_budget: usize,
+    pub effective_budget: usize,
+    pub context_sha256: String,
+    pub content_bytes: usize,
+    pub included_sections: Vec<String>,
+    pub missing_required_sections: Vec<String>,
+    pub replay_command: ContextReplayCommand,
+    pub shard_refs: Vec<ContextReplayShardRef>,
+    pub manifest_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextReplayCommand {
+    pub binary: String,
+    pub args: Vec<String>,
+    pub requires_store_path: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextReplayShardRef {
+    pub sequence: usize,
+    pub shard_id: String,
+    pub section: String,
+    pub source: String,
+    pub required: bool,
+    pub included: bool,
+    pub compressed: bool,
+    pub routing_decision: String,
+    pub source_sha256: String,
+    pub content_sha256: String,
+    pub bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -586,9 +633,30 @@ struct ContextPromptPacketSeed {
     validation_gates: Vec<String>,
     context_sha256: String,
     lineage_sha256: String,
+    replay_manifest_sha256: String,
     budget_status: String,
     routing_quality_status: String,
     handoff_status: String,
+}
+
+#[derive(Serialize)]
+struct ContextReplayManifestSeed<'a> {
+    schema_version: &'static str,
+    context_schema_version: &'static str,
+    routing_policy: &'static str,
+    selector_version: &'static str,
+    workflow_id: &'a str,
+    task_id: &'a str,
+    workflow_revision: u64,
+    executor_profile_id: &'static str,
+    requested_budget: usize,
+    effective_budget: usize,
+    context_sha256: &'a str,
+    content_bytes: usize,
+    included_sections: &'a [String],
+    missing_required_sections: &'a [String],
+    replay_command: &'a ContextReplayCommand,
+    shard_refs: &'a [ContextReplayShardRef],
 }
 
 struct RoutingFingerprintInput<'a> {
@@ -611,6 +679,7 @@ struct RoutingFingerprintInput<'a> {
     budget_plan: &'a ContextBudgetPlan,
     routing_economy: &'a ContextRoutingEconomy,
     routing_quality: &'a ContextRoutingQuality,
+    replay_manifest: &'a ContextReplayManifest,
     persona_profile: Option<&'a ContextPersonaProfile>,
     persona_contract: Option<&'a ContextPersonaContract>,
     prompt_packet: &'a ContextPromptPacket,
@@ -625,9 +694,24 @@ struct PromptPacketInput<'a> {
     lineage: &'a ContextLineage,
     workflow_revision: u64,
     context_sha256: &'a str,
+    replay_manifest_sha256: &'a str,
     budget_plan: &'a ContextBudgetPlan,
     routing_quality: &'a ContextRoutingQuality,
     handoff_status: &'a str,
+}
+
+struct ReplayManifestInput<'a> {
+    workflow_id: &'a str,
+    task_id: &'a str,
+    workflow_revision: u64,
+    profile: &'a ExecutorContextProfile,
+    requested_budget: usize,
+    effective_budget: usize,
+    context_sha256: &'a str,
+    content_bytes: usize,
+    included_sections: &'a [String],
+    missing_required_sections: &'a [String],
+    shards: &'a [ContextShard],
 }
 
 pub fn build_context_package(
@@ -1033,6 +1117,19 @@ pub fn build_context_package_with_checkpoint(
         &missing_required_sections,
         &profile_omitted_sections,
     );
+    let replay_manifest = build_replay_manifest(ReplayManifestInput {
+        workflow_id: &workflow.id,
+        task_id: &task.id,
+        workflow_revision,
+        profile: &profile,
+        requested_budget: budget,
+        effective_budget,
+        context_sha256: &context_sha256,
+        content_bytes: content.len(),
+        included_sections: &included_sections,
+        missing_required_sections: &missing_required_sections,
+        shards: &shards,
+    })?;
     let prompt_packet = build_prompt_packet(PromptPacketInput {
         workflow_id: &workflow.id,
         task,
@@ -1041,6 +1138,7 @@ pub fn build_context_package_with_checkpoint(
         lineage: &lineage,
         workflow_revision,
         context_sha256: &context_sha256,
+        replay_manifest_sha256: &replay_manifest.manifest_sha256,
         budget_plan: &budget_plan,
         routing_quality: &routing_quality,
         handoff_status,
@@ -1065,6 +1163,7 @@ pub fn build_context_package_with_checkpoint(
         budget_plan: &budget_plan,
         routing_economy: &routing_economy,
         routing_quality: &routing_quality,
+        replay_manifest: &replay_manifest,
         persona_profile: persona_profile.as_ref(),
         persona_contract: persona_contract.as_ref(),
         prompt_packet: &prompt_packet,
@@ -1115,6 +1214,7 @@ pub fn build_context_package_with_checkpoint(
         effective_budget,
         context_bytes: content.len(),
         context_sha256,
+        replay_manifest,
         prompt_packet,
         routing_fingerprint,
         routing_contract,
@@ -1369,6 +1469,7 @@ fn build_prompt_packet(input: PromptPacketInput<'_>) -> Result<ContextPromptPack
         validation_gates: prompt_packet_validation_gates(input.task, persona),
         context_sha256: input.context_sha256.to_string(),
         lineage_sha256: input.lineage.lineage_sha256.clone(),
+        replay_manifest_sha256: input.replay_manifest_sha256.to_string(),
         budget_status: input.budget_plan.status.clone(),
         routing_quality_status: input.routing_quality.status.clone(),
         handoff_status: input.handoff_status.to_string(),
@@ -1393,10 +1494,87 @@ fn build_prompt_packet(input: PromptPacketInput<'_>) -> Result<ContextPromptPack
         validation_gates: seed.validation_gates,
         context_sha256: seed.context_sha256,
         lineage_sha256: seed.lineage_sha256,
+        replay_manifest_sha256: seed.replay_manifest_sha256,
         budget_status: seed.budget_status,
         routing_quality_status: seed.routing_quality_status,
         handoff_status: seed.handoff_status,
         packet_sha256,
+    })
+}
+
+fn build_replay_manifest(input: ReplayManifestInput<'_>) -> Result<ContextReplayManifest> {
+    let replay_command = ContextReplayCommand {
+        binary: "forge".to_string(),
+        args: vec![
+            "context".to_string(),
+            "--workflow".to_string(),
+            input.workflow_id.to_string(),
+            "--task".to_string(),
+            input.task_id.to_string(),
+            "--budget".to_string(),
+            input.requested_budget.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        requires_store_path: true,
+        reason: "replay this context route against the same Forge store and workflow revision"
+            .to_string(),
+    };
+    let shard_refs = input
+        .shards
+        .iter()
+        .map(|shard| ContextReplayShardRef {
+            sequence: shard.sequence,
+            shard_id: shard.shard_id.clone(),
+            section: shard.section.clone(),
+            source: shard.source.clone(),
+            required: shard.required,
+            included: shard.included,
+            compressed: shard.compressed,
+            routing_decision: shard.routing_decision.clone(),
+            source_sha256: shard.source_sha256.clone(),
+            content_sha256: shard.content_sha256.clone(),
+            bytes: shard.bytes,
+        })
+        .collect::<Vec<_>>();
+    let seed = ContextReplayManifestSeed {
+        schema_version: CONTEXT_REPLAY_MANIFEST_SCHEMA_VERSION,
+        context_schema_version: CONTEXT_SCHEMA_VERSION,
+        routing_policy: ROUTING_POLICY,
+        selector_version: CONTEXT_SELECTOR_VERSION,
+        workflow_id: input.workflow_id,
+        task_id: input.task_id,
+        workflow_revision: input.workflow_revision,
+        executor_profile_id: input.profile.id,
+        requested_budget: input.requested_budget,
+        effective_budget: input.effective_budget,
+        context_sha256: input.context_sha256,
+        content_bytes: input.content_bytes,
+        included_sections: input.included_sections,
+        missing_required_sections: input.missing_required_sections,
+        replay_command: &replay_command,
+        shard_refs: &shard_refs,
+    };
+    let manifest_sha256 = hex_sha256(serde_json::to_string(&seed)?.as_bytes());
+
+    Ok(ContextReplayManifest {
+        schema_version: seed.schema_version.to_string(),
+        context_schema_version: seed.context_schema_version.to_string(),
+        routing_policy: seed.routing_policy.to_string(),
+        selector_version: seed.selector_version.to_string(),
+        workflow_id: seed.workflow_id.to_string(),
+        task_id: seed.task_id.to_string(),
+        workflow_revision: seed.workflow_revision,
+        executor_profile_id: seed.executor_profile_id.to_string(),
+        requested_budget: seed.requested_budget,
+        effective_budget: seed.effective_budget,
+        context_sha256: seed.context_sha256.to_string(),
+        content_bytes: seed.content_bytes,
+        included_sections: seed.included_sections.to_vec(),
+        missing_required_sections: seed.missing_required_sections.to_vec(),
+        replay_command,
+        shard_refs,
+        manifest_sha256,
     })
 }
 
@@ -2000,6 +2178,7 @@ fn build_routing_fingerprint(
     let budget_plan = serde_json::to_string(input.budget_plan)?;
     let routing_economy = serde_json::to_string(input.routing_economy)?;
     let routing_quality = serde_json::to_string(input.routing_quality)?;
+    let replay_manifest = input.replay_manifest.manifest_sha256.clone();
     let persona_profile = serde_json::to_string(&input.persona_profile)?;
     let persona_contract = serde_json::to_string(&input.persona_contract)?;
     let source_shards = input
@@ -2061,6 +2240,7 @@ fn build_routing_fingerprint(
         fingerprint_component("budget_plan", budget_plan),
         fingerprint_component("routing_economy", routing_economy),
         fingerprint_component("routing_quality", routing_quality),
+        fingerprint_component("replay_manifest", replay_manifest),
         fingerprint_component("persona_profile", persona_profile),
         fingerprint_component("persona_contract", persona_contract),
         fingerprint_component("prompt_packet", input.prompt_packet.packet_sha256.clone()),

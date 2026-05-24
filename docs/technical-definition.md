@@ -197,8 +197,8 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v26` and routing policy
-`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_v26`. Each packet
+Current `forge context` packets use schema `forge.context.v27` and routing policy
+`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27`. Each packet
 includes the executor-facing content, the full context checksum, workflow revision,
 artifact count, node-scoped persona routing metadata plus a versioned persona profile
 and persona contract for human-facing tasks, executor
@@ -217,7 +217,10 @@ checkpoint refresh and partial retry with fresh context without first asking for
 separate inspection projection. Packets now include a versioned `prompt_packet`
 contract that binds the context schema, routing policy, executor profile, persona
 mode/profile, instruction sources, validation gates, context checksum and lineage
-checksum into a stable adapter-facing hash. The routing contract names the selector version, executor profile version,
+checksum into a stable adapter-facing hash. Packets also include a versioned
+`replay_manifest` that records the replay command, selector version, budget,
+context checksum and content-addressed shard refs; prompt packets bind its checksum
+so async executors can pause and resume against the exact route. The routing contract names the selector version, executor profile version,
 profile id, selection strategy, requested and effective budget, minimum budget,
 allowed/required/optional section set and profile hash. The repair contract turns
 missing required sections into a deterministic action and recommended budget so

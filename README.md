@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.60`
+Current version: `0.4.61`
 
 This is the first functional CLI + Skill version:
 
@@ -94,8 +94,8 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v26`) with a deterministic
-`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_v26` routing policy.
+`forge context` emits a versioned context packet (`forge.context.v27`) with a deterministic
+`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27` routing policy.
 The packet keeps the legacy `content` body for executors, and also returns workflow
 revision, artifact count, persona routing metadata for human-facing nodes, a versioned
 persona profile and persona contract, executor profile metadata, a versioned routing contract, execution policy metadata, dependency readiness summaries, proposed
@@ -126,6 +126,11 @@ compact `child_subflows` shard so the executor sees Forge's reuse decision witho
 reconstructing it from history. Runtime goal, artifact and persona routing state are
 included in the context lineage so executors can detect stale context before resuming
 work.
+The packet also includes a versioned `replay_manifest` with the minimal replay
+command, selector version, route budget, context checksum and shard refs. The prompt
+packet binds the replay manifest checksum, and inspection projects the same checksum,
+so long-running executor adapters can pause, compare and resume against the exact
+context route without reparsing unrelated packet fields.
 
 `forge inspect --output json` projects compact `context_route` and `execution_policy`
 contracts for every DAG node and expands proposed child-subflow links into auditable

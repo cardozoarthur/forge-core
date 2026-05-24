@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.61 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v27` with a versioned `replay_manifest` contract for resumable executor context.
+- Replay manifests use schema `forge.context.replay_manifest.v1` and record context schema, routing policy, selector version, workflow/task ids, workflow revision, executor profile, requested/effective budget, context checksum, content bytes, included/missing-required sections, a replay command and content-addressed shard refs.
+- Prompt packets now use schema `forge.context.prompt_packet.v2` and packet version `forge.executor.prompt_packet.v2`, binding `replay_manifest_sha256` into the adapter-facing prompt packet checksum.
+- Context routing fingerprints now include a `replay_manifest` component, so route cache keys account for replay manifest changes.
+- `forge inspect --output json` now projects `replay_manifest_sha256` for each terminal node, and the human diagram prints a compact `replay <hash>` marker.
+- Added CLI contract coverage proving the replay manifest is emitted, bound into the prompt packet and routing fingerprint, and surfaced through inspection.
+
+### Changed
+
+- The context routing policy is now `task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27`.
+- The package version is now `0.4.61`.
+
+### Safety
+
+- Replay manifests are read-only metadata derived from Forge-owned workflow/task state and deterministic shard selection.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules, task leases, persona gates and child-subflow validation gates.
+
 ## 0.4.60 - 2026-05-24
 
 ### Added
