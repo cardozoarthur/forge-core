@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.48 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v19` with a versioned `routing_repair` object.
+- The repair contract uses schema `forge.context.routing_repair.v1` and records repair status, action, current effective budget, recommended budget, required budget deficit, missing required sections, omitted-by-budget sections, compressed sections and a short reason.
+- Context routing fingerprints now include a `routing_repair` component, so executor cache keys account for repair-plan changes alongside contracts and routing quality.
+- `forge inspect --output json` now projects the same routing repair contract for terminal DAG nodes.
+- Added CLI contract coverage proving missing required context produces an auditable `increase_context_budget` repair plan with a bounded budget recommendation.
+
+### Changed
+
+- The context routing policy is now `task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_v19`.
+- The package version is now `0.4.48`.
+
+### Safety
+
+- Routing repair is read-only metadata derived from Forge-owned workflow/task state and deterministic shard selection.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules and task leases.
+
 ## 0.4.47 - 2026-05-24
 
 ### Added

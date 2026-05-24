@@ -190,8 +190,8 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v18` and routing policy
-`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_v18`. Each packet
+Current `forge context` packets use schema `forge.context.v19` and routing policy
+`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_v19`. Each packet
 includes the executor-facing content, the full context checksum, workflow revision,
 artifact count, node-scoped persona routing metadata for human-facing tasks, executor
 profile metadata, a versioned routing contract, execution policy metadata, dependency
@@ -202,14 +202,17 @@ state, remaining-budget before/after values, byte count, summary and shard check
 Packets also include `context_ready`,
 `required_sections`, `missing_required_sections`, `handoff_ready`, `handoff_status`,
 `handoff_blockers`, aggregate `routing_summary` metrics and a versioned
-`routing_contract` plus `routing_quality` contract. The routing contract names the
-selector version, executor profile version, profile id, selection strategy, requested
-and effective budget, minimum budget, allowed/required/optional section set and
-profile hash. The quality contract scores each packet and emits explicit warnings for
-missing required context, budget pressure, compressed summaries and profile-filtered
-optional context, so adapters and operators can audit routing risk without
-reconstructing shard decisions. Handoff policy can still block incomplete context or
-pending dependencies before an executor starts work.
+`routing_contract`, `routing_repair` budget recommendation and `routing_quality`
+contract. The routing contract names the selector version, executor profile version,
+profile id, selection strategy, requested and effective budget, minimum budget,
+allowed/required/optional section set and profile hash. The repair contract turns
+missing required sections into a deterministic action and recommended budget so
+operators can retry with the smallest known budget increase instead of guessing. The
+quality contract scores each packet and emits explicit warnings for missing required
+context, budget pressure, compressed summaries and profile-filtered optional context,
+so adapters and operators can audit routing risk without reconstructing shard
+decisions. Handoff policy can still block incomplete context or pending dependencies
+before an executor starts work.
 
 Executor profiles let Forge route different envelopes without changing workflow
 authority. Deterministic `command` and `wait` nodes use a no-AI profile that shrinks

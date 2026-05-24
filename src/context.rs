@@ -8,9 +8,10 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v18";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v19";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
 const ROUTING_CONTRACT_SCHEMA_VERSION: &str = "forge.context.routing_contract.v1";
+const ROUTING_REPAIR_SCHEMA_VERSION: &str = "forge.context.routing_repair.v1";
 const CONTEXT_SELECTOR_VERSION: &str = "forge.context.selector.v1";
 const EXECUTOR_PROFILE_SCHEMA_VERSION: &str = "forge.context.executor_profile.v1";
 const CONTEXT_NEXT_ACTION_SCHEMA_VERSION: &str = "forge.inspect_context_action.v1";
@@ -18,7 +19,7 @@ const CONTEXT_ROUTING_QUALITY_SCHEMA_VERSION: &str = "forge.context_routing_qual
 const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
     "forge.context_routing_quality_summary.v1";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_v18";
+    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_v19";
 const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
@@ -107,6 +108,7 @@ pub struct ContextPackage {
     pub context_sha256: String,
     pub routing_fingerprint: ContextRoutingFingerprint,
     pub routing_contract: ContextRoutingContract,
+    pub routing_repair: ContextRoutingRepair,
     pub routing_summary: ContextRoutingSummary,
     pub routing_quality: ContextRoutingQuality,
     pub context_ready: bool,
@@ -153,6 +155,20 @@ pub struct ContextRoutingContract {
     pub required_sections: Vec<String>,
     pub optional_sections: Vec<String>,
     pub profile_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextRoutingRepair {
+    pub schema_version: String,
+    pub status: String,
+    pub action: String,
+    pub current_effective_budget: usize,
+    pub recommended_budget_bytes: usize,
+    pub required_budget_deficit_bytes: usize,
+    pub missing_required_sections: Vec<String>,
+    pub budget_omitted_sections: Vec<String>,
+    pub compressed_sections: Vec<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -400,6 +416,7 @@ struct RoutingFingerprintInput<'a> {
     child_subflows: &'a [ChildSubflowRef],
     resume_context_status: &'a str,
     routing_contract: &'a ContextRoutingContract,
+    routing_repair: &'a ContextRoutingRepair,
     routing_quality: &'a ContextRoutingQuality,
     context_sha256: &'a str,
 }
@@ -776,6 +793,12 @@ pub fn build_context_package_with_checkpoint(
     let context_sha256 = hex_sha256(content.as_bytes());
     let routing_contract =
         build_routing_contract(&profile, budget, effective_budget, &required_sections)?;
+    let routing_repair = build_routing_repair(
+        &routing_summary,
+        &shards,
+        &missing_required_sections,
+        effective_budget,
+    );
     let routing_quality = build_routing_quality(
         &routing_summary,
         &shards,
@@ -798,6 +821,7 @@ pub fn build_context_package_with_checkpoint(
         child_subflows: &task.child_subflows,
         resume_context_status,
         routing_contract: &routing_contract,
+        routing_repair: &routing_repair,
         routing_quality: &routing_quality,
         context_sha256: &context_sha256,
     })?;
@@ -829,6 +853,7 @@ pub fn build_context_package_with_checkpoint(
         context_sha256,
         routing_fingerprint,
         routing_contract,
+        routing_repair,
         routing_summary,
         routing_quality,
         context_ready,
@@ -1141,6 +1166,86 @@ fn build_routing_quality(
     }
 }
 
+fn build_routing_repair(
+    summary: &ContextRoutingSummary,
+    shards: &[ContextShard],
+    missing_required_sections: &[String],
+    effective_budget: usize,
+) -> ContextRoutingRepair {
+    let budget_omitted_sections = unique_sections(
+        shards
+            .iter()
+            .filter(|shard| shard.routing_decision == "omitted_budget")
+            .map(|shard| shard.section.as_str()),
+    );
+    let compressed_sections = unique_sections(
+        shards
+            .iter()
+            .filter(|shard| shard.included && shard.compressed)
+            .map(|shard| shard.section.as_str()),
+    );
+
+    if !missing_required_sections.is_empty() {
+        let missing_required_budget = shards
+            .iter()
+            .filter(|shard| shard.missing_required)
+            .map(minimum_routable_shard_bytes)
+            .sum::<usize>();
+        let recommended_budget_bytes = summary
+            .selected_bytes
+            .saturating_add(missing_required_budget)
+            .max(effective_budget.saturating_add(1));
+
+        return ContextRoutingRepair {
+            schema_version: ROUTING_REPAIR_SCHEMA_VERSION.to_string(),
+            status: "repair_required".to_string(),
+            action: "increase_context_budget".to_string(),
+            current_effective_budget: effective_budget,
+            recommended_budget_bytes,
+            required_budget_deficit_bytes: recommended_budget_bytes
+                .saturating_sub(effective_budget),
+            missing_required_sections: missing_required_sections.to_vec(),
+            budget_omitted_sections,
+            compressed_sections,
+            reason: "required context sections were omitted before executor handoff".to_string(),
+        };
+    }
+
+    if summary.budget_omitted_shards > 0 {
+        return ContextRoutingRepair {
+            schema_version: ROUTING_REPAIR_SCHEMA_VERSION.to_string(),
+            status: "advisory".to_string(),
+            action: "review_budget_pressure".to_string(),
+            current_effective_budget: effective_budget,
+            recommended_budget_bytes: effective_budget,
+            required_budget_deficit_bytes: 0,
+            missing_required_sections: Vec::new(),
+            budget_omitted_sections,
+            compressed_sections,
+            reason: "optional context was omitted by budget; no required repair is needed"
+                .to_string(),
+        };
+    }
+
+    ContextRoutingRepair {
+        schema_version: ROUTING_REPAIR_SCHEMA_VERSION.to_string(),
+        status: "ready".to_string(),
+        action: "none".to_string(),
+        current_effective_budget: effective_budget,
+        recommended_budget_bytes: effective_budget,
+        required_budget_deficit_bytes: 0,
+        missing_required_sections: Vec::new(),
+        budget_omitted_sections,
+        compressed_sections,
+        reason: "required context fits within the effective budget".to_string(),
+    }
+}
+
+fn minimum_routable_shard_bytes(shard: &ContextShard) -> usize {
+    let compressed_bytes = format!("[compressed {}]\n{}\n", shard.section, shard.summary).len();
+    shard.original_bytes.min(compressed_bytes)
+}
+
 fn build_routing_contract(
     profile: &ExecutorContextProfile,
     requested_budget: usize,
@@ -1268,6 +1373,7 @@ fn build_routing_fingerprint(
     let dependency_state = serde_json::to_string(input.dependency_summary)?;
     let child_subflows = serde_json::to_string(input.child_subflows)?;
     let routing_contract = serde_json::to_string(input.routing_contract)?;
+    let routing_repair = serde_json::to_string(input.routing_repair)?;
     let routing_quality = serde_json::to_string(input.routing_quality)?;
     let source_shards = input
         .shards
@@ -1324,6 +1430,7 @@ fn build_routing_fingerprint(
         fingerprint_component("resume_context", input.resume_context_status.to_string()),
         fingerprint_component("budget_ledger", budget_ledger),
         fingerprint_component("routing_contract", routing_contract),
+        fingerprint_component("routing_repair", routing_repair),
         fingerprint_component("routing_quality", routing_quality),
         fingerprint_component("context_payload", input.context_sha256.to_string()),
     ];

@@ -2,7 +2,8 @@ use crate::checkpoint::load_workflow_checkpoints;
 use crate::context::{
     build_context_package_with_checkpoint, context_next_action, summarize_context_handoff_tasks,
     ContextHandoffBlocker, ContextHandoffSummary, ContextHandoffTask, ContextNextAction,
-    ContextPackage, ContextRoutingQuality, ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
+    ContextPackage, ContextRoutingQuality, ContextRoutingRepair, ContextRoutingSummary,
+    DEFAULT_CONTEXT_BUDGET,
 };
 use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, SubtaskSpec, TaskStatus,
@@ -76,6 +77,7 @@ pub struct ContextInspectionRoute {
     pub included_sections: Vec<String>,
     pub omitted_sections: Vec<String>,
     pub routing_summary: ContextRoutingSummary,
+    pub routing_repair: ContextRoutingRepair,
     pub routing_quality: ContextRoutingQuality,
     pub next_action: ContextNextAction,
 }
@@ -266,6 +268,7 @@ fn context_route(package: &ContextPackage) -> ContextInspectionRoute {
         included_sections: package.included_sections.clone(),
         omitted_sections: package.omitted_sections.clone(),
         routing_summary: package.routing_summary.clone(),
+        routing_repair: package.routing_repair.clone(),
         routing_quality: package.routing_quality.clone(),
         next_action: context_next_action(package),
     }
