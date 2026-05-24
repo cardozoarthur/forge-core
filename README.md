@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.68`
+Current version: `0.4.69`
 
 This is the first functional CLI + Skill version:
 
@@ -43,6 +43,7 @@ This is the first functional CLI + Skill version:
 - proposed child-subflow links for compatible deterministic code-node reuse
 - revisioned child-subflow validation gates before workflow promotion
 - context routing with deterministic shard manifests, deterministic code-node and long-running cognition goals
+- minimum-correct context section receipts for executor adapters and budget repair
 - context routing quality scores and warnings for budget pressure, missing required context and profile filtering
 - registry-level context quality summaries and workflow `quality_action` recommendations
 - Forge-owned execution policy metadata for deterministic local Python/Node.js code nodes
@@ -95,8 +96,8 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v28`) with a deterministic
-`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28` routing policy.
+`forge context` emits a versioned context packet (`forge.context.v29`) with a deterministic
+`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v29` routing policy.
 The packet keeps the legacy `content` body for executors, and also returns workflow
 revision, artifact count, persona routing metadata for human-facing nodes, a versioned
 persona profile and persona contract, executor profile metadata, a versioned routing contract, execution policy metadata, dependency readiness summaries, proposed
@@ -107,7 +108,7 @@ byte counts, summaries and SHA-256 checksums. The packet also exposes `context_r
 `required_sections`, `missing_required_sections`, `handoff_ready`, `handoff_status`,
 `handoff_blockers`, a `routing_summary`, a versioned `routing_contract`, a versioned
 `routing_repair` budget recommendation, a versioned `routing_quality` score/warning contract,
-a node-scoped `persona_profile` and `persona_contract` for human-facing artifacts, a versioned `next_action`
+`minimum_correct_set` section receipt, a node-scoped `persona_profile` and `persona_contract` for human-facing artifacts, a versioned `next_action`
 resume/handoff decision, a versioned `routing_economy` ledger with selected, compressed,
 omitted and no-AI model-call avoidance metrics, a versioned `prompt_packet`
 contract for executor adapters, a versioned `replay_manifest`, a versioned
@@ -115,6 +116,9 @@ contract for executor adapters, a versioned `replay_manifest`, a versioned
 with component hashes and a cache key so executor adapters can reuse or invalidate
 bounded context without reparsing full packets. Adapters can block handoff when the
 minimum correct context was omitted or dependency tasks are not ready.
+`minimum_correct_set` lists every required section with its inclusion/compression state,
+selected and original byte counts, hashes, routing decision and repair action, so adapters
+can audit the exact missing floor without re-deriving it from the full shard manifest.
 Deterministic
 command and wait nodes receive a smaller no-AI context
 envelope that preserves local objective, execution policy, proposed subflow reuse and

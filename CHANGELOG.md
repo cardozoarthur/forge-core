@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.69 - 2026-05-24
+
+### Added
+
+- `forge context` now emits a versioned `minimum_correct_set` with schema `forge.context.minimum_correct_set.v1`.
+- The minimum-correct set records each required context section with inclusion, compression, missing-state, routing decision, repair action, selected/original byte counts and source/content hashes.
+- Context routing fingerprints now include a `minimum_correct_set` component, so executor cache keys account for the exact required-section floor used for budget repair and resumable handoff.
+- `forge inspect --output json` now projects the minimum-correct set in each node's `context_route`, and terminal diagrams include a compact minimum-correct marker.
+- Added CLI contract coverage proving low-budget context packets expose missing required sections through the minimum-correct set and bind the set checksum into the routing fingerprint.
+
+### Changed
+
+- The context packet schema is now `forge.context.v29`.
+- The routing policy is now `task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v29`.
+- The package version is now `0.4.69`.
+
+### Safety
+
+- Minimum-correct sets are read-only metadata derived from deterministic context shard routing.
+- This change does not execute local Python/Node.js code, complete tasks, promote workflows, authorize CLIs, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules, task leases, persona gates, child-subflow validation gates and continuation plans.
+
 ## 0.4.68 - 2026-05-24
 
 ### Added

@@ -2,9 +2,9 @@ use crate::checkpoint::load_workflow_checkpoints;
 use crate::context::{
     build_context_package_with_checkpoint, context_next_action, summarize_context_handoff_tasks,
     ContextBudgetPlan, ContextContinuationPlan, ContextDelta, ContextExecutionPolicyDecision,
-    ContextHandoffBlocker, ContextHandoffSummary, ContextHandoffTask, ContextNextAction,
-    ContextPackage, ContextRoutingEconomy, ContextRoutingQuality, ContextRoutingRepair,
-    ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
+    ContextHandoffBlocker, ContextHandoffSummary, ContextHandoffTask, ContextMinimumCorrectSet,
+    ContextNextAction, ContextPackage, ContextRoutingEconomy, ContextRoutingQuality,
+    ContextRoutingRepair, ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
 };
 use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, SubtaskSpec, TaskStatus,
@@ -99,6 +99,7 @@ pub struct ContextInspectionRoute {
     pub routing_summary: ContextRoutingSummary,
     pub routing_repair: ContextRoutingRepair,
     pub budget_plan: ContextBudgetPlan,
+    pub minimum_correct_set: ContextMinimumCorrectSet,
     pub routing_economy: ContextRoutingEconomy,
     pub routing_quality: ContextRoutingQuality,
     pub next_action: ContextNextAction,
@@ -366,6 +367,7 @@ fn context_route(package: &ContextPackage) -> ContextInspectionRoute {
         routing_summary: package.routing_summary.clone(),
         routing_repair: package.routing_repair.clone(),
         budget_plan: package.budget_plan.clone(),
+        minimum_correct_set: package.minimum_correct_set.clone(),
         routing_economy: package.routing_economy.clone(),
         routing_quality: package.routing_quality.clone(),
         next_action: context_next_action(package),
@@ -631,7 +633,7 @@ fn render_diagram(
             )
         };
         let context_route = format!(
-            " context {} {} {}/{} cache {} packet {} replay {} receipt {} select {} required_complete {} next {} delta {} continue {} {} budget_plan {}/{} {}",
+            " context {} {} {}/{} cache {} packet {} replay {} receipt {} select {} required_complete {} minimum_correct {}/{} complete {} next {} delta {} continue {} {} budget_plan {}/{} {}",
             node.context_route.profile_id,
             node.context_route.handoff_status,
             node.context_route.context_bytes,
@@ -642,6 +644,13 @@ fn render_diagram(
             short_hash(&node.context_route.selection_receipt_sha256),
             node.context_route.selection_route_status,
             node.context_route.selection_required_complete,
+            node.context_route
+                .minimum_correct_set
+                .required_selected_bytes,
+            node.context_route
+                .minimum_correct_set
+                .minimum_correct_budget_bytes,
+            node.context_route.minimum_correct_set.required_complete,
             node.context_route.next_action.action,
             node.context_route.context_delta.status,
             node.context_route.continuation_plan.action,

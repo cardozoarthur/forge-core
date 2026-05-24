@@ -197,8 +197,8 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v28` and routing policy
-`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28`. Each packet
+Current `forge context` packets use schema `forge.context.v29` and routing policy
+`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v29`. Each packet
 includes the executor-facing content, the full context checksum, workflow revision,
 artifact count, node-scoped persona routing metadata plus a versioned persona profile
 and persona contract for human-facing tasks, executor
@@ -211,7 +211,7 @@ Packets also include `context_ready`,
 `required_sections`, `missing_required_sections`, `handoff_ready`, `handoff_status`,
 `handoff_blockers`, aggregate `routing_summary` metrics and a versioned
 `routing_contract`, `routing_repair` budget recommendation, `budget_plan` minimum-correct budget contract and
-`routing_quality` contract. Packets also carry a versioned `next_action` decision so executor adapters
+`minimum_correct_set` section receipt plus a `routing_quality` contract. Packets also carry a versioned `next_action` decision so executor adapters
 can distinguish fresh handoff, dependency waits, context-budget repair, stale
 checkpoint refresh and partial retry with fresh context without first asking for a
 separate inspection projection. Packets now include a versioned `prompt_packet`
@@ -230,7 +230,10 @@ allowed/required/optional section set and profile hash. The repair contract turn
 missing required sections into a deterministic action and recommended budget so
 operators can retry with the smallest known budget increase instead of guessing. The
 budget plan exposes the required context floor, selected bytes, optional pressure,
-and recommended budget. The `routing_economy` contract records baseline bytes, selected bytes,
+and recommended budget. The minimum-correct set records every required section's
+included/compressed/missing state, source and content hashes, byte counts, routing
+decision and repair action, then binds that section-level floor into the routing
+fingerprint. The `routing_economy` contract records baseline bytes, selected bytes,
 compression savings, budget omissions, profile-filtered omissions, total avoided bytes,
 reduction basis points and whether a deterministic no-AI profile avoided a model call.
 Together these contracts let executor adapters choose the smallest correct handoff

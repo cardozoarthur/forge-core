@@ -8,11 +8,12 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v28";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v29";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
 const ROUTING_CONTRACT_SCHEMA_VERSION: &str = "forge.context.routing_contract.v1";
 const ROUTING_REPAIR_SCHEMA_VERSION: &str = "forge.context.routing_repair.v1";
 const BUDGET_PLAN_SCHEMA_VERSION: &str = "forge.context.budget_plan.v1";
+const MINIMUM_CORRECT_SET_SCHEMA_VERSION: &str = "forge.context.minimum_correct_set.v1";
 const PERSONA_PROFILE_SCHEMA_VERSION: &str = "forge.context.persona_profile.v1";
 const PERSONA_CONTRACT_SCHEMA_VERSION: &str = "forge.context.persona_contract.v2";
 const CONTEXT_DELTA_SCHEMA_VERSION: &str = "forge.context.delta.v1";
@@ -30,7 +31,7 @@ const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
     "forge.context_routing_quality_summary.v1";
 const CONTINUATION_PLAN_SCHEMA_VERSION: &str = "forge.context.continuation_plan.v1";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28";
+    "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v29";
 const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
@@ -127,6 +128,7 @@ pub struct ContextPackage {
     pub routing_contract: ContextRoutingContract,
     pub routing_repair: ContextRoutingRepair,
     pub budget_plan: ContextBudgetPlan,
+    pub minimum_correct_set: ContextMinimumCorrectSet,
     pub routing_summary: ContextRoutingSummary,
     pub routing_economy: ContextRoutingEconomy,
     pub routing_quality: ContextRoutingQuality,
@@ -336,6 +338,38 @@ pub struct ContextBudgetPlan {
     pub missing_required_sections: Vec<String>,
     pub budget_omitted_sections: Vec<String>,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextMinimumCorrectSet {
+    pub schema_version: String,
+    pub selector_version: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub workflow_revision: u64,
+    pub executor_profile_id: String,
+    pub required_complete: bool,
+    pub required_original_bytes: usize,
+    pub required_selected_bytes: usize,
+    pub minimum_correct_budget_bytes: usize,
+    pub missing_required_sections: Vec<String>,
+    pub sections: Vec<ContextMinimumCorrectSection>,
+    pub set_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextMinimumCorrectSection {
+    pub section: String,
+    pub included: bool,
+    pub compressed: bool,
+    pub missing: bool,
+    pub routing_decision: String,
+    pub decision_reason: String,
+    pub repair_action: String,
+    pub bytes: usize,
+    pub original_bytes: usize,
+    pub source_sha256: String,
+    pub content_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -767,6 +801,22 @@ struct ContextSelectionReceiptSeed<'a> {
 }
 
 #[derive(Serialize)]
+struct ContextMinimumCorrectSetSeed<'a> {
+    schema_version: &'static str,
+    selector_version: &'static str,
+    workflow_id: &'a str,
+    task_id: &'a str,
+    workflow_revision: u64,
+    executor_profile_id: &'static str,
+    required_complete: bool,
+    required_original_bytes: usize,
+    required_selected_bytes: usize,
+    minimum_correct_budget_bytes: usize,
+    missing_required_sections: &'a [String],
+    sections: &'a [ContextMinimumCorrectSection],
+}
+
+#[derive(Serialize)]
 struct ContextExecutionPolicyDecisionSeed {
     schema_version: &'static str,
     workflow_id: String,
@@ -808,6 +858,7 @@ struct RoutingFingerprintInput<'a> {
     routing_contract: &'a ContextRoutingContract,
     routing_repair: &'a ContextRoutingRepair,
     budget_plan: &'a ContextBudgetPlan,
+    minimum_correct_set: &'a ContextMinimumCorrectSet,
     routing_economy: &'a ContextRoutingEconomy,
     routing_quality: &'a ContextRoutingQuality,
     execution_policy_decision: &'a ContextExecutionPolicyDecision,
@@ -1261,6 +1312,14 @@ pub fn build_context_package_with_checkpoint(
         budget,
         effective_budget,
     );
+    let minimum_correct_set = build_minimum_correct_set(
+        &workflow.id,
+        &task.id,
+        workflow_revision,
+        &profile,
+        &budget_plan,
+        &shards,
+    )?;
     let routing_economy = build_routing_economy(&profile, &routing_summary, &shards);
     let routing_quality = build_routing_quality(
         &routing_summary,
@@ -1331,6 +1390,7 @@ pub fn build_context_package_with_checkpoint(
         routing_contract: &routing_contract,
         routing_repair: &routing_repair,
         budget_plan: &budget_plan,
+        minimum_correct_set: &minimum_correct_set,
         routing_economy: &routing_economy,
         routing_quality: &routing_quality,
         execution_policy_decision: &execution_policy_decision,
@@ -1403,6 +1463,7 @@ pub fn build_context_package_with_checkpoint(
         routing_contract,
         routing_repair,
         budget_plan,
+        minimum_correct_set,
         routing_summary,
         routing_economy,
         routing_quality,
@@ -2448,6 +2509,89 @@ fn build_budget_plan(
     }
 }
 
+fn build_minimum_correct_set(
+    workflow_id: &str,
+    task_id: &str,
+    workflow_revision: u64,
+    profile: &ExecutorContextProfile,
+    budget_plan: &ContextBudgetPlan,
+    shards: &[ContextShard],
+) -> Result<ContextMinimumCorrectSet> {
+    let sections = shards
+        .iter()
+        .filter(|shard| shard.required)
+        .map(|shard| ContextMinimumCorrectSection {
+            section: shard.section.clone(),
+            included: shard.included,
+            compressed: shard.compressed,
+            missing: shard.missing_required,
+            routing_decision: shard.routing_decision.clone(),
+            decision_reason: shard.decision_reason.clone(),
+            repair_action: minimum_correct_repair_action(shard).to_string(),
+            bytes: shard.bytes,
+            original_bytes: shard.original_bytes,
+            source_sha256: shard.source_sha256.clone(),
+            content_sha256: shard.content_sha256.clone(),
+        })
+        .collect::<Vec<_>>();
+    let missing_required_sections = sections
+        .iter()
+        .filter(|section| section.missing)
+        .map(|section| section.section.clone())
+        .collect::<Vec<_>>();
+    let required_original_bytes = sections
+        .iter()
+        .map(|section| section.original_bytes)
+        .sum::<usize>();
+    let required_selected_bytes = sections.iter().map(|section| section.bytes).sum::<usize>();
+    let required_complete = missing_required_sections.is_empty();
+    let set_sha256 = {
+        let seed = ContextMinimumCorrectSetSeed {
+            schema_version: MINIMUM_CORRECT_SET_SCHEMA_VERSION,
+            selector_version: CONTEXT_SELECTOR_VERSION,
+            workflow_id,
+            task_id,
+            workflow_revision,
+            executor_profile_id: profile.id,
+            required_complete,
+            required_original_bytes,
+            required_selected_bytes,
+            minimum_correct_budget_bytes: budget_plan.minimum_correct_budget_bytes,
+            missing_required_sections: &missing_required_sections,
+            sections: &sections,
+        };
+        hex_sha256(serde_json::to_string(&seed)?.as_bytes())
+    };
+
+    Ok(ContextMinimumCorrectSet {
+        schema_version: MINIMUM_CORRECT_SET_SCHEMA_VERSION.to_string(),
+        selector_version: CONTEXT_SELECTOR_VERSION.to_string(),
+        workflow_id: workflow_id.to_string(),
+        task_id: task_id.to_string(),
+        workflow_revision,
+        executor_profile_id: profile.id.to_string(),
+        required_complete,
+        required_original_bytes,
+        required_selected_bytes,
+        minimum_correct_budget_bytes: budget_plan.minimum_correct_budget_bytes,
+        missing_required_sections,
+        sections,
+        set_sha256,
+    })
+}
+
+fn minimum_correct_repair_action(shard: &ContextShard) -> &'static str {
+    if !shard.missing_required {
+        "none"
+    } else if shard.profile_excluded || shard.routing_decision == "omitted_profile" {
+        "verify_executor_profile"
+    } else if shard.routing_decision == "omitted_budget" {
+        "increase_context_budget"
+    } else {
+        "repair_required_context"
+    }
+}
+
 fn build_routing_economy(
     profile: &ExecutorContextProfile,
     summary: &ContextRoutingSummary,
@@ -2646,6 +2790,7 @@ fn build_routing_fingerprint(
     let routing_contract = serde_json::to_string(input.routing_contract)?;
     let routing_repair = serde_json::to_string(input.routing_repair)?;
     let budget_plan = serde_json::to_string(input.budget_plan)?;
+    let minimum_correct_set = input.minimum_correct_set.set_sha256.clone();
     let routing_economy = serde_json::to_string(input.routing_economy)?;
     let routing_quality = serde_json::to_string(input.routing_quality)?;
     let execution_policy_decision = input.execution_policy_decision.decision_sha256.clone();
@@ -2710,6 +2855,7 @@ fn build_routing_fingerprint(
         fingerprint_component("routing_contract", routing_contract),
         fingerprint_component("routing_repair", routing_repair),
         fingerprint_component("budget_plan", budget_plan),
+        fingerprint_component("minimum_correct_set", minimum_correct_set),
         fingerprint_component("routing_economy", routing_economy),
         fingerprint_component("routing_quality", routing_quality),
         fingerprint_component("execution_policy_decision", execution_policy_decision),
