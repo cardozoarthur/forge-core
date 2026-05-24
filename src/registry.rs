@@ -18,8 +18,21 @@ const REGISTRY_CONTEXT_HANDOFF_SCHEMA_VERSION: &str = "forge.registry_context_ha
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowRegistryReport {
     pub status: String,
+    pub filter: WorkflowRegistryFilterReport,
     pub summary: WorkflowRegistrySummary,
     pub workflows: Vec<WorkflowRegistryRow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowRegistryFilterReport {
+    pub lifecycle: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowLifecycleFilter {
+    All,
+    Running,
+    NonRunning,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -104,6 +117,13 @@ pub struct WorkflowReuseCandidate {
 }
 
 pub fn list_workflows(store: &ForgeStore) -> Result<WorkflowRegistryReport> {
+    list_workflows_filtered(store, WorkflowLifecycleFilter::All)
+}
+
+pub fn list_workflows_filtered(
+    store: &ForgeStore,
+    filter: WorkflowLifecycleFilter,
+) -> Result<WorkflowRegistryReport> {
     let workflows = store.load_workflows()?;
     let runs_by_workflow = load_runs_by_workflow(store)?;
     let mut rows = Vec::new();
@@ -119,6 +139,7 @@ pub fn list_workflows(store: &ForgeStore) -> Result<WorkflowRegistryReport> {
         rows.push(registry_row(&workflow, runs, &handoff_summary));
     }
 
+    rows.retain(|row| filter.matches(row));
     let running = rows.iter().filter(|row| row.running).count();
     let reusable_subflows = rows.iter().map(|row| row.reusable_subflows.len()).sum();
     let context_handoff =
@@ -137,9 +158,30 @@ pub fn list_workflows(store: &ForgeStore) -> Result<WorkflowRegistryReport> {
 
     Ok(WorkflowRegistryReport {
         status: "loaded".to_string(),
+        filter: WorkflowRegistryFilterReport {
+            lifecycle: filter.label().to_string(),
+        },
         summary,
         workflows: rows,
     })
+}
+
+impl WorkflowLifecycleFilter {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Running => "running",
+            Self::NonRunning => "non-running",
+        }
+    }
+
+    fn matches(self, row: &WorkflowRegistryRow) -> bool {
+        match self {
+            Self::All => true,
+            Self::Running => row.running,
+            Self::NonRunning => !row.running,
+        }
+    }
 }
 
 fn load_runs_by_workflow(store: &ForgeStore) -> Result<BTreeMap<String, Vec<RunRecord>>> {

@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.33`
+Current version: `0.4.37`
 
 This is the first functional CLI + Skill version:
 
@@ -36,7 +36,7 @@ This is the first functional CLI + Skill version:
 - cron/wait task representation
 - notification payloads with final workflow cost reporting
 - artifact listing
-- workflow registry listing with lifecycle state
+- workflow registry listing with lifecycle state and `running`/`non-running` filters
 - terminal workflow DAG inspection with lifecycle, dependency, persona and context-route annotations
 - handoff readiness summaries in workflow inspection and async request status
 - proposed child-subflow links for compatible deterministic code-node reuse
@@ -73,6 +73,8 @@ Use the returned `workflow_id`:
 
 ```bash
 forge list --output json
+forge list --lifecycle running --output json
+forge list --lifecycle non-running --output json
 forge inspect <workflow-id> --verbose --output json
 forge status --workflow <workflow-id> --output json
 forge context --workflow <workflow-id> --task task-001 --budget 1200 --output json
@@ -133,7 +135,7 @@ forge task handoff --workflow <workflow-id> --task task-001 --executor codex --b
 ```
 
 The command reuses the strict context readiness contract, acquires a Forge task
-lease only when `handoff_ready=true`, and returns `forge.executor_handoff.v2`
+lease only when `handoff_ready=true`, and returns `forge.executor_handoff.v3`
 with the selected executor, task executor kind, lease id, context SHA-256,
 routing fingerprint schema, routing cache key, lineage hash, expected output,
 execution policy mode and validation gate.

@@ -14,7 +14,8 @@ use forge_core::inspection::inspect_workflow;
 use forge_core::intent::parse_intent;
 use forge_core::lease::{acquire_task_lease, release_task_lease};
 use forge_core::registry::{
-    attach_reuse_candidates_as_child_subflows, find_reuse_candidates, list_workflows,
+    attach_reuse_candidates_as_child_subflows, find_reuse_candidates, list_workflows_filtered,
+    WorkflowLifecycleFilter,
 };
 use forge_core::request::{load_request_status, start_async_request};
 use forge_core::runtime::{
@@ -47,6 +48,8 @@ enum Commands {
         output: OutputFormat,
     },
     List {
+        #[arg(long, value_enum, default_value_t = WorkflowLifecycleArg::All)]
+        lifecycle: WorkflowLifecycleArg,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -366,6 +369,23 @@ enum OutputFormat {
     Json,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum WorkflowLifecycleArg {
+    All,
+    Running,
+    NonRunning,
+}
+
+impl From<WorkflowLifecycleArg> for WorkflowLifecycleFilter {
+    fn from(value: WorkflowLifecycleArg) -> Self {
+        match value {
+            WorkflowLifecycleArg::All => WorkflowLifecycleFilter::All,
+            WorkflowLifecycleArg::Running => WorkflowLifecycleFilter::Running,
+            WorkflowLifecycleArg::NonRunning => WorkflowLifecycleFilter::NonRunning,
+        }
+    }
+}
+
 fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
@@ -404,9 +424,9 @@ fn run() -> Result<i32> {
             print_response(output, &response)?;
             Ok(0)
         }
-        Commands::List { output } => {
+        Commands::List { lifecycle, output } => {
             let store = ForgeStore::open(cli.store)?;
-            let report = list_workflows(&store)?;
+            let report = list_workflows_filtered(&store, lifecycle.into())?;
             print_response(output, &report)?;
             Ok(0)
         }

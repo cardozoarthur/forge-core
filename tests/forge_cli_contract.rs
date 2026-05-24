@@ -3518,6 +3518,122 @@ fn list_surfaces_workflow_registry_with_lifecycle_and_initial_request() {
 }
 
 #[test]
+fn list_filters_workflow_registry_by_running_and_non_running_lifecycle() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let completed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build a reusable completed workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let completed_json: Value = serde_json::from_slice(&completed).unwrap();
+    let completed_workflow_id = completed_json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            completed_workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let running = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build a currently running workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let running_json: Value = serde_json::from_slice(&running).unwrap();
+    let running_workflow_id = running_json["workflow_id"].as_str().unwrap();
+    set_task_status_in_stored_workflow(&store, running_workflow_id, "task-001", "running");
+
+    let running_list = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--lifecycle",
+            "running",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let running_list_json: Value = serde_json::from_slice(&running_list).unwrap();
+    assert_eq!(running_list_json["filter"]["lifecycle"], "running");
+    assert_eq!(running_list_json["summary"]["total"], 1);
+    assert_eq!(running_list_json["summary"]["running"], 1);
+    assert_eq!(running_list_json["summary"]["non_running"], 0);
+    assert_eq!(running_list_json["workflows"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        running_list_json["workflows"][0]["workflow_id"],
+        running_workflow_id
+    );
+    assert_eq!(
+        running_list_json["workflows"][0]["lifecycle_state"],
+        "running"
+    );
+
+    let non_running_list = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--lifecycle",
+            "non-running",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let non_running_list_json: Value = serde_json::from_slice(&non_running_list).unwrap();
+    assert_eq!(non_running_list_json["filter"]["lifecycle"], "non-running");
+    assert_eq!(non_running_list_json["summary"]["total"], 1);
+    assert_eq!(non_running_list_json["summary"]["running"], 0);
+    assert_eq!(non_running_list_json["summary"]["non_running"], 1);
+    assert_eq!(
+        non_running_list_json["workflows"][0]["workflow_id"],
+        completed_workflow_id
+    );
+    assert_eq!(
+        non_running_list_json["workflows"][0]["lifecycle_state"],
+        "scaled_to_zero"
+    );
+}
+
+#[test]
 fn list_projects_context_handoff_readiness_for_registry_rows() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -4898,6 +5014,39 @@ fn make_persona_routing_non_auditable(store: &Path, workflow_id: &str, title: &s
             "codex_developer_personality_instructions".to_string(),
         )]),
     );
+    let patched = serde_json::to_string(&workflow).unwrap();
+    connection
+        .execute(
+            "UPDATE workflows SET data_json = ?1 WHERE id = ?2",
+            (&patched, workflow_id),
+        )
+        .unwrap();
+}
+
+fn set_task_status_in_stored_workflow(
+    store: &Path,
+    workflow_id: &str,
+    task_id: &str,
+    status: &str,
+) {
+    let connection = Connection::open(store).unwrap();
+    let data_json: String = connection
+        .query_row(
+            "SELECT data_json FROM workflows WHERE id = ?1",
+            [workflow_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut workflow: Value = serde_json::from_str(&data_json).unwrap();
+    let task = workflow["tasks"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|task| task["id"] == task_id)
+        .unwrap();
+    task.as_object_mut()
+        .unwrap()
+        .insert("status".to_string(), Value::String(status.to_string()));
     let patched = serde_json::to_string(&workflow).unwrap();
     connection
         .execute(

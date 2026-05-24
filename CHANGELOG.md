@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.37 - 2026-05-24
+
+### Added
+
+- `forge list` now accepts `--lifecycle all|running|non-running` for explicit workflow inventory slices.
+- Registry JSON output now includes `filter.lifecycle`, making filtered operator views auditable and replayable.
+- Added CLI contract coverage proving running and non-running workflow rows are filtered separately and that summary counts are derived from the filtered view.
+
+### Changed
+
+- The default `forge list` behavior remains `all`, while filtered list calls recompute summary counts, reusable subflow counts and context-handoff totals over only the selected rows.
+- Internal registry callers continue to use the unfiltered source-of-truth workflow registry unless they explicitly request a lifecycle filter.
+
+### Safety
+
+- Lifecycle filtering is read-only registry projection metadata derived from Forge-owned workflow/task state.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+
 ## 0.4.36 - 2026-05-24
 
 ### Added
