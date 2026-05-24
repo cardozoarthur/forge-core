@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.56 - 2026-05-24
+
+### Added
+
+- `forge validate` now blocks workflow promotion when a task still carries child-subflow bindings that are only `proposed`, have a non-promotable lifecycle state or are missing subflow validation metadata.
+- Added `forge workflow validate-subflow` to transition a planned child-subflow reuse binding from `proposed` to `validated` through a Forge-owned, revisioned workflow mutation.
+- The subflow validation command checks the current child workflow/task, stamps the latest child lifecycle state and validation gate into the parent binding, records an event and advances the workflow revision.
+- Added CLI contract coverage proving a completed parent workflow remains blocked until the reused deterministic child subflow is explicitly validated, then becomes promotable.
+
+### Changed
+
+- The package version is now `0.4.56`.
+- Proposed child-subflow reuse is no longer only inspection/context metadata; it is part of validation-before-promotion semantics.
+
+### Safety
+
+- Child-subflow validation is a metadata transition over Forge-owned workflow state. It does not execute child subflows, acquire leases, complete tasks, authorize CLIs, run local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- `forge workflow validate-subflow` refuses to validate child workflows that are not scaled to zero.
+- Parent workflow promotion remains blocked until task readiness, persona gates and child-subflow validation gates all pass.
+
 ## 0.4.55 - 2026-05-24
 
 ### Added

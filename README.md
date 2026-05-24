@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.55`
+Current version: `0.4.56`
 
 This is the first functional CLI + Skill version:
 
@@ -41,6 +41,7 @@ This is the first functional CLI + Skill version:
 - terminal workflow DAG inspection with lifecycle, dependency, persona, context-route, execution-policy, next-action and recursive child-subflow annotations
 - handoff readiness summaries in workflow inspection and async request status
 - proposed child-subflow links for compatible deterministic code-node reuse
+- revisioned child-subflow validation gates before workflow promotion
 - context routing with deterministic shard manifests, deterministic code-node and long-running cognition goals
 - context routing quality scores and warnings for budget pressure, missing required context and profile filtering
 - registry-level context quality summaries and workflow `quality_action` recommendations
@@ -82,6 +83,7 @@ forge list --quality-actions --output json
 forge list --quality-action increase_context_budget --output json
 forge inspect <workflow-id> --verbose --output json
 forge status --workflow <workflow-id> --output json
+forge workflow validate-subflow --workflow <workflow-id> --task task-011 --child-workflow <child-workflow-id> --child-task task-011 --origin codex --output json
 forge context --workflow <workflow-id> --task task-001 --budget 1200 --output json
 forge run --workflow <workflow-id> --simulate --output json
 forge validate --workflow <workflow-id> --output json
@@ -179,7 +181,8 @@ The handoff summary includes aggregate routing quality counts and each task's qu
 The registry also includes compact `context_handoff`, `context_actions` and `context_quality` projections for every workflow and for the filtered global summary, so operators can see ready tasks, missing-context blockers, dependency blockers, routing quality pressure and the workflow-level `quality_action` recommendation without inspecting each task individually.
 `forge plan` and `forge request start` report `reuse_candidates` when the registry already contains a compatible reusable deterministic subflow, and persist the best attachable candidate per requested task as a proposed child subflow before duplicating local Python/Node.js work.
 `forge inspect <workflow-id>` renders the current DAG as terminal text and also exposes the same graph as structured JSON when `--output json` is used. `--verbose` includes task goals, expected outputs, validation rules, subtasks and proposed child-subflow links. Persona-aware nodes are annotated with their node-scoped persona mode, and every node carries the context handoff status and next operational action derived from the same readiness contract used by `forge context --strict`.
-`forge validate` blocks promotion when a task declares persona routing that is not node-scoped, auditable, source-model backed and gated by `persona_routing_required`.
+`forge workflow validate-subflow` turns a proposed child-subflow binding into a revisioned `validated` binding only when the child workflow/task is present and the child flow is scaled to zero.
+`forge validate` blocks promotion when a task declares persona routing that is not node-scoped, auditable, source-model backed and gated by `persona_routing_required`; it also blocks promotion while child-subflow bindings remain proposed, non-promotable or missing validation metadata.
 
 Sync local execution engines before Forge uses external CLIs:
 

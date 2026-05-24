@@ -1,4 +1,4 @@
-use crate::graph::{PersonaRoutingSpec, TaskStatus, Workflow};
+use crate::graph::{ChildSubflowRef, PersonaRoutingSpec, TaskStatus, Workflow};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,6 +83,29 @@ pub fn validate_workflow(workflow: &Workflow) -> ValidationReport {
                 });
             }
         }
+        for subflow in &task.child_subflows {
+            let violations = child_subflow_validation_violations(subflow);
+            if !violations.is_empty() {
+                failed_rules.push(FailedRule {
+                    task_id: task.id.clone(),
+                    kind: "child_subflow_validation".to_string(),
+                    message: format!(
+                        "task {} child subflow {}/{} is not validation-ready: {}",
+                        task.id,
+                        subflow.workflow_id,
+                        subflow.task_id,
+                        violations.join("; ")
+                    ),
+                });
+                rework_tasks.push(ReworkTask {
+                    task_id: task.id.clone(),
+                    goal: task.goal.clone(),
+                    reason:
+                        "child subflow binding is not validation-ready; validate or reschedule subflow before promotion"
+                            .to_string(),
+                });
+            }
+        }
     }
 
     let promotable = failed_rules.is_empty();
@@ -93,6 +116,35 @@ pub fn validate_workflow(workflow: &Workflow) -> ValidationReport {
         failed_rules,
         rework_tasks,
     }
+}
+
+fn child_subflow_validation_violations(subflow: &ChildSubflowRef) -> Vec<String> {
+    let mut violations = Vec::new();
+    if !matches!(subflow.binding_status.as_str(), "validated" | "reusable") {
+        violations.push(format!(
+            "binding status {} must be validated or reusable before promotion",
+            subflow.binding_status
+        ));
+    }
+    if !matches!(
+        subflow.lifecycle_state.as_str(),
+        "scaled_to_zero" | "reusable"
+    ) {
+        violations.push(format!(
+            "lifecycle state {} is not promotion-ready",
+            subflow.lifecycle_state
+        ));
+    }
+    if subflow.validation_gate.trim().is_empty() {
+        violations.push("validation gate must be explicit".to_string());
+    }
+    if subflow.reuse_key.trim().is_empty() {
+        violations.push("reuse key must be explicit".to_string());
+    }
+    if subflow.context_lineage_sha256.len() != 64 {
+        violations.push("context lineage hash must be content-addressed".to_string());
+    }
+    violations
 }
 
 fn persona_routing_violations(persona: &PersonaRoutingSpec) -> Vec<String> {

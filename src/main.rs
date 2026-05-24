@@ -25,7 +25,9 @@ use forge_core::self_evolve::{run_self_evolution, SelfRunOptions};
 use forge_core::skill::install_skill;
 use forge_core::storage::ForgeStore;
 use forge_core::validation::validate_workflow;
-use forge_core::workflow::{attach_workflow_artifact, update_workflow_goal};
+use forge_core::workflow::{
+    attach_workflow_artifact, update_workflow_goal, validate_child_subflow_binding,
+};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -258,6 +260,20 @@ enum WorkflowCommands {
         path: PathBuf,
         #[arg(long)]
         kind: String,
+        #[arg(long)]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ValidateSubflow {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long = "child-workflow")]
+        child_workflow: String,
+        #[arg(long = "child-task")]
+        child_task: String,
         #[arg(long)]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -733,6 +749,26 @@ fn run() -> Result<i32> {
             } => {
                 let store = ForgeStore::open(cli.store)?;
                 let report = attach_workflow_artifact(&store, &workflow, &path, &kind, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::ValidateSubflow {
+                workflow,
+                task,
+                child_workflow,
+                child_task,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = validate_child_subflow_binding(
+                    &store,
+                    &workflow,
+                    &task,
+                    &child_workflow,
+                    &child_task,
+                    &origin,
+                )?;
                 print_response(output, &report)?;
                 Ok(0)
             }

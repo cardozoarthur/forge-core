@@ -5888,6 +5888,177 @@ fn context_package_carries_proposed_child_subflow_routing_for_reused_nodes() {
 }
 
 #[test]
+fn validation_blocks_promotion_until_child_subflow_binding_is_validated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let first = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with repeated local Python cost calculations without AI and email ops@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first_json: Value = serde_json::from_slice(&first).unwrap();
+    let first_workflow_id = first_json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            first_workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let second = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with frequent local Python cost calculations without AI and email finance@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second_json: Value = serde_json::from_slice(&second).unwrap();
+    let second_workflow_id = second_json["workflow_id"].as_str().unwrap();
+    assert_eq!(second_json["attached_subflows"], 1);
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            second_workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let blocked = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "validate",
+            "--workflow",
+            second_workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let blocked_json: Value = serde_json::from_slice(&blocked).unwrap();
+    assert_eq!(blocked_json["status"], "blocked");
+    assert_eq!(blocked_json["promotable"], false);
+    assert!(blocked_json["failed_rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| {
+            rule["task_id"] == "task-011"
+                && rule["kind"] == "child_subflow_validation"
+                && rule["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("binding status proposed")
+                && rule["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("{first_workflow_id}/task-011"))
+        }));
+    assert!(blocked_json["rework_tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|task| {
+            task["task_id"] == "task-011"
+                && task["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("child subflow binding")
+        }));
+
+    let validated = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "validate-subflow",
+            "--workflow",
+            second_workflow_id,
+            "--task",
+            "task-011",
+            "--child-workflow",
+            first_workflow_id,
+            "--child-task",
+            "task-011",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let validated_json: Value = serde_json::from_slice(&validated).unwrap();
+    assert_eq!(validated_json["status"], "child_subflow_validated");
+    assert_eq!(validated_json["workflow_id"], second_workflow_id);
+    assert_eq!(validated_json["task_id"], "task-011");
+    assert_eq!(validated_json["child_workflow_id"], first_workflow_id);
+    assert_eq!(validated_json["child_task_id"], "task-011");
+    assert_eq!(validated_json["previous_binding_status"], "proposed");
+    assert_eq!(validated_json["binding_status"], "validated");
+    assert_eq!(validated_json["lifecycle_state"], "scaled_to_zero");
+    assert_eq!(validated_json["revision"], 1);
+
+    let passed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "validate",
+            "--workflow",
+            second_workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let passed_json: Value = serde_json::from_slice(&passed).unwrap();
+    assert_eq!(passed_json["status"], "passed");
+    assert_eq!(passed_json["promotable"], true);
+}
+
+#[test]
 fn task_checkpoint_records_resumable_context_and_surfaces_request_status() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

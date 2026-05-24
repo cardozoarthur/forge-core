@@ -1,7 +1,7 @@
 use crate::artifact::copy_artifact;
-use crate::graph::{ArtifactRecord, WorkflowRevision};
+use crate::graph::{ArtifactRecord, TaskStatus, Workflow, WorkflowRevision};
 use crate::storage::ForgeStore;
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use serde::Serialize;
 use std::path::Path;
@@ -24,6 +24,21 @@ pub struct ArtifactAttachReport {
     pub origin: String,
     pub revision: u64,
     pub artifact: AttachedArtifact,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SubflowValidationReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub child_workflow_id: String,
+    pub child_task_id: String,
+    pub origin: String,
+    pub previous_binding_status: String,
+    pub binding_status: String,
+    pub lifecycle_state: String,
+    pub validation_gate: String,
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,6 +137,135 @@ pub fn attach_workflow_artifact(
             bytes,
         },
     })
+}
+
+pub fn validate_child_subflow_binding(
+    store: &ForgeStore,
+    workflow_id: &str,
+    task_id: &str,
+    child_workflow_id: &str,
+    child_task_id: &str,
+    origin: &str,
+) -> Result<SubflowValidationReport> {
+    let child_workflow = store.load_workflow(child_workflow_id)?;
+    let child_task = child_workflow
+        .tasks
+        .iter()
+        .find(|task| task.id == child_task_id)
+        .with_context(|| {
+            format!("child task {child_task_id} not found in workflow {child_workflow_id}")
+        })?;
+    let lifecycle_state = derive_child_lifecycle_state(&child_workflow);
+    if lifecycle_state != "scaled_to_zero" {
+        bail!(
+            "child subflow {child_workflow_id}/{child_task_id} is not validation-ready: lifecycle state {lifecycle_state}"
+        );
+    }
+    let validation_gate = child_task.execution_policy.validation_gate.clone();
+    if validation_gate.trim().is_empty() {
+        bail!(
+            "child subflow {child_workflow_id}/{child_task_id} is not validation-ready: validation gate is empty"
+        );
+    }
+
+    let mut workflow = store.load_workflow(workflow_id)?;
+    let previous_binding_status = {
+        let task = workflow
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == task_id)
+            .with_context(|| format!("task not found: {task_id}"))?;
+        let subflow = task
+            .child_subflows
+            .iter_mut()
+            .find(|subflow| {
+                subflow.workflow_id == child_workflow_id && subflow.task_id == child_task_id
+            })
+            .with_context(|| {
+                format!(
+                    "child subflow {child_workflow_id}/{child_task_id} not found on task {task_id}"
+                )
+            })?;
+        let previous = subflow.binding_status.clone();
+        subflow.binding_status = "validated".to_string();
+        subflow.lifecycle_state = lifecycle_state.clone();
+        subflow.validation_gate = validation_gate.clone();
+        previous
+    };
+
+    let revision = push_revision(
+        &mut workflow.revisions,
+        origin,
+        "child_subflow_validated",
+        &format!("validated child subflow {child_workflow_id}/{child_task_id} for task {task_id}"),
+    );
+    store.save_workflow(&workflow)?;
+    store.record_event(
+        workflow_id,
+        "child_subflow_validated",
+        &serde_json::json!({
+            "origin": origin,
+            "task_id": task_id,
+            "child_workflow_id": child_workflow_id,
+            "child_task_id": child_task_id,
+            "previous_binding_status": previous_binding_status,
+            "binding_status": "validated",
+            "lifecycle_state": lifecycle_state,
+            "validation_gate": validation_gate,
+            "revision": revision
+        }),
+    )?;
+
+    Ok(SubflowValidationReport {
+        status: "child_subflow_validated".to_string(),
+        workflow_id: workflow_id.to_string(),
+        task_id: task_id.to_string(),
+        child_workflow_id: child_workflow_id.to_string(),
+        child_task_id: child_task_id.to_string(),
+        origin: origin.to_string(),
+        previous_binding_status,
+        binding_status: "validated".to_string(),
+        lifecycle_state,
+        validation_gate,
+        revision,
+    })
+}
+
+fn derive_child_lifecycle_state(workflow: &Workflow) -> String {
+    if workflow.status == "failed"
+        || workflow
+            .tasks
+            .iter()
+            .any(|task| task.status == TaskStatus::Failed)
+    {
+        return "failed".to_string();
+    }
+    if workflow.status == "blocked"
+        || workflow
+            .tasks
+            .iter()
+            .any(|task| task.status == TaskStatus::Blocked)
+    {
+        return "blocked".to_string();
+    }
+    if workflow
+        .tasks
+        .iter()
+        .any(|task| task.status == TaskStatus::Running)
+    {
+        return "running".to_string();
+    }
+    if workflow.status == "completed" {
+        let all_completed = workflow
+            .tasks
+            .iter()
+            .all(|task| task.status == TaskStatus::Completed);
+        if all_completed {
+            return "scaled_to_zero".to_string();
+        }
+        return "completed".to_string();
+    }
+    "idle".to_string()
 }
 
 fn push_revision(

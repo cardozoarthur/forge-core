@@ -247,13 +247,22 @@ from `subflow_registry`, which lets executors reuse Forge's planning decision wi
 rebuilding it from irrelevant history. Runtime goal, artifact and persona routing state
 remain part of the context lineage, which gives long-running executors a deterministic
 stale-context signal while leaving room for persisted summaries, artifact shards and
-active child-subflow execution gates in later versions.
+active child-subflow execution gates.
 
 Inspection expands those proposed child-subflow bindings as read-only topology
 metadata. `forge inspect --output json` records the parent workflow/task, depth,
 path, reachability, terminal flag and loaded child workflow/task counts for each
 linked subflow, and the terminal diagram prints the same path. This makes recursive
 reuse auditable before Forge schedules, executes or promotes a child flow.
+
+Validation turns recursive reuse into an explicit promotion gate. A proposed
+child-subflow binding is not promotable by itself: `forge validate` fails the parent
+task until the binding is revisioned to a validation-ready state. `forge workflow
+validate-subflow` performs that Forge-owned mutation, checks that the child
+workflow/task exists, refuses child flows that are not scaled to zero,
+stamps the current child lifecycle and validation gate onto the parent binding, and
+records a workflow revision plus event. This keeps reuse as an auditable runtime
+decision instead of silently treating a registry suggestion as completed work.
 
 ## Personality/Soul Routing
 
@@ -330,7 +339,7 @@ Required user-facing goals:
 
 Before creating a new workflow from scratch, Forge should inspect available workflows and reusable flow definitions. If an existing flow can satisfy part of the new objective, Forge should propose or attach it as a child subflow instead of duplicating orchestration logic.
 
-The first reuse contract is deterministic and registry-derived. `forge list` exposes reusable local code-node subflows with a compatibility key based on execution policy, language, entrypoint and validation gate, plus a context lineage hash derived from the task-local context requirements and validation rules. `forge plan` and `forge request start` report compatible `reuse_candidates` from existing workflows before saving the new workflow and persist the best attachable candidate per requested task as a proposed `child_subflows` link. This gives direct planning and skill-style async requests the same recursive subflow surface without spending a model call, executing local Python/Node.js work or automatically promoting reused subflows.
+The first reuse contract is deterministic and registry-derived. `forge list` exposes reusable local code-node subflows with a compatibility key based on execution policy, language, entrypoint and validation gate, plus a context lineage hash derived from the task-local context requirements and validation rules. `forge plan` and `forge request start` report compatible `reuse_candidates` from existing workflows before saving the new workflow and persist the best attachable candidate per requested task as a proposed `child_subflows` link. This gives direct planning and skill-style async requests the same recursive subflow surface without spending a model call, executing local Python/Node.js work or automatically promoting reused subflows. Promotion requires a later `forge workflow validate-subflow` mutation so the parent workflow records when a reused child became validation-ready.
 
 ## Async Request Contract
 
