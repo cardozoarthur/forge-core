@@ -2821,6 +2821,73 @@ fn inspect_renders_terminal_dag_with_lifecycle_persona_and_verbose_subtasks() {
 }
 
 #[test]
+fn inspect_can_focus_terminal_view_on_one_task() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Create an operator report with auditable persona routing",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+
+    let inspect_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--task",
+            "task-008",
+            "--verbose",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let inspection: Value = serde_json::from_slice(&inspect_output).unwrap();
+    assert_eq!(inspection["status"], "inspected");
+    assert_eq!(inspection["workflow_id"], workflow_id);
+    assert_eq!(inspection["focus"]["task_id"], "task-008");
+    assert_eq!(inspection["focus"]["node_count"], 1);
+    assert!(inspection["workflow_task_count"].as_u64().unwrap() >= 8);
+    assert_eq!(inspection["task_count"], 1);
+    assert_eq!(inspection["handoff_summary"]["total"], 1);
+    assert!(inspection["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("focus task: task-008"));
+    assert!(inspection["diagram"].as_str().unwrap().contains(
+        "task-008 Generate documentation [pending] depends_on task-007 persona operator_report"
+    ));
+    assert!(!inspection["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("task-002 Extract requirements"));
+
+    let nodes = inspection["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0]["id"], "task-008");
+    assert_eq!(nodes[0]["persona_mode"], "operator_report");
+    assert!(nodes[0]["subtasks"].as_array().unwrap().len() >= 3);
+}
+
+#[test]
 fn inspect_exposes_context_route_summary_for_each_terminal_node() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

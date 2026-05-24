@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.60 - 2026-05-24
+
+### Added
+
+- Added focused terminal inspection with `forge inspect <workflow-id> --task <task-id>`.
+- `forge inspect --output json` now includes a `focus` block when a task focus is requested, plus `workflow_task_count` so operators can distinguish the focused node count from the full persisted DAG size.
+- Focused inspection routes the same context, persona, execution-policy, handoff and subflow projections as full inspection, but limits `nodes`, `handoff_summary` and the terminal diagram to the selected task.
+- Added CLI contract coverage proving a focused verbose inspection includes the selected node's subtasks while excluding unrelated task lines from the terminal diagram.
+
+### Changed
+
+- The package version is now `0.4.60`.
+
+### Safety
+
+- Focused inspection is read-only and derives all output from Forge-owned workflow state and deterministic context routing.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Full workflow inspection remains the default when `--task` is not provided.
+
 ## 0.4.59 - 2026-05-24
 
 ### Added

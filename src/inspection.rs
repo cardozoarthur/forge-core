@@ -11,7 +11,7 @@ use crate::graph::{
 };
 use crate::registry::{list_workflows, WorkflowRegistryRow};
 use crate::storage::ForgeStore;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
@@ -26,13 +26,23 @@ pub struct WorkflowInspectionReport {
     pub lifecycle_state: String,
     pub workflow_revision: u64,
     pub artifact_count: usize,
+    pub workflow_task_count: usize,
     pub task_count: usize,
     pub verbose: bool,
+    pub focus: Option<InspectionFocus>,
     pub subflow_count: usize,
     pub subflows: Vec<SubflowInspection>,
     pub handoff_summary: ContextHandoffSummary,
     pub nodes: Vec<TaskInspectionNode>,
     pub diagram: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InspectionFocus {
+    pub task_id: String,
+    pub title: String,
+    pub node_count: usize,
+    pub workflow_task_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -127,6 +137,15 @@ pub fn inspect_workflow(
     workflow_id: &str,
     verbose: bool,
 ) -> Result<WorkflowInspectionReport> {
+    inspect_workflow_with_focus(store, workflow_id, verbose, None)
+}
+
+pub fn inspect_workflow_with_focus(
+    store: &ForgeStore,
+    workflow_id: &str,
+    verbose: bool,
+    focus_task_id: Option<&str>,
+) -> Result<WorkflowInspectionReport> {
     let workflow = store.load_workflow(workflow_id)?;
     let registry = list_workflows(store)?;
     let registry_row = registry
@@ -135,9 +154,10 @@ pub fn inspect_workflow(
         .find(|row| row.workflow_id == workflow.id)
         .with_context(|| format!("workflow not found in registry: {}", workflow.id))?;
     let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
+    let selected_tasks = selected_tasks(&workflow, focus_task_id)?;
     let mut nodes = Vec::new();
     let mut handoff_tasks = Vec::new();
-    for task in &workflow.tasks {
+    for task in selected_tasks {
         let latest_checkpoint = checkpoints
             .iter()
             .rev()
@@ -153,9 +173,25 @@ pub fn inspect_workflow(
         nodes.push(task_node(task, &handoff, &context_package, verbose));
         handoff_tasks.push(handoff);
     }
+    let focus = focus_task_id.map(|task_id| InspectionFocus {
+        task_id: task_id.to_string(),
+        title: nodes
+            .first()
+            .map(|node| node.title.clone())
+            .unwrap_or_default(),
+        node_count: nodes.len(),
+        workflow_task_count: workflow.tasks.len(),
+    });
     let handoff_summary = summarize_handoff_tasks(handoff_tasks);
     let subflows = collect_subflows(store, workflow_id, &nodes);
-    let diagram = render_diagram(&registry_row, &nodes, &subflows, verbose);
+    let diagram = render_diagram(
+        &registry_row,
+        &nodes,
+        &subflows,
+        verbose,
+        focus.as_ref(),
+        workflow.tasks.len(),
+    );
 
     Ok(WorkflowInspectionReport {
         status: "inspected".to_string(),
@@ -165,14 +201,35 @@ pub fn inspect_workflow(
         lifecycle_state: registry_row.lifecycle_state,
         workflow_revision: registry_row.workflow_revision,
         artifact_count: registry_row.artifact_count,
+        workflow_task_count: workflow.tasks.len(),
         task_count: nodes.len(),
         verbose,
+        focus,
         subflow_count: subflows.len(),
         subflows,
         handoff_summary,
         nodes,
         diagram,
     })
+}
+
+fn selected_tasks<'a>(
+    workflow: &'a Workflow,
+    focus_task_id: Option<&str>,
+) -> Result<Vec<&'a AtomicTask>> {
+    let Some(task_id) = focus_task_id else {
+        return Ok(workflow.tasks.iter().collect());
+    };
+
+    let tasks = workflow
+        .tasks
+        .iter()
+        .filter(|task| task.id == task_id)
+        .collect::<Vec<_>>();
+    if tasks.is_empty() {
+        bail!("task not found in workflow {}: {task_id}", workflow.id);
+    }
+    Ok(tasks)
 }
 
 fn handoff_task(task: &AtomicTask, package: &ContextPackage) -> ContextHandoffTask {
@@ -483,6 +540,8 @@ fn render_diagram(
     nodes: &[TaskInspectionNode],
     subflows: &[SubflowInspection],
     verbose: bool,
+    focus: Option<&InspectionFocus>,
+    workflow_task_count: usize,
 ) -> String {
     let mut lines = vec![
         format!("Workflow {} [{}]", row.workflow_id, row.lifecycle_state),
@@ -496,6 +555,12 @@ fn render_diagram(
             subflows.len()
         ),
     ];
+    if let Some(focus) = focus {
+        lines.push(format!(
+            "focus task: {} {} nodes: {}/{}",
+            focus.task_id, focus.title, focus.node_count, workflow_task_count
+        ));
+    }
 
     for node in nodes {
         let dependency = if node.dependencies.is_empty() {

@@ -254,6 +254,12 @@ read-only summaries, so operators and async callers can see which task is ready,
 blocked by missing context or blocked by dependencies without reconstructing the
 context package manually. Those summaries also carry routing quality aggregates and
 per-task quality contracts for context-budget and profile-pressure triage.
+`forge inspect <workflow-id> --task <task-id>` provides a focused terminal and JSON
+inspection view for one task. It preserves the selected node's context-route,
+persona, execution-policy, handoff and child-subflow projections while limiting the
+node list, handoff summary and diagram to the focused task. The JSON report includes
+both the focused node count and the full workflow task count so adapters can bound
+operator context without losing DAG scale metadata.
 When the workflow registry has attached a proposed compatible child subflow, the
 context package carries the structured binding plus a compact `child_subflows` shard
 from `subflow_registry`, which lets executors reuse Forge's planning decision without
@@ -346,6 +352,7 @@ Required user-facing goals:
 - Infinite workflows and infinite subflows remain eligible for scheduling instead of being treated as completed one-shot graphs.
 - `forge inspect <id>` renders the current workflow graph in the terminal from persisted Forge state.
 - `forge inspect <id> --verbose` includes task goals, expected outputs, validation rules, subtasks and proposed child-subflow links.
+- `forge inspect <id> --task <task-id>` focuses inspection on one node while retaining full workflow task-count metadata.
 - Workflows may contain subflows recursively. A flow can own many subflows, and each subflow can own many child subflows.
 - Subflows can be finite or infinite. Infinite subflows require explicit lifecycle metadata so Forge can distinguish "idle but alive" from "completed".
 - Running workflows must remain mutable: list gives stable ids, inspect shows the current graph, and goal/artifact mutations appear as revisions.

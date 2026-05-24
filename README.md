@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.59`
+Current version: `0.4.60`
 
 This is the first functional CLI + Skill version:
 
@@ -38,7 +38,7 @@ This is the first functional CLI + Skill version:
 - artifact listing
 - workflow registry listing with lifecycle state and `running`/`non-running` filters
 - workflow registry quality-action catalog discovery for Context Routing Engine triage filters
-- terminal workflow DAG inspection with lifecycle, dependency, persona, context-route, execution-policy, next-action and recursive child-subflow annotations
+- terminal workflow DAG inspection with lifecycle, dependency, persona, context-route, execution-policy, next-action, focused task views and recursive child-subflow annotations
 - handoff readiness summaries in workflow inspection and async request status
 - proposed child-subflow links for compatible deterministic code-node reuse
 - revisioned child-subflow validation gates before workflow promotion
@@ -83,6 +83,7 @@ forge list --lifecycle non-running --output json
 forge list --quality-actions --output json
 forge list --quality-action increase_context_budget --output json
 forge inspect <workflow-id> --verbose --output json
+forge inspect <workflow-id> --task task-008 --verbose --output json
 forge status --workflow <workflow-id> --output json
 forge workflow validate-subflow --workflow <workflow-id> --task task-011 --child-workflow <child-workflow-id> --child-task task-011 --origin codex --output json
 forge task validate-response --workflow <workflow-id> --task task-001 --response ./executor-response.json --output json
@@ -144,6 +145,11 @@ next action and compact execution policy for each node. When a node has proposed
 child subflows, inspection also reports each subflow's parent node, depth, path,
 reachability, terminal status and loaded child workflow/task counts so operators can
 audit recursive reuse without executing or promoting the child flow.
+Use `forge inspect <workflow-id> --task <task-id>` when an operator or adapter needs a
+bounded terminal view of one node. Focused inspection keeps the same context-route,
+persona, execution-policy, handoff and child-subflow projections, adds a `focus`
+block and `workflow_task_count`, and limits the node list, handoff summary and
+terminal diagram to the selected task.
 
 Use strict context mode when handing a package to an executor:
 
@@ -197,7 +203,7 @@ The handoff summary includes aggregate routing quality counts and each task's qu
 `forge list` exposes the workflow registry across planned and async workflows, including stable workflow ids, associated run ids, initial request, current goal, lifecycle state, task summary and deterministic code-node subflows that can be reused by compatible future workflows. Completed finite workflows are projected as `scaled_to_zero` when there is no remaining task work.
 The registry also includes compact `context_handoff`, `context_actions` and `context_quality` projections for every workflow and for the filtered global summary, so operators can see ready tasks, missing-context blockers, dependency blockers, routing quality pressure and the workflow-level `quality_action` recommendation without inspecting each task individually.
 `forge plan` and `forge request start` report `reuse_candidates` when the registry already contains a compatible reusable deterministic subflow, and persist the best attachable candidate per requested task as a proposed child subflow before duplicating local Python/Node.js work.
-`forge inspect <workflow-id>` renders the current DAG as terminal text and also exposes the same graph as structured JSON when `--output json` is used. `--verbose` includes task goals, expected outputs, validation rules, subtasks and proposed child-subflow links. Persona-aware nodes are annotated with their node-scoped persona mode, and every node carries the context handoff status and next operational action derived from the same readiness contract used by `forge context --strict`.
+`forge inspect <workflow-id>` renders the current DAG as terminal text and also exposes the same graph as structured JSON when `--output json` is used. `--verbose` includes task goals, expected outputs, validation rules, subtasks and proposed child-subflow links. `--task <task-id>` focuses the terminal and JSON inspection on one node while preserving the full workflow task count. Persona-aware nodes are annotated with their node-scoped persona mode, and every inspected node carries the context handoff status and next operational action derived from the same readiness contract used by `forge context --strict`.
 `forge workflow validate-subflow` turns a proposed child-subflow binding into a revisioned `validated` binding only when the child workflow/task is present and the child flow is scaled to zero.
 `forge validate` blocks promotion when a task declares persona routing that is not node-scoped, auditable, source-model backed and gated by `persona_routing_required`; it also blocks promotion while child-subflow bindings remain proposed, non-promotable or missing validation metadata.
 

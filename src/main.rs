@@ -11,7 +11,7 @@ use forge_core::executor::{load_executors, sync_executors, ExecutorSyncOptions};
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff;
 use forge_core::improve::generate_improvement;
-use forge_core::inspection::inspect_workflow;
+use forge_core::inspection::inspect_workflow_with_focus;
 use forge_core::intent::parse_intent;
 use forge_core::lease::{acquire_task_lease, release_task_lease};
 use forge_core::registry::{
@@ -62,6 +62,8 @@ enum Commands {
     },
     Inspect {
         workflow: String,
+        #[arg(long)]
+        task: Option<String>,
         #[arg(long)]
         verbose: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -479,11 +481,12 @@ fn run() -> Result<i32> {
         }
         Commands::Inspect {
             workflow,
+            task,
             verbose,
             output,
         } => {
             let store = ForgeStore::open(cli.store)?;
-            let report = inspect_workflow(&store, &workflow, verbose)?;
+            let report = inspect_workflow_with_focus(&store, &workflow, verbose, task.as_deref())?;
             match output {
                 OutputFormat::Json => print_response(output, &report)?,
                 OutputFormat::Human => println!("{}", report.diagram),
