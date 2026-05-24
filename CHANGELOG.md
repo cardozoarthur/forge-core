@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.62 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v28` with a versioned `continuation_plan` for resumable executor adapters.
+- Continuation plans use schema `forge.context.continuation_plan.v1` and turn checkpoint state, current context checksum, current route key and context delta into explicit actions: `start_fresh`, `resume_from_checkpoint`, `refresh_context_before_resume` or `partial_retry_with_fresh_context`.
+- `forge inspect --output json` now projects the continuation plan for each terminal node, and the human diagram prints a compact `continue <action> <status>` marker.
+- `forge task handoff` now emits `forge.executor_handoff.v8` and reuses the context continuation plan as the handoff `resume_plan`, so context, inspection and handoff agree on the same validation-gated continuation decision.
+- Added CLI contract coverage proving the continuation plan is exposed through `forge context`, `forge inspect` and `forge task handoff`.
+
+### Changed
+
+- The context routing policy is now `task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28`.
+- The package version is now `0.4.62`.
+
+### Safety
+
+- Continuation plans are read-only metadata derived from Forge-owned workflow checkpoints and deterministic context routing.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules, task leases, persona gates, child-subflow validation gates and the continuation plan's validation gate.
+
 ## 0.4.61 - 2026-05-24
 
 ### Added

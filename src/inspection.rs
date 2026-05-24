@@ -1,9 +1,10 @@
 use crate::checkpoint::load_workflow_checkpoints;
 use crate::context::{
     build_context_package_with_checkpoint, context_next_action, summarize_context_handoff_tasks,
-    ContextBudgetPlan, ContextDelta, ContextHandoffBlocker, ContextHandoffSummary,
-    ContextHandoffTask, ContextNextAction, ContextPackage, ContextRoutingEconomy,
-    ContextRoutingQuality, ContextRoutingRepair, ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
+    ContextBudgetPlan, ContextContinuationPlan, ContextDelta, ContextHandoffBlocker,
+    ContextHandoffSummary, ContextHandoffTask, ContextNextAction, ContextPackage,
+    ContextRoutingEconomy, ContextRoutingQuality, ContextRoutingRepair, ContextRoutingSummary,
+    DEFAULT_CONTEXT_BUDGET,
 };
 use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, SubtaskSpec, TaskStatus,
@@ -97,6 +98,7 @@ pub struct ContextInspectionRoute {
     pub routing_quality: ContextRoutingQuality,
     pub next_action: ContextNextAction,
     pub context_delta: ContextDelta,
+    pub continuation_plan: ContextContinuationPlan,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -355,6 +357,7 @@ fn context_route(package: &ContextPackage) -> ContextInspectionRoute {
         routing_quality: package.routing_quality.clone(),
         next_action: context_next_action(package),
         context_delta: package.context_delta.clone(),
+        continuation_plan: package.continuation_plan.clone(),
     }
 }
 
@@ -598,7 +601,7 @@ fn render_diagram(
             )
         };
         let context_route = format!(
-            " context {} {} {}/{} cache {} packet {} replay {} next {} delta {} budget_plan {}/{} {}",
+            " context {} {} {}/{} cache {} packet {} replay {} next {} delta {} continue {} {} budget_plan {}/{} {}",
             node.context_route.profile_id,
             node.context_route.handoff_status,
             node.context_route.context_bytes,
@@ -608,6 +611,8 @@ fn render_diagram(
             short_hash(&node.context_route.replay_manifest_sha256),
             node.context_route.next_action.action,
             node.context_route.context_delta.status,
+            node.context_route.continuation_plan.action,
+            node.context_route.continuation_plan.status,
             node.context_route.budget_plan.minimum_correct_budget_bytes,
             node.context_route.budget_plan.recommended_budget_bytes,
             node.context_route.budget_plan.status

@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v27";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v28";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
 const ROUTING_CONTRACT_SCHEMA_VERSION: &str = "forge.context.routing_contract.v1";
 const ROUTING_REPAIR_SCHEMA_VERSION: &str = "forge.context.routing_repair.v1";
@@ -26,8 +26,9 @@ const CONTEXT_NEXT_ACTION_SCHEMA_VERSION: &str = "forge.inspect_context_action.v
 const CONTEXT_ROUTING_QUALITY_SCHEMA_VERSION: &str = "forge.context_routing_quality.v1";
 const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
     "forge.context_routing_quality_summary.v1";
+const CONTINUATION_PLAN_SCHEMA_VERSION: &str = "forge.context.continuation_plan.v1";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27";
+    "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28";
 const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
@@ -127,6 +128,7 @@ pub struct ContextPackage {
     pub routing_quality: ContextRoutingQuality,
     pub next_action: ContextNextAction,
     pub context_delta: ContextDelta,
+    pub continuation_plan: ContextContinuationPlan,
     pub context_ready: bool,
     pub required_sections: Vec<String>,
     pub missing_required_sections: Vec<String>,
@@ -526,6 +528,25 @@ pub struct ContextDelta {
     pub checkpoint_context_routing_cache_key: Option<String>,
     pub current_context_routing_cache_key: String,
     pub changed_components: Vec<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextContinuationPlan {
+    pub schema_version: String,
+    pub status: String,
+    pub action: String,
+    pub checkpoint_reusable: bool,
+    pub requires_fresh_context: bool,
+    pub partial_retry_recommended: bool,
+    pub checkpoint_id: Option<String>,
+    pub checkpoint_context_sha256: Option<String>,
+    pub checkpoint_context_routing_cache_key: Option<String>,
+    pub current_context_sha256: String,
+    pub current_context_routing_cache_key: String,
+    pub workflow_revision: u64,
+    pub checkpoint_workflow_revision: Option<u64>,
+    pub validation_gate: String,
     pub reason: String,
 }
 
@@ -1186,6 +1207,15 @@ pub fn build_context_package_with_checkpoint(
         resume_context_status,
         resume_context_reason,
     );
+    let continuation_plan = build_continuation_plan(
+        latest_checkpoint.as_ref(),
+        workflow_revision,
+        &context_sha256,
+        &routing_fingerprint.cache_key,
+        resume_context_status,
+        resume_context_reason,
+        &context_delta,
+    );
 
     Ok(ContextPackage {
         schema_version: CONTEXT_SCHEMA_VERSION.to_string(),
@@ -1225,6 +1255,7 @@ pub fn build_context_package_with_checkpoint(
         routing_quality,
         next_action,
         context_delta,
+        continuation_plan,
         context_ready,
         required_sections,
         missing_required_sections,
@@ -1443,6 +1474,108 @@ fn build_context_delta(
         checkpoint_context_routing_cache_key: checkpoint.context_routing_cache_key.clone(),
         current_context_routing_cache_key: context_routing_cache_key.to_string(),
         changed_components,
+        reason: reason.to_string(),
+    }
+}
+
+fn build_continuation_plan(
+    checkpoint: Option<&TaskCheckpoint>,
+    workflow_revision: u64,
+    current_context_sha256: &str,
+    current_context_routing_cache_key: &str,
+    resume_context_status: &str,
+    resume_context_reason: &str,
+    delta: &ContextDelta,
+) -> ContextContinuationPlan {
+    let Some(checkpoint) = checkpoint else {
+        return ContextContinuationPlan {
+            schema_version: CONTINUATION_PLAN_SCHEMA_VERSION.to_string(),
+            status: "no_checkpoint".to_string(),
+            action: "start_fresh".to_string(),
+            checkpoint_reusable: false,
+            requires_fresh_context: true,
+            partial_retry_recommended: false,
+            checkpoint_id: None,
+            checkpoint_context_sha256: None,
+            checkpoint_context_routing_cache_key: None,
+            current_context_sha256: current_context_sha256.to_string(),
+            current_context_routing_cache_key: current_context_routing_cache_key.to_string(),
+            workflow_revision,
+            checkpoint_workflow_revision: None,
+            validation_gate: "fresh_executor_handoff_required".to_string(),
+            reason: "no checkpoint recorded for this workflow task".to_string(),
+        };
+    };
+
+    let checkpoint_route = checkpoint.context_routing_cache_key.clone();
+    let (status, action, checkpoint_reusable, requires_fresh_context, partial_retry, gate, reason) =
+        if resume_context_status == "checkpoint_stale" {
+            (
+                "checkpoint_stale",
+                "refresh_context_before_resume",
+                false,
+                true,
+                false,
+                "checkpoint_refresh_validation_required",
+                resume_context_reason,
+            )
+        } else if checkpoint_route.is_none() {
+            (
+                "checkpoint_route_unknown",
+                "refresh_context_before_resume",
+                false,
+                true,
+                false,
+                "checkpoint_refresh_validation_required",
+                "checkpoint does not carry a context routing cache key",
+            )
+        } else if delta.can_reuse_checkpoint_context {
+            (
+                "checkpoint_route_current",
+                "resume_from_checkpoint",
+                true,
+                false,
+                false,
+                "resume_checkpoint_validation_required",
+                "checkpoint route matches current context route",
+            )
+        } else if delta.partial_retry_recommended {
+            (
+                "checkpoint_route_changed",
+                "partial_retry_with_fresh_context",
+                false,
+                true,
+                true,
+                "partial_retry_requires_fresh_context_validation",
+                "checkpoint route differs from current context route",
+            )
+        } else {
+            (
+                "checkpoint_context_changed",
+                "refresh_context_before_resume",
+                false,
+                true,
+                false,
+                "checkpoint_refresh_validation_required",
+                delta.reason.as_str(),
+            )
+        };
+
+    ContextContinuationPlan {
+        schema_version: CONTINUATION_PLAN_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        action: action.to_string(),
+        checkpoint_reusable,
+        requires_fresh_context,
+        partial_retry_recommended: partial_retry,
+        checkpoint_id: Some(checkpoint.checkpoint_id.clone()),
+        checkpoint_context_sha256: Some(checkpoint.context_sha256.clone()),
+        checkpoint_context_routing_cache_key: checkpoint_route,
+        current_context_sha256: current_context_sha256.to_string(),
+        current_context_routing_cache_key: current_context_routing_cache_key.to_string(),
+        workflow_revision,
+        checkpoint_workflow_revision: Some(checkpoint.workflow_revision),
+        validation_gate: gate.to_string(),
         reason: reason.to_string(),
     }
 }

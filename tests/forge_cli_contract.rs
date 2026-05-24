@@ -317,10 +317,10 @@ fn context_controller_returns_versioned_shard_manifest() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
     assert_eq!(context["workflow_id"], workflow_id);
     assert_eq!(context["task_id"], task_id);
@@ -393,10 +393,10 @@ fn context_package_routes_dependency_readiness_as_structured_context() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
     assert_eq!(context["dependency_summary"]["total"], 1);
     assert_eq!(context["dependency_summary"]["pending"], 1);
@@ -475,10 +475,10 @@ fn strict_context_blocks_executor_handoff_when_dependencies_are_not_ready() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
     assert_eq!(context["context_ready"], true);
     assert_eq!(context["dependency_summary"]["ready"], false);
@@ -547,10 +547,10 @@ fn context_package_summarizes_routing_decisions_for_executor_cost_audit() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
 
     let shards = context["shards"].as_array().unwrap();
@@ -639,10 +639,10 @@ fn context_package_exposes_routing_economy_for_cost_audit() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
 
     let economy = &context["routing_economy"];
@@ -829,10 +829,10 @@ fn context_package_exposes_versioned_prompt_packet_for_executor_adapters() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
 
     let packet = &context["prompt_packet"];
@@ -977,10 +977,10 @@ fn context_package_exposes_replay_manifest_for_resumable_executor_context() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
 
     let manifest = &context["replay_manifest"];
@@ -1130,10 +1130,10 @@ fn strict_context_blocks_executor_when_required_sections_are_missing() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
     assert_eq!(context["context_ready"], false);
     assert!(!context["missing_required_sections"]
@@ -1205,10 +1205,10 @@ fn context_controller_compresses_oversized_shards_before_omitting() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
     assert_eq!(context["executor_profile"]["id"], "ai_reasoning");
     assert!(context["context_bytes"].as_u64().unwrap() <= 420);
@@ -1290,10 +1290,10 @@ fn context_shards_explain_selection_decisions_for_budget_and_profile_routing() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
 
     let shards = context["shards"].as_array().unwrap();
@@ -1379,10 +1379,10 @@ fn context_package_applies_no_ai_profile_to_deterministic_executor_nodes() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
     assert_eq!(context["requested_budget"], 1600);
     assert!(context["effective_budget"].as_u64().unwrap() < 1600);
@@ -1479,10 +1479,10 @@ fn deterministic_code_nodes_carry_no_ai_execution_policy_in_context() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
     assert_eq!(context["execution_policy"]["mode"], "local_code_node");
     assert_eq!(
@@ -1594,10 +1594,10 @@ fn context_package_tracks_runtime_mutation_lineage_and_current_goal() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
     assert_eq!(context["workflow_revision"], 2);
     assert_eq!(context["artifact_count"], 1);
@@ -1819,10 +1819,10 @@ fn context_package_addresses_each_shard_by_source_content_for_routing_reuse() {
         .stdout
         .clone();
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
 
     let shards = context["shards"].as_array().unwrap();
@@ -1924,10 +1924,10 @@ fn context_shards_include_remaining_budget_ledger_for_replayable_selection() {
         .stdout
         .clone();
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
 
     let effective_budget = context["effective_budget"].as_u64().unwrap();
@@ -2011,10 +2011,10 @@ fn context_package_exposes_versioned_routing_contract_for_executor_adapters() {
         .clone();
     let context: Value = serde_json::from_slice(&context_output).unwrap();
 
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
 
     let contract = &context["routing_contract"];
@@ -2190,10 +2190,10 @@ fn context_package_recommends_budget_repair_for_missing_required_sections() {
         .clone();
     let context: Value = serde_json::from_slice(&context_output).unwrap();
 
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
     assert_eq!(
         context["routing_repair"]["schema_version"],
@@ -2588,10 +2588,10 @@ fn context_package_includes_persona_routing_lineage_for_human_facing_task() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
     assert_eq!(context["persona"]["mode"], "operator_report");
     assert_eq!(context["persona"]["scope"], "node");
@@ -2659,10 +2659,10 @@ fn context_package_exposes_versioned_persona_contract_for_human_facing_nodes() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
 
     let contract = &context["persona_contract"];
@@ -3082,8 +3082,8 @@ fn inspect_exposes_context_route_summary_for_each_terminal_node() {
     let nodes = inspection["nodes"].as_array().unwrap();
     let deterministic = find_task(nodes, "Run deterministic non-AI step");
     let route = &deterministic["context_route"];
-    assert_eq!(route["schema_version"], "forge.context.v27");
-    assert_eq!(route["routing_policy"], "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27");
+    assert_eq!(route["schema_version"], "forge.context.v28");
+    assert_eq!(route["routing_policy"], "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28");
     assert_eq!(
         route["routing_fingerprint_schema_version"],
         "forge.context.routing_fingerprint.v1"
@@ -3388,7 +3388,7 @@ fn context_package_exposes_next_action_for_executor_resume_decisions() {
         .stdout
         .clone();
     let initial_context: Value = serde_json::from_slice(&initial_context_output).unwrap();
-    assert_eq!(initial_context["schema_version"], "forge.context.v27");
+    assert_eq!(initial_context["schema_version"], "forge.context.v28");
     assert_eq!(
         initial_context["next_action"]["schema_version"],
         "forge.inspect_context_action.v1"
@@ -3522,7 +3522,7 @@ fn context_package_exposes_versioned_context_delta_for_resumable_reuse() {
         .stdout
         .clone();
     let initial_context: Value = serde_json::from_slice(&initial_context_output).unwrap();
-    assert_eq!(initial_context["schema_version"], "forge.context.v27");
+    assert_eq!(initial_context["schema_version"], "forge.context.v28");
     assert_eq!(
         initial_context["context_delta"]["schema_version"],
         "forge.context.delta.v1"
@@ -3628,6 +3628,220 @@ fn context_package_exposes_versioned_context_delta_for_resumable_reuse() {
         .as_array()
         .unwrap()
         .contains(&Value::String("routing_cache_key".to_string())));
+}
+
+#[test]
+fn context_package_exposes_versioned_continuation_plan_for_executor_adapters() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build versioned continuation plans for resumable executor adapters",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+
+    let initial_context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let initial_context: Value = serde_json::from_slice(&initial_context_output).unwrap();
+    assert_eq!(initial_context["schema_version"], "forge.context.v28");
+    assert_eq!(
+        initial_context["routing_policy"],
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
+    );
+
+    let initial_plan = &initial_context["continuation_plan"];
+    assert_eq!(
+        initial_plan["schema_version"],
+        "forge.context.continuation_plan.v1"
+    );
+    assert_eq!(initial_plan["status"], "no_checkpoint");
+    assert_eq!(initial_plan["action"], "start_fresh");
+    assert_eq!(initial_plan["checkpoint_reusable"], false);
+    assert_eq!(initial_plan["requires_fresh_context"], true);
+    assert_eq!(initial_plan["partial_retry_recommended"], false);
+    assert_eq!(
+        initial_plan["current_context_routing_cache_key"],
+        initial_context["routing_fingerprint"]["cache_key"]
+    );
+    assert_eq!(
+        initial_plan["current_context_sha256"],
+        initial_context["context_sha256"]
+    );
+    assert_eq!(
+        initial_plan["validation_gate"],
+        "fresh_executor_handoff_required"
+    );
+    assert_eq!(initial_plan["checkpoint_id"], Value::Null);
+
+    let workflow_revision = initial_context["workflow_revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let checkpoint_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "checkpoint",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--executor",
+            "codex",
+            "--state",
+            "paused",
+            "--summary",
+            "Paused after first continuation route",
+            "--context-sha256",
+            initial_context["context_sha256"].as_str().unwrap(),
+            "--context-routing-cache-key",
+            initial_context["routing_fingerprint"]["cache_key"]
+                .as_str()
+                .unwrap(),
+            "--workflow-revision",
+            &workflow_revision,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let checkpoint_json: Value = serde_json::from_slice(&checkpoint_output).unwrap();
+
+    let resumed_context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let resumed_context: Value = serde_json::from_slice(&resumed_context_output).unwrap();
+    let resumed_plan = &resumed_context["continuation_plan"];
+    assert_eq!(
+        resumed_plan["checkpoint_id"],
+        checkpoint_json["checkpoint"]["checkpoint_id"]
+    );
+    assert_eq!(resumed_plan["status"], "checkpoint_route_changed");
+    assert_eq!(resumed_plan["action"], "partial_retry_with_fresh_context");
+    assert_eq!(resumed_plan["checkpoint_reusable"], false);
+    assert_eq!(resumed_plan["requires_fresh_context"], true);
+    assert_eq!(resumed_plan["partial_retry_recommended"], true);
+    assert_eq!(
+        resumed_plan["checkpoint_context_routing_cache_key"],
+        initial_context["routing_fingerprint"]["cache_key"]
+    );
+    assert_eq!(
+        resumed_plan["current_context_routing_cache_key"],
+        resumed_context["routing_fingerprint"]["cache_key"]
+    );
+    assert_eq!(
+        resumed_plan["validation_gate"],
+        "partial_retry_requires_fresh_context_validation"
+    );
+
+    let inspect_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspection: Value = serde_json::from_slice(&inspect_output).unwrap();
+    assert!(inspection["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("continue partial_retry_with_fresh_context checkpoint_route_changed"));
+    assert_eq!(
+        inspection["nodes"][0]["context_route"]["continuation_plan"],
+        *resumed_plan
+    );
+
+    let handoff = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
+    assert_eq!(
+        handoff_json["packet"]["schema_version"],
+        "forge.executor_handoff.v8"
+    );
+    assert_eq!(
+        handoff_json["packet"]["resume_plan"],
+        resumed_context["continuation_plan"]
+    );
 }
 
 #[test]
@@ -6413,10 +6627,10 @@ fn context_package_carries_proposed_child_subflow_routing_for_reused_nodes() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v27");
+    assert_eq!(context["schema_version"], "forge.context.v28");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
     assert_eq!(context["child_subflow_count"], 1);
     assert_eq!(
@@ -6825,10 +7039,10 @@ fn context_package_includes_latest_checkpoint_and_marks_stale_after_goal_mutatio
         .stdout
         .clone();
     let checkpointed_context: Value = serde_json::from_slice(&checkpointed_context_output).unwrap();
-    assert_eq!(checkpointed_context["schema_version"], "forge.context.v27");
+    assert_eq!(checkpointed_context["schema_version"], "forge.context.v28");
     assert_eq!(
         checkpointed_context["routing_policy"],
-        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_v27"
+        "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_v28"
     );
     assert_eq!(
         checkpointed_context["latest_checkpoint"]["context_sha256"],
@@ -7132,7 +7346,7 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
     assert_eq!(handoff_json["context"]["handoff_status"], "ready");
 
     let packet = &handoff_json["packet"];
-    assert_eq!(packet["schema_version"], "forge.executor_handoff.v7");
+    assert_eq!(packet["schema_version"], "forge.executor_handoff.v8");
     assert_eq!(packet["workflow_id"], workflow_id);
     assert_eq!(packet["task_id"], task_id);
     assert_eq!(packet["selected_executor"], "codex");
@@ -7143,7 +7357,7 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
         packet["lease_id"],
         handoff_json["lease"]["lease_id"].as_str().unwrap()
     );
-    assert_eq!(packet["context_schema_version"], "forge.context.v27");
+    assert_eq!(packet["context_schema_version"], "forge.context.v28");
     assert_eq!(
         packet["context_sha256"],
         handoff_json["context"]["context_sha256"]
@@ -7264,7 +7478,7 @@ fn task_handoff_packet_carries_full_execution_policy_for_deterministic_code_node
     let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
     let packet = &handoff_json["packet"];
 
-    assert_eq!(packet["schema_version"], "forge.executor_handoff.v7");
+    assert_eq!(packet["schema_version"], "forge.executor_handoff.v8");
     assert_eq!(packet["task_executor"], "command");
     assert_eq!(packet["execution_policy_mode"], "local_code_node");
     assert_eq!(packet["execution_policy"]["mode"], "local_code_node");
@@ -7435,7 +7649,7 @@ fn task_handoff_packet_exposes_resume_plan_from_checkpoint_route_key() {
     let resumed_packet = &resumed_handoff_json["packet"];
     assert_eq!(
         resumed_packet["schema_version"],
-        "forge.executor_handoff.v7"
+        "forge.executor_handoff.v8"
     );
     assert_eq!(
         resumed_packet["resume_context_status"],
@@ -7471,7 +7685,7 @@ fn task_handoff_packet_exposes_resume_plan_from_checkpoint_route_key() {
     );
     assert_eq!(
         resumed_packet["resume_plan"]["reason"],
-        "checkpoint route differs from current handoff route"
+        "checkpoint route differs from current context route"
     );
     assert_eq!(
         resumed_packet["context_delta"]["schema_version"],
@@ -7545,7 +7759,7 @@ fn task_handoff_packet_carries_node_scoped_persona_contract() {
     let packet = &handoff_json["packet"];
     let contract = &packet["persona_contract"];
 
-    assert_eq!(packet["schema_version"], "forge.executor_handoff.v7");
+    assert_eq!(packet["schema_version"], "forge.executor_handoff.v8");
     assert_eq!(packet["persona_mode"], "operator_report");
     assert_eq!(packet["persona_profile_id"], "persona.operator_report.v1");
     assert_eq!(contract["schema_version"], "forge.persona_handoff.v2");
