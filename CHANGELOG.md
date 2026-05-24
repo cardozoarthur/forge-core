@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.4.82 - 2026-05-24
+
+### Added
+
+- Added explicit cluster placement metadata for reasoning-heavy tasks: `reasoning_required` and `remote_ai_execution_allowed`.
+- Added CLI contract coverage proving a LAN node that advertises `ai` capability is still ineligible for AI task placement until explicit remote cognitive executor authorization exists.
+- Added `docs/reports/forge-core-v0.4.82-report-2026-05-24.md` with the cycle report.
+
+### Changed
+
+- The package version is now `0.4.82`.
+- Cluster placement requirements now use schema `forge.cluster_placement_requirements.v2`.
+- Cluster placement remains available for deterministic/local-code handoff, but AI/Mixed tasks are blocked from remote placement by default.
+
+### Safety
+
+- Remote AI execution remains disabled even when a node reports GPU/AI capabilities.
+- This increment only changes Forge-owned scheduling metadata, placement policy and documentation.
+- No SSH session, Docker/Kubernetes/Knative resource, remote machine or user infrastructure is mutated.
+
+## 0.4.81 - 2026-05-24
+
+### Added
+
+- Added Hackathon MVP Software Factory planning for hackathon, ideathon and maratona goals that ask for an MVP or software factory.
+- Hackathon planning now adds regulation parsing, buffered deadline calculation, regulation-fit viability gating, weighted brainstorm, final idea selection, PDF artifact generation, Telegram delivery, MVP backlog, OSM/OSRM technical planning, pitch validation and continuous improvement until the buffered deadline.
+- Hackathon intents now expose deliverables for the regulation compliance matrix, idea viability decision, final idea PDF, MVP software factory plan, pitch package, deadline-buffered improvement loop and Telegram payload.
+- Added CLI contract coverage proving the hackathon factory graph includes the expected executor mix, validation gates, Telegram notification metadata, OSM/OSRM context and recurring improvement schedule.
+
+### Changed
+
+- The package version is now `0.4.81`.
+- Hackathon MVP planning now treats user ideas as regulation-first candidates: off-theme or weakly aligned ideas must be reframed or replaced before the MVP backlog is built.
+
+### Safety
+
+- The hackathon factory increment only changes Forge-owned planning metadata, validation rules and documentation.
+- Telegram delivery is represented as a notification node with a configured chat target and no exposed token or raw chat id.
+- The improvement loop stops at the buffered deadline and prioritizes rubric gaps before extra features.
+
 ## 0.4.80 - 2026-05-24
 
 ### Added

@@ -14,7 +14,7 @@ const CLUSTER_REGISTRY_SCHEMA_VERSION: &str = "forge.cluster_registry.v2";
 const CLUSTER_NODE_SCHEDULING_SCHEMA_VERSION: &str = "forge.cluster_node_scheduling.v1";
 const CLUSTER_PLACEMENT_SCHEMA_VERSION: &str = "forge.cluster_placement.v1";
 const CLUSTER_PLACEMENT_REQUIREMENTS_SCHEMA_VERSION: &str =
-    "forge.cluster_placement_requirements.v1";
+    "forge.cluster_placement_requirements.v2";
 const CLUSTER_TASK_HANDOFF_SCHEMA_VERSION: &str = "forge.cluster_task_handoff.v1";
 const CLUSTER_SYNC_MANIFEST_SCHEMA_VERSION: &str = "forge.cluster_sync_manifest.v1";
 const CLUSTER_NODE_LEASE_SCHEMA_VERSION: &str = "forge.cluster_node_lease.v1";
@@ -128,6 +128,8 @@ pub struct ClusterPlacementRequirements {
     pub task_id: String,
     pub executor: String,
     pub policy_mode: String,
+    pub reasoning_required: bool,
+    pub remote_ai_execution_allowed: bool,
     pub required_capabilities: Vec<String>,
     pub required_sandbox_permissions: Vec<String>,
     pub required_trust: String,
@@ -446,17 +448,19 @@ pub fn place_task_on_cluster(
     } else {
         "placement_blocked"
     };
-    let reason = selected_node
-        .as_ref()
-        .map(|node| {
-            format!(
-                "selected {} by deterministic capability and trust policy",
-                node.node_id
-            )
-        })
-        .unwrap_or_else(|| {
+    let reason = selected_node.as_ref().map(|node| {
+        format!(
+            "selected {} by deterministic capability and trust policy",
+            node.node_id
+        )
+    })
+    .unwrap_or_else(|| {
+        if requirements.reasoning_required && !requirements.remote_ai_execution_allowed {
+            "remote AI execution is blocked until explicit authorization enables cluster cognitive executors".to_string()
+        } else {
             "no registered cluster node satisfies task placement requirements".to_string()
-        });
+        }
+    });
 
     Ok(ClusterPlacementReport {
         schema_version: CLUSTER_PLACEMENT_SCHEMA_VERSION.to_string(),
@@ -764,6 +768,9 @@ fn placement_requirements(workflow_id: &str, task: &AtomicTask) -> ClusterPlacem
         task_id: task.id.clone(),
         executor: executor_kind(&task.executor).to_string(),
         policy_mode: task.execution_policy.mode.clone(),
+        reasoning_required: task.execution_policy.ai_allowed
+            && !task.execution_policy.deterministic,
+        remote_ai_execution_allowed: false,
         required_capabilities,
         required_sandbox_permissions,
         required_trust: "trusted_lan_or_local".to_string(),
@@ -795,6 +802,9 @@ fn evaluate_candidate(
         if !node.sandbox_permissions.contains(sandbox_permission) {
             reasons.push(format!("missing sandbox permission {sandbox_permission}"));
         }
+    }
+    if requirements.reasoning_required && !requirements.remote_ai_execution_allowed {
+        reasons.push("remote AI execution requires explicit authorization".to_string());
     }
 
     let eligible = reasons.is_empty();
