@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.28`
+Current version: `0.4.29`
 
 This is the first functional CLI + Skill version:
 
@@ -52,6 +52,7 @@ This is the first functional CLI + Skill version:
 - async workflow substrate policy with scope guards for Forge-owned resources
 - async request handoff for skill callers: submit a goal, receive `run_id`, continue later with Forge
 - persisted task leases so two executors cannot acquire the same workflow task concurrently
+- executor handoff packets that combine strict context readiness, lease metadata, checksums and validation gates
 - self-evolution runner for bounded Codex/OpenCode cycles until a stop date
 - versioned self-evolution prompt packets with SHA-256 checksums in cycle reports
 - versioned improvement artifacts with strong changelog generation
@@ -114,6 +115,17 @@ forge context --workflow <workflow-id> --task task-001 --budget 1200 --strict --
 
 Strict mode still prints the replayable context package, but exits non-zero if
 `handoff_ready=false`.
+
+Acquire an executor handoff packet when a bounded adapter is ready to work:
+
+```bash
+forge task handoff --workflow <workflow-id> --task task-001 --executor codex --budget 1200 --ttl-seconds 900 --output json
+```
+
+The command reuses the strict context readiness contract, acquires a Forge task
+lease only when `handoff_ready=true`, and returns `forge.executor_handoff.v1`
+with the selected executor, task executor kind, lease id, context SHA-256,
+expected output, execution policy mode and validation gate.
 
 Skill-style async handoff:
 

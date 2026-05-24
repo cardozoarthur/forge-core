@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.29 - 2026-05-24
+
+### Added
+
+- Added `forge task handoff` as an executor adapter contract around strict context readiness and task leases.
+- The command returns `forge.executor_handoff.v1` with the selected executor, task executor kind, lease status/id, context schema, context SHA-256, handoff status, expected output, execution policy mode, validation gate and validation rules.
+- Handoff responses include the full bounded context package so adapters can use one Forge-owned command for lease acquisition plus replayable executor context.
+
+### Changed
+
+- Executor handoff now has a stable CLI envelope instead of requiring adapters to manually combine `forge context --strict` and `forge task acquire`.
+- Forge acquires a task lease only when the context handoff is ready; missing required context or dependency blockers return `handoff_blocked` without claiming the task.
+
+### Safety
+
+- The new handoff command mutates only Forge-owned task lease state after context readiness passes.
+- It does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative, or mutate Docker/Kubernetes/Knative resources.
+- Context readiness and promotion remain controlled by the existing context and validation gates.
+
+### Validation
+
+- Added CLI contract coverage proving `forge task handoff` acquires a lease for a ready task, emits `forge.executor_handoff.v1`, links the packet checksum to the context package, carries the validation gate, reports lease conflicts without overwriting the existing executor lease and does not lease a task when context readiness is blocked.
+
 ## 0.4.28 - 2026-05-24
 
 ### Added

@@ -8,6 +8,7 @@ use forge_core::context::build_context_package_with_checkpoint;
 use forge_core::execution::run_simulated;
 use forge_core::executor::{load_executors, sync_executors, ExecutorSyncOptions};
 use forge_core::graph::create_workflow;
+use forge_core::handoff::build_task_handoff;
 use forge_core::improve::generate_improvement;
 use forge_core::inspection::inspect_workflow;
 use forge_core::intent::parse_intent;
@@ -259,6 +260,20 @@ enum WorkflowCommands {
 
 #[derive(Debug, Subcommand)]
 enum TaskCommands {
+    Handoff {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        executor: String,
+        #[arg(long, default_value_t = 1200)]
+        budget: usize,
+        #[arg(long, default_value_t = 900)]
+        ttl_seconds: u64,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
     Acquire {
         #[arg(long)]
         workflow: String,
@@ -681,6 +696,21 @@ fn run() -> Result<i32> {
             }
         },
         Commands::Task { command } => match command {
+            TaskCommands::Handoff {
+                workflow,
+                task,
+                executor,
+                budget,
+                ttl_seconds,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report =
+                    build_task_handoff(&store, &workflow, &task, &executor, budget, ttl_seconds)?;
+                let exit_code = if report.allowed { 0 } else { 1 };
+                print_response(output, &report)?;
+                Ok(exit_code)
+            }
             TaskCommands::Acquire {
                 workflow,
                 task,

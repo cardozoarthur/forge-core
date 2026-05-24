@@ -3909,6 +3909,208 @@ fn task_lease_prevents_two_executors_from_acquiring_same_task() {
 }
 
 #[test]
+fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executor() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Handoff",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let task_id = json["tasks"][0]["id"].as_str().unwrap();
+
+    let handoff = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
+    assert_eq!(handoff_json["status"], "handoff_ready");
+    assert_eq!(handoff_json["allowed"], true);
+    assert_eq!(handoff_json["workflow_id"], workflow_id);
+    assert_eq!(handoff_json["task_id"], task_id);
+    assert_eq!(handoff_json["selected_executor"], "codex");
+    assert_eq!(handoff_json["task_executor"], "command");
+    assert_eq!(handoff_json["context"]["handoff_ready"], true);
+    assert_eq!(handoff_json["context"]["handoff_status"], "ready");
+
+    let packet = &handoff_json["packet"];
+    assert_eq!(packet["schema_version"], "forge.executor_handoff.v1");
+    assert_eq!(packet["workflow_id"], workflow_id);
+    assert_eq!(packet["task_id"], task_id);
+    assert_eq!(packet["selected_executor"], "codex");
+    assert_eq!(packet["task_executor"], "command");
+    assert_eq!(packet["lease_required"], true);
+    assert_eq!(packet["lease_status"], "lease_acquired");
+    assert_eq!(
+        packet["lease_id"],
+        handoff_json["lease"]["lease_id"].as_str().unwrap()
+    );
+    assert_eq!(packet["context_schema_version"], "forge.context.v13");
+    assert_eq!(
+        packet["context_sha256"],
+        handoff_json["context"]["context_sha256"]
+    );
+    assert_eq!(
+        packet["context_bytes"],
+        handoff_json["context"]["context_bytes"]
+    );
+    assert_eq!(packet["handoff_ready"], true);
+    assert_eq!(packet["handoff_status"], "ready");
+    assert_eq!(packet["expected_output"], "IntentSpec JSON");
+    assert_eq!(packet["validation_gate"], "task_validation_rules");
+    assert!(packet["validation_rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| rule["kind"] == "schema"));
+
+    let conflict = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "opencode",
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let conflict_json: Value = serde_json::from_slice(&conflict).unwrap();
+    assert_eq!(conflict_json["status"], "lease_conflict");
+    assert_eq!(conflict_json["allowed"], false);
+    assert_eq!(conflict_json["packet"]["lease_status"], "lease_conflict");
+    assert_eq!(conflict_json["packet"]["handoff_ready"], true);
+    assert_eq!(conflict_json["current_lease"]["executor"], "codex");
+}
+
+#[test]
+fn task_handoff_does_not_acquire_lease_when_strict_context_is_blocked() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run executor handoff packets with a deliberately tiny context budget",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let task_id = json["tasks"][0]["id"].as_str().unwrap();
+
+    let blocked = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "128",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let blocked_json: Value = serde_json::from_slice(&blocked).unwrap();
+    assert_eq!(blocked_json["status"], "handoff_blocked");
+    assert_eq!(blocked_json["allowed"], false);
+    assert_eq!(blocked_json["lease"], Value::Null);
+    assert_eq!(blocked_json["current_lease"], Value::Null);
+    assert_eq!(blocked_json["packet"]["lease_status"], "not_requested");
+    assert_eq!(blocked_json["packet"]["handoff_ready"], false);
+    assert!(blocked_json["context"]["missing_required_sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|section| section == "context_requirements"));
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "acquire",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "opencode",
+            "--ttl-seconds",
+            "600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("\"executor\": \"opencode\""));
+}
+
+#[test]
 fn self_run_rejects_stop_date_in_the_past() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

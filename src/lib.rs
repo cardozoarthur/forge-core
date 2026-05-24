@@ -4,6 +4,7 @@ pub mod context;
 pub mod execution;
 pub mod executor;
 pub mod graph;
+pub mod handoff;
 pub mod improve;
 pub mod inspection;
 pub mod intent;
