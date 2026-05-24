@@ -467,6 +467,66 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         ),
     ];
 
+    if requires_n8n_research(&intent.goal) {
+        let catalog_id = next_task_id(&tasks);
+        let catalog = task(
+            &catalog_id,
+            "Catalog n8n workflow primitives",
+            &["task-002"],
+            &[
+                "n8n source documentation",
+                "n8n node package inventory",
+                "workflow primitive taxonomy",
+            ],
+            vec![rule(
+                "research_catalog",
+                "catalog covers loop, condition, router, merge, wait, code, execute-subworkflow, trigger, retry, error, transform and human approval patterns",
+                None,
+            )],
+            "n8n node and pattern catalog artifact",
+            (ExecutorKind::Ai, 0.018),
+        );
+        tasks.push(catalog);
+
+        let evaluation_id = next_task_id(&tasks);
+        let catalog_dependency = [catalog_id.as_str()];
+        let evaluation = task(
+            &evaluation_id,
+            "Evaluate Forge primitive candidates",
+            &catalog_dependency,
+            &[
+                "n8n research catalog",
+                "Forge DAG semantics",
+                "context routing requirements",
+                "resumability and observability goals",
+            ],
+            vec![
+                rule(
+                    "promotion_guard",
+                    "only promote concepts that improve validated DAG execution, context routing, resumability, observability or operator clarity",
+                    None,
+                ),
+                rule(
+                    "license_guard",
+                    "external source code and licenses are not copied blindly into Forge",
+                    None,
+                ),
+            ],
+            "Forge primitive promotion recommendation",
+            (ExecutorKind::Ai, 0.012),
+        );
+        tasks.push(evaluation);
+
+        if let Some(graph_task) = tasks.iter_mut().find(|task| task.id == "task-003") {
+            if !graph_task.dependencies.contains(&evaluation_id) {
+                graph_task.dependencies.push(evaluation_id);
+            }
+            graph_task
+                .context_requirements
+                .push("Forge primitive promotion recommendation".to_string());
+        }
+    }
+
     if let (false, Some(policy)) = (
         autonomous_extensions_required,
         reusable_local_code_policy(local_code_policy.as_ref()),
@@ -706,6 +766,14 @@ fn reusable_local_code_policy(
     policy: Option<&ExecutionPolicySpec>,
 ) -> Option<&ExecutionPolicySpec> {
     policy.filter(|policy| policy.reuse_hint == "reuse_compatible_code_node")
+}
+
+fn requires_n8n_research(goal: &str) -> bool {
+    goal.to_lowercase().contains("n8n")
+}
+
+fn next_task_id(tasks: &[AtomicTask]) -> String {
+    format!("task-{:03}", tasks.len() + 1)
 }
 
 fn requires_async_runtime(goal: &str) -> bool {

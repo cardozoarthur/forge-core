@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.75 - 2026-05-24
+
+### Added
+
+- `forge plan` now detects n8n research goals and adds two explicit workflow tasks before graph promotion: `Catalog n8n workflow primitives` and `Evaluate Forge primitive candidates`.
+- n8n research intents now include `n8n primitive research catalog` and `Forge primitive promotion recommendation` deliverables, plus risk/unknown records requiring current source/docs review and avoiding blind code/license copying.
+- The atomic graph build task depends on the Forge primitive recommendation when n8n research is requested, so external automation concepts remain gated before becoming native Forge graph semantics.
+- Added CLI contract coverage proving the n8n catalog task, promotion guard and graph dependency are persisted in the planned workflow.
+- Added `docs/reports/forge-core-v0.4.75-report-2026-05-24.md` with the cycle report and initial source-backed n8n pattern catalog.
+
+### Changed
+
+- The package version is now `0.4.75`.
+- README now documents n8n-aware research planning as a pre-promotion workflow-design stage.
+
+### Safety
+
+- The n8n increment only changes Forge-owned planning metadata and documentation. It does not fetch or copy n8n source into Forge, execute external code, promote any n8n primitive, authorize CLIs, install Knative or mutate Docker/Kubernetes/Knative/user resources.
+- Promotion remains gated by Forge validation rules requiring evidence that a candidate improves validated DAG execution, context routing, resumability, observability or operator clarity.
+
 ## 0.4.74 - 2026-05-24
 
 ### Added

@@ -109,6 +109,85 @@ fn plan_supports_autonomous_mixed_workflow_with_cron_non_ai_step_and_email_cost_
 }
 
 #[test]
+fn plan_for_n8n_research_requires_catalog_before_forge_primitive_promotion() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Research current n8n node packages, workflow primitives, loop, if, switch, merge, wait, code, execute-subworkflow, triggers and human approval patterns before promoting Forge graph semantics",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert!(json["intent"]["deliverables"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("n8n primitive research catalog".to_string())));
+
+    let tasks = json["tasks"].as_array().unwrap();
+    let catalog_task = find_task(tasks, "Catalog n8n workflow primitives");
+    let evaluation_task = find_task(tasks, "Evaluate Forge primitive candidates");
+    let graph_task = find_task(tasks, "Build atomic task graph");
+
+    assert_eq!(catalog_task["executor"], "ai");
+    assert!(catalog_task["dependencies"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("task-002".to_string())));
+    assert_eq!(
+        catalog_task["expected_output"],
+        "n8n node and pattern catalog artifact"
+    );
+    assert!(catalog_task["context_requirements"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("n8n source documentation".to_string())));
+    assert!(catalog_task["validation_rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| rule["kind"] == "research_catalog"
+            && rule["expected"]
+                .as_str()
+                .unwrap()
+                .contains("loop, condition, router, merge, wait, code")));
+
+    assert_eq!(evaluation_task["executor"], "ai");
+    assert!(evaluation_task["dependencies"]
+        .as_array()
+        .unwrap()
+        .contains(&catalog_task["id"]));
+    assert_eq!(
+        evaluation_task["expected_output"],
+        "Forge primitive promotion recommendation"
+    );
+    assert!(evaluation_task["validation_rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| rule["kind"] == "promotion_guard"
+            && rule["expected"]
+                .as_str()
+                .unwrap()
+                .contains("validated DAG execution")));
+    assert!(graph_task["dependencies"]
+        .as_array()
+        .unwrap()
+        .contains(&evaluation_task["id"]));
+}
+
+#[test]
 fn validation_blocks_promotion_until_required_gates_pass() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

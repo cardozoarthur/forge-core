@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.74`
+Current version: `0.4.75`
 
 This is the first functional CLI + Skill version:
 
@@ -55,6 +55,7 @@ This is the first functional CLI + Skill version:
 - executor sync that detects installed/configured CLIs and persists human authorization policy
 - runtime sync that detects Docker/Kubernetes/Knative and persists human authorization policy
 - local cluster node registry with capability/trust metadata and dry-run placement decisions
+- n8n-aware research planning that catalogs workflow primitives and evaluates Forge primitive candidates before graph promotion
 - goal-oriented tasks with subtasks, impediments, acceptance criteria and rework readiness checks
 - runtime workflow mutation for goals and artifacts with origin trace from `codex`, `opencode`, `forge_cli` or skills
 - async workflow substrate policy with scope guards for Forge-owned resources
@@ -315,6 +316,14 @@ Example autonomous mixed objective:
 ```bash
 forge plan --goal "Execute research now, continue every Friday at 09:00, calculate costs without AI, and email the final workflow cost to finance@example.com" --output json
 ```
+
+When a goal mentions n8n research, `forge plan` adds a research catalog task and
+a separate Forge primitive evaluation task. The atomic graph build depends on
+that recommendation, so concepts such as loop-over-items, IF/Switch routing,
+Merge, Wait, Code, Execute Sub-workflow, triggers, retries, errors, transforms
+and human approval patterns stay outside native Forge semantics until they
+improve validated DAG execution, context routing, resumability, observability or
+operator clarity.
 
 ## Skill Install
 

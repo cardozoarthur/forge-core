@@ -27,6 +27,27 @@ pub fn parse_intent(goal: &str) -> IntentSpec {
     if lower.contains("runtime") || lower.contains("workflow") {
         deliverables.push("persistent runtime state".to_string());
     }
+    if lower.contains("n8n") {
+        deliverables.push("n8n primitive research catalog".to_string());
+        deliverables.push("Forge primitive promotion recommendation".to_string());
+    }
+
+    let mut risks = vec![
+        "ambiguous objective can create non-atomic tasks".to_string(),
+        "invalid outputs must not be promoted".to_string(),
+    ];
+    let mut unknowns = vec![
+        "provider adapter is selected at execution time".to_string(),
+        "human approval rules may vary by workflow".to_string(),
+    ];
+
+    if lower.contains("n8n") {
+        risks.push("external workflow concepts must not be copied blindly or promoted without Forge validation value".to_string());
+        unknowns.push(
+            "current n8n source and documentation must be checked during research execution"
+                .to_string(),
+        );
+    }
 
     IntentSpec {
         goal: normalized.to_string(),
@@ -36,13 +57,7 @@ pub fn parse_intent(goal: &str) -> IntentSpec {
             "persistent operational state".to_string(),
         ],
         deliverables,
-        risks: vec![
-            "ambiguous objective can create non-atomic tasks".to_string(),
-            "invalid outputs must not be promoted".to_string(),
-        ],
-        unknowns: vec![
-            "provider adapter is selected at execution time".to_string(),
-            "human approval rules may vary by workflow".to_string(),
-        ],
+        risks,
+        unknowns,
     }
 }
