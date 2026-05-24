@@ -8,10 +8,11 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v19";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v20";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
 const ROUTING_CONTRACT_SCHEMA_VERSION: &str = "forge.context.routing_contract.v1";
 const ROUTING_REPAIR_SCHEMA_VERSION: &str = "forge.context.routing_repair.v1";
+const PERSONA_CONTRACT_SCHEMA_VERSION: &str = "forge.context.persona_contract.v1";
 const CONTEXT_SELECTOR_VERSION: &str = "forge.context.selector.v1";
 const EXECUTOR_PROFILE_SCHEMA_VERSION: &str = "forge.context.executor_profile.v1";
 const CONTEXT_NEXT_ACTION_SCHEMA_VERSION: &str = "forge.inspect_context_action.v1";
@@ -19,7 +20,7 @@ const CONTEXT_ROUTING_QUALITY_SCHEMA_VERSION: &str = "forge.context_routing_qual
 const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
     "forge.context_routing_quality_summary.v1";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_v19";
+    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20";
 const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
@@ -90,6 +91,7 @@ pub struct ContextPackage {
     pub artifact_count: usize,
     pub lineage: ContextLineage,
     pub persona: Option<PersonaRoutingSpec>,
+    pub persona_contract: Option<ContextPersonaContract>,
     pub executor_profile: ContextExecutorProfile,
     pub execution_policy: ExecutionPolicySpec,
     pub dependency_summary: ContextDependencySummary,
@@ -182,6 +184,22 @@ pub struct ContextLineage {
     pub persona_scope: String,
     pub revision_sources: Vec<String>,
     pub lineage_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextPersonaContract {
+    pub schema_version: String,
+    pub mode: String,
+    pub scope: String,
+    pub persona_scope: String,
+    pub instruction_source: String,
+    pub voice: String,
+    pub tone: String,
+    pub validation_gate: String,
+    pub source_models: Vec<String>,
+    pub auditable: bool,
+    pub lineage_sha256: String,
+    pub persona_mode_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -418,6 +436,7 @@ struct RoutingFingerprintInput<'a> {
     routing_contract: &'a ContextRoutingContract,
     routing_repair: &'a ContextRoutingRepair,
     routing_quality: &'a ContextRoutingQuality,
+    persona_contract: Option<&'a ContextPersonaContract>,
     context_sha256: &'a str,
 }
 
@@ -548,6 +567,9 @@ pub fn build_context_package_with_checkpoint(
         resume_context_status(latest_checkpoint.as_ref(), workflow_revision);
     let dependency_refs = build_dependency_refs(workflow, task);
     let dependency_summary = summarize_dependency_refs(&dependency_refs);
+    let persona_contract = persona
+        .as_ref()
+        .map(|persona| build_persona_contract(persona, &lineage));
 
     let mut candidates = vec![
         ContextShardCandidate {
@@ -823,6 +845,7 @@ pub fn build_context_package_with_checkpoint(
         routing_contract: &routing_contract,
         routing_repair: &routing_repair,
         routing_quality: &routing_quality,
+        persona_contract: persona_contract.as_ref(),
         context_sha256: &context_sha256,
     })?;
 
@@ -835,6 +858,7 @@ pub fn build_context_package_with_checkpoint(
         artifact_count: workflow.artifacts.len(),
         lineage,
         persona,
+        persona_contract,
         executor_profile: profile.to_public(&task.executor, &required_sections),
         execution_policy: task.execution_policy.clone(),
         dependency_summary,
@@ -1375,6 +1399,7 @@ fn build_routing_fingerprint(
     let routing_contract = serde_json::to_string(input.routing_contract)?;
     let routing_repair = serde_json::to_string(input.routing_repair)?;
     let routing_quality = serde_json::to_string(input.routing_quality)?;
+    let persona_contract = serde_json::to_string(&input.persona_contract)?;
     let source_shards = input
         .shards
         .iter()
@@ -1432,6 +1457,7 @@ fn build_routing_fingerprint(
         fingerprint_component("routing_contract", routing_contract),
         fingerprint_component("routing_repair", routing_repair),
         fingerprint_component("routing_quality", routing_quality),
+        fingerprint_component("persona_contract", persona_contract),
         fingerprint_component("context_payload", input.context_sha256.to_string()),
     ];
     let seed = ContextRoutingFingerprintSeed {
@@ -1604,6 +1630,26 @@ fn build_lineage(
         revision_sources: seed.revision_sources,
         lineage_sha256,
     })
+}
+
+fn build_persona_contract(
+    persona: &PersonaRoutingSpec,
+    lineage: &ContextLineage,
+) -> ContextPersonaContract {
+    ContextPersonaContract {
+        schema_version: PERSONA_CONTRACT_SCHEMA_VERSION.to_string(),
+        mode: persona.mode.clone(),
+        scope: persona.scope.clone(),
+        persona_scope: lineage.persona_scope.clone(),
+        instruction_source: persona.instruction_source.clone(),
+        voice: persona.voice.clone(),
+        tone: persona.tone.clone(),
+        validation_gate: persona.validation_gate.clone(),
+        source_models: persona.source_models.clone(),
+        auditable: persona.auditable,
+        lineage_sha256: lineage.lineage_sha256.clone(),
+        persona_mode_sha256: lineage.persona_mode_sha256.clone(),
+    }
 }
 
 fn render_persona_context(persona: &PersonaRoutingSpec) -> String {

@@ -190,10 +190,10 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v19` and routing policy
-`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_v19`. Each packet
+Current `forge context` packets use schema `forge.context.v20` and routing policy
+`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20`. Each packet
 includes the executor-facing content, the full context checksum, workflow revision,
-artifact count, node-scoped persona routing metadata for human-facing tasks, executor
+artifact count, node-scoped persona routing metadata and a versioned persona contract for human-facing tasks, executor
 profile metadata, a versioned routing contract, execution policy metadata, dependency
 readiness summaries, proposed child-subflow bindings, requested and effective budgets,
 lineage hashes, included and omitted sections, profile-driven omissions, and a deterministic shard manifest with
@@ -208,7 +208,9 @@ profile id, selection strategy, requested and effective budget, minimum budget,
 allowed/required/optional section set and profile hash. The repair contract turns
 missing required sections into a deterministic action and recommended budget so
 operators can retry with the smallest known budget increase instead of guessing. The
-quality contract scores each packet and emits explicit warnings for missing required
+persona contract binds the node's mode, scope, voice, tone, instruction source,
+source models, validation gate and audit flag to the context lineage hash and
+persona-mode hash before executor handoff. The quality contract scores each packet and emits explicit warnings for missing required
 context, budget pressure, compressed summaries and profile-filtered optional context,
 so adapters and operators can audit routing risk without reconstructing shard
 decisions. Handoff policy can still block incomplete context or pending dependencies

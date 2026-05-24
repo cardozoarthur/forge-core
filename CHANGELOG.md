@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.49 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v20` with a versioned `persona_contract` for human-facing nodes.
+- The context persona contract uses schema `forge.context.persona_contract.v1` and binds mode, node scope, instruction source, voice, tone, validation gate, source models, auditability, context lineage hash and persona-mode hash.
+- Context routing fingerprints now include a `persona_contract` component, so executor cache keys account for Personality/Soul Routing changes before handoff.
+- Added CLI contract coverage proving a human-facing documentation node exposes the persona contract directly in the context package.
+
+### Changed
+
+- The context routing policy is now `task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20`.
+- Human-facing persona routing is now auditable at context-build time instead of only after `forge task handoff` constructs an executor packet.
+- The package version is now `0.4.49`.
+
+### Safety
+
+- The persona contract is read-only metadata derived from Forge-owned workflow/task state and existing context lineage.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Persona promotion remains validation-gated by `persona_routing_required`, and executor handoff remains controlled by strict context readiness, dependency readiness, validation rules and task leases.
+
 ## 0.4.48 - 2026-05-24
 
 ### Added
