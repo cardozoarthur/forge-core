@@ -317,10 +317,10 @@ fn context_controller_returns_versioned_shard_manifest() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v7");
+    assert_eq!(context["schema_version"], "forge.context.v8");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_v7"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8"
     );
     assert_eq!(context["workflow_id"], workflow_id);
     assert_eq!(context["task_id"], task_id);
@@ -399,10 +399,10 @@ fn context_controller_compresses_oversized_shards_before_omitting() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v7");
+    assert_eq!(context["schema_version"], "forge.context.v8");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_v7"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8"
     );
     assert_eq!(context["executor_profile"]["id"], "ai_reasoning");
     assert!(context["context_bytes"].as_u64().unwrap() <= 420);
@@ -435,6 +435,93 @@ fn context_controller_compresses_oversized_shards_before_omitting() {
         .as_str()
         .unwrap()
         .contains("[compressed workflow_goal]"));
+}
+
+#[test]
+fn context_shards_explain_selection_decisions_for_budget_and_profile_routing() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with repeated local Python cost calculations without AI and email ops@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let deterministic_task = find_task(
+        json["tasks"].as_array().unwrap(),
+        "Run deterministic non-AI step",
+    );
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            deterministic_task["id"].as_str().unwrap(),
+            "--budget",
+            "1600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+    assert_eq!(context["schema_version"], "forge.context.v8");
+    assert_eq!(
+        context["routing_policy"],
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8"
+    );
+
+    let shards = context["shards"].as_array().unwrap();
+    assert!(shards.iter().any(|shard| {
+        shard["section"] == "execution_policy"
+            && shard["included"] == true
+            && shard["routing_decision"] == "included_full"
+            && shard["decision_reason"]
+                .as_str()
+                .unwrap()
+                .contains("fits within remaining effective budget")
+    }));
+    assert!(shards.iter().any(|shard| {
+        shard["section"] == "work_item"
+            && shard["profile_excluded"] == true
+            && shard["included"] == false
+            && shard["routing_decision"] == "omitted_profile"
+            && shard["decision_reason"]
+                .as_str()
+                .unwrap()
+                .contains("executor profile")
+    }));
+    assert!(shards.iter().any(|shard| {
+        shard["included"] == false
+            && shard["profile_excluded"] == false
+            && shard["routing_decision"] == "omitted_budget"
+            && shard["bytes"] == 0
+    }));
+    assert!(shards
+        .iter()
+        .all(|shard| shard["routing_decision"].is_string()));
+    assert!(shards
+        .iter()
+        .all(|shard| shard["decision_reason"].is_string()));
 }
 
 #[test]
@@ -486,10 +573,10 @@ fn context_package_applies_no_ai_profile_to_deterministic_executor_nodes() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v7");
+    assert_eq!(context["schema_version"], "forge.context.v8");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_v7"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8"
     );
     assert_eq!(context["requested_budget"], 1600);
     assert!(context["effective_budget"].as_u64().unwrap() < 1600);
@@ -586,10 +673,10 @@ fn deterministic_code_nodes_carry_no_ai_execution_policy_in_context() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v7");
+    assert_eq!(context["schema_version"], "forge.context.v8");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_v7"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8"
     );
     assert_eq!(context["execution_policy"]["mode"], "local_code_node");
     assert_eq!(
@@ -701,10 +788,10 @@ fn context_package_tracks_runtime_mutation_lineage_and_current_goal() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v7");
+    assert_eq!(context["schema_version"], "forge.context.v8");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_v7"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8"
     );
     assert_eq!(context["workflow_revision"], 2);
     assert_eq!(context["artifact_count"], 1);
@@ -826,10 +913,10 @@ fn context_package_includes_persona_routing_lineage_for_human_facing_task() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v7");
+    assert_eq!(context["schema_version"], "forge.context.v8");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_v7"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8"
     );
     assert_eq!(context["persona"]["mode"], "operator_report");
     assert_eq!(context["persona"]["scope"], "node");
@@ -2826,10 +2913,10 @@ fn context_package_carries_proposed_child_subflow_routing_for_reused_nodes() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v7");
+    assert_eq!(context["schema_version"], "forge.context.v8");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_v7"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8"
     );
     assert_eq!(context["child_subflow_count"], 1);
     assert_eq!(

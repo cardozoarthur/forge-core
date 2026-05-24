@@ -5,9 +5,9 @@ use crate::graph::{
 use anyhow::{bail, Result};
 use serde::Serialize;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v7";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v8";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_v7";
+    "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8";
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
 const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
 const ALL_CONTEXT_SECTIONS: &[&str] = &[
@@ -88,6 +88,8 @@ pub struct ContextShard {
     pub included: bool,
     pub compressed: bool,
     pub profile_excluded: bool,
+    pub routing_decision: String,
+    pub decision_reason: String,
     pub bytes: usize,
     pub original_bytes: usize,
     pub content_sha256: String,
@@ -297,6 +299,11 @@ pub fn build_context_package(
                 included: false,
                 compressed: false,
                 profile_excluded: true,
+                routing_decision: "omitted_profile".to_string(),
+                decision_reason: format!(
+                    "section is not allowed by executor profile {}",
+                    profile.id
+                ),
                 bytes: 0,
                 original_bytes,
                 content_sha256: hex_sha256(b""),
@@ -306,15 +313,33 @@ pub fn build_context_package(
         }
 
         let compressed_content = compress_shard(&candidate, &summary);
-        let (included, compressed, selected_content) =
+        let (included, compressed, selected_content, routing_decision, decision_reason) =
             if content.len() + candidate.content.len() <= effective_budget {
-                (true, false, candidate.content.clone())
+                (
+                    true,
+                    false,
+                    candidate.content.clone(),
+                    "included_full",
+                    "full shard fits within remaining effective budget",
+                )
             } else if compressed_content.len() < original_bytes
                 && content.len() + compressed_content.len() <= effective_budget
             {
-                (true, true, compressed_content)
+                (
+                    true,
+                    true,
+                    compressed_content,
+                    "included_compressed",
+                    "compressed shard fits within remaining effective budget",
+                )
             } else {
-                (false, false, candidate.content.clone())
+                (
+                    false,
+                    false,
+                    String::new(),
+                    "omitted_budget",
+                    "full and compressed shard exceed remaining effective budget",
+                )
             };
 
         if included {
@@ -331,6 +356,8 @@ pub fn build_context_package(
             included,
             compressed,
             profile_excluded: false,
+            routing_decision: routing_decision.to_string(),
+            decision_reason: decision_reason.to_string(),
             bytes: selected_content.len(),
             original_bytes,
             content_sha256: hex_sha256(selected_content.as_bytes()),

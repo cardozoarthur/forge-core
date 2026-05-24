@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.21 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v8` with routing policy `task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8`.
+- Context shard manifests now expose `routing_decision` and `decision_reason` for every emitted shard.
+- Routing decisions distinguish `included_full`, `included_compressed`, `omitted_profile` and `omitted_budget`, making context selection auditable without replaying the routing algorithm manually.
+
+### Changed
+
+- Budget-omitted shards now report `bytes = 0` and hash the empty selected payload, reflecting that no shard content was sent to the executor.
+- Context contract tests now target schema `forge.context.v8`.
+
+### Safety
+
+- Routing decisions are read-only metadata in the context packet. They do not authorize CLIs, run local code, mutate Docker/Kubernetes/Knative resources, or promote subflows.
+- Profile omissions remain deterministic and executor-policy scoped.
+
+### Validation
+
+- Added CLI contract coverage proving deterministic no-AI context shards explain full inclusion, profile exclusion and budget omission decisions.
+
 ## 0.4.20 - 2026-05-23
 
 ### Added
