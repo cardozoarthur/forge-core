@@ -4845,7 +4845,7 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
     assert_eq!(handoff_json["context"]["handoff_status"], "ready");
 
     let packet = &handoff_json["packet"];
-    assert_eq!(packet["schema_version"], "forge.executor_handoff.v4");
+    assert_eq!(packet["schema_version"], "forge.executor_handoff.v5");
     assert_eq!(packet["workflow_id"], workflow_id);
     assert_eq!(packet["task_id"], task_id);
     assert_eq!(packet["selected_executor"], "codex");
@@ -4921,6 +4921,90 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
     assert_eq!(conflict_json["packet"]["lease_status"], "lease_conflict");
     assert_eq!(conflict_json["packet"]["handoff_ready"], true);
     assert_eq!(conflict_json["current_lease"]["executor"], "codex");
+}
+
+#[test]
+fn task_handoff_packet_carries_full_execution_policy_for_deterministic_code_nodes() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with repeated local Python cost calculations without AI and email ops@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let code_task = find_task(
+        json["tasks"].as_array().unwrap(),
+        "Run deterministic non-AI step",
+    );
+    let task_id = code_task["id"].as_str().unwrap();
+
+    let handoff = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "local-python",
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
+    let packet = &handoff_json["packet"];
+
+    assert_eq!(packet["schema_version"], "forge.executor_handoff.v5");
+    assert_eq!(packet["task_executor"], "command");
+    assert_eq!(packet["execution_policy_mode"], "local_code_node");
+    assert_eq!(packet["execution_policy"]["mode"], "local_code_node");
+    assert_eq!(packet["execution_policy"]["ai_allowed"], false);
+    assert_eq!(packet["execution_policy"]["deterministic"], true);
+    assert_eq!(
+        packet["execution_policy"]["reuse_hint"],
+        "reuse_compatible_code_node"
+    );
+    assert_eq!(
+        packet["execution_policy"]["validation_gate"],
+        "deterministic_code_node_validation_required"
+    );
+    assert_eq!(
+        packet["execution_policy"]["code_runtime"]["language"],
+        "python"
+    );
+    assert_eq!(
+        packet["execution_policy"]["code_runtime"]["entrypoint"],
+        "forge_local_python_code_node"
+    );
+    assert_eq!(
+        packet["execution_policy"]["code_runtime"]["sandbox"],
+        "local_process_no_network"
+    );
+    assert_eq!(packet["lease_status"], "not_requested");
+    assert_eq!(packet["handoff_ready"], false);
 }
 
 #[test]
@@ -5064,7 +5148,7 @@ fn task_handoff_packet_exposes_resume_plan_from_checkpoint_route_key() {
     let resumed_packet = &resumed_handoff_json["packet"];
     assert_eq!(
         resumed_packet["schema_version"],
-        "forge.executor_handoff.v4"
+        "forge.executor_handoff.v5"
     );
     assert_eq!(
         resumed_packet["resume_context_status"],
@@ -5165,7 +5249,7 @@ fn task_handoff_packet_carries_node_scoped_persona_contract() {
     let packet = &handoff_json["packet"];
     let contract = &packet["persona_contract"];
 
-    assert_eq!(packet["schema_version"], "forge.executor_handoff.v4");
+    assert_eq!(packet["schema_version"], "forge.executor_handoff.v5");
     assert_eq!(packet["persona_mode"], "operator_report");
     assert_eq!(contract["schema_version"], "forge.persona_handoff.v1");
     assert_eq!(contract["mode"], "operator_report");

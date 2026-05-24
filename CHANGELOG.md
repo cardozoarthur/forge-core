@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.41 - 2026-05-24
+
+### Added
+
+- `forge task handoff` now emits `forge.executor_handoff.v5`.
+- Executor handoff packets now include the full `execution_policy` contract alongside the existing `execution_policy_mode` compatibility field.
+- Deterministic local code nodes expose `ai_allowed`, `deterministic`, `reuse_hint`, `selection_reason`, `validation_gate` and `code_runtime` directly in the adapter envelope.
+- Added CLI contract coverage proving a local Python no-AI code node receives its bounded execution policy without requiring adapters to parse the nested context package.
+
+### Changed
+
+- Bounded executor adapters can now decide whether to run a no-AI deterministic node, and which local runtime to use, from the top-level handoff packet.
+- The existing strict context, dependency readiness, lease and persona contracts remain unchanged; v5 extends the packet without authorizing execution by itself.
+
+### Safety
+
+- The full execution policy is read-only metadata derived from Forge-owned workflow/task state.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Execution remains gated by strict context readiness, dependency readiness, validation rules and task leases.
+
 ## 0.4.40 - 2026-05-24
 
 ### Added

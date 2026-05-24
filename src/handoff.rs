@@ -2,14 +2,14 @@ use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{
     build_context_package_with_checkpoint, ContextHandoffBlocker, ContextPackage,
 };
-use crate::graph::{ExecutorKind, PersonaRoutingSpec, ValidationRule};
+use crate::graph::{ExecutionPolicySpec, ExecutorKind, PersonaRoutingSpec, ValidationRule};
 use crate::lease::{acquire_task_lease, TaskLease};
 use crate::storage::ForgeStore;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-const EXECUTOR_HANDOFF_SCHEMA_VERSION: &str = "forge.executor_handoff.v4";
+const EXECUTOR_HANDOFF_SCHEMA_VERSION: &str = "forge.executor_handoff.v5";
 const PERSONA_HANDOFF_SCHEMA_VERSION: &str = "forge.persona_handoff.v1";
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,6 +53,7 @@ pub struct ExecutorHandoffPacket {
     pub validation_gate: String,
     pub validation_rules: Vec<ValidationRule>,
     pub execution_policy_mode: String,
+    pub execution_policy: ExecutionPolicySpec,
     pub persona_mode: Option<String>,
     pub persona_contract: Option<ExecutorHandoffPersonaContract>,
     pub resume_context_status: String,
@@ -96,7 +97,7 @@ struct PacketParts<'a> {
     expected_output: String,
     validation_gate: String,
     validation_rules: Vec<ValidationRule>,
-    execution_policy_mode: String,
+    execution_policy: ExecutionPolicySpec,
     persona: Option<PersonaRoutingSpec>,
 }
 
@@ -134,7 +135,7 @@ pub fn build_task_handoff(
             expected_output: task.expected_output.clone(),
             validation_gate: task.execution_policy.validation_gate.clone(),
             validation_rules: task.validation_rules.clone(),
-            execution_policy_mode: task.execution_policy.mode.clone(),
+            execution_policy: task.execution_policy.clone(),
             persona: task.persona.clone(),
         });
         return Ok(TaskHandoffReport {
@@ -164,7 +165,7 @@ pub fn build_task_handoff(
         expected_output: task.expected_output.clone(),
         validation_gate: task.execution_policy.validation_gate.clone(),
         validation_rules: task.validation_rules.clone(),
-        execution_policy_mode: task.execution_policy.mode.clone(),
+        execution_policy: task.execution_policy.clone(),
         persona: task.persona.clone(),
     });
     let allowed = lease_report.allowed;
@@ -227,7 +228,8 @@ impl ExecutorHandoffPacket {
             expected_output: parts.expected_output,
             validation_gate: parts.validation_gate,
             validation_rules: parts.validation_rules,
-            execution_policy_mode: parts.execution_policy_mode,
+            execution_policy_mode: parts.execution_policy.mode.clone(),
+            execution_policy: parts.execution_policy,
             persona_mode,
             persona_contract,
             resume_context_status: parts.context.resume_context_status.clone(),
