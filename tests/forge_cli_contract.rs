@@ -9113,6 +9113,48 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     assert_eq!(validation["validation_summary"]["failing"], 0);
     assert_eq!(validation["violations"], serde_json::json!([]));
     assert_eq!(validation["response_sha256"].as_str().unwrap().len(), 64);
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "status",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status_json["tasks"][0]["status"], "completed");
+    assert_eq!(
+        status_json["tasks"][0]["work_item"]["backlog_state"],
+        "done"
+    );
+    assert_eq!(
+        status_json["tasks"][0]["work_item"]["goal_validation"]["definitively_ready"],
+        true
+    );
+    assert!(status_json["tasks"][0]["work_item"]["subtasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|subtask| subtask["status"] == "completed"));
+    assert_eq!(status_json["revisions"].as_array().unwrap().len(), 1);
+    assert_eq!(status_json["revisions"][0]["origin"], "executor_response");
+    assert_eq!(
+        status_json["revisions"][0]["change_type"],
+        "executor_response_promoted"
+    );
+    assert!(status_json["revisions"][0]["summary"]
+        .as_str()
+        .unwrap()
+        .contains(task_id));
 }
 
 #[test]
