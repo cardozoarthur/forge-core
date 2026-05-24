@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.30 - 2026-05-24
+
+### Added
+
+- `forge list --output json` now includes a compact `context_handoff` projection on each workflow row and on the global registry summary.
+- The registry projection uses schema `forge.registry_context_handoff.v1` and reports total tasks, ready tasks, blocked tasks, missing-context blockers, dependency blockers and combined blockers.
+- Added CLI contract coverage proving registry-level handoff counts are derived from the Context Routing Engine instead of loose task-status heuristics.
+
+### Changed
+
+- `forge context` now emits schema `forge.context.v14` with routing policy `task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_v14`.
+- Context shard selection now ranks required sections before optional sections inside each executor profile. This prevents optional workflow context from consuming a deterministic executor's bounded budget while required task-local sections are omitted.
+- `forge task handoff`, `forge inspect` and `forge request status` inherit the v14 context readiness contract.
+
+### Safety
+
+- The registry handoff projection is read-only and reuses Forge-owned workflow graph, checkpoint and deterministic context routing state.
+- The routing-order change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Promotion remains controlled by `forge validate`, and executor ownership remains controlled by `forge task handoff` and task leases.
+
 ## 0.4.29 - 2026-05-24
 
 ### Added

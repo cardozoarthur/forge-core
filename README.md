@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.29`
+Current version: `0.4.30`
 
 This is the first functional CLI + Skill version:
 
@@ -82,8 +82,8 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v13`) with a deterministic
-`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_v13` routing policy.
+`forge context` emits a versioned context packet (`forge.context.v14`) with a deterministic
+`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_v14` routing policy.
 The packet keeps the legacy `content` body for executors, and also returns workflow
 revision, artifact count, persona routing metadata for human-facing nodes, executor
 profile metadata, execution policy metadata, dependency readiness summaries, proposed
@@ -137,6 +137,7 @@ forge request status --run <run-id> --output json
 Codex/OpenCode should prefer this pattern when using Forge as a skill: make a short request, receive a `run_id`, and let Forge own the asynchronous workflow state.
 `forge request status` resolves the run id back to the current Forge workflow state, including the current goal, original requested goal, latest revision, artifact count, task status summary and context handoff summary for every task.
 `forge list` exposes the workflow registry across planned and async workflows, including stable workflow ids, associated run ids, initial request, current goal, lifecycle state, task summary and deterministic code-node subflows that can be reused by compatible future workflows. Completed finite workflows are projected as `scaled_to_zero` when there is no remaining task work.
+The registry also includes a compact `context_handoff` projection for every workflow and for the global summary, so operators can see ready tasks, missing-context blockers and dependency blockers without inspecting each task individually.
 `forge plan` reports `reuse_candidates` when the registry already contains a compatible reusable deterministic subflow, and persists the best attachable candidate per requested task as a proposed child subflow before duplicating local Python/Node.js work.
 `forge inspect <workflow-id>` renders the current DAG as terminal text and also exposes the same graph as structured JSON when `--output json` is used. `--verbose` includes task goals, expected outputs, validation rules, subtasks and proposed child-subflow links. Persona-aware nodes are annotated with their node-scoped persona mode, and every node carries the context handoff status derived from the same readiness contract used by `forge context --strict`.
 `forge validate` blocks promotion when a task declares persona routing that is not node-scoped, auditable, source-model backed and gated by `persona_routing_required`.

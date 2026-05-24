@@ -1,4 +1,8 @@
 use crate::artifact::hex_sha256;
+use crate::checkpoint::load_workflow_checkpoints;
+use crate::context::{
+    build_context_handoff_summary, ContextHandoffSummary, DEFAULT_CONTEXT_BUDGET,
+};
 use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, TaskStatus, Workflow,
 };
@@ -8,6 +12,8 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+
+const REGISTRY_CONTEXT_HANDOFF_SCHEMA_VERSION: &str = "forge.registry_context_handoff.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowRegistryReport {
@@ -22,6 +28,7 @@ pub struct WorkflowRegistrySummary {
     pub running: usize,
     pub non_running: usize,
     pub reusable_subflows: usize,
+    pub context_handoff: RegistryContextHandoffSummary,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -37,6 +44,7 @@ pub struct WorkflowRegistryRow {
     pub workflow_revision: u64,
     pub artifact_count: usize,
     pub task_summary: RegistryTaskStatusSummary,
+    pub context_handoff: RegistryContextHandoffSummary,
     pub reusable_subflows: Vec<ReusableSubflowRef>,
     pub created_at: DateTime<Utc>,
 }
@@ -49,6 +57,18 @@ pub struct RegistryTaskStatusSummary {
     pub completed: usize,
     pub blocked: usize,
     pub failed: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RegistryContextHandoffSummary {
+    pub schema_version: String,
+    pub workflows: usize,
+    pub total_tasks: usize,
+    pub ready_tasks: usize,
+    pub blocked_tasks: usize,
+    pub blocked_missing_context: usize,
+    pub blocked_dependencies: usize,
+    pub blocked_missing_context_and_dependencies: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,16 +113,26 @@ pub fn list_workflows(store: &ForgeStore) -> Result<WorkflowRegistryReport> {
             .get(&workflow.id)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        rows.push(registry_row(&workflow, runs));
+        let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
+        let handoff_summary =
+            build_context_handoff_summary(&workflow, DEFAULT_CONTEXT_BUDGET, &checkpoints)?;
+        rows.push(registry_row(&workflow, runs, &handoff_summary));
     }
 
     let running = rows.iter().filter(|row| row.running).count();
     let reusable_subflows = rows.iter().map(|row| row.reusable_subflows.len()).sum();
+    let context_handoff =
+        rows.iter()
+            .fold(RegistryContextHandoffSummary::empty(), |mut total, row| {
+                total.add(&row.context_handoff);
+                total
+            });
     let summary = WorkflowRegistrySummary {
         total: rows.len(),
         running,
         non_running: rows.len().saturating_sub(running),
         reusable_subflows,
+        context_handoff,
     };
 
     Ok(WorkflowRegistryReport {
@@ -228,7 +258,11 @@ pub fn attach_reuse_candidates_as_child_subflows(
     attached
 }
 
-fn registry_row(workflow: &Workflow, runs: &[RunRecord]) -> WorkflowRegistryRow {
+fn registry_row(
+    workflow: &Workflow,
+    runs: &[RunRecord],
+    handoff_summary: &ContextHandoffSummary,
+) -> WorkflowRegistryRow {
     let task_summary = summarize_tasks(workflow);
     let lifecycle_state = derive_lifecycle_state(workflow, &task_summary);
     let running = lifecycle_state == "running";
@@ -251,8 +285,49 @@ fn registry_row(workflow: &Workflow, runs: &[RunRecord]) -> WorkflowRegistryRow 
         workflow_revision,
         artifact_count: workflow.artifacts.len(),
         task_summary,
+        context_handoff: RegistryContextHandoffSummary::from_handoff_summary(handoff_summary),
         reusable_subflows,
         created_at: workflow.created_at,
+    }
+}
+
+impl RegistryContextHandoffSummary {
+    fn empty() -> Self {
+        Self {
+            schema_version: REGISTRY_CONTEXT_HANDOFF_SCHEMA_VERSION.to_string(),
+            workflows: 0,
+            total_tasks: 0,
+            ready_tasks: 0,
+            blocked_tasks: 0,
+            blocked_missing_context: 0,
+            blocked_dependencies: 0,
+            blocked_missing_context_and_dependencies: 0,
+        }
+    }
+
+    fn from_handoff_summary(summary: &ContextHandoffSummary) -> Self {
+        Self {
+            schema_version: REGISTRY_CONTEXT_HANDOFF_SCHEMA_VERSION.to_string(),
+            workflows: 1,
+            total_tasks: summary.total,
+            ready_tasks: summary.ready,
+            blocked_tasks: summary.blocked,
+            blocked_missing_context: summary.blocked_missing_context,
+            blocked_dependencies: summary.blocked_dependencies,
+            blocked_missing_context_and_dependencies: summary
+                .blocked_missing_context_and_dependencies,
+        }
+    }
+
+    fn add(&mut self, other: &Self) {
+        self.workflows += other.workflows;
+        self.total_tasks += other.total_tasks;
+        self.ready_tasks += other.ready_tasks;
+        self.blocked_tasks += other.blocked_tasks;
+        self.blocked_missing_context += other.blocked_missing_context;
+        self.blocked_dependencies += other.blocked_dependencies;
+        self.blocked_missing_context_and_dependencies +=
+            other.blocked_missing_context_and_dependencies;
     }
 }
 

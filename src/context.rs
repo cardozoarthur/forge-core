@@ -8,9 +8,9 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v13";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v14";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_v13";
+    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_v14";
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
 const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
@@ -484,9 +484,11 @@ pub fn build_context_package_with_checkpoint(
     let mut shards = Vec::new();
 
     candidates.sort_by(|left, right| {
-        right
-            .priority
-            .cmp(&left.priority)
+        let left_required = profile.required_sections.contains(&left.section);
+        let right_required = profile.required_sections.contains(&right.section);
+        right_required
+            .cmp(&left_required)
+            .then_with(|| right.priority.cmp(&left.priority))
             .then_with(|| left.section.cmp(right.section))
     });
 
