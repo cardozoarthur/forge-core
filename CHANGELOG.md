@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.80 - 2026-05-24
+
+### Added
+
+- `forge cluster list --output json` now returns `forge.cluster_registry.v2`.
+- Cluster registry output includes per-node `forge.cluster_node_scheduling.v1` posture rows with schedulable state, busy/idle/blocked status, active/expired lease counts, blockers and explicit no-remote-execution/no-external-mutation policy markers.
+- Cluster registry summaries now include schedulable, busy schedulable, idle schedulable, active lease and expired lease counts.
+- Added CLI contract coverage proving `forge cluster list` exposes lease-derived scheduling posture after a cluster handoff.
+- Added `docs/reports/forge-core-v0.4.80-report-2026-05-24.md` with the cycle report.
+
+### Changed
+
+- The package version is now `0.4.80`.
+- README and technical definition now document cluster registry scheduling posture as the operator preflight surface before placement and handoff.
+
+### Safety
+
+- Cluster scheduling posture is read-only metadata derived from Forge-owned SQLite node profiles and task leases.
+- It does not open SSH sessions, execute remote commands, copy files to external machines, authorize AI executors, install Knative or mutate Docker/Kubernetes/Knative/user resources.
+- Each scheduling row keeps `remote_execution_enabled=false`, `external_mutation_allowed=false` and the explicit trust policy string.
+
 ## 0.4.79 - 2026-05-24
 
 ### Added

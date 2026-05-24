@@ -9361,7 +9361,7 @@ fn cluster_registry_records_nodes_and_places_deterministic_code_task_by_capabili
         .stdout
         .clone();
     let cluster_list: Value = serde_json::from_slice(&cluster_list).unwrap();
-    assert_eq!(cluster_list["schema_version"], "forge.cluster_registry.v1");
+    assert_eq!(cluster_list["schema_version"], "forge.cluster_registry.v2");
     assert_eq!(cluster_list["summary"]["total_nodes"], 2);
     assert_eq!(cluster_list["summary"]["online_nodes"], 2);
     assert_eq!(cluster_list["summary"]["python_nodes"], 1);
@@ -9989,6 +9989,188 @@ fn cluster_placement_prefers_idle_eligible_node_over_node_with_active_lease() {
         .contains(&Value::String("active leases 1".to_string())));
     assert_eq!(idle["eligible"], true);
     assert_eq!(idle["active_lease_count"], 0);
+}
+
+#[test]
+fn cluster_list_exposes_node_scheduling_posture_from_task_leases() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "register",
+            "--node-id",
+            "lan-linux-scheduling-busy",
+            "--name",
+            "LAN Linux Scheduling Busy",
+            "--endpoint",
+            "ssh://forge@lan-scheduling-busy",
+            "--os",
+            "linux",
+            "--arch",
+            "x86_64",
+            "--cpu-cores",
+            "8",
+            "--memory-gb",
+            "32",
+            "--software",
+            "python3",
+            "--capability",
+            "command",
+            "--capability",
+            "python",
+            "--python",
+            "--network-reachable",
+            "--status",
+            "online",
+            "--trust",
+            "trusted_lan",
+            "--sandbox",
+            "local_process_no_network",
+            "--latency-ms",
+            "5",
+            "--reliability",
+            "0.98",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "register",
+            "--node-id",
+            "lan-linux-scheduling-idle",
+            "--name",
+            "LAN Linux Scheduling Idle",
+            "--endpoint",
+            "ssh://forge@lan-scheduling-idle",
+            "--os",
+            "linux",
+            "--arch",
+            "x86_64",
+            "--cpu-cores",
+            "8",
+            "--memory-gb",
+            "32",
+            "--software",
+            "python3",
+            "--capability",
+            "command",
+            "--capability",
+            "python",
+            "--python",
+            "--network-reachable",
+            "--status",
+            "online",
+            "--trust",
+            "trusted_lan",
+            "--sandbox",
+            "local_process_no_network",
+            "--latency-ms",
+            "8",
+            "--reliability",
+            "0.97",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let planned_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Prepare cluster list scheduling posture audit without remote execution",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned: Value = serde_json::from_slice(&planned_output).unwrap();
+    let workflow_id = planned["workflow_id"].as_str().unwrap();
+    let task_id = planned["tasks"][0]["id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let cluster_list_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "list",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cluster_list: Value = serde_json::from_slice(&cluster_list_output).unwrap();
+
+    assert_eq!(cluster_list["schema_version"], "forge.cluster_registry.v2");
+    assert_eq!(cluster_list["summary"]["total_nodes"], 2);
+    assert_eq!(cluster_list["summary"]["active_leases"], 1);
+    assert_eq!(cluster_list["summary"]["expired_leases"], 0);
+    assert_eq!(cluster_list["summary"]["schedulable_nodes"], 2);
+    assert_eq!(cluster_list["summary"]["busy_schedulable_nodes"], 1);
+    assert_eq!(cluster_list["summary"]["idle_schedulable_nodes"], 1);
+
+    let busy = cluster_list["scheduling"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["node_id"] == "lan-linux-scheduling-busy")
+        .unwrap();
+    assert_eq!(busy["schema_version"], "forge.cluster_node_scheduling.v1");
+    assert_eq!(busy["schedulable"], true);
+    assert_eq!(busy["scheduling_status"], "busy");
+    assert_eq!(busy["active_lease_count"], 1);
+    assert_eq!(busy["expired_lease_count"], 0);
+    assert_eq!(busy["remote_execution_enabled"], false);
+    assert_eq!(busy["external_mutation_allowed"], false);
+
+    let idle = cluster_list["scheduling"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["node_id"] == "lan-linux-scheduling-idle")
+        .unwrap();
+    assert_eq!(idle["schedulable"], true);
+    assert_eq!(idle["scheduling_status"], "idle");
+    assert_eq!(idle["active_lease_count"], 0);
+    assert_eq!(idle["expired_lease_count"], 0);
 }
 
 fn find_executor<'a>(json: &'a Value, id: &str) -> &'a Value {

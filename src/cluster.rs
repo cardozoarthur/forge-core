@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 const CLUSTER_NODE_SCHEMA_VERSION: &str = "forge.cluster_node.v1";
-const CLUSTER_REGISTRY_SCHEMA_VERSION: &str = "forge.cluster_registry.v1";
+const CLUSTER_REGISTRY_SCHEMA_VERSION: &str = "forge.cluster_registry.v2";
+const CLUSTER_NODE_SCHEDULING_SCHEMA_VERSION: &str = "forge.cluster_node_scheduling.v1";
 const CLUSTER_PLACEMENT_SCHEMA_VERSION: &str = "forge.cluster_placement.v1";
 const CLUSTER_PLACEMENT_REQUIREMENTS_SCHEMA_VERSION: &str =
     "forge.cluster_placement_requirements.v1";
@@ -90,6 +91,11 @@ pub struct ClusterRegistrySummary {
     pub docker_nodes: usize,
     pub gpu_nodes: usize,
     pub metatrader5_nodes: usize,
+    pub schedulable_nodes: usize,
+    pub busy_schedulable_nodes: usize,
+    pub idle_schedulable_nodes: usize,
+    pub active_leases: usize,
+    pub expired_leases: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,6 +104,21 @@ pub struct ClusterRegistryReport {
     pub status: String,
     pub summary: ClusterRegistrySummary,
     pub nodes: Vec<ClusterNode>,
+    pub scheduling: Vec<ClusterNodeSchedulingStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClusterNodeSchedulingStatus {
+    pub schema_version: String,
+    pub node_id: String,
+    pub schedulable: bool,
+    pub scheduling_status: String,
+    pub active_lease_count: usize,
+    pub expired_lease_count: usize,
+    pub blockers: Vec<String>,
+    pub remote_execution_enabled: bool,
+    pub external_mutation_allowed: bool,
+    pub trust_policy: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -276,12 +297,24 @@ pub fn register_cluster_node(
 
 pub fn list_cluster_nodes(store: &ForgeStore) -> Result<ClusterRegistryReport> {
     let nodes = load_cluster_nodes(store)?;
-    let summary = summarize_nodes(&nodes);
+    let lease_pressure = load_cluster_lease_pressure(store)?;
+    let scheduling = nodes
+        .iter()
+        .map(|node| {
+            let pressure = lease_pressure
+                .get(&node.node_id)
+                .copied()
+                .unwrap_or_default();
+            node_scheduling_status(node, pressure)
+        })
+        .collect::<Vec<_>>();
+    let summary = summarize_nodes(&nodes, &scheduling);
     Ok(ClusterRegistryReport {
         schema_version: CLUSTER_REGISTRY_SCHEMA_VERSION.to_string(),
         status: "listed".to_string(),
         summary,
         nodes,
+        scheduling,
     })
 }
 
@@ -655,7 +688,10 @@ fn load_cluster_nodes(store: &ForgeStore) -> Result<Vec<ClusterNode>> {
         .map_err(Into::into)
 }
 
-fn summarize_nodes(nodes: &[ClusterNode]) -> ClusterRegistrySummary {
+fn summarize_nodes(
+    nodes: &[ClusterNode],
+    scheduling: &[ClusterNodeSchedulingStatus],
+) -> ClusterRegistrySummary {
     let mut summary = ClusterRegistrySummary {
         total_nodes: nodes.len(),
         ..ClusterRegistrySummary::default()
@@ -692,6 +728,18 @@ fn summarize_nodes(nodes: &[ClusterNode]) -> ClusterRegistrySummary {
                 .any(|software| software.to_lowercase().contains("metatrader 5"))
         {
             summary.metatrader5_nodes += 1;
+        }
+    }
+    for posture in scheduling {
+        summary.active_leases += posture.active_lease_count;
+        summary.expired_leases += posture.expired_lease_count;
+        if posture.schedulable {
+            summary.schedulable_nodes += 1;
+            if posture.active_lease_count > 0 {
+                summary.busy_schedulable_nodes += 1;
+            } else {
+                summary.idle_schedulable_nodes += 1;
+            }
         }
     }
     summary
@@ -783,19 +831,81 @@ fn placement_score(
 }
 
 fn load_active_cluster_lease_counts(store: &ForgeStore) -> Result<BTreeMap<String, usize>> {
+    Ok(load_cluster_lease_pressure(store)?
+        .into_iter()
+        .map(|(node_id, pressure)| (node_id, pressure.active_lease_count))
+        .collect())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ClusterLeasePressure {
+    active_lease_count: usize,
+    expired_lease_count: usize,
+}
+
+fn load_cluster_lease_pressure(
+    store: &ForgeStore,
+) -> Result<BTreeMap<String, ClusterLeasePressure>> {
     let leases = store
         .load_task_leases()?
         .into_iter()
         .map(serde_json::from_value::<TaskLease>)
         .collect::<Result<Vec<_>, _>>()?;
     let now = Utc::now();
-    let mut counts = BTreeMap::new();
+    let mut pressure = BTreeMap::new();
     for lease in leases {
+        let entry = pressure
+            .entry(lease.executor)
+            .or_insert_with(ClusterLeasePressure::default);
         if lease.expires_at > now {
-            *counts.entry(lease.executor).or_insert(0) += 1;
+            entry.active_lease_count += 1;
+        } else {
+            entry.expired_lease_count += 1;
         }
     }
-    Ok(counts)
+    Ok(pressure)
+}
+
+fn node_scheduling_status(
+    node: &ClusterNode,
+    pressure: ClusterLeasePressure,
+) -> ClusterNodeSchedulingStatus {
+    let blockers = node_registry_blockers(node);
+    let schedulable = blockers.is_empty();
+    let scheduling_status = if !schedulable {
+        "blocked"
+    } else if pressure.active_lease_count > 0 {
+        "busy"
+    } else {
+        "idle"
+    };
+
+    ClusterNodeSchedulingStatus {
+        schema_version: CLUSTER_NODE_SCHEDULING_SCHEMA_VERSION.to_string(),
+        node_id: node.node_id.clone(),
+        schedulable,
+        scheduling_status: scheduling_status.to_string(),
+        active_lease_count: pressure.active_lease_count,
+        expired_lease_count: pressure.expired_lease_count,
+        blockers,
+        remote_execution_enabled: false,
+        external_mutation_allowed: false,
+        trust_policy: "explicit_trust_required_no_external_mutation".to_string(),
+    }
+}
+
+fn node_registry_blockers(node: &ClusterNode) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if node.status != "online" {
+        blockers.push(format!("status is {}", node.status));
+    }
+    if !node.network_reachable {
+        blockers.push("network unreachable".to_string());
+    }
+    if !trusted_for_placement(&node.trust_level) {
+        blockers.push(format!("trust level {} is not allowed", node.trust_level));
+    }
+    blockers
 }
 
 fn has_capability(node: &ClusterNode, capability: &str) -> bool {

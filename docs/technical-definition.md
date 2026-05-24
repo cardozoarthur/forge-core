@@ -50,7 +50,7 @@ Close coupling is still valuable when it reduces friction. The target architectu
 
 ## v0 Boundary
 
-The current version is a local Rust CLI and skill package. It includes SQLite persistence, simulated execution, AI/non-AI/wait/notification task kinds, executor sync/policy, runtime substrate sync/policy, goal-oriented work items, rework validation, runtime goal/artifact mutation, cluster registry/placement metadata, cluster handoff manifests, cost report generation and controlled improvement artifacts with changelog generation. It does not yet include remote distributed execution, real provider adapters, SaaS UI or WASM plugins.
+The current version is a local Rust CLI and skill package. It includes SQLite persistence, simulated execution, AI/non-AI/wait/notification task kinds, executor sync/policy, runtime substrate sync/policy, goal-oriented work items, rework validation, runtime goal/artifact mutation, cluster registry/placement metadata, per-node cluster scheduling posture, cluster handoff manifests, cost report generation and controlled improvement artifacts with changelog generation. It does not yet include remote distributed execution, real provider adapters, SaaS UI or WASM plugins.
 
 ## Executor Contract Direction
 
@@ -147,7 +147,11 @@ Each Forge node record includes:
 - trust level and sandbox permissions.
 
 `forge cluster register` persists a reported node profile in SQLite.
-`forge cluster list` returns the current registry with capability summaries.
+`forge cluster list` returns `forge.cluster_registry.v2` with capability
+summaries and scheduling posture. Each registered node gets a
+`forge.cluster_node_scheduling.v1` row with schedulable/busy/idle/blocked state,
+active and expired lease counts, local registry blockers and explicit
+`remote_execution_enabled=false` / `external_mutation_allowed=false` markers.
 `forge cluster place --workflow <id> --task <task-id>` derives deterministic
 placement requirements from the task's executor and execution policy, then
 returns a dry-run placement decision with candidate reasons. Candidates include
