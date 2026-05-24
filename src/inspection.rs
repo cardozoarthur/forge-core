@@ -1,7 +1,8 @@
 use crate::checkpoint::load_workflow_checkpoints;
 use crate::context::{
-    build_context_package_with_checkpoint, ContextHandoffBlocker, ContextHandoffSummary,
-    ContextHandoffTask, ContextPackage, ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
+    build_context_package_with_checkpoint, context_next_action, ContextHandoffBlocker,
+    ContextHandoffSummary, ContextHandoffTask, ContextNextAction, ContextPackage,
+    ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
 };
 use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutorKind, SubtaskSpec, TaskStatus, ValidationRule,
@@ -11,8 +12,6 @@ use crate::storage::ForgeStore;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
-
-const INSPECT_CONTEXT_ACTION_SCHEMA_VERSION: &str = "forge.inspect_context_action.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowInspectionReport {
@@ -73,21 +72,7 @@ pub struct ContextInspectionRoute {
     pub included_sections: Vec<String>,
     pub omitted_sections: Vec<String>,
     pub routing_summary: ContextRoutingSummary,
-    pub next_action: ContextInspectionNextAction,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ContextInspectionNextAction {
-    pub schema_version: String,
-    pub action: String,
-    pub ready_for_handoff: bool,
-    pub partial_retry_recommended: bool,
-    pub checkpoint_id: Option<String>,
-    pub checkpoint_context_sha256: Option<String>,
-    pub checkpoint_context_routing_cache_key: Option<String>,
-    pub current_context_routing_cache_key: String,
-    pub reason: String,
-    pub blocking_refs: Vec<String>,
+    pub next_action: ContextNextAction,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -260,120 +245,6 @@ fn context_route(package: &ContextPackage) -> ContextInspectionRoute {
         omitted_sections: package.omitted_sections.clone(),
         routing_summary: package.routing_summary.clone(),
         next_action: context_next_action(package),
-    }
-}
-
-fn context_next_action(package: &ContextPackage) -> ContextInspectionNextAction {
-    let current_route = package.routing_fingerprint.cache_key.clone();
-    let blocking_refs = package
-        .handoff_blockers
-        .iter()
-        .flat_map(|blocker| blocker.refs.iter().cloned())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-
-    if !package.context_ready && !package.dependency_summary.ready {
-        return ContextInspectionNextAction {
-            schema_version: INSPECT_CONTEXT_ACTION_SCHEMA_VERSION.to_string(),
-            action: "repair_context_and_wait_for_dependencies".to_string(),
-            ready_for_handoff: false,
-            partial_retry_recommended: false,
-            checkpoint_id: None,
-            checkpoint_context_sha256: None,
-            checkpoint_context_routing_cache_key: None,
-            current_context_routing_cache_key: current_route,
-            reason: "required context is missing and dependency tasks are not ready".to_string(),
-            blocking_refs,
-        };
-    }
-
-    if !package.context_ready {
-        return ContextInspectionNextAction {
-            schema_version: INSPECT_CONTEXT_ACTION_SCHEMA_VERSION.to_string(),
-            action: "increase_context_budget".to_string(),
-            ready_for_handoff: false,
-            partial_retry_recommended: false,
-            checkpoint_id: None,
-            checkpoint_context_sha256: None,
-            checkpoint_context_routing_cache_key: None,
-            current_context_routing_cache_key: current_route,
-            reason: "required context sections were omitted by budget or profile routing"
-                .to_string(),
-            blocking_refs,
-        };
-    }
-
-    if !package.dependency_summary.ready {
-        return ContextInspectionNextAction {
-            schema_version: INSPECT_CONTEXT_ACTION_SCHEMA_VERSION.to_string(),
-            action: "wait_for_dependencies".to_string(),
-            ready_for_handoff: false,
-            partial_retry_recommended: false,
-            checkpoint_id: None,
-            checkpoint_context_sha256: None,
-            checkpoint_context_routing_cache_key: None,
-            current_context_routing_cache_key: current_route,
-            reason: "dependency tasks must complete before executor handoff".to_string(),
-            blocking_refs,
-        };
-    }
-
-    let Some(checkpoint) = &package.latest_checkpoint else {
-        return ContextInspectionNextAction {
-            schema_version: INSPECT_CONTEXT_ACTION_SCHEMA_VERSION.to_string(),
-            action: "start_executor_handoff".to_string(),
-            ready_for_handoff: true,
-            partial_retry_recommended: false,
-            checkpoint_id: None,
-            checkpoint_context_sha256: None,
-            checkpoint_context_routing_cache_key: None,
-            current_context_routing_cache_key: current_route,
-            reason: "context and dependencies are ready; acquire an executor handoff lease"
-                .to_string(),
-            blocking_refs,
-        };
-    };
-
-    let checkpoint_route = checkpoint.context_routing_cache_key.clone();
-    let (action, partial_retry_recommended, reason) =
-        if package.resume_context_status == "checkpoint_stale" {
-            (
-                "refresh_context_before_resume",
-                false,
-                package.resume_context_reason.as_str(),
-            )
-        } else if checkpoint_route.is_none() {
-            (
-                "refresh_context_before_resume",
-                false,
-                "checkpoint does not carry a context routing cache key",
-            )
-        } else if checkpoint_route.as_deref() == Some(current_route.as_str()) {
-            (
-                "resume_from_checkpoint",
-                false,
-                "checkpoint route matches current inspect route",
-            )
-        } else {
-            (
-                "partial_retry_with_fresh_context",
-                true,
-                "checkpoint route differs from current inspect route",
-            )
-        };
-
-    ContextInspectionNextAction {
-        schema_version: INSPECT_CONTEXT_ACTION_SCHEMA_VERSION.to_string(),
-        action: action.to_string(),
-        ready_for_handoff: true,
-        partial_retry_recommended,
-        checkpoint_id: Some(checkpoint.checkpoint_id.clone()),
-        checkpoint_context_sha256: Some(checkpoint.context_sha256.clone()),
-        checkpoint_context_routing_cache_key: checkpoint_route,
-        current_context_routing_cache_key: current_route,
-        reason: reason.to_string(),
-        blocking_refs,
     }
 }
 

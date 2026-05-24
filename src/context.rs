@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 
 const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v16";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
+const CONTEXT_NEXT_ACTION_SCHEMA_VERSION: &str = "forge.inspect_context_action.v1";
 const ROUTING_POLICY: &str =
     "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_v16";
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
@@ -248,6 +249,20 @@ pub struct ContextExecutorProfile {
     pub max_context_bytes: Option<usize>,
     pub allowed_sections: Vec<String>,
     pub required_sections: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextNextAction {
+    pub schema_version: String,
+    pub action: String,
+    pub ready_for_handoff: bool,
+    pub partial_retry_recommended: bool,
+    pub checkpoint_id: Option<String>,
+    pub checkpoint_context_sha256: Option<String>,
+    pub checkpoint_context_routing_cache_key: Option<String>,
+    pub current_context_routing_cache_key: String,
+    pub reason: String,
+    pub blocking_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -725,6 +740,120 @@ pub fn build_context_package_with_checkpoint(
         shards,
         content,
     })
+}
+
+pub fn context_next_action(package: &ContextPackage) -> ContextNextAction {
+    let current_route = package.routing_fingerprint.cache_key.clone();
+    let blocking_refs = package
+        .handoff_blockers
+        .iter()
+        .flat_map(|blocker| blocker.refs.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    if !package.context_ready && !package.dependency_summary.ready {
+        return ContextNextAction {
+            schema_version: CONTEXT_NEXT_ACTION_SCHEMA_VERSION.to_string(),
+            action: "repair_context_and_wait_for_dependencies".to_string(),
+            ready_for_handoff: false,
+            partial_retry_recommended: false,
+            checkpoint_id: None,
+            checkpoint_context_sha256: None,
+            checkpoint_context_routing_cache_key: None,
+            current_context_routing_cache_key: current_route,
+            reason: "required context is missing and dependency tasks are not ready".to_string(),
+            blocking_refs,
+        };
+    }
+
+    if !package.context_ready {
+        return ContextNextAction {
+            schema_version: CONTEXT_NEXT_ACTION_SCHEMA_VERSION.to_string(),
+            action: "increase_context_budget".to_string(),
+            ready_for_handoff: false,
+            partial_retry_recommended: false,
+            checkpoint_id: None,
+            checkpoint_context_sha256: None,
+            checkpoint_context_routing_cache_key: None,
+            current_context_routing_cache_key: current_route,
+            reason: "required context sections were omitted by budget or profile routing"
+                .to_string(),
+            blocking_refs,
+        };
+    }
+
+    if !package.dependency_summary.ready {
+        return ContextNextAction {
+            schema_version: CONTEXT_NEXT_ACTION_SCHEMA_VERSION.to_string(),
+            action: "wait_for_dependencies".to_string(),
+            ready_for_handoff: false,
+            partial_retry_recommended: false,
+            checkpoint_id: None,
+            checkpoint_context_sha256: None,
+            checkpoint_context_routing_cache_key: None,
+            current_context_routing_cache_key: current_route,
+            reason: "dependency tasks must complete before executor handoff".to_string(),
+            blocking_refs,
+        };
+    }
+
+    let Some(checkpoint) = &package.latest_checkpoint else {
+        return ContextNextAction {
+            schema_version: CONTEXT_NEXT_ACTION_SCHEMA_VERSION.to_string(),
+            action: "start_executor_handoff".to_string(),
+            ready_for_handoff: true,
+            partial_retry_recommended: false,
+            checkpoint_id: None,
+            checkpoint_context_sha256: None,
+            checkpoint_context_routing_cache_key: None,
+            current_context_routing_cache_key: current_route,
+            reason: "context and dependencies are ready; acquire an executor handoff lease"
+                .to_string(),
+            blocking_refs,
+        };
+    };
+
+    let checkpoint_route = checkpoint.context_routing_cache_key.clone();
+    let (action, partial_retry_recommended, reason) =
+        if package.resume_context_status == "checkpoint_stale" {
+            (
+                "refresh_context_before_resume",
+                false,
+                package.resume_context_reason.as_str(),
+            )
+        } else if checkpoint_route.is_none() {
+            (
+                "refresh_context_before_resume",
+                false,
+                "checkpoint does not carry a context routing cache key",
+            )
+        } else if checkpoint_route.as_deref() == Some(current_route.as_str()) {
+            (
+                "resume_from_checkpoint",
+                false,
+                "checkpoint route matches current context route",
+            )
+        } else {
+            (
+                "partial_retry_with_fresh_context",
+                true,
+                "checkpoint route differs from current context route",
+            )
+        };
+
+    ContextNextAction {
+        schema_version: CONTEXT_NEXT_ACTION_SCHEMA_VERSION.to_string(),
+        action: action.to_string(),
+        ready_for_handoff: true,
+        partial_retry_recommended,
+        checkpoint_id: Some(checkpoint.checkpoint_id.clone()),
+        checkpoint_context_sha256: Some(checkpoint.context_sha256.clone()),
+        checkpoint_context_routing_cache_key: checkpoint_route,
+        current_context_routing_cache_key: current_route,
+        reason: reason.to_string(),
+        blocking_refs,
+    }
 }
 
 fn build_handoff_blockers(

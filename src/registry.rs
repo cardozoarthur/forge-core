@@ -1,7 +1,8 @@
 use crate::artifact::hex_sha256;
-use crate::checkpoint::load_workflow_checkpoints;
+use crate::checkpoint::{load_workflow_checkpoints, TaskCheckpoint};
 use crate::context::{
-    build_context_handoff_summary, ContextHandoffSummary, DEFAULT_CONTEXT_BUDGET,
+    build_context_handoff_summary, build_context_package_with_checkpoint, context_next_action,
+    ContextHandoffSummary, ContextNextAction, DEFAULT_CONTEXT_BUDGET,
 };
 use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, TaskStatus, Workflow,
@@ -14,6 +15,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 const REGISTRY_CONTEXT_HANDOFF_SCHEMA_VERSION: &str = "forge.registry_context_handoff.v1";
+const REGISTRY_CONTEXT_ACTION_SCHEMA_VERSION: &str = "forge.registry_context_action.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowRegistryReport {
@@ -42,6 +44,7 @@ pub struct WorkflowRegistrySummary {
     pub non_running: usize,
     pub reusable_subflows: usize,
     pub context_handoff: RegistryContextHandoffSummary,
+    pub context_actions: RegistryContextActionSummary,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,6 +61,7 @@ pub struct WorkflowRegistryRow {
     pub artifact_count: usize,
     pub task_summary: RegistryTaskStatusSummary,
     pub context_handoff: RegistryContextHandoffSummary,
+    pub context_actions: RegistryContextActionSummary,
     pub reusable_subflows: Vec<ReusableSubflowRef>,
     pub created_at: DateTime<Utc>,
 }
@@ -82,6 +86,23 @@ pub struct RegistryContextHandoffSummary {
     pub blocked_missing_context: usize,
     pub blocked_dependencies: usize,
     pub blocked_missing_context_and_dependencies: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RegistryContextActionSummary {
+    pub schema_version: String,
+    pub workflows: usize,
+    pub total_tasks: usize,
+    pub ready_for_handoff: usize,
+    pub blocked_tasks: usize,
+    pub start_executor_handoff: usize,
+    pub wait_for_dependencies: usize,
+    pub increase_context_budget: usize,
+    pub repair_context_and_wait_for_dependencies: usize,
+    pub refresh_context_before_resume: usize,
+    pub resume_from_checkpoint: usize,
+    pub partial_retry_with_fresh_context: usize,
+    pub partial_retry_recommended: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -136,7 +157,13 @@ pub fn list_workflows_filtered(
         let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
         let handoff_summary =
             build_context_handoff_summary(&workflow, DEFAULT_CONTEXT_BUDGET, &checkpoints)?;
-        rows.push(registry_row(&workflow, runs, &handoff_summary));
+        let action_summary = registry_context_action_summary(&workflow, &checkpoints)?;
+        rows.push(registry_row(
+            &workflow,
+            runs,
+            &handoff_summary,
+            &action_summary,
+        ));
     }
 
     rows.retain(|row| filter.matches(row));
@@ -148,12 +175,19 @@ pub fn list_workflows_filtered(
                 total.add(&row.context_handoff);
                 total
             });
+    let context_actions =
+        rows.iter()
+            .fold(RegistryContextActionSummary::empty(), |mut total, row| {
+                total.add(&row.context_actions);
+                total
+            });
     let summary = WorkflowRegistrySummary {
         total: rows.len(),
         running,
         non_running: rows.len().saturating_sub(running),
         reusable_subflows,
         context_handoff,
+        context_actions,
     };
 
     Ok(WorkflowRegistryReport {
@@ -304,6 +338,7 @@ fn registry_row(
     workflow: &Workflow,
     runs: &[RunRecord],
     handoff_summary: &ContextHandoffSummary,
+    action_summary: &RegistryContextActionSummary,
 ) -> WorkflowRegistryRow {
     let task_summary = summarize_tasks(workflow);
     let lifecycle_state = derive_lifecycle_state(workflow, &task_summary);
@@ -328,6 +363,7 @@ fn registry_row(
         artifact_count: workflow.artifacts.len(),
         task_summary,
         context_handoff: RegistryContextHandoffSummary::from_handoff_summary(handoff_summary),
+        context_actions: action_summary.clone(),
         reusable_subflows,
         created_at: workflow.created_at,
     }
@@ -371,6 +407,99 @@ impl RegistryContextHandoffSummary {
         self.blocked_missing_context_and_dependencies +=
             other.blocked_missing_context_and_dependencies;
     }
+}
+
+impl RegistryContextActionSummary {
+    fn empty() -> Self {
+        Self {
+            schema_version: REGISTRY_CONTEXT_ACTION_SCHEMA_VERSION.to_string(),
+            workflows: 0,
+            total_tasks: 0,
+            ready_for_handoff: 0,
+            blocked_tasks: 0,
+            start_executor_handoff: 0,
+            wait_for_dependencies: 0,
+            increase_context_budget: 0,
+            repair_context_and_wait_for_dependencies: 0,
+            refresh_context_before_resume: 0,
+            resume_from_checkpoint: 0,
+            partial_retry_with_fresh_context: 0,
+            partial_retry_recommended: 0,
+        }
+    }
+
+    fn for_workflow() -> Self {
+        Self {
+            workflows: 1,
+            ..Self::empty()
+        }
+    }
+
+    fn add_action(&mut self, action: &ContextNextAction) {
+        self.total_tasks += 1;
+        if action.ready_for_handoff {
+            self.ready_for_handoff += 1;
+        } else {
+            self.blocked_tasks += 1;
+        }
+        if action.partial_retry_recommended {
+            self.partial_retry_recommended += 1;
+        }
+
+        match action.action.as_str() {
+            "start_executor_handoff" => self.start_executor_handoff += 1,
+            "wait_for_dependencies" => self.wait_for_dependencies += 1,
+            "increase_context_budget" => self.increase_context_budget += 1,
+            "repair_context_and_wait_for_dependencies" => {
+                self.repair_context_and_wait_for_dependencies += 1;
+            }
+            "refresh_context_before_resume" => self.refresh_context_before_resume += 1,
+            "resume_from_checkpoint" => self.resume_from_checkpoint += 1,
+            "partial_retry_with_fresh_context" => self.partial_retry_with_fresh_context += 1,
+            _ => {}
+        }
+    }
+
+    fn add(&mut self, other: &Self) {
+        self.workflows += other.workflows;
+        self.total_tasks += other.total_tasks;
+        self.ready_for_handoff += other.ready_for_handoff;
+        self.blocked_tasks += other.blocked_tasks;
+        self.start_executor_handoff += other.start_executor_handoff;
+        self.wait_for_dependencies += other.wait_for_dependencies;
+        self.increase_context_budget += other.increase_context_budget;
+        self.repair_context_and_wait_for_dependencies +=
+            other.repair_context_and_wait_for_dependencies;
+        self.refresh_context_before_resume += other.refresh_context_before_resume;
+        self.resume_from_checkpoint += other.resume_from_checkpoint;
+        self.partial_retry_with_fresh_context += other.partial_retry_with_fresh_context;
+        self.partial_retry_recommended += other.partial_retry_recommended;
+    }
+}
+
+fn registry_context_action_summary(
+    workflow: &Workflow,
+    checkpoints: &[TaskCheckpoint],
+) -> Result<RegistryContextActionSummary> {
+    let mut summary = RegistryContextActionSummary::for_workflow();
+
+    for task in &workflow.tasks {
+        let latest_checkpoint = checkpoints
+            .iter()
+            .rev()
+            .find(|checkpoint| checkpoint.task_id == task.id)
+            .cloned();
+        let package = build_context_package_with_checkpoint(
+            workflow,
+            &task.id,
+            DEFAULT_CONTEXT_BUDGET,
+            latest_checkpoint,
+        )?;
+        let action = context_next_action(&package);
+        summary.add_action(&action);
+    }
+
+    Ok(summary)
 }
 
 fn initial_request(workflow: &Workflow, runs: &[RunRecord]) -> String {

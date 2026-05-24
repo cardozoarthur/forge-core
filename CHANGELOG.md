@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.40 - 2026-05-24
+
+### Added
+
+- `forge list --output json` now includes a versioned `context_actions` projection on each workflow row and on the filtered registry summary.
+- The projection uses schema `forge.registry_context_action.v1` and counts task next actions: `start_executor_handoff`, `wait_for_dependencies`, `increase_context_budget`, `repair_context_and_wait_for_dependencies`, `refresh_context_before_resume`, `resume_from_checkpoint` and `partial_retry_with_fresh_context`.
+- Registry summaries now expose `ready_for_handoff`, `blocked_tasks` and `partial_retry_recommended` counts so operators can triage workflow fleets without opening every `forge inspect` DAG.
+- Added CLI contract coverage proving `forge list` aggregates checkpoint-driven partial retries and dependency waits from the shared Context Routing Engine next-action decision.
+
+### Changed
+
+- The next-action decision previously local to `forge inspect` now lives in the Context Routing Engine as a shared `ContextNextAction` contract.
+- `forge inspect` keeps emitting the same `forge.inspect_context_action.v1` node action shape, while `forge list` adds a registry-level aggregate rather than duplicating per-node details.
+
+### Safety
+
+- Registry action summaries are read-only metadata derived from Forge-owned workflow/task/checkpoint state and deterministic context routing.
+- This change does not acquire leases, complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by `forge task handoff`, strict context readiness and task leases.
+
 ## 0.4.39 - 2026-05-24
 
 ### Added

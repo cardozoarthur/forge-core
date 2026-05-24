@@ -3863,6 +3863,122 @@ fn list_projects_context_handoff_readiness_for_registry_rows() {
 }
 
 #[test]
+fn list_aggregates_context_next_actions_for_registry_rows() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build registry-level context action routing visibility",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let task_count = planned_json["tasks"].as_array().unwrap().len() as u64;
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "checkpoint",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--executor",
+            "codex",
+            "--state",
+            "paused",
+            "--summary",
+            "Paused after registry context route",
+            "--context-sha256",
+            context["context_sha256"].as_str().unwrap(),
+            "--context-routing-cache-key",
+            context["routing_fingerprint"]["cache_key"]
+                .as_str()
+                .unwrap(),
+            "--workflow-revision",
+            "0",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    let summary = &listed_json["summary"]["context_actions"];
+    assert_eq!(
+        summary["schema_version"],
+        "forge.registry_context_action.v1"
+    );
+    assert_eq!(summary["total_tasks"], task_count);
+    assert_eq!(summary["ready_for_handoff"], 1);
+    assert_eq!(summary["partial_retry_with_fresh_context"], 1);
+    assert_eq!(summary["partial_retry_recommended"], 1);
+    assert_eq!(summary["wait_for_dependencies"], task_count - 1);
+    assert_eq!(summary["start_executor_handoff"], 0);
+
+    let row = find_workflow(&listed_json, workflow_id);
+    assert_eq!(row["context_actions"]["total_tasks"], task_count);
+    assert_eq!(row["context_actions"]["ready_for_handoff"], 1);
+    assert_eq!(
+        row["context_actions"]["wait_for_dependencies"],
+        task_count - 1
+    );
+    assert_eq!(
+        row["context_actions"]["partial_retry_with_fresh_context"],
+        1
+    );
+    assert_eq!(row["context_actions"]["partial_retry_recommended"], 1);
+}
+
+#[test]
 fn list_surfaces_reusable_code_node_subflows_with_compatibility_keys() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
