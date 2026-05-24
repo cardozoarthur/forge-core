@@ -9794,6 +9794,203 @@ fn cluster_lease_registry_lists_node_scoped_leases_without_remote_execution() {
     assert_eq!(filtered["leases"].as_array().unwrap().len(), 1);
 }
 
+#[test]
+fn cluster_placement_prefers_idle_eligible_node_over_node_with_active_lease() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "register",
+            "--node-id",
+            "lan-linux-busy",
+            "--name",
+            "LAN Linux Busy Worker",
+            "--endpoint",
+            "ssh://forge@lan-busy",
+            "--os",
+            "linux",
+            "--arch",
+            "x86_64",
+            "--cpu-cores",
+            "8",
+            "--memory-gb",
+            "32",
+            "--software",
+            "python3",
+            "--capability",
+            "command",
+            "--capability",
+            "python",
+            "--python",
+            "--network-reachable",
+            "--status",
+            "online",
+            "--trust",
+            "trusted_lan",
+            "--sandbox",
+            "local_process_no_network",
+            "--latency-ms",
+            "1",
+            "--reliability",
+            "0.99",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let first_plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Prepare first distributed cluster handoff lease-aware placement",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first_plan: Value = serde_json::from_slice(&first_plan_output).unwrap();
+    let first_workflow_id = first_plan["workflow_id"].as_str().unwrap();
+    let first_task_id = first_plan["tasks"][0]["id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "handoff",
+            "--workflow",
+            first_workflow_id,
+            "--task",
+            first_task_id,
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "register",
+            "--node-id",
+            "lan-linux-idle",
+            "--name",
+            "LAN Linux Idle Worker",
+            "--endpoint",
+            "ssh://forge@lan-idle",
+            "--os",
+            "linux",
+            "--arch",
+            "x86_64",
+            "--cpu-cores",
+            "8",
+            "--memory-gb",
+            "32",
+            "--software",
+            "python3",
+            "--capability",
+            "command",
+            "--capability",
+            "python",
+            "--python",
+            "--network-reachable",
+            "--status",
+            "online",
+            "--trust",
+            "trusted_lan",
+            "--sandbox",
+            "local_process_no_network",
+            "--latency-ms",
+            "10",
+            "--reliability",
+            "0.96",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let second_plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Prepare second distributed cluster handoff lease-aware placement",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second_plan: Value = serde_json::from_slice(&second_plan_output).unwrap();
+    let second_workflow_id = second_plan["workflow_id"].as_str().unwrap();
+    let second_task_id = second_plan["tasks"][0]["id"].as_str().unwrap();
+
+    let placement_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "place",
+            "--workflow",
+            second_workflow_id,
+            "--task",
+            second_task_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let placement: Value = serde_json::from_slice(&placement_output).unwrap();
+
+    assert_eq!(placement["schema_version"], "forge.cluster_placement.v1");
+    assert_eq!(placement["selected_node"]["node_id"], "lan-linux-idle");
+
+    let busy = placement["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["node_id"] == "lan-linux-busy")
+        .unwrap();
+    let idle = placement["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["node_id"] == "lan-linux-idle")
+        .unwrap();
+
+    assert_eq!(busy["eligible"], true);
+    assert_eq!(busy["active_lease_count"], 1);
+    assert!(busy["reasons"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("active leases 1".to_string())));
+    assert_eq!(idle["eligible"], true);
+    assert_eq!(idle["active_lease_count"], 0);
+}
+
 fn find_executor<'a>(json: &'a Value, id: &str) -> &'a Value {
     json["executors"]
         .as_array()

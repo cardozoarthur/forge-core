@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.78`
+Current version: `0.4.79`
 
 This is the first functional CLI + Skill version:
 
@@ -55,6 +55,7 @@ This is the first functional CLI + Skill version:
 - executor sync that detects installed/configured CLIs and persists human authorization policy
 - runtime sync that detects Docker/Kubernetes/Knative and persists human authorization policy
 - local cluster node registry with capability/trust metadata, dry-run placement decisions and distributed handoff manifests
+- lease-aware cluster placement that exposes active lease counts and prefers idle eligible nodes
 - n8n-aware research planning that catalogs workflow primitives and evaluates Forge primitive candidates before graph promotion
 - goal-oriented tasks with subtasks, impediments, acceptance criteria and rework readiness checks
 - runtime workflow mutation for goals and artifacts with origin trace from `codex`, `opencode`, `forge_cli` or skills
@@ -281,7 +282,9 @@ Python/Node/Docker/GPU availability, network reachability, status,
 cost/latency/reliability, trust level and sandbox permissions. Placement is a
 read-only policy decision: Forge can select a node that satisfies deterministic
 task requirements, but it does not connect over SSH, execute remote code or mutate
-external machines. `forge cluster handoff` layers that placement decision over the
+external machines. Placement candidates also expose active node lease counts and
+penalize busy eligible nodes, so a compatible idle node is preferred before
+handoff. `forge cluster handoff` layers that placement decision over the
 normal executor handoff contract: it leases the task to the selected node id and
 returns `forge.cluster_task_handoff.v1` with the placement report, executor handoff
 packet, node-scoped lease ref and `forge.cluster_sync_manifest.v1`. The sync

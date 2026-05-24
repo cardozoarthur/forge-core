@@ -150,7 +150,9 @@ Each Forge node record includes:
 `forge cluster list` returns the current registry with capability summaries.
 `forge cluster place --workflow <id> --task <task-id>` derives deterministic
 placement requirements from the task's executor and execution policy, then
-returns a dry-run placement decision with candidate reasons. A local Python code
+returns a dry-run placement decision with candidate reasons. Candidates include
+active node lease counts and the score penalizes busy eligible nodes, so a
+compatible idle node is preferred before distributed handoff. A local Python code
 node, for example, requires a registered online and reachable node with the
 `python` capability, a trusted LAN/local trust class and the declared sandbox
 permission.

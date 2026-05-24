@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.79 - 2026-05-24
+
+### Added
+
+- Added lease-aware cluster placement candidate metadata through `active_lease_count`.
+- `forge cluster place` now counts active task leases per registered node and penalizes busy eligible nodes when scoring candidates.
+- Added CLI contract coverage proving a second eligible idle node is selected over a node that already holds an active cluster handoff lease.
+- Added `docs/reports/forge-core-v0.4.79-report-2026-05-24.md` with the cycle report.
+
+### Changed
+
+- The package version is now `0.4.79`.
+- README and technical definition now document active-lease pressure in dry-run cluster placement.
+
+### Safety
+
+- Lease-aware placement only reads Forge-owned SQLite task leases and cluster node metadata.
+- It does not open SSH sessions, execute remote commands, copy files to external machines, authorize AI executors, install Knative or mutate Docker/Kubernetes/Knative/user resources.
+- Cluster handoff still declares `remote_execution_enabled=false` and `external_mutation_allowed=false`.
+
 ## 0.4.78 - 2026-05-24
 
 ### Added

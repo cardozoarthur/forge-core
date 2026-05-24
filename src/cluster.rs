@@ -118,6 +118,7 @@ pub struct ClusterPlacementCandidate {
     pub node_id: String,
     pub eligible: bool,
     pub score: i64,
+    pub active_lease_count: usize,
     pub reasons: Vec<String>,
 }
 
@@ -380,9 +381,19 @@ pub fn place_task_on_cluster(
         .with_context(|| format!("task not found in workflow {workflow_id}: {task_id}"))?;
     let requirements = placement_requirements(workflow_id, task);
     let nodes = load_cluster_nodes(store)?;
+    let active_lease_counts = load_active_cluster_lease_counts(store)?;
     let mut candidates = nodes
         .iter()
-        .map(|node| evaluate_candidate(node, &requirements))
+        .map(|node| {
+            evaluate_candidate(
+                node,
+                &requirements,
+                active_lease_counts
+                    .get(&node.node_id)
+                    .copied()
+                    .unwrap_or_default(),
+            )
+        })
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
         right
@@ -715,6 +726,7 @@ fn placement_requirements(workflow_id: &str, task: &AtomicTask) -> ClusterPlacem
 fn evaluate_candidate(
     node: &ClusterNode,
     requirements: &ClusterPlacementRequirements,
+    active_lease_count: usize,
 ) -> ClusterPlacementCandidate {
     let mut reasons = Vec::new();
     if node.status != "online" {
@@ -740,16 +752,24 @@ fn evaluate_candidate(
     let eligible = reasons.is_empty();
     if eligible {
         reasons.push("matches deterministic placement requirements".to_string());
+        if active_lease_count > 0 {
+            reasons.push(format!("active leases {active_lease_count}"));
+        }
     }
     ClusterPlacementCandidate {
         node_id: node.node_id.clone(),
         eligible,
-        score: placement_score(node, requirements),
+        score: placement_score(node, requirements, active_lease_count),
+        active_lease_count,
         reasons,
     }
 }
 
-fn placement_score(node: &ClusterNode, requirements: &ClusterPlacementRequirements) -> i64 {
+fn placement_score(
+    node: &ClusterNode,
+    requirements: &ClusterPlacementRequirements,
+    active_lease_count: usize,
+) -> i64 {
     let matched_capabilities = requirements
         .required_capabilities
         .iter()
@@ -759,6 +779,23 @@ fn placement_score(node: &ClusterNode, requirements: &ClusterPlacementRequiremen
     reliability_score + matched_capabilities * 1_000
         - i64::from(node.latency_ms)
         - (node.cost_per_hour_usd * 100.0).round() as i64
+        - (active_lease_count as i64 * 10_000)
+}
+
+fn load_active_cluster_lease_counts(store: &ForgeStore) -> Result<BTreeMap<String, usize>> {
+    let leases = store
+        .load_task_leases()?
+        .into_iter()
+        .map(serde_json::from_value::<TaskLease>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let now = Utc::now();
+    let mut counts = BTreeMap::new();
+    for lease in leases {
+        if lease.expires_at > now {
+            *counts.entry(lease.executor).or_insert(0) += 1;
+        }
+    }
+    Ok(counts)
 }
 
 fn has_capability(node: &ClusterNode, capability: &str) -> bool {
