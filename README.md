@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.26`
+Current version: `0.4.27`
 
 This is the first functional CLI + Skill version:
 
@@ -80,16 +80,18 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v12`) with a deterministic
-`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_budget_summary_required_v12` routing policy.
+`forge context` emits a versioned context packet (`forge.context.v13`) with a deterministic
+`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_v13` routing policy.
 The packet keeps the legacy `content` body for executors, and also returns workflow
 revision, artifact count, persona routing metadata for human-facing nodes, executor
 profile metadata, execution policy metadata, dependency readiness summaries, proposed
 child-subflow bindings, lineage hashes and a shard manifest with included/omitted sections, profile exclusions,
 compression flags, required/missing-required markers, source labels, priorities, byte
 counts, summaries and SHA-256 checksums. The packet also exposes `context_ready`,
-`required_sections`, `missing_required_sections` and a `routing_summary` so executor
-adapters can block handoff when the minimum correct context was omitted. Deterministic
+`required_sections`, `missing_required_sections`, `handoff_ready`, `handoff_status`,
+`handoff_blockers` and a `routing_summary` so executor adapters can block handoff
+when the minimum correct context was omitted or dependency tasks are not ready.
+Deterministic
 command and wait nodes receive a smaller no-AI context
 envelope that preserves local objective, execution policy, proposed subflow reuse and
 validation context before lower-priority narrative sections, while AI and mixed nodes
@@ -110,7 +112,7 @@ forge context --workflow <workflow-id> --task task-001 --budget 1200 --strict --
 ```
 
 Strict mode still prints the replayable context package, but exits non-zero if
-`context_ready=false`.
+`handoff_ready=false`.
 
 Skill-style async handoff:
 

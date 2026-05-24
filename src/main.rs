@@ -433,7 +433,7 @@ fn run() -> Result<i32> {
             let context =
                 build_context_package_with_checkpoint(&workflow, &task, budget, latest_checkpoint)?;
             print_response(output, &context)?;
-            Ok(if strict && !context.context_ready {
+            Ok(if strict && !context.handoff_ready {
                 1
             } else {
                 0

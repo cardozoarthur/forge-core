@@ -190,8 +190,8 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v12` and routing policy
-`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_budget_summary_required_v12`. Each packet
+Current `forge context` packets use schema `forge.context.v13` and routing policy
+`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_v13`. Each packet
 includes the executor-facing content, the full context checksum, workflow revision,
 artifact count, node-scoped persona routing metadata for human-facing tasks, executor
 profile metadata, execution policy metadata, dependency readiness summaries, proposed
@@ -199,8 +199,9 @@ child-subflow bindings, requested and effective budgets, lineage hashes, include
 omitted sections, profile-driven omissions, and a deterministic shard manifest with
 source, priority, compression state, profile exclusion state, required/missing-required
 state, byte count, summary and shard checksum. Packets also include `context_ready`,
-`required_sections`, `missing_required_sections` and aggregate `routing_summary` metrics
-so handoff policy can block incomplete context before an executor starts work.
+`required_sections`, `missing_required_sections`, `handoff_ready`, `handoff_status`,
+`handoff_blockers` and aggregate `routing_summary` metrics so handoff policy can block
+incomplete context or pending dependencies before an executor starts work.
 
 Executor profiles let Forge route different envelopes without changing workflow
 authority. Deterministic `command` and `wait` nodes use a no-AI profile that shrinks
@@ -211,8 +212,8 @@ mixed nodes keep the richer reasoning profile. Execution policy metadata records
 whether the node is allowed to use AI, whether it is deterministic, whether a local
 Python/Node.js code runtime was selected and which validation gate controls the node.
 `forge context --strict` emits the same replayable JSON packet but exits non-zero when
-required sections are missing, giving adapters a deterministic readiness gate without
-hiding routing evidence.
+`handoff_ready=false`, giving adapters a deterministic readiness gate for missing
+required sections and dependency-not-ready holds without hiding routing evidence.
 When the workflow registry has attached a proposed compatible child subflow, the
 context package carries the structured binding plus a compact `child_subflows` shard
 from `subflow_registry`, which lets executors reuse Forge's planning decision without

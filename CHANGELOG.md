@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.27 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v13` with routing policy `task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_v13`.
+- Context packets include `handoff_ready`, `handoff_status` and structured `handoff_blockers` so executor adapters can distinguish missing required context from dependency-not-ready holds.
+- `handoff_blockers` carries typed blocker records with `kind`, `message` and `refs` for replayable executor-handoff decisions.
+
+### Changed
+
+- `forge context --strict` now exits non-zero when `handoff_ready=false`, including the case where all required context sections fit but upstream dependency tasks are still pending, running, blocked, failed or missing.
+- Context contract tests now target schema `forge.context.v13`.
+
+### Safety
+
+- Handoff readiness is read-only metadata derived from Forge-owned workflow graph state and the deterministic shard manifest. It does not complete dependencies, promote workflows, authorize CLIs, execute local Python/Node.js code, mutate Docker/Kubernetes/Knative resources or bypass validation gates.
+- Non-strict `forge context` remains inspectable and backwards-compatible for consumers that only need the emitted JSON package.
+
+### Validation
+
+- Added CLI contract coverage proving `forge context --strict` blocks a downstream executor handoff when dependency readiness is false even though required context sections are present.
+
 ## 0.4.26 - 2026-05-24
 
 ### Added

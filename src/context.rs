@@ -7,9 +7,9 @@ use crate::graph::{
 use anyhow::{bail, Result};
 use serde::Serialize;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v12";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v13";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_budget_summary_required_v12";
+    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_v13";
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
 const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
 const ALL_CONTEXT_SECTIONS: &[&str] = &[
@@ -82,6 +82,9 @@ pub struct ContextPackage {
     pub execution_policy: ExecutionPolicySpec,
     pub dependency_summary: ContextDependencySummary,
     pub dependency_refs: Vec<ContextDependencyRef>,
+    pub handoff_ready: bool,
+    pub handoff_status: String,
+    pub handoff_blockers: Vec<ContextHandoffBlocker>,
     pub child_subflow_count: usize,
     pub child_subflows: Vec<ChildSubflowRef>,
     pub latest_checkpoint: Option<TaskCheckpoint>,
@@ -155,6 +158,13 @@ pub struct ContextDependencyRef {
     pub required: bool,
     pub blocking: bool,
     pub missing: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextHandoffBlocker {
+    pub kind: String,
+    pub message: String,
+    pub refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -485,6 +495,9 @@ pub fn build_context_package_with_checkpoint(
         .map(|shard| shard.section.clone())
         .collect::<Vec<_>>();
     let context_ready = missing_required_sections.is_empty();
+    let handoff_blockers = build_handoff_blockers(&missing_required_sections, &dependency_summary);
+    let handoff_ready = handoff_blockers.is_empty();
+    let handoff_status = derive_handoff_status(&handoff_blockers);
 
     Ok(ContextPackage {
         schema_version: CONTEXT_SCHEMA_VERSION.to_string(),
@@ -499,6 +512,9 @@ pub fn build_context_package_with_checkpoint(
         execution_policy: task.execution_policy.clone(),
         dependency_summary,
         dependency_refs,
+        handoff_ready,
+        handoff_status: handoff_status.to_string(),
+        handoff_blockers,
         child_subflow_count: task.child_subflows.len(),
         child_subflows: task.child_subflows.clone(),
         latest_checkpoint,
@@ -518,6 +534,48 @@ pub fn build_context_package_with_checkpoint(
         shards,
         content,
     })
+}
+
+fn build_handoff_blockers(
+    missing_required_sections: &[String],
+    dependency_summary: &ContextDependencySummary,
+) -> Vec<ContextHandoffBlocker> {
+    let mut blockers = Vec::new();
+
+    if !missing_required_sections.is_empty() {
+        blockers.push(ContextHandoffBlocker {
+            kind: "missing_required_context".to_string(),
+            message: "required context sections were omitted by budget or profile routing"
+                .to_string(),
+            refs: missing_required_sections.to_vec(),
+        });
+    }
+
+    if !dependency_summary.ready {
+        blockers.push(ContextHandoffBlocker {
+            kind: "dependency_not_ready".to_string(),
+            message: "dependency tasks are not ready for executor handoff".to_string(),
+            refs: dependency_summary.blocking_task_ids.clone(),
+        });
+    }
+
+    blockers
+}
+
+fn derive_handoff_status(blockers: &[ContextHandoffBlocker]) -> &'static str {
+    let missing_context = blockers
+        .iter()
+        .any(|blocker| blocker.kind == "missing_required_context");
+    let blocked_dependencies = blockers
+        .iter()
+        .any(|blocker| blocker.kind == "dependency_not_ready");
+
+    match (missing_context, blocked_dependencies) {
+        (false, false) => "ready",
+        (true, false) => "blocked_missing_context",
+        (false, true) => "blocked_dependencies",
+        (true, true) => "blocked_missing_context_and_dependencies",
+    }
 }
 
 fn build_routing_summary(
