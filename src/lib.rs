@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod artifact;
 pub mod checkpoint;
+pub mod cluster;
 pub mod context;
 pub mod execution;
 pub mod executor;

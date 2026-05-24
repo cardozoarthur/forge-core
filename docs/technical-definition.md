@@ -128,6 +128,38 @@ Forge records whether each CLI is installed and configured. Installed/configured
 
 When Codex and OpenCode are both authorized, Forge records the `opencode_codex_bridge` integration so OpenCode and Codex can be coordinated as bounded execution engines.
 
+## Cluster Registry Contract
+
+Forge must know available cluster nodes before it schedules distributed work.
+The first contract is a local registry, populated by explicit operator input, not
+by automatic network scans or infrastructure mutation.
+
+Each Forge node record includes:
+
+- CPU cores and memory;
+- operating system and architecture;
+- GPU inventory and GPU availability;
+- installed software;
+- Python, Node.js and Docker availability;
+- network reachability and endpoint metadata;
+- lifecycle status;
+- cost, latency and reliability estimates;
+- trust level and sandbox permissions.
+
+`forge cluster register` persists a reported node profile in SQLite.
+`forge cluster list` returns the current registry with capability summaries.
+`forge cluster place --workflow <id> --task <task-id>` derives deterministic
+placement requirements from the task's executor and execution policy, then
+returns a dry-run placement decision with candidate reasons. A local Python code
+node, for example, requires a registered online and reachable node with the
+`python` capability, a trusted LAN/local trust class and the declared sandbox
+permission.
+
+This stage intentionally does not open SSH sessions, run remote commands, mutate
+Docker/Kubernetes/Knative resources or execute remote AI. It gives Forge an
+auditable scheduling precondition so later distributed handoff and node-lease
+work can build on explicit capabilities and trust policy.
+
 ## Runtime Substrate Contract
 
 Forge separates cognitive executors from run substrates.

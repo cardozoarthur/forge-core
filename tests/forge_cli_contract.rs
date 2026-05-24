@@ -9149,6 +9149,211 @@ fn self_run_prompt_uses_persisted_self_evolution_goal_updates() {
     assert_eq!(status["goal"], updated_goal);
 }
 
+#[test]
+fn cluster_registry_records_nodes_and_places_deterministic_code_task_by_capability() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let linux_register = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "register",
+            "--node-id",
+            "lan-linux-ai",
+            "--name",
+            "LAN Linux AI Worker",
+            "--endpoint",
+            "ssh://forge@lan-linux",
+            "--os",
+            "linux",
+            "--arch",
+            "x86_64",
+            "--cpu-cores",
+            "16",
+            "--memory-gb",
+            "64",
+            "--gpu",
+            "nvidia-rtx-4090",
+            "--software",
+            "python3",
+            "--software",
+            "node",
+            "--capability",
+            "python",
+            "--capability",
+            "nodejs",
+            "--capability",
+            "docker",
+            "--capability",
+            "gpu",
+            "--python",
+            "--node",
+            "--docker",
+            "--gpu-available",
+            "--network-reachable",
+            "--status",
+            "online",
+            "--trust",
+            "trusted_lan",
+            "--sandbox",
+            "local_process_no_network",
+            "--sandbox",
+            "ssh_command_no_sudo",
+            "--cost-per-hour-usd",
+            "0.42",
+            "--latency-ms",
+            "4",
+            "--reliability",
+            "0.99",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let linux_register: Value = serde_json::from_slice(&linux_register).unwrap();
+    assert_eq!(linux_register["status"], "registered");
+    assert_eq!(
+        linux_register["node"]["schema_version"],
+        "forge.cluster_node.v1"
+    );
+    assert_eq!(linux_register["node"]["node_id"], "lan-linux-ai");
+    assert_eq!(linux_register["node"]["python_available"], true);
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "register",
+            "--node-id",
+            "lan-windows-mt5",
+            "--name",
+            "LAN Windows MT5 Terminal",
+            "--endpoint",
+            "ssh://forge@lan-windows",
+            "--os",
+            "windows",
+            "--arch",
+            "x86_64",
+            "--cpu-cores",
+            "8",
+            "--memory-gb",
+            "32",
+            "--software",
+            "MetaTrader 5",
+            "--capability",
+            "metatrader5",
+            "--network-reachable",
+            "--status",
+            "online",
+            "--trust",
+            "trusted_lan",
+            "--sandbox",
+            "windows_desktop_user_session",
+            "--cost-per-hour-usd",
+            "0.20",
+            "--latency-ms",
+            "11",
+            "--reliability",
+            "0.97",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let cluster_list = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "list",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cluster_list: Value = serde_json::from_slice(&cluster_list).unwrap();
+    assert_eq!(cluster_list["schema_version"], "forge.cluster_registry.v1");
+    assert_eq!(cluster_list["summary"]["total_nodes"], 2);
+    assert_eq!(cluster_list["summary"]["online_nodes"], 2);
+    assert_eq!(cluster_list["summary"]["python_nodes"], 1);
+    assert_eq!(cluster_list["summary"]["windows_nodes"], 1);
+    assert_eq!(cluster_list["summary"]["metatrader5_nodes"], 1);
+
+    let planned_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run repeated local Python calculations without AI",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned: Value = serde_json::from_slice(&planned_output).unwrap();
+    let workflow_id = planned["workflow_id"].as_str().unwrap();
+    let code_task = find_task(
+        planned["tasks"].as_array().unwrap(),
+        "Run deterministic non-AI step",
+    );
+
+    let placement = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "place",
+            "--workflow",
+            workflow_id,
+            "--task",
+            code_task["id"].as_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let placement: Value = serde_json::from_slice(&placement).unwrap();
+    assert_eq!(placement["schema_version"], "forge.cluster_placement.v1");
+    assert_eq!(placement["status"], "placement_selected");
+    assert_eq!(placement["requirements"]["executor"], "command");
+    assert_eq!(placement["requirements"]["policy_mode"], "local_code_node");
+    assert_eq!(placement["requirements"]["mutation_allowed"], false);
+    assert!(placement["requirements"]["required_capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("python".to_string())));
+    assert_eq!(placement["selected_node"]["node_id"], "lan-linux-ai");
+
+    let rejected_windows = placement["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["node_id"] == "lan-windows-mt5")
+        .unwrap();
+    assert_eq!(rejected_windows["eligible"], false);
+    assert!(rejected_windows["reasons"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("missing capability python".to_string())));
+}
+
 fn find_executor<'a>(json: &'a Value, id: &str) -> &'a Value {
     json["executors"]
         .as_array()

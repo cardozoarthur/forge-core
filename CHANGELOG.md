@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.74 - 2026-05-24
+
+### Added
+
+- Added a local Forge cluster node registry through `forge cluster register` and `forge cluster list`.
+- Cluster node records use schema `forge.cluster_node.v1` and persist CPU, memory, OS, architecture, GPU inventory, installed software, Python/Node/Docker/GPU availability, network reachability, lifecycle status, cost/latency/reliability, trust level and sandbox permissions.
+- Added `forge cluster place --workflow <id> --task <task-id>` with schema `forge.cluster_placement.v1` for dry-run task placement by deterministic capability, trust and sandbox policy.
+- Added CLI contract coverage proving a Python local-code task selects the Linux Python node while rejecting a Windows MetaTrader 5 node that lacks the required Python capability.
+
+### Changed
+
+- The package version is now `0.4.74`.
+- README and technical definition now document the safe LAN/SSH cluster registry stage before remote AI execution or distributed task handoff.
+
+### Safety
+
+- Cluster placement is read-only metadata and policy evaluation. It does not open SSH sessions, execute remote code, complete tasks, promote workflows, authorize CLIs, install Knative or mutate Docker/Kubernetes/Knative/user resources.
+- Placement requires explicit registered node capability, trusted LAN/local trust and declared sandbox permissions before a node is selected.
+
 ## 0.4.73 - 2026-05-24
 
 ### Added

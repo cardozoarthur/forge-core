@@ -5,6 +5,9 @@ use forge_core::artifact::list_workflow_artifacts;
 use forge_core::checkpoint::{
     load_latest_task_checkpoint, record_task_checkpoint, TaskCheckpointRequest,
 };
+use forge_core::cluster::{
+    list_cluster_nodes, place_task_on_cluster, register_cluster_node, ClusterNodeInput,
+};
 use forge_core::context::build_context_package_with_checkpoint;
 use forge_core::execution::run_simulated;
 use forge_core::executor::{load_executors, sync_executors, ExecutorSyncOptions};
@@ -140,6 +143,10 @@ enum Commands {
         #[command(subcommand)]
         command: RuntimeCommands,
     },
+    Cluster {
+        #[command(subcommand)]
+        command: ClusterCommands,
+    },
     Workflow {
         #[command(subcommand)]
         command: WorkflowCommands,
@@ -244,6 +251,69 @@ enum RuntimeCommands {
         owner: String,
         #[arg(long)]
         allow_external: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
+enum ClusterCommands {
+    Register {
+        #[arg(long = "node-id")]
+        node_id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long = "os")]
+        os: String,
+        #[arg(long)]
+        arch: String,
+        #[arg(long = "cpu-cores")]
+        cpu_cores: u16,
+        #[arg(long = "memory-gb")]
+        memory_gb: u32,
+        #[arg(long = "gpu")]
+        gpus: Vec<String>,
+        #[arg(long = "software")]
+        installed_software: Vec<String>,
+        #[arg(long = "capability")]
+        capabilities: Vec<String>,
+        #[arg(long = "python")]
+        python_available: bool,
+        #[arg(long = "node")]
+        node_available: bool,
+        #[arg(long = "docker")]
+        docker_available: bool,
+        #[arg(long = "gpu-available")]
+        gpu_available: bool,
+        #[arg(long = "network-reachable")]
+        network_reachable: bool,
+        #[arg(long)]
+        status: String,
+        #[arg(long = "trust")]
+        trust_level: String,
+        #[arg(long = "sandbox")]
+        sandbox_permissions: Vec<String>,
+        #[arg(long = "cost-per-hour-usd", default_value_t = 0.0)]
+        cost_per_hour_usd: f64,
+        #[arg(long = "latency-ms", default_value_t = 0)]
+        latency_ms: u32,
+        #[arg(long, default_value_t = 1.0)]
+        reliability: f64,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    List {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Place {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -755,6 +825,79 @@ fn run() -> Result<i32> {
                     },
                 )?;
                 let exit_code = if report.allowed { 0 } else { 1 };
+                print_response(output, &report)?;
+                Ok(exit_code)
+            }
+        },
+        Commands::Cluster { command } => match command {
+            ClusterCommands::Register {
+                node_id,
+                name,
+                endpoint,
+                os,
+                arch,
+                cpu_cores,
+                memory_gb,
+                gpus,
+                installed_software,
+                capabilities,
+                python_available,
+                node_available,
+                docker_available,
+                gpu_available,
+                network_reachable,
+                status,
+                trust_level,
+                sandbox_permissions,
+                cost_per_hour_usd,
+                latency_ms,
+                reliability,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = register_cluster_node(
+                    &store,
+                    ClusterNodeInput {
+                        node_id,
+                        name,
+                        endpoint,
+                        os,
+                        arch,
+                        cpu_cores,
+                        memory_gb,
+                        gpus,
+                        installed_software,
+                        capabilities,
+                        python_available,
+                        node_available,
+                        docker_available,
+                        gpu_available,
+                        network_reachable,
+                        status,
+                        trust_level,
+                        sandbox_permissions,
+                        cost_per_hour_usd,
+                        latency_ms,
+                        reliability,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            ClusterCommands::List { output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_cluster_nodes(&store)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            ClusterCommands::Place {
+                workflow,
+                task,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = place_task_on_cluster(&store, &workflow, &task)?;
+                let exit_code = if report.selected_node.is_some() { 0 } else { 1 };
                 print_response(output, &report)?;
                 Ok(exit_code)
             }

@@ -103,6 +103,11 @@ impl ForgeStore {
                 created_at TEXT NOT NULL,
                 data_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS cluster_nodes (
+                id TEXT PRIMARY KEY,
+                data_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             "#,
         )?;
         Ok(())
@@ -396,5 +401,45 @@ impl ForgeStore {
             }
         }
         Ok(checkpoints)
+    }
+
+    pub fn save_cluster_node(&self, id: &str, data: &serde_json::Value) -> Result<()> {
+        self.connection.execute(
+            r#"
+            INSERT INTO cluster_nodes (id, data_json, updated_at)
+            VALUES (?1, ?2, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+                data_json=excluded.data_json,
+                updated_at=CURRENT_TIMESTAMP
+            "#,
+            params![id, serde_json::to_string(data)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_cluster_node(&self, id: &str) -> Result<Option<serde_json::Value>> {
+        let data_json: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT data_json FROM cluster_nodes WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        data_json
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
+    }
+
+    pub fn load_cluster_nodes(&self) -> Result<Vec<serde_json::Value>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT data_json FROM cluster_nodes ORDER BY id ASC")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut nodes = Vec::new();
+        for row in rows {
+            nodes.push(serde_json::from_str(&row?)?);
+        }
+        Ok(nodes)
     }
 }

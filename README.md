@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.73`
+Current version: `0.4.74`
 
 This is the first functional CLI + Skill version:
 
@@ -54,6 +54,7 @@ This is the first functional CLI + Skill version:
 - Codex/OpenCode-compatible `forge-core` skill
 - executor sync that detects installed/configured CLIs and persists human authorization policy
 - runtime sync that detects Docker/Kubernetes/Knative and persists human authorization policy
+- local cluster node registry with capability/trust metadata and dry-run placement decisions
 - goal-oriented tasks with subtasks, impediments, acceptance criteria and rework readiness checks
 - runtime workflow mutation for goals and artifacts with origin trace from `codex`, `opencode`, `forge_cli` or skills
 - async workflow substrate policy with scope guards for Forge-owned resources
@@ -245,6 +246,36 @@ forge runtimes --output json
 ```
 
 Forge can detect Docker, Kubernetes and Knative. If Docker and Kubernetes are available but Knative is missing, Forge reports a Knative install suggestion that requires human approval. Forge does not install or mutate infrastructure by itself.
+
+Register LAN or SSH-reachable cluster nodes before scheduling distributed work:
+
+```bash
+forge cluster register \
+  --node-id lan-linux-ai \
+  --name "LAN Linux AI Worker" \
+  --endpoint ssh://forge@lan-linux \
+  --os linux \
+  --arch x86_64 \
+  --cpu-cores 16 \
+  --memory-gb 64 \
+  --software python3 \
+  --capability python \
+  --python \
+  --network-reachable \
+  --status online \
+  --trust trusted_lan \
+  --sandbox local_process_no_network \
+  --output json
+forge cluster list --output json
+forge cluster place --workflow <workflow-id> --task task-009 --output json
+```
+
+The cluster registry records reported CPU, memory, OS, GPUs, installed software,
+Python/Node/Docker/GPU availability, network reachability, status,
+cost/latency/reliability, trust level and sandbox permissions. Placement is a
+read-only policy decision: Forge can select a node that satisfies deterministic
+task requirements, but it does not connect over SSH, execute remote code or mutate
+external machines.
 
 Runtime resources are scope-guarded:
 
