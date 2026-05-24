@@ -161,6 +161,12 @@ emits `forge.cluster_sync_manifest.v1` with context, checkpoint, artifact and
 context-shard hashes. The manifest is hash-only and declares remote execution and
 external mutation disabled, so it is an auditable staging contract rather than a
 remote runner.
+`forge cluster leases --output json` lists the node-scoped leases created by
+cluster handoff. Each row includes the workflow/task identity, lease scope,
+active/expired state, selected node metadata, trust level, sandbox permissions and
+explicit `remote_execution_enabled=false` / `external_mutation_allowed=false`
+markers. Operators can filter by `--node-id` to inspect a single LAN/SSH node
+without touching the remote machine.
 
 This stage intentionally does not open SSH sessions, run remote commands, mutate
 Docker/Kubernetes/Knative resources or execute remote AI. It gives Forge an

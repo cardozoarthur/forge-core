@@ -325,6 +325,18 @@ impl ForgeStore {
             .transpose()
     }
 
+    pub fn load_task_leases(&self) -> Result<Vec<serde_json::Value>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT data_json FROM task_leases ORDER BY workflow_id ASC, task_id ASC")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut leases = Vec::new();
+        for row in rows {
+            leases.push(serde_json::from_str(&row?)?);
+        }
+        Ok(leases)
+    }
+
     pub fn delete_task_lease(
         &self,
         workflow_id: &str,

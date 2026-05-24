@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.77 - 2026-05-24
+
+### Added
+
+- Added `forge cluster leases --output json` with schema `forge.cluster_node_lease_registry.v1`.
+- Cluster lease registry rows expose node id/name, workflow/task identity, lease id, lease scope, active/expired state, trust level, sandbox permissions and explicit no-remote-execution/no-external-mutation flags.
+- Added `--node-id <id>` filtering for node-scoped lease inspection.
+- Added CLI contract coverage proving cluster handoff leases can be inspected without enabling remote execution or external mutation.
+- Added `docs/reports/forge-core-v0.4.77-report-2026-05-24.md` with the cycle report.
+
+### Changed
+
+- The package version is now `0.4.77`.
+- README and technical definition now document cluster lease inspection as the audit surface after cluster handoff.
+
+### Safety
+
+- Cluster lease inspection is read-only metadata over Forge-owned SQLite task leases and registered node profiles.
+- This change does not open SSH sessions, execute remote commands, copy files to external machines, authorize AI executors, install Knative or mutate Docker/Kubernetes/Knative/user resources.
+- Every listed node lease keeps `remote_execution_enabled=false`, `external_mutation_allowed=false` and the explicit trust policy string.
+
 ## 0.4.76 - 2026-05-24
 
 ### Added

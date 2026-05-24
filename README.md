@@ -271,6 +271,8 @@ forge cluster register \
 forge cluster list --output json
 forge cluster place --workflow <workflow-id> --task task-009 --output json
 forge cluster handoff --workflow <workflow-id> --task task-001 --budget 1200 --ttl-seconds 900 --output json
+forge cluster leases --output json
+forge cluster leases --node-id lan-linux-ai --output json
 ```
 
 The cluster registry records reported CPU, memory, OS, GPUs, installed software,
@@ -284,7 +286,10 @@ returns `forge.cluster_task_handoff.v1` with the placement report, executor hand
 packet, node-scoped lease ref and `forge.cluster_sync_manifest.v1`. The sync
 manifest carries context, checkpoint, artifact and shard hashes so a future
 distributed adapter can copy or verify only content-addressed inputs after an
-explicit remote-execution policy exists.
+explicit remote-execution policy exists. `forge cluster leases` provides the
+read-only audit surface for those node-scoped leases, including active/expired
+state, workflow/task identity, trust level, sandbox permissions and explicit
+`remote_execution_enabled=false` / `external_mutation_allowed=false` markers.
 
 Runtime resources are scope-guarded:
 

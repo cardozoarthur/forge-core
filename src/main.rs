@@ -6,8 +6,8 @@ use forge_core::checkpoint::{
     load_latest_task_checkpoint, record_task_checkpoint, TaskCheckpointRequest,
 };
 use forge_core::cluster::{
-    build_cluster_task_handoff, list_cluster_nodes, place_task_on_cluster, register_cluster_node,
-    ClusterNodeInput,
+    build_cluster_task_handoff, list_cluster_node_leases, list_cluster_nodes,
+    place_task_on_cluster, register_cluster_node, ClusterNodeInput,
 };
 use forge_core::context::build_context_package_with_checkpoint;
 use forge_core::execution::run_simulated;
@@ -307,6 +307,12 @@ enum ClusterCommands {
         output: OutputFormat,
     },
     List {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Leases {
+        #[arg(long = "node-id")]
+        node_id: Option<String>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -900,6 +906,12 @@ fn run() -> Result<i32> {
             ClusterCommands::List { output } => {
                 let store = ForgeStore::open(cli.store)?;
                 let report = list_cluster_nodes(&store)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            ClusterCommands::Leases { node_id, output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_cluster_node_leases(&store, node_id.as_deref())?;
                 print_response(output, &report)?;
                 Ok(0)
             }

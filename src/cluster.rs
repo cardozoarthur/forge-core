@@ -1,11 +1,12 @@
 use crate::context::ContextReplayShardRef;
 use crate::graph::{ArtifactRecord, AtomicTask, ExecutorKind};
 use crate::handoff::{build_task_handoff, TaskHandoffReport};
+use crate::lease::TaskLease;
 use crate::storage::ForgeStore;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const CLUSTER_NODE_SCHEMA_VERSION: &str = "forge.cluster_node.v1";
 const CLUSTER_REGISTRY_SCHEMA_VERSION: &str = "forge.cluster_registry.v1";
@@ -14,6 +15,8 @@ const CLUSTER_PLACEMENT_REQUIREMENTS_SCHEMA_VERSION: &str =
     "forge.cluster_placement_requirements.v1";
 const CLUSTER_TASK_HANDOFF_SCHEMA_VERSION: &str = "forge.cluster_task_handoff.v1";
 const CLUSTER_SYNC_MANIFEST_SCHEMA_VERSION: &str = "forge.cluster_sync_manifest.v1";
+const CLUSTER_NODE_LEASE_SCHEMA_VERSION: &str = "forge.cluster_node_lease.v1";
+const CLUSTER_NODE_LEASE_REGISTRY_SCHEMA_VERSION: &str = "forge.cluster_node_lease_registry.v1";
 
 #[derive(Debug, Clone)]
 pub struct ClusterNodeInput {
@@ -185,6 +188,52 @@ pub struct ClusterCheckpointRef {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ClusterNodeLeaseRegistryFilter {
+    pub node_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ClusterNodeLeaseRegistrySummary {
+    pub total_leases: usize,
+    pub active_leases: usize,
+    pub expired_leases: usize,
+    pub registered_node_leases: usize,
+    pub unregistered_executor_leases: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClusterNodeLeaseRecord {
+    pub schema_version: String,
+    pub node_id: String,
+    pub node_name: Option<String>,
+    pub endpoint: Option<String>,
+    pub workflow_id: String,
+    pub workflow_goal: Option<String>,
+    pub task_id: String,
+    pub task_title: Option<String>,
+    pub lease_id: String,
+    pub lease_scope: String,
+    pub acquired_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub lease_status: String,
+    pub trust_level: String,
+    pub sandbox_permissions: Vec<String>,
+    pub network_reachable: bool,
+    pub remote_execution_enabled: bool,
+    pub external_mutation_allowed: bool,
+    pub trust_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClusterNodeLeaseRegistryReport {
+    pub schema_version: String,
+    pub status: String,
+    pub filter: ClusterNodeLeaseRegistryFilter,
+    pub summary: ClusterNodeLeaseRegistrySummary,
+    pub leases: Vec<ClusterNodeLeaseRecord>,
+}
+
 pub fn register_cluster_node(
     store: &ForgeStore,
     input: ClusterNodeInput,
@@ -230,6 +279,89 @@ pub fn list_cluster_nodes(store: &ForgeStore) -> Result<ClusterRegistryReport> {
         status: "listed".to_string(),
         summary,
         nodes,
+    })
+}
+
+pub fn list_cluster_node_leases(
+    store: &ForgeStore,
+    node_id: Option<&str>,
+) -> Result<ClusterNodeLeaseRegistryReport> {
+    let node_filter = node_id
+        .map(normalize_node_filter)
+        .filter(|value| !value.is_empty());
+    let nodes = load_cluster_nodes(store)?;
+    let nodes_by_id = nodes
+        .into_iter()
+        .map(|node| (node.node_id.clone(), node))
+        .collect::<BTreeMap<_, _>>();
+    let leases = store
+        .load_task_leases()?
+        .into_iter()
+        .map(serde_json::from_value::<TaskLease>)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let now = Utc::now();
+    let mut summary = ClusterNodeLeaseRegistrySummary::default();
+    let mut records = Vec::new();
+    for lease in leases {
+        if node_filter
+            .as_ref()
+            .is_some_and(|filter| lease.executor != filter.as_str())
+        {
+            continue;
+        }
+        summary.total_leases += 1;
+        let Some(node) = nodes_by_id.get(&lease.executor) else {
+            summary.unregistered_executor_leases += 1;
+            continue;
+        };
+        let workflow = store.load_workflow(&lease.workflow_id).ok();
+        let task_title = workflow.as_ref().and_then(|workflow| {
+            workflow
+                .tasks
+                .iter()
+                .find(|task| task.id == lease.task_id)
+                .map(|task| task.title.clone())
+        });
+        let lease_status = if lease.expires_at > now {
+            summary.active_leases += 1;
+            "active"
+        } else {
+            summary.expired_leases += 1;
+            "expired"
+        };
+        summary.registered_node_leases += 1;
+        records.push(ClusterNodeLeaseRecord {
+            schema_version: CLUSTER_NODE_LEASE_SCHEMA_VERSION.to_string(),
+            node_id: node.node_id.clone(),
+            node_name: Some(node.name.clone()),
+            endpoint: node.endpoint.clone(),
+            workflow_id: lease.workflow_id,
+            workflow_goal: workflow.map(|workflow| workflow.goal),
+            task_id: lease.task_id,
+            task_title,
+            lease_id: lease.lease_id,
+            lease_scope: "task_on_cluster_node".to_string(),
+            acquired_at: lease.acquired_at,
+            expires_at: lease.expires_at,
+            lease_status: lease_status.to_string(),
+            trust_level: node.trust_level.clone(),
+            sandbox_permissions: node.sandbox_permissions.clone(),
+            network_reachable: node.network_reachable,
+            remote_execution_enabled: false,
+            external_mutation_allowed: false,
+            trust_policy: "explicit_trust_required_no_external_mutation".to_string(),
+        });
+    }
+
+    Ok(ClusterNodeLeaseRegistryReport {
+        schema_version: CLUSTER_NODE_LEASE_REGISTRY_SCHEMA_VERSION.to_string(),
+        status: "listed".to_string(),
+        filter: ClusterNodeLeaseRegistryFilter {
+            node_id: node_filter,
+        },
+        summary,
+        leases: records,
     })
 }
 
@@ -641,4 +773,8 @@ fn normalize_set(values: &[String]) -> BTreeSet<String> {
 
 fn normalize_token(value: &str) -> String {
     value.trim().to_lowercase().replace(' ', "_")
+}
+
+fn normalize_node_filter(value: &str) -> String {
+    value.trim().to_string()
 }

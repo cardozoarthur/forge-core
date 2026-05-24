@@ -9613,6 +9613,165 @@ fn cluster_handoff_selects_node_leases_task_and_returns_hash_sync_manifest() {
     );
 }
 
+#[test]
+fn cluster_lease_registry_lists_node_scoped_leases_without_remote_execution() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "register",
+            "--node-id",
+            "lan-linux-lease-worker",
+            "--name",
+            "LAN Linux Lease Worker",
+            "--endpoint",
+            "ssh://forge@lan-lease-worker",
+            "--os",
+            "linux",
+            "--arch",
+            "x86_64",
+            "--cpu-cores",
+            "8",
+            "--memory-gb",
+            "32",
+            "--software",
+            "python3",
+            "--capability",
+            "command",
+            "--capability",
+            "python",
+            "--python",
+            "--network-reachable",
+            "--status",
+            "online",
+            "--trust",
+            "trusted_lan",
+            "--sandbox",
+            "local_process_no_network",
+            "--latency-ms",
+            "5",
+            "--reliability",
+            "0.98",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let planned_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Prepare distributed cluster handoff lease inspection without external mutation",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned: Value = serde_json::from_slice(&planned_output).unwrap();
+    let workflow_id = planned["workflow_id"].as_str().unwrap();
+    let task = &planned["tasks"][0];
+    let task_id = task["id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let lease_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "leases",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let leases: Value = serde_json::from_slice(&lease_output).unwrap();
+
+    assert_eq!(
+        leases["schema_version"],
+        "forge.cluster_node_lease_registry.v1"
+    );
+    assert_eq!(leases["status"], "listed");
+    assert_eq!(leases["summary"]["total_leases"], 1);
+    assert_eq!(leases["summary"]["active_leases"], 1);
+    assert_eq!(leases["summary"]["expired_leases"], 0);
+    assert_eq!(leases["summary"]["registered_node_leases"], 1);
+    assert_eq!(leases["summary"]["unregistered_executor_leases"], 0);
+
+    let lease = &leases["leases"][0];
+    assert_eq!(lease["schema_version"], "forge.cluster_node_lease.v1");
+    assert_eq!(lease["node_id"], "lan-linux-lease-worker");
+    assert_eq!(lease["node_name"], "LAN Linux Lease Worker");
+    assert_eq!(lease["workflow_id"], workflow_id);
+    assert_eq!(lease["task_id"], task_id);
+    assert_eq!(lease["task_title"], task["title"]);
+    assert_eq!(lease["lease_scope"], "task_on_cluster_node");
+    assert_eq!(lease["lease_status"], "active");
+    assert_eq!(lease["trust_level"], "trusted_lan");
+    assert_eq!(lease["network_reachable"], true);
+    assert_eq!(lease["remote_execution_enabled"], false);
+    assert_eq!(lease["external_mutation_allowed"], false);
+    assert_eq!(
+        lease["trust_policy"],
+        "explicit_trust_required_no_external_mutation"
+    );
+    assert!(lease["sandbox_permissions"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("local_process_no_network".to_string())));
+
+    let filtered_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "leases",
+            "--node-id",
+            "lan-linux-lease-worker",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let filtered: Value = serde_json::from_slice(&filtered_output).unwrap();
+    assert_eq!(filtered["filter"]["node_id"], "lan-linux-lease-worker");
+    assert_eq!(filtered["leases"].as_array().unwrap().len(), 1);
+}
+
 fn find_executor<'a>(json: &'a Value, id: &str) -> &'a Value {
     json["executors"]
         .as_array()
