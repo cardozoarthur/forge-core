@@ -31,6 +31,7 @@ pub struct SelfRunOptions {
     pub max_cycles: u32,
     pub sleep_seconds: u64,
     pub executors: Vec<String>,
+    pub mode: String,
     pub dry_run: bool,
     pub push: bool,
 }
@@ -43,9 +44,12 @@ pub struct SelfRunReport {
     pub stop_at: String,
     pub repo: String,
     pub executors: Vec<String>,
+    pub operating_mode: String,
     pub max_cycles: u32,
     pub dry_run: bool,
     pub push: bool,
+    pub overhead_ledger: SelfOverheadLedger,
+    pub decision_gate: SelfDecisionGateReport,
     pub cycle_reports: Vec<SelfCycleReport>,
 }
 
@@ -61,10 +65,38 @@ pub struct SelfCycleReport {
     pub validation_report_sha256: String,
     pub report_path: String,
     pub validation_passed: bool,
+    pub overhead_ledger: SelfOverheadLedger,
+    pub decision_gate: SelfDecisionGateReport,
     pub self_update: SelfUpdateReport,
     pub committed: bool,
     pub commit: Option<String>,
     pub public_project_update: PublicProjectUpdateReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SelfOverheadLedger {
+    pub schema_version: String,
+    pub operating_mode: String,
+    pub cycle_count: u32,
+    pub prompt_bytes: u64,
+    pub estimated_prompt_tokens: u64,
+    pub validation_command_count: u32,
+    pub artifact_count: u32,
+    pub metadata_bytes: u64,
+    pub orchestration_cost_score: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SelfDecisionGateReport {
+    pub schema_version: String,
+    pub operating_mode: String,
+    pub mode_boundary: String,
+    pub decision: String,
+    pub stop_loop: bool,
+    pub terminal_goal_reached: bool,
+    pub expected_value_score: u32,
+    pub orchestration_cost_score: u32,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,6 +130,8 @@ struct SelfEvolutionPromptPacket {
     workflow_revision: u64,
     stop_at: String,
     repo: String,
+    operating_mode: String,
+    decision_gate: SelfDecisionGateReport,
     validation_commands: Vec<String>,
 }
 
@@ -128,7 +162,148 @@ struct SelfValidationCommandEvidence {
     reason: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+enum SelfOperatingMode {
+    Lean,
+    Balanced,
+    Strict,
+}
+
+impl SelfOperatingMode {
+    fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "balanced" => Ok(Self::Balanced),
+            "lean" => Ok(Self::Lean),
+            "strict" => Ok(Self::Strict),
+            other => bail!("unsupported self-evolution mode: {other}"),
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Lean => "lean",
+            Self::Balanced => "balanced",
+            Self::Strict => "strict",
+        }
+    }
+
+    fn boundary(&self) -> &'static str {
+        match self {
+            Self::Lean => {
+                "minimal governance; run only when expected throughput, cost, retry or artifact value clearly exceeds orchestration cost"
+            }
+            Self::Balanced => {
+                "default bounded governance; allow small validated increments with explicit value evidence and measured overhead"
+            }
+            Self::Strict => {
+                "high auditability; tolerate more overhead only for real failure prevention, audit, safety or distributed execution needs"
+            }
+        }
+    }
+
+    fn base_cost_score(&self) -> u32 {
+        match self {
+            Self::Lean => 2,
+            Self::Balanced => 3,
+            Self::Strict => 5,
+        }
+    }
+}
+
+impl SelfOverheadLedger {
+    fn empty(mode: &SelfOperatingMode) -> Self {
+        Self {
+            schema_version: "forge.self_evolution.overhead_ledger.v1".to_string(),
+            operating_mode: mode.as_str().to_string(),
+            cycle_count: 0,
+            prompt_bytes: 0,
+            estimated_prompt_tokens: 0,
+            validation_command_count: 0,
+            artifact_count: 0,
+            metadata_bytes: 0,
+            orchestration_cost_score: mode.base_cost_score(),
+        }
+    }
+
+    fn for_cycle(
+        mode: &SelfOperatingMode,
+        prompt_bytes: u64,
+        validation_command_count: u32,
+        artifact_count: u32,
+        metadata_bytes: u64,
+    ) -> Self {
+        let estimated_prompt_tokens = estimate_tokens(prompt_bytes);
+        Self {
+            schema_version: "forge.self_evolution.overhead_ledger.v1".to_string(),
+            operating_mode: mode.as_str().to_string(),
+            cycle_count: 1,
+            prompt_bytes,
+            estimated_prompt_tokens,
+            validation_command_count,
+            artifact_count,
+            metadata_bytes,
+            orchestration_cost_score: mode.base_cost_score()
+                + (estimated_prompt_tokens / 2_000) as u32
+                + artifact_count,
+        }
+    }
+
+    fn aggregate(mode: &SelfOperatingMode, reports: &[SelfCycleReport]) -> Self {
+        let mut ledger = Self::empty(mode);
+        ledger.cycle_count = reports.len() as u32;
+        for report in reports {
+            ledger.prompt_bytes += report.overhead_ledger.prompt_bytes;
+            ledger.estimated_prompt_tokens += report.overhead_ledger.estimated_prompt_tokens;
+            ledger.validation_command_count += report.overhead_ledger.validation_command_count;
+            ledger.artifact_count += report.overhead_ledger.artifact_count;
+            ledger.metadata_bytes += report.overhead_ledger.metadata_bytes;
+            ledger.orchestration_cost_score += report.overhead_ledger.orchestration_cost_score;
+        }
+        ledger
+    }
+}
+
+impl SelfDecisionGateReport {
+    fn evaluate(goal: &str, mode: &SelfOperatingMode) -> Self {
+        let expected_value_score = expected_value_score(goal);
+        let orchestration_cost_score = mode.base_cost_score() + bloat_score(goal);
+        let terminal_goal_reached = terminal_goal_contract_satisfied(goal);
+        let (decision, stop_loop, reason) = if terminal_goal_reached {
+            (
+                "stop_terminal_goal_reached",
+                true,
+                "terminal self-evolution goal is already satisfied by the mode boundary, overhead ledger and decision gate",
+            )
+        } else if expected_value_score < orchestration_cost_score {
+            (
+                "reject_low_value_cycle",
+                true,
+                "expected value is lower than orchestration cost under the selected operating mode",
+            )
+        } else {
+            (
+                "run_cycle",
+                false,
+                "expected value is high enough to justify one bounded self-evolution cycle",
+            )
+        };
+
+        Self {
+            schema_version: "forge.self_evolution.decision_gate.v1".to_string(),
+            operating_mode: mode.as_str().to_string(),
+            mode_boundary: mode.boundary().to_string(),
+            decision: decision.to_string(),
+            stop_loop,
+            terminal_goal_reached,
+            expected_value_score,
+            orchestration_cost_score,
+            reason: reason.to_string(),
+        }
+    }
+}
+
 pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result<SelfRunReport> {
+    let operating_mode = SelfOperatingMode::parse(&options.mode)?;
     let stop_at = DateTime::parse_from_rfc3339(&options.until)
         .with_context(|| format!("invalid --until value: {}", options.until))?;
     if stop_at.with_timezone(&Utc) <= Utc::now() {
@@ -154,6 +329,30 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
     store.save_workflow(&workflow)?;
     save_run_record(store, &run)?;
 
+    let decision_gate = SelfDecisionGateReport::evaluate(&self_evolution_goal, &operating_mode);
+    if decision_gate.stop_loop {
+        let overhead_ledger = SelfOverheadLedger::empty(&operating_mode);
+        return Ok(SelfRunReport {
+            status: if decision_gate.terminal_goal_reached {
+                "terminal_goal_reached".to_string()
+            } else {
+                "rejected".to_string()
+            },
+            run_id: run.run_id,
+            workflow_id: workflow.id,
+            stop_at: options.until,
+            repo: options.repo.display().to_string(),
+            executors,
+            operating_mode: operating_mode.as_str().to_string(),
+            max_cycles: options.max_cycles,
+            dry_run: options.dry_run,
+            push: options.push,
+            overhead_ledger,
+            decision_gate,
+            cycle_reports: Vec::new(),
+        });
+    }
+
     let mut cycle_reports = Vec::new();
     for cycle in 1..=options.max_cycles {
         if Utc::now() >= stop_at.with_timezone(&Utc) {
@@ -169,9 +368,18 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             &current_workflow,
             &run.run_id,
             &options,
+            &operating_mode,
+            &decision_gate,
         );
         let prompt = render_prompt(&prompt_packet);
         let prompt_sha256 = hex_sha256(prompt.as_bytes());
+        let cycle_overhead_ledger = SelfOverheadLedger::for_cycle(
+            &operating_mode,
+            prompt.len() as u64,
+            prompt_packet.validation_commands.len() as u32,
+            3,
+            serde_json::to_vec(&prompt_packet)?.len() as u64,
+        );
         let prompt_path = format!(
             "artifacts/{}/self-evolution-cycle-{:03}-prompt.md",
             workflow.id, cycle
@@ -240,6 +448,8 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             validation_report_sha256,
             report_path: report_path.clone(),
             validation_passed: validation_report.validation_passed,
+            overhead_ledger: cycle_overhead_ledger,
+            decision_gate: decision_gate.clone(),
             self_update,
             committed,
             commit,
@@ -259,6 +469,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             std::thread::sleep(std::time::Duration::from_secs(options.sleep_seconds));
         }
     }
+    let overhead_ledger = SelfOverheadLedger::aggregate(&operating_mode, &cycle_reports);
 
     Ok(SelfRunReport {
         status: if options.dry_run {
@@ -271,9 +482,12 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         stop_at: options.until,
         repo: options.repo.display().to_string(),
         executors,
+        operating_mode: operating_mode.as_str().to_string(),
         max_cycles: options.max_cycles,
         dry_run: options.dry_run,
         push: options.push,
+        overhead_ledger,
+        decision_gate,
         cycle_reports,
     })
 }
@@ -285,6 +499,8 @@ impl SelfEvolutionPromptPacket {
         workflow: &Workflow,
         run_id: &str,
         options: &SelfRunOptions,
+        operating_mode: &SelfOperatingMode,
+        decision_gate: &SelfDecisionGateReport,
     ) -> Self {
         Self {
             version: SELF_EVOLUTION_PROMPT_PACKET_VERSION.to_string(),
@@ -300,6 +516,8 @@ impl SelfEvolutionPromptPacket {
             workflow_revision: workflow.revisions.len() as u64,
             stop_at: options.until.clone(),
             repo: options.repo.display().to_string(),
+            operating_mode: operating_mode.as_str().to_string(),
+            decision_gate: decision_gate.clone(),
             validation_commands: vec![
                 VALIDATION_COMMANDS[0].to_string(),
                 VALIDATION_COMMANDS[1].to_string(),
@@ -447,6 +665,71 @@ fn is_self_evolution_workflow(workflow: &Workflow) -> bool {
             .is_some_and(|goal| goal.contains(BASE_SELF_EVOLUTION_GOAL))
 }
 
+fn estimate_tokens(bytes: u64) -> u64 {
+    bytes.saturating_add(3) / 4
+}
+
+fn terminal_goal_contract_satisfied(goal: &str) -> bool {
+    let normalized = goal.to_ascii_lowercase();
+    normalized.contains("validated lean/balanced/strict mode boundary")
+        && normalized.contains("measurable overhead ledger")
+        && normalized.contains("automated self-evolution decision gate")
+        && normalized.contains("expected value is lower than orchestration cost")
+}
+
+fn expected_value_score(goal: &str) -> u32 {
+    let normalized = goal.to_ascii_lowercase();
+    let no_value_clause = normalized.contains("without changing")
+        || normalized.contains("without improving")
+        || normalized.contains("does not improve");
+    if no_value_clause && bloat_score(goal) > 0 {
+        return 1;
+    }
+
+    let value_terms = [
+        "throughput",
+        "reduces",
+        "reduce",
+        "cost",
+        "retries",
+        "retry",
+        "deterministic",
+        "artifact delivery",
+        "validation",
+        "useful artifact",
+        "prevents",
+        "failure",
+        "context routing",
+        "bounded executor",
+    ];
+    let score = value_terms
+        .iter()
+        .filter(|term| normalized.contains(**term))
+        .count() as u32;
+    score.max(4)
+}
+
+fn bloat_score(goal: &str) -> u32 {
+    let normalized = goal.to_ascii_lowercase();
+    [
+        "governance",
+        "schema",
+        "schemas",
+        "receipt",
+        "receipts",
+        "hash",
+        "hashes",
+        "manifest",
+        "manifests",
+        "projection",
+        "projections",
+        "metadata",
+    ]
+    .iter()
+    .filter(|term| normalized.contains(**term))
+    .count() as u32
+}
+
 fn render_prompt(packet: &SelfEvolutionPromptPacket) -> String {
     format!(
         r#"# Improve Forge Core
@@ -467,6 +750,22 @@ Initial workflow goal:
 {}
 
 Workflow revision: `{}`
+
+Operating mode: `{}`
+
+Mode boundary:
+- {}
+
+Lean overhead ledger:
+- Record prompt bytes, estimated prompt tokens, validation command count, artifact count and metadata bytes for each cycle.
+- Use the ledger to compare orchestration cost against useful artifact delivery, retries avoided, deterministic execution and validation value.
+
+Automated self-evolution decision gate:
+- Schema: `{}`
+- Decision: `{}`
+- Expected value score: `{}`
+- Orchestration cost score: `{}`
+- Reason: {}
 
 Strategic goal guidance:
 - Improve Forge Core itself in a small, validated, production-quality increment.
@@ -512,6 +811,13 @@ Return a concise final report with:
         packet.workflow_goal,
         packet.initial_workflow_goal,
         packet.workflow_revision,
+        packet.operating_mode,
+        packet.decision_gate.mode_boundary,
+        packet.decision_gate.schema_version,
+        packet.decision_gate.decision,
+        packet.decision_gate.expected_value_score,
+        packet.decision_gate.orchestration_cost_score,
+        packet.decision_gate.reason,
         packet.repo,
         packet
             .validation_commands

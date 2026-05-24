@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.86 - 2026-05-24
+
+### Added
+
+- Added `forge self run --mode lean|balanced|strict`, defaulting to `balanced`.
+- Added `forge.self_evolution.overhead_ledger.v1` to self-evolution run and cycle reports with prompt bytes, estimated prompt tokens, validation command count, artifact count, metadata bytes and orchestration cost score.
+- Added `forge.self_evolution.decision_gate.v1` to self-evolution run and cycle reports so Forge can run one bounded cycle, reject low-value governance bloat, or stop when the terminal self-evolution goal is already satisfied.
+- Self-evolution prompts now include the operating mode boundary, overhead-ledger policy and decision-gate score before generic strategic guidance.
+- Added CLI contract coverage for the mode/ledger/gate surface, terminal-goal stop behavior and lean-mode rejection of low-value bloat cycles.
+- Added `docs/reports/forge-core-v0.4.86-report-2026-05-24.md` with the cycle report.
+
+### Changed
+
+- The package version is now `0.4.86`.
+- `forge self run` can now return `terminal_goal_reached` or `rejected` without creating cycle prompt artifacts when continuing would violate the lean final goal.
+
+### Safety
+
+- The decision gate is local and deterministic. It does not call a model, install tooling, mutate Docker/Kubernetes/Knative resources or bypass the existing validation-before-commit path.
+- The new metadata is intentionally compact and lives on the existing self-evolution report surface instead of adding a new store table or control plane.
+
 ## 0.4.85 - 2026-05-24
 
 ### Added

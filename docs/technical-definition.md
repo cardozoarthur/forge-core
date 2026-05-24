@@ -466,6 +466,17 @@ Forge may work on Forge itself only through bounded cycles:
 - every cycle writes prompt/report artifacts;
 - prompt packets are versioned and must load the persisted Forge workflow goal before generic strategic guidance;
 - if a human or adapter mutates the self-evolution goal through `forge workflow update-goal`, the next cycle must carry that current goal, initial goal and workflow revision into the executor prompt;
+- `forge self run --mode lean|balanced|strict` selects the self-evolution operating boundary:
+  lean minimizes governance and rejects low-value bloat cycles, balanced is the
+  default for small validated increments, and strict tolerates extra overhead
+  only for concrete audit, safety or distributed-execution needs;
+- every run reports `forge.self_evolution.overhead_ledger.v1` with prompt bytes,
+  estimated prompt tokens, validation command count, artifact count, metadata
+  bytes and an orchestration cost score;
+- every run reports `forge.self_evolution.decision_gate.v1`, which can run one
+  bounded cycle, reject a low-value cycle whose expected value is below
+  orchestration cost, or stop immediately when the persisted terminal
+  self-evolution goal is already satisfied;
 - authorized executors are selected from local policy;
 - validation must pass before commit;
 - push is explicit;
