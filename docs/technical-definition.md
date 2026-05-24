@@ -236,6 +236,8 @@ This capability must remain operationally bounded:
 - Codex-style developer/personality instructions and Paperclip-style soul, voice,
   tone or persona models are inputs to the profile contract;
 - the persona switch is included in lineage so results are replayable;
+- promotion validation rejects persona switches that are not node-scoped,
+  auditable, source-model backed and gated by `persona_routing_required`;
 - validation gates can reject artifacts that drift away from the requested role,
   audience, constraints or factual content.
 

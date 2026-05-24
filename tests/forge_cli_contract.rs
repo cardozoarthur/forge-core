@@ -1108,6 +1108,85 @@ fn context_package_includes_persona_routing_lineage_for_human_facing_task() {
 }
 
 #[test]
+fn validation_blocks_promotion_when_persona_routing_is_not_auditable() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Create an operator report with auditable persona routing",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    make_persona_routing_non_auditable(&store, workflow_id, "Generate documentation");
+
+    let validation_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "validate",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+
+    let validation: Value = serde_json::from_slice(&validation_output).unwrap();
+    assert_eq!(validation["status"], "blocked");
+    assert_eq!(validation["promotable"], false);
+    assert!(validation["failed_rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| {
+            rule["task_id"] == "task-008"
+                && rule["kind"] == "persona_routing"
+                && rule["message"].as_str().unwrap().contains("node-scoped")
+        }));
+    assert!(validation["rework_tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|task| {
+            task["task_id"] == "task-008"
+                && task["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("persona routing contract")
+        }));
+}
+
+#[test]
 fn inspect_renders_terminal_dag_with_lifecycle_persona_and_verbose_subtasks() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -3638,6 +3717,44 @@ fn remove_legacy_fields_from_stored_workflow(store: &Path, workflow_id: &str) {
     for task in workflow["tasks"].as_array_mut().unwrap() {
         task.as_object_mut().unwrap().remove("async_policy");
     }
+    let patched = serde_json::to_string(&workflow).unwrap();
+    connection
+        .execute(
+            "UPDATE workflows SET data_json = ?1 WHERE id = ?2",
+            (&patched, workflow_id),
+        )
+        .unwrap();
+}
+
+fn make_persona_routing_non_auditable(store: &Path, workflow_id: &str, title: &str) {
+    let connection = Connection::open(store).unwrap();
+    let data_json: String = connection
+        .query_row(
+            "SELECT data_json FROM workflows WHERE id = ?1",
+            [workflow_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut workflow: Value = serde_json::from_str(&data_json).unwrap();
+    let task = workflow["tasks"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|task| task["title"] == title)
+        .unwrap();
+    let persona = task["persona"].as_object_mut().unwrap();
+    persona.insert("scope".to_string(), Value::String("workflow".to_string()));
+    persona.insert("auditable".to_string(), Value::Bool(false));
+    persona.insert(
+        "validation_gate".to_string(),
+        Value::String("manual_review_optional".to_string()),
+    );
+    persona.insert(
+        "source_models".to_string(),
+        Value::Array(vec![Value::String(
+            "codex_developer_personality_instructions".to_string(),
+        )]),
+    );
     let patched = serde_json::to_string(&workflow).unwrap();
     connection
         .execute(

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.25 - 2026-05-24
+
+### Added
+
+- `forge validate` now enforces the node-scoped Personality/Soul Routing contract on tasks that declare persona metadata.
+- Persona-routed tasks are blocked from promotion when the persona mode is empty, scope is not `node`, auditability is false, voice/tone are missing, the validation gate is not `persona_routing_required`, or required Codex/Paperclip source model references are absent.
+- Validation reports now emit `failed_rules.kind="persona_routing"` plus a rework task when persona routing is incomplete or non-auditable.
+
+### Changed
+
+- Personality/Soul Routing is now validation-gated runtime behavior rather than context-only metadata.
+- Human-facing persona switches remain optional per node, but any declared switch must be explicit, auditable and replayable before promotion.
+
+### Safety
+
+- The new gate is read-only validation over Forge-owned workflow metadata. It does not select a provider, run a model, authorize CLIs, execute local code, mutate Docker/Kubernetes/Knative resources or promote any workflow.
+- Persona-free legacy tasks remain valid under the existing task-status and goal-readiness gates.
+
+### Validation
+
+- Added CLI contract coverage proving a completed workflow is still blocked when its stored persona routing metadata is corrupted after execution.
+
 ## 0.4.24 - 2026-05-24
 
 ### Added
