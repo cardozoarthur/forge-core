@@ -5773,6 +5773,265 @@ fn self_run_writes_validation_evidence_contract_artifact() {
 }
 
 #[test]
+fn self_run_exposes_operating_mode_overhead_ledger_and_decision_gate() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("README.md"), "# Repo\n").unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2026-05-25T10:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--executor",
+            "codex",
+            "--mode",
+            "balanced",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["operating_mode"], "balanced");
+    assert_eq!(json["status"], "planned");
+    assert_eq!(
+        json["decision_gate"]["schema_version"],
+        "forge.self_evolution.decision_gate.v1"
+    );
+    assert_eq!(json["decision_gate"]["decision"], "run_cycle");
+    assert_eq!(json["decision_gate"]["stop_loop"], false);
+    assert!(
+        json["decision_gate"]["expected_value_score"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        json["decision_gate"]["orchestration_cost_score"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(
+        json["overhead_ledger"]["schema_version"],
+        "forge.self_evolution.overhead_ledger.v1"
+    );
+    assert_eq!(json["overhead_ledger"]["operating_mode"], "balanced");
+    assert_eq!(json["overhead_ledger"]["cycle_count"], 1);
+    assert!(json["overhead_ledger"]["prompt_bytes"].as_u64().unwrap() > 0);
+    assert!(
+        json["overhead_ledger"]["estimated_prompt_tokens"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+
+    let cycle_report = &json["cycle_reports"][0];
+    assert_eq!(
+        cycle_report["overhead_ledger"]["schema_version"],
+        "forge.self_evolution.overhead_ledger.v1"
+    );
+    assert_eq!(cycle_report["decision_gate"]["decision"], "run_cycle");
+    let prompt_path = temp
+        .path()
+        .join(cycle_report["prompt_path"].as_str().unwrap());
+    let prompt = fs::read_to_string(prompt_path).unwrap();
+    assert!(prompt.contains("Operating mode: `balanced`"));
+    assert!(prompt.contains("Lean overhead ledger"));
+    assert!(prompt.contains("Automated self-evolution decision gate"));
+}
+
+#[test]
+fn self_run_stops_when_terminal_final_goal_contract_is_satisfied() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let base_goal =
+        "Improve Forge Core autonomously with bounded executor cycles, validation gates, artifacts and changelog";
+    let terminal_goal = format!(
+        "{base_goal}. Stopping rule: when Forge has a validated lean/balanced/strict mode boundary, a measurable overhead ledger, and an automated self-evolution decision gate that can reject or stop cycles whose expected value is lower than orchestration cost, the self-evolution loop should mark the terminal goal reached, stop proposing new architecture by default, avoid further interaction, and only resume if a human gives a new explicit goal."
+    );
+
+    let planned_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            base_goal,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned: Value = serde_json::from_slice(&planned_output).unwrap();
+    let strategic_workflow_id = planned["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "update-goal",
+            "--workflow",
+            strategic_workflow_id,
+            "--origin",
+            "codex",
+            "--goal",
+            &terminal_goal,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2026-05-25T10:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--mode",
+            "balanced",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "terminal_goal_reached");
+    assert!(json["cycle_reports"].as_array().unwrap().is_empty());
+    assert_eq!(
+        json["decision_gate"]["decision"],
+        "stop_terminal_goal_reached"
+    );
+    assert_eq!(json["decision_gate"]["terminal_goal_reached"], true);
+    assert_eq!(json["decision_gate"]["stop_loop"], true);
+    assert!(json["decision_gate"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("terminal self-evolution goal is already satisfied"));
+}
+
+#[test]
+fn self_run_rejects_low_value_bloat_cycle_in_lean_mode() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let base_goal =
+        "Improve Forge Core autonomously with bounded executor cycles, validation gates, artifacts and changelog";
+    let bloat_goal = format!(
+        "{base_goal}. Add governance schemas, receipts, hashes, manifests and projections for every self-evolution detail without changing useful throughput, cost, validation, retries, deterministic execution or artifact delivery."
+    );
+
+    let planned_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            base_goal,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned: Value = serde_json::from_slice(&planned_output).unwrap();
+    let strategic_workflow_id = planned["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "update-goal",
+            "--workflow",
+            strategic_workflow_id,
+            "--origin",
+            "codex",
+            "--goal",
+            &bloat_goal,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2026-05-25T10:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--mode",
+            "lean",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "rejected");
+    assert!(json["cycle_reports"].as_array().unwrap().is_empty());
+    assert_eq!(json["decision_gate"]["decision"], "reject_low_value_cycle");
+    assert_eq!(json["decision_gate"]["stop_loop"], true);
+    assert_eq!(json["decision_gate"]["operating_mode"], "lean");
+    assert!(
+        json["decision_gate"]["expected_value_score"]
+            .as_u64()
+            .unwrap()
+            < json["decision_gate"]["orchestration_cost_score"]
+                .as_u64()
+                .unwrap()
+    );
+}
+
+#[test]
 fn request_status_surfaces_latest_validation_evidence_for_async_callers() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
