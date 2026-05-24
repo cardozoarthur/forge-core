@@ -1,7 +1,10 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use forge_core::artifact::list_workflow_artifacts;
-use forge_core::context::build_context_package;
+use forge_core::checkpoint::{
+    load_latest_task_checkpoint, record_task_checkpoint, TaskCheckpointRequest,
+};
+use forge_core::context::build_context_package_with_checkpoint;
 use forge_core::execution::run_simulated;
 use forge_core::executor::{load_executors, sync_executors, ExecutorSyncOptions};
 use forge_core::graph::create_workflow;
@@ -278,6 +281,24 @@ enum TaskCommands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
+    Checkpoint {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        executor: String,
+        #[arg(long)]
+        state: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long = "context-sha256")]
+        context_sha256: String,
+        #[arg(long = "workflow-revision")]
+        workflow_revision: u64,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -405,7 +426,9 @@ fn run() -> Result<i32> {
         } => {
             let store = ForgeStore::open(cli.store)?;
             let workflow = store.load_workflow(&workflow)?;
-            let context = build_context_package(&workflow, &task, budget)?;
+            let latest_checkpoint = load_latest_task_checkpoint(&store, &workflow.id, &task)?;
+            let context =
+                build_context_package_with_checkpoint(&workflow, &task, budget, latest_checkpoint)?;
             print_response(output, &context)?;
             Ok(0)
         }
@@ -676,6 +699,32 @@ fn run() -> Result<i32> {
                 let exit_code = if report.released { 0 } else { 1 };
                 print_response(output, &report)?;
                 Ok(exit_code)
+            }
+            TaskCommands::Checkpoint {
+                workflow,
+                task,
+                executor,
+                state,
+                summary,
+                context_sha256,
+                workflow_revision,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = record_task_checkpoint(
+                    &store,
+                    TaskCheckpointRequest {
+                        workflow_id: &workflow,
+                        task_id: &task,
+                        executor: &executor,
+                        state: &state,
+                        summary: &summary,
+                        context_sha256: &context_sha256,
+                        workflow_revision,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
             }
         },
         Commands::Request { command } => match command {

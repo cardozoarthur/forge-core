@@ -1,3 +1,4 @@
+use crate::checkpoint::TaskCheckpoint;
 use crate::graph::Workflow;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -92,6 +93,15 @@ impl ForgeStore {
                 expires_at TEXT NOT NULL,
                 data_json TEXT NOT NULL,
                 PRIMARY KEY (workflow_id, task_id)
+            );
+            CREATE TABLE IF NOT EXISTS task_checkpoints (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                executor TEXT NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                data_json TEXT NOT NULL
             );
             "#,
         )?;
@@ -324,5 +334,67 @@ impl ForgeStore {
             params![workflow_id, task_id, lease_id],
         )?;
         Ok(changed == 1)
+    }
+
+    pub fn save_task_checkpoint(&self, checkpoint: &TaskCheckpoint) -> Result<()> {
+        self.connection.execute(
+            r#"
+            INSERT INTO task_checkpoints (
+                id,
+                workflow_id,
+                task_id,
+                executor,
+                state,
+                created_at,
+                data_json
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                &checkpoint.checkpoint_id,
+                &checkpoint.workflow_id,
+                &checkpoint.task_id,
+                &checkpoint.executor,
+                &checkpoint.state,
+                checkpoint.created_at.to_rfc3339(),
+                serde_json::to_string(checkpoint)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_task_checkpoints(
+        &self,
+        workflow_id: &str,
+        task_id: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let sql = if task_id.is_some() {
+            r#"
+            SELECT data_json FROM task_checkpoints
+            WHERE workflow_id = ?1 AND task_id = ?2
+            ORDER BY created_at ASC, id ASC
+            "#
+        } else {
+            r#"
+            SELECT data_json FROM task_checkpoints
+            WHERE workflow_id = ?1
+            ORDER BY created_at ASC, id ASC
+            "#
+        };
+        let mut statement = self.connection.prepare(sql)?;
+        let mut checkpoints = Vec::new();
+        if let Some(task_id) = task_id {
+            let rows = statement
+                .query_map(params![workflow_id, task_id], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                checkpoints.push(serde_json::from_str(&row?)?);
+            }
+        } else {
+            let rows = statement.query_map(params![workflow_id], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                checkpoints.push(serde_json::from_str(&row?)?);
+            }
+        }
+        Ok(checkpoints)
     }
 }

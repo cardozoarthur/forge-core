@@ -1,4 +1,5 @@
 use crate::artifact::list_workflow_artifacts;
+use crate::checkpoint::{load_workflow_checkpoints, TaskCheckpoint};
 use crate::graph::{create_workflow, TaskStatus, Workflow};
 use crate::intent::parse_intent;
 use crate::storage::ForgeStore;
@@ -45,6 +46,8 @@ pub struct RequestStatusReport {
     pub workflow_status: String,
     pub workflow_revision: u64,
     pub artifact_count: usize,
+    pub checkpoint_count: usize,
+    pub latest_checkpoint: Option<TaskCheckpoint>,
     pub task_summary: TaskStatusSummary,
     pub latest_validation_evidence: Option<ValidationEvidenceSummary>,
     pub created_at: DateTime<Utc>,
@@ -154,6 +157,8 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
     let workflow = store.load_workflow(&run.workflow_id)?;
     let task_summary = summarize_tasks(&workflow);
     let latest_validation_evidence = load_latest_validation_evidence(store, &workflow.id)?;
+    let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
+    let latest_checkpoint = checkpoints.last().cloned();
     let workflow_revision = workflow
         .revisions
         .last()
@@ -170,6 +175,8 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
         workflow_status: workflow.status,
         workflow_revision,
         artifact_count: workflow.artifacts.len(),
+        checkpoint_count: checkpoints.len(),
+        latest_checkpoint,
         task_summary,
         latest_validation_evidence,
         created_at: run.created_at,

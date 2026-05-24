@@ -317,10 +317,10 @@ fn context_controller_returns_versioned_shard_manifest() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v8");
+    assert_eq!(context["schema_version"], "forge.context.v9");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_decisions_v9"
     );
     assert_eq!(context["workflow_id"], workflow_id);
     assert_eq!(context["task_id"], task_id);
@@ -399,10 +399,10 @@ fn context_controller_compresses_oversized_shards_before_omitting() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v8");
+    assert_eq!(context["schema_version"], "forge.context.v9");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_decisions_v9"
     );
     assert_eq!(context["executor_profile"]["id"], "ai_reasoning");
     assert!(context["context_bytes"].as_u64().unwrap() <= 420);
@@ -484,10 +484,10 @@ fn context_shards_explain_selection_decisions_for_budget_and_profile_routing() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v8");
+    assert_eq!(context["schema_version"], "forge.context.v9");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_decisions_v9"
     );
 
     let shards = context["shards"].as_array().unwrap();
@@ -573,10 +573,10 @@ fn context_package_applies_no_ai_profile_to_deterministic_executor_nodes() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v8");
+    assert_eq!(context["schema_version"], "forge.context.v9");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_decisions_v9"
     );
     assert_eq!(context["requested_budget"], 1600);
     assert!(context["effective_budget"].as_u64().unwrap() < 1600);
@@ -673,10 +673,10 @@ fn deterministic_code_nodes_carry_no_ai_execution_policy_in_context() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v8");
+    assert_eq!(context["schema_version"], "forge.context.v9");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_decisions_v9"
     );
     assert_eq!(context["execution_policy"]["mode"], "local_code_node");
     assert_eq!(
@@ -788,10 +788,10 @@ fn context_package_tracks_runtime_mutation_lineage_and_current_goal() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v8");
+    assert_eq!(context["schema_version"], "forge.context.v9");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_decisions_v9"
     );
     assert_eq!(context["workflow_revision"], 2);
     assert_eq!(context["artifact_count"], 1);
@@ -913,10 +913,10 @@ fn context_package_includes_persona_routing_lineage_for_human_facing_task() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v8");
+    assert_eq!(context["schema_version"], "forge.context.v9");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_decisions_v9"
     );
     assert_eq!(context["persona"]["mode"], "operator_report");
     assert_eq!(context["persona"]["scope"], "node");
@@ -2913,10 +2913,10 @@ fn context_package_carries_proposed_child_subflow_routing_for_reused_nodes() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v8");
+    assert_eq!(context["schema_version"], "forge.context.v9");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_decisions_v9"
     );
     assert_eq!(context["child_subflow_count"], 1);
     assert_eq!(
@@ -2942,6 +2942,294 @@ fn context_package_carries_proposed_child_subflow_routing_for_reused_nodes() {
         .as_str()
         .unwrap()
         .contains("Binding status: proposed"));
+}
+
+#[test]
+fn task_checkpoint_records_resumable_context_and_surfaces_request_status() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Improve Forge with durable task checkpoints",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-002",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+    let workflow_revision = context["workflow_revision"].as_u64().unwrap().to_string();
+
+    let checkpoint_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "checkpoint",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-002",
+            "--executor",
+            "codex",
+            "--state",
+            "paused",
+            "--summary",
+            "Requirements extraction paused after bounded context routing",
+            "--context-sha256",
+            context["context_sha256"].as_str().unwrap(),
+            "--workflow-revision",
+            workflow_revision.as_str(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let checkpoint_json: Value = serde_json::from_slice(&checkpoint_output).unwrap();
+    assert_eq!(checkpoint_json["status"], "checkpoint_recorded");
+    assert!(checkpoint_json["checkpoint"]["checkpoint_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("ckpt_"));
+    assert_eq!(checkpoint_json["checkpoint"]["workflow_id"], workflow_id);
+    assert_eq!(checkpoint_json["checkpoint"]["task_id"], "task-002");
+    assert_eq!(checkpoint_json["checkpoint"]["executor"], "codex");
+    assert_eq!(checkpoint_json["checkpoint"]["state"], "paused");
+    assert_eq!(
+        checkpoint_json["checkpoint"]["context_sha256"],
+        context["context_sha256"]
+    );
+    assert_eq!(checkpoint_json["checkpoint"]["workflow_revision"], 0);
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status_json["checkpoint_count"], 1);
+    assert_eq!(
+        status_json["latest_checkpoint"]["checkpoint_id"],
+        checkpoint_json["checkpoint"]["checkpoint_id"]
+    );
+    assert_eq!(status_json["latest_checkpoint"]["task_id"], "task-002");
+    assert_eq!(status_json["latest_checkpoint"]["state"], "paused");
+    assert_eq!(status_json["latest_checkpoint"]["workflow_revision"], 0);
+}
+
+#[test]
+fn context_package_includes_latest_checkpoint_and_marks_stale_after_goal_mutation() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build resumable context packets for async continuation",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+
+    let original_context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-002",
+            "--budget",
+            "1600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let original_context: Value = serde_json::from_slice(&original_context_output).unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "checkpoint",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-002",
+            "--executor",
+            "codex",
+            "--state",
+            "paused",
+            "--summary",
+            "Paused before requirement synthesis",
+            "--context-sha256",
+            original_context["context_sha256"].as_str().unwrap(),
+            "--workflow-revision",
+            "0",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let checkpointed_context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-002",
+            "--budget",
+            "1600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let checkpointed_context: Value = serde_json::from_slice(&checkpointed_context_output).unwrap();
+    assert_eq!(checkpointed_context["schema_version"], "forge.context.v9");
+    assert_eq!(
+        checkpointed_context["routing_policy"],
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_decisions_v9"
+    );
+    assert_eq!(
+        checkpointed_context["latest_checkpoint"]["context_sha256"],
+        original_context["context_sha256"]
+    );
+    assert_eq!(
+        checkpointed_context["latest_checkpoint"]["workflow_revision"],
+        checkpointed_context["workflow_revision"]
+    );
+    assert_eq!(
+        checkpointed_context["resume_context_status"],
+        "checkpoint_current"
+    );
+    assert!(checkpointed_context["included_sections"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("checkpoint".to_string())));
+    assert!(checkpointed_context["shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|shard| {
+            shard["section"] == "checkpoint"
+                && shard["source"] == "checkpoint"
+                && shard["included"] == true
+        }));
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "update-goal",
+            "--workflow",
+            workflow_id,
+            "--goal",
+            "Build resumable context packets after a goal mutation",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let stale_context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-002",
+            "--budget",
+            "1600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stale_context: Value = serde_json::from_slice(&stale_context_output).unwrap();
+    assert_eq!(stale_context["workflow_revision"], 1);
+    assert_eq!(stale_context["latest_checkpoint"]["workflow_revision"], 0);
+    assert_eq!(stale_context["resume_context_status"], "checkpoint_stale");
+    assert_eq!(
+        stale_context["resume_context_reason"],
+        "checkpoint workflow revision differs from current workflow revision"
+    );
 }
 
 #[test]

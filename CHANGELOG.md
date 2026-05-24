@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.22 - 2026-05-24
+
+### Added
+
+- Added persisted task checkpoint records through `forge task checkpoint`.
+- `forge request status` now projects `checkpoint_count` and `latest_checkpoint` so async callers can resume from Forge's workflow source of truth instead of keeping executor-local progress state.
+- `forge context` now emits schema `forge.context.v9` with routing policy `task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_decisions_v9`.
+- Context packets include `latest_checkpoint`, `resume_context_status`, `resume_context_reason` and a checkpoint shard when the task has a checkpoint.
+
+### Changed
+
+- Resumable context routing now marks checkpoints as `checkpoint_current` when their recorded workflow revision matches the current workflow revision and `checkpoint_stale` after runtime goal/artifact mutations advance the workflow revision.
+- Context contract tests now target schema `forge.context.v9`.
+
+### Safety
+
+- Checkpoints are Forge-owned metadata. Recording a checkpoint does not complete a task, promote a workflow, execute local code, authorize external CLIs, or mutate Docker/Kubernetes/Knative resources.
+- Stale checkpoints remain visible for audit and partial retry decisions, but executor adapters must refresh context before resuming from an older workflow revision.
+
+### Validation
+
+- Added CLI contract coverage for `forge task checkpoint`, request-status checkpoint projection, checkpoint context shards and stale checkpoint detection after a goal mutation.
+
 ## 0.4.21 - 2026-05-24
 
 ### Added

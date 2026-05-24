@@ -1,13 +1,14 @@
 use crate::artifact::hex_sha256;
+use crate::checkpoint::TaskCheckpoint;
 use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, PersonaRoutingSpec, Workflow,
 };
 use anyhow::{bail, Result};
 use serde::Serialize;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v8";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v9";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_compressed_executor_policy_subflow_budget_decisions_v8";
+    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_decisions_v9";
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
 const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
 const ALL_CONTEXT_SECTIONS: &[&str] = &[
@@ -16,6 +17,7 @@ const ALL_CONTEXT_SECTIONS: &[&str] = &[
     "persona_routing",
     "execution_policy",
     "child_subflows",
+    "checkpoint",
     "context_requirements",
     "validation_rules",
     "dependencies",
@@ -27,6 +29,7 @@ const NO_AI_CONTEXT_SECTIONS: &[&str] = &[
     "workflow_goal",
     "execution_policy",
     "child_subflows",
+    "checkpoint",
     "context_requirements",
     "validation_rules",
     "dependencies",
@@ -37,6 +40,7 @@ const NOTIFICATION_CONTEXT_SECTIONS: &[&str] = &[
     "persona_routing",
     "execution_policy",
     "child_subflows",
+    "checkpoint",
     "context_requirements",
     "validation_rules",
     "dependencies",
@@ -56,6 +60,9 @@ pub struct ContextPackage {
     pub execution_policy: ExecutionPolicySpec,
     pub child_subflow_count: usize,
     pub child_subflows: Vec<ChildSubflowRef>,
+    pub latest_checkpoint: Option<TaskCheckpoint>,
+    pub resume_context_status: String,
+    pub resume_context_reason: String,
     pub requested_budget: usize,
     pub effective_budget: usize,
     pub context_bytes: usize,
@@ -141,6 +148,15 @@ pub fn build_context_package(
     task_id: &str,
     budget: usize,
 ) -> Result<ContextPackage> {
+    build_context_package_with_checkpoint(workflow, task_id, budget, None)
+}
+
+pub fn build_context_package_with_checkpoint(
+    workflow: &Workflow,
+    task_id: &str,
+    budget: usize,
+    latest_checkpoint: Option<TaskCheckpoint>,
+) -> Result<ContextPackage> {
     let task = workflow
         .tasks
         .iter()
@@ -176,6 +192,8 @@ pub fn build_context_package(
         revision_sources,
         &artifact_manifest,
     )?;
+    let (resume_context_status, resume_context_reason) =
+        resume_context_status(latest_checkpoint.as_ref(), workflow_revision);
 
     let mut candidates = vec![
         ContextShardCandidate {
@@ -226,6 +244,15 @@ pub fn build_context_package(
             source: "subflow_registry",
             priority: priority_for_profile(&profile, "child_subflows", 89),
             content: render_child_subflows_context(&task.child_subflows),
+        },
+        ContextShardCandidate {
+            section: "checkpoint",
+            source: "checkpoint",
+            priority: priority_for_profile(&profile, "checkpoint", 88),
+            content: latest_checkpoint
+                .as_ref()
+                .map(|checkpoint| render_checkpoint_context(checkpoint, resume_context_status))
+                .unwrap_or_default(),
         },
         ContextShardCandidate {
             section: "context_requirements",
@@ -378,6 +405,9 @@ pub fn build_context_package(
         execution_policy: task.execution_policy.clone(),
         child_subflow_count: task.child_subflows.len(),
         child_subflows: task.child_subflows.clone(),
+        latest_checkpoint,
+        resume_context_status: resume_context_status.to_string(),
+        resume_context_reason: resume_context_reason.to_string(),
         requested_budget: budget,
         effective_budget,
         context_bytes: content.len(),
@@ -478,6 +508,42 @@ fn render_child_subflows_context(child_subflows: &[ChildSubflowRef]) -> String {
         .join("")
 }
 
+fn render_checkpoint_context(checkpoint: &TaskCheckpoint, resume_status: &str) -> String {
+    format!(
+        "Latest checkpoint: {}\nTask: {}\nExecutor: {}\nState: {}\nWorkflow revision: {}\nContext sha256: {}\nResume status: {}\nSummary: {}\n",
+        checkpoint.checkpoint_id,
+        checkpoint.task_id,
+        checkpoint.executor,
+        checkpoint.state,
+        checkpoint.workflow_revision,
+        checkpoint.context_sha256,
+        resume_status,
+        checkpoint.summary
+    )
+}
+
+fn resume_context_status(
+    checkpoint: Option<&TaskCheckpoint>,
+    workflow_revision: u64,
+) -> (&'static str, &'static str) {
+    let Some(checkpoint) = checkpoint else {
+        return (
+            "no_checkpoint",
+            "no checkpoint recorded for this workflow task",
+        );
+    };
+    if checkpoint.workflow_revision == workflow_revision {
+        return (
+            "checkpoint_current",
+            "checkpoint workflow revision matches current workflow revision",
+        );
+    }
+    (
+        "checkpoint_stale",
+        "checkpoint workflow revision differs from current workflow revision",
+    )
+}
+
 fn summarize_shard(content: &str) -> String {
     content
         .lines()
@@ -562,6 +628,7 @@ fn priority_for_profile(
             "local_objective" => 100,
             "execution_policy" => 98,
             "child_subflows" => 97,
+            "checkpoint" => 97,
             "validation_rules" => 96,
             "workflow_goal" => 95,
             "context_requirements" => 90,
@@ -573,6 +640,7 @@ fn priority_for_profile(
             "persona_routing" => 96,
             "execution_policy" => 94,
             "child_subflows" => 92,
+            "checkpoint" => 92,
             "validation_rules" => 90,
             "workflow_goal" => 85,
             "context_requirements" => 80,

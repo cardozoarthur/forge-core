@@ -1,4 +1,5 @@
 pub mod artifact;
+pub mod checkpoint;
 pub mod context;
 pub mod execution;
 pub mod executor;
