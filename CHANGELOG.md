@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.19 - 2026-05-23
+
+### Added
+
+- Added persisted `child_subflows` metadata on atomic tasks so compatible reusable deterministic code-node candidates can be attached to the new workflow graph as proposed child subflows.
+- `forge plan` now reports `attached_subflows` and saves one best attachable child-subflow reference per requested task when the registry finds a compatible reusable local code-node flow.
+- `forge inspect --verbose` now renders persisted child subflow links in both structured JSON and the terminal DAG diagram.
+
+### Changed
+
+- Reuse candidates are no longer only transient plan-output hints. The planned workflow now carries the proposed recursive subflow relationship forward for later validation, execution policy and inspection cycles.
+
+### Safety
+
+- Child subflow bindings are `proposed` metadata only. Forge does not execute, promote, mutate or auto-complete reused child subflows during planning.
+- Attachment is limited to candidates already marked attachable by the registry lifecycle policy: `idle`, `completed` or `scaled_to_zero`.
+- This change does not authorize CLIs, run Python/Node.js code, or mutate Docker/Kubernetes/Knative resources.
+
+### Validation
+
+- Added CLI contract coverage proving `forge plan` persists a compatible reusable code-node candidate as a proposed child subflow and `forge inspect --verbose` renders it.
+
 ## 0.4.18 - 2026-05-23
 
 ### Added

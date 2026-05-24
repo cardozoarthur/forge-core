@@ -2640,6 +2640,113 @@ fn plan_reports_compatible_reuse_candidates_before_creating_duplicate_code_nodes
 }
 
 #[test]
+fn plan_persists_reuse_candidates_as_proposed_child_subflows_for_inspection() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let first = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with repeated local Python cost calculations without AI and email ops@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first_json: Value = serde_json::from_slice(&first).unwrap();
+    let first_workflow_id = first_json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            first_workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let second = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with frequent local Python cost calculations without AI and email finance@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let second_json: Value = serde_json::from_slice(&second).unwrap();
+    let second_workflow_id = second_json["workflow_id"].as_str().unwrap();
+    assert_eq!(second_json["attached_subflows"], 1);
+    let deterministic_task = find_task(
+        second_json["tasks"].as_array().unwrap(),
+        "Run deterministic non-AI step",
+    );
+    let child_subflows = deterministic_task["child_subflows"].as_array().unwrap();
+    assert_eq!(child_subflows.len(), 1);
+    assert_eq!(child_subflows[0]["workflow_id"], first_workflow_id);
+    assert_eq!(child_subflows[0]["task_id"], "task-011");
+    assert_eq!(child_subflows[0]["binding_status"], "proposed");
+    assert_eq!(child_subflows[0]["lifecycle_state"], "scaled_to_zero");
+    assert_eq!(
+        child_subflows[0]["validation_gate"],
+        "deterministic_code_node_validation_required"
+    );
+
+    let inspection = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            second_workflow_id,
+            "--verbose",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let inspection_json: Value = serde_json::from_slice(&inspection).unwrap();
+    assert_eq!(inspection_json["subflow_count"], 1);
+    assert_eq!(
+        inspection_json["subflows"][0]["workflow_id"],
+        first_workflow_id
+    );
+    assert_eq!(inspection_json["subflows"][0]["task_id"], "task-011");
+    assert_eq!(inspection_json["subflows"][0]["binding_status"], "proposed");
+    assert!(inspection_json["diagram"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("subflows {first_workflow_id}/task-011:proposed")));
+
+    let inspected_task = find_task(
+        inspection_json["nodes"].as_array().unwrap(),
+        "Run deterministic non-AI step",
+    );
+    assert_eq!(inspected_task["subflow_refs"].as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn list_loads_legacy_workflows_without_async_policy_or_revisions() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

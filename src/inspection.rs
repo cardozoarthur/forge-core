@@ -1,4 +1,6 @@
-use crate::graph::{AtomicTask, ExecutorKind, SubtaskSpec, TaskStatus, ValidationRule};
+use crate::graph::{
+    AtomicTask, ChildSubflowRef, ExecutorKind, SubtaskSpec, TaskStatus, ValidationRule,
+};
 use crate::registry::{list_workflows, WorkflowRegistryRow};
 use crate::storage::ForgeStore;
 use anyhow::{Context, Result};
@@ -33,14 +35,17 @@ pub struct TaskInspectionNode {
     pub expected_output: String,
     pub subtasks: Vec<SubtaskSpec>,
     pub validation_rules: Vec<ValidationRule>,
-    pub subflow_refs: Vec<String>,
+    pub subflow_refs: Vec<ChildSubflowRef>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SubflowInspection {
     pub id: String,
+    pub workflow_id: String,
+    pub task_id: String,
     pub title: String,
     pub lifecycle_state: String,
+    pub binding_status: String,
 }
 
 pub fn inspect_workflow(
@@ -60,7 +65,8 @@ pub fn inspect_workflow(
         .iter()
         .map(|task| task_node(task, verbose))
         .collect::<Vec<_>>();
-    let diagram = render_diagram(&registry_row, &nodes, verbose);
+    let subflows = collect_subflows(&nodes);
+    let diagram = render_diagram(&registry_row, &nodes, &subflows, verbose);
 
     Ok(WorkflowInspectionReport {
         status: "inspected".to_string(),
@@ -72,8 +78,8 @@ pub fn inspect_workflow(
         artifact_count: registry_row.artifact_count,
         task_count: nodes.len(),
         verbose,
-        subflow_count: 0,
-        subflows: Vec::new(),
+        subflow_count: subflows.len(),
+        subflows,
         nodes,
         diagram,
     })
@@ -99,13 +105,30 @@ fn task_node(task: &AtomicTask, verbose: bool) -> TaskInspectionNode {
         } else {
             Vec::new()
         },
-        subflow_refs: Vec::new(),
+        subflow_refs: task.child_subflows.clone(),
     }
+}
+
+fn collect_subflows(nodes: &[TaskInspectionNode]) -> Vec<SubflowInspection> {
+    nodes
+        .iter()
+        .flat_map(|node| {
+            node.subflow_refs.iter().map(|subflow| SubflowInspection {
+                id: format!("{}/{}", subflow.workflow_id, subflow.task_id),
+                workflow_id: subflow.workflow_id.clone(),
+                task_id: subflow.task_id.clone(),
+                title: subflow.title.clone(),
+                lifecycle_state: subflow.lifecycle_state.clone(),
+                binding_status: subflow.binding_status.clone(),
+            })
+        })
+        .collect()
 }
 
 fn render_diagram(
     row: &WorkflowRegistryRow,
     nodes: &[TaskInspectionNode],
+    subflows: &[SubflowInspection],
     verbose: bool,
 ) -> String {
     let mut lines = vec![
@@ -113,10 +136,11 @@ fn render_diagram(
         format!("initial_request: {}", row.initial_request),
         format!("current_goal: {}", row.current_goal),
         format!(
-            "revision: {} artifacts: {} tasks: {} subflows: 0",
+            "revision: {} artifacts: {} tasks: {} subflows: {}",
             row.workflow_revision,
             row.artifact_count,
-            nodes.len()
+            nodes.len(),
+            subflows.len()
         ),
     ];
 
@@ -131,9 +155,24 @@ fn render_diagram(
             .as_ref()
             .map(|mode| format!(" persona {mode}"))
             .unwrap_or_default();
+        let subflow_refs = if node.subflow_refs.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " subflows {}",
+                node.subflow_refs
+                    .iter()
+                    .map(|subflow| format!(
+                        "{}/{}:{}",
+                        subflow.workflow_id, subflow.task_id, subflow.binding_status
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
         lines.push(format!(
-            "{} {} [{}] {}{} executor {}",
-            node.id, node.title, node.status, dependency, persona, node.executor
+            "{} {} [{}] {}{}{} executor {}",
+            node.id, node.title, node.status, dependency, persona, subflow_refs, node.executor
         ));
 
         if verbose {

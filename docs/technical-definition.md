@@ -276,14 +276,14 @@ Required user-facing goals:
 - Non-infinite workflows should scale to zero when no runnable or scheduled work remains.
 - Infinite workflows and infinite subflows remain eligible for scheduling instead of being treated as completed one-shot graphs.
 - `forge inspect <id>` renders the current workflow graph in the terminal from persisted Forge state.
-- `forge inspect <id> --verbose` includes task goals, expected outputs, validation rules and subtasks. Recursive subflow descriptions remain the next registry increment.
+- `forge inspect <id> --verbose` includes task goals, expected outputs, validation rules, subtasks and proposed child-subflow links.
 - Workflows may contain subflows recursively. A flow can own many subflows, and each subflow can own many child subflows.
 - Subflows can be finite or infinite. Infinite subflows require explicit lifecycle metadata so Forge can distinguish "idle but alive" from "completed".
 - Running workflows must remain mutable: list gives stable ids, inspect shows the current graph, and goal/artifact mutations appear as revisions.
 
 Before creating a new workflow from scratch, Forge should inspect available workflows and reusable flow definitions. If an existing flow can satisfy part of the new objective, Forge should propose or attach it as a child subflow instead of duplicating orchestration logic.
 
-The first reuse contract is deterministic and registry-derived. `forge list` exposes reusable local code-node subflows with a compatibility key based on execution policy, language, entrypoint and validation gate, plus a context lineage hash derived from the task-local context requirements and validation rules. `forge plan` reports compatible `reuse_candidates` from existing workflows before saving the new workflow, allowing a later cycle to attach the candidate as a recursive child subflow without spending a model call or re-creating identical Python/Node.js orchestration work.
+The first reuse contract is deterministic and registry-derived. `forge list` exposes reusable local code-node subflows with a compatibility key based on execution policy, language, entrypoint and validation gate, plus a context lineage hash derived from the task-local context requirements and validation rules. `forge plan` reports compatible `reuse_candidates` from existing workflows before saving the new workflow and persists the best attachable candidate per requested task as a proposed `child_subflows` link. This gives `forge inspect` a recursive subflow surface without spending a model call, executing local Python/Node.js work or automatically promoting reused subflows.
 
 ## Async Request Contract
 

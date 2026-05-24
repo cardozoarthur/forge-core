@@ -219,7 +219,7 @@ Goal: make Forge observable and composable as a long-running runtime.
 - Implement scale-to-zero semantics for finite workflows when no runnable or scheduled work remains.
 - Initial `forge inspect <id>` renders the workflow graph in the terminal with lifecycle, dependency and persona annotations.
 - Expand `forge inspect <id> --verbose` from task goals, validation rules and subtasks to recursive subflows and descriptions of each process and subprocess/subflow.
-- Add recursive subflow records so a workflow can contain many subflows and each subflow can contain child subflows.
+- Add recursive subflow records so a workflow can contain many subflows and each subflow can contain child subflows. The current implementation persists proposed child-subflow links for compatible deterministic code-node reuse and renders them in inspection output; later cycles should validate, schedule and execute those links explicitly.
 - Add infinite subflow metadata so idle long-lived subflows remain schedulable instead of being incorrectly marked complete.
 - Before creating a new workflow, search available workflow definitions and prior workflows for compatible reusable flows, then integrate compatible ones as child subflows when appropriate.
 
@@ -257,7 +257,7 @@ Goal: let Forge improve workflows structurally without unrestricted self-modific
 10. Add real Knative node adapter with ownership labels and namespace guard.
 11. Add runtime mutation propagation so changed goals invalidate stale downstream context.
 12. Add `forge list` with running/non-running lifecycle and original request descriptions.
-13. Add `forge inspect` graph rendering with verbose recursive subflow descriptions.
+13. Add validated execution semantics for proposed child subflows.
 14. Add recursive finite/infinite subflow records and scale-to-zero lifecycle semantics.
 15. Add available-flow discovery so new workflows can reuse compatible existing flows as child subflows.
 16. Add versioned context packets and context lineage for the Context Routing Engine.

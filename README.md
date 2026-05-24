@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.17`
+Current version: `0.4.19`
 
 This is the first functional CLI + Skill version:
 
@@ -37,6 +37,7 @@ This is the first functional CLI + Skill version:
 - artifact listing
 - workflow registry listing with lifecycle state
 - terminal workflow DAG inspection with lifecycle, dependency and persona annotations
+- proposed child-subflow links for compatible deterministic code-node reuse
 - context routing with deterministic shard manifests, deterministic code-node and long-running cognition goals
 - Forge-owned execution policy metadata for deterministic local Python/Node.js code nodes
 - node-scoped Personality/Soul Routing metadata for human-facing artifacts
@@ -104,8 +105,8 @@ forge request status --run <run-id> --output json
 Codex/OpenCode should prefer this pattern when using Forge as a skill: make a short request, receive a `run_id`, and let Forge own the asynchronous workflow state.
 `forge request status` resolves the run id back to the current Forge workflow state, including the current goal, original requested goal, latest revision, artifact count and task status summary.
 `forge list` exposes the workflow registry across planned and async workflows, including stable workflow ids, associated run ids, initial request, current goal, lifecycle state, task summary and deterministic code-node subflows that can be reused by compatible future workflows. Completed finite workflows are projected as `scaled_to_zero` when there is no remaining task work.
-`forge plan` reports `reuse_candidates` when the registry already contains a compatible reusable deterministic subflow, so Forge can propose child-subflow reuse before duplicating local Python/Node.js work.
-`forge inspect <workflow-id>` renders the current DAG as terminal text and also exposes the same graph as structured JSON when `--output json` is used. `--verbose` includes task goals, expected outputs, validation rules and subtasks. Persona-aware nodes are annotated with their node-scoped persona mode; recursive subflow records are reserved for the next registry increment.
+`forge plan` reports `reuse_candidates` when the registry already contains a compatible reusable deterministic subflow, and persists the best attachable candidate per requested task as a proposed child subflow before duplicating local Python/Node.js work.
+`forge inspect <workflow-id>` renders the current DAG as terminal text and also exposes the same graph as structured JSON when `--output json` is used. `--verbose` includes task goals, expected outputs, validation rules, subtasks and proposed child-subflow links. Persona-aware nodes are annotated with their node-scoped persona mode.
 
 Sync local execution engines before Forge uses external CLIs:
 

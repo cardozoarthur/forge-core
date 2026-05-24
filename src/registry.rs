@@ -1,11 +1,13 @@
 use crate::artifact::hex_sha256;
-use crate::graph::{AtomicTask, ExecutionPolicySpec, ExecutorKind, TaskStatus, Workflow};
+use crate::graph::{
+    AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, TaskStatus, Workflow,
+};
 use crate::request::RunRecord;
 use crate::storage::ForgeStore;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowRegistryReport {
@@ -75,6 +77,7 @@ pub struct WorkflowReuseCandidate {
     pub reuse_key: String,
     pub context_lineage_sha256: String,
     pub policy_mode: String,
+    pub validation_gate: String,
     pub candidate_lifecycle_state: String,
     pub attachable_as_child_subflow: bool,
     pub reason: String,
@@ -153,6 +156,7 @@ pub fn find_reuse_candidates(
                     reuse_key: existing.reuse_key.clone(),
                     context_lineage_sha256: existing.context_lineage_sha256.clone(),
                     policy_mode: existing.policy_mode.clone(),
+                    validation_gate: existing.validation_gate.clone(),
                     candidate_lifecycle_state: existing.lifecycle_state.clone(),
                     attachable_as_child_subflow: attachable,
                     reason: if attachable {
@@ -175,6 +179,53 @@ pub fn find_reuse_candidates(
             .then_with(|| left.candidate_task_id.cmp(&right.candidate_task_id))
     });
     Ok(candidates)
+}
+
+pub fn attach_reuse_candidates_as_child_subflows(
+    workflow: &mut Workflow,
+    candidates: &[WorkflowReuseCandidate],
+) -> usize {
+    let mut attached_task_ids = BTreeSet::new();
+    let mut attached = 0;
+
+    for candidate in candidates
+        .iter()
+        .filter(|candidate| candidate.attachable_as_child_subflow)
+    {
+        if !attached_task_ids.insert(candidate.requested_task_id.clone()) {
+            continue;
+        }
+
+        let Some(task) = workflow
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == candidate.requested_task_id)
+        else {
+            continue;
+        };
+
+        if task.child_subflows.iter().any(|subflow| {
+            subflow.workflow_id == candidate.candidate_workflow_id
+                && subflow.task_id == candidate.candidate_task_id
+        }) {
+            continue;
+        }
+
+        task.child_subflows.push(ChildSubflowRef {
+            workflow_id: candidate.candidate_workflow_id.clone(),
+            task_id: candidate.candidate_task_id.clone(),
+            title: candidate.candidate_title.clone(),
+            binding_status: "proposed".to_string(),
+            lifecycle_state: candidate.candidate_lifecycle_state.clone(),
+            reuse_key: candidate.reuse_key.clone(),
+            context_lineage_sha256: candidate.context_lineage_sha256.clone(),
+            validation_gate: candidate.validation_gate.clone(),
+            reason: candidate.reason.clone(),
+        });
+        attached += 1;
+    }
+
+    attached
 }
 
 fn registry_row(workflow: &Workflow, runs: &[RunRecord]) -> WorkflowRegistryRow {

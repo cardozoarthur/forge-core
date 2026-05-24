@@ -95,6 +95,19 @@ impl Default for ExecutionPolicySpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChildSubflowRef {
+    pub workflow_id: String,
+    pub task_id: String,
+    pub title: String,
+    pub binding_status: String,
+    pub lifecycle_state: String,
+    pub reuse_key: String,
+    pub context_lineage_sha256: String,
+    pub validation_gate: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubtaskSpec {
     pub id: String,
     pub title: String,
@@ -162,6 +175,8 @@ pub struct AtomicTask {
     pub async_policy: AsyncPolicy,
     #[serde(default)]
     pub execution_policy: ExecutionPolicySpec,
+    #[serde(default)]
+    pub child_subflows: Vec<ChildSubflowRef>,
     pub status: TaskStatus,
 }
 
@@ -261,6 +276,7 @@ fn task(
         work_item,
         async_policy: AsyncPolicy::default(),
         execution_policy,
+        child_subflows: Vec::new(),
         status: TaskStatus::Pending,
     }
 }
