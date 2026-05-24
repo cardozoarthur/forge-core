@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.69`
+Current version: `0.4.70`
 
 This is the first functional CLI + Skill version:
 
@@ -37,6 +37,7 @@ This is the first functional CLI + Skill version:
 - notification payloads with final workflow cost reporting
 - artifact listing
 - workflow registry listing with lifecycle state and `running`/`non-running` filters
+- workflow registry context-action catalog discovery for handoff/resume/retry filters
 - workflow registry quality-action catalog discovery for Context Routing Engine triage filters
 - terminal workflow DAG inspection with lifecycle, dependency, persona, context-route, execution-policy, next-action, focused task views and recursive child-subflow annotations
 - handoff readiness summaries in workflow inspection and async request status
@@ -81,6 +82,7 @@ Use the returned `workflow_id`:
 forge list --output json
 forge list --lifecycle running --output json
 forge list --lifecycle non-running --output json
+forge list --context-actions --output json
 forge list --context-action wait_for_dependencies --output json
 forge list --quality-actions --output json
 forge list --quality-action increase_context_budget --output json
@@ -214,7 +216,7 @@ Codex/OpenCode should prefer this pattern when using Forge as a skill: make a sh
 `forge request start` uses the same registry-derived reuse pass as `forge plan`, returning `reuse_candidates` and `attached_subflows` when Forge can attach a compatible deterministic child subflow before persisting the async workflow.
 `forge request status` resolves the run id back to the current Forge workflow state, including the current goal, original requested goal, latest revision, artifact count, task status summary and context handoff summary for every task.
 The handoff summary includes aggregate routing quality counts and each task's quality contract, so async callers can distinguish dependency waits from context budget/profile pressure without opening full context packets.
-`forge list` exposes the workflow registry across planned and async workflows, including stable workflow ids, associated run ids, initial request, current goal, lifecycle state, task summary, execution-policy route counts and deterministic code-node subflows that can be reused by compatible future workflows. Completed finite workflows are projected as `scaled_to_zero` when there is no remaining task work. Operators can combine lifecycle slices with `--context-action <action>` to find workflows whose next context route includes a specific handoff action such as `wait_for_dependencies`, `increase_context_budget` or `partial_retry_with_fresh_context`.
+`forge list` exposes the workflow registry across planned and async workflows, including stable workflow ids, associated run ids, initial request, current goal, lifecycle state, task summary, execution-policy route counts and deterministic code-node subflows that can be reused by compatible future workflows. Completed finite workflows are projected as `scaled_to_zero` when there is no remaining task work. Operators can use `forge list --context-actions` to discover valid handoff/resume/retry filter values, then combine lifecycle slices with `--context-action <action>` to find workflows whose next context route includes a specific handoff action such as `wait_for_dependencies`, `increase_context_budget` or `partial_retry_with_fresh_context`.
 The registry-level `execution_policy` summary uses schema `forge.registry_execution_policy.v1` and aggregates AI, mixed, deterministic, no-AI, model-call-required, model-call-avoided, local-code and reusable local-code route counts for both the filtered global summary and every workflow row.
 The registry also includes compact `context_handoff`, `context_actions` and `context_quality` projections for every workflow and for the filtered global summary, so operators can see ready tasks, missing-context blockers, dependency blockers, routing quality pressure and the workflow-level `quality_action` recommendation without inspecting each task individually.
 `forge plan` and `forge request start` report `reuse_candidates` when the registry already contains a compatible reusable deterministic subflow, and persist the best attachable candidate per requested task as a proposed child subflow before duplicating local Python/Node.js work.

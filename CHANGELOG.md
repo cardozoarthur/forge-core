@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.70 - 2026-05-24
+
+### Added
+
+- `forge list --context-actions` now returns a versioned context-action catalog with schema `forge.registry_context_action_catalog.v1`.
+- The catalog exposes valid `--context-action` filter values, readiness classes and trigger descriptions for handoff, dependency wait, context repair, checkpoint resume and partial-retry routes.
+- Added CLI contract coverage proving operators can discover `wait_for_dependencies`, `start_executor_handoff` and `partial_retry_with_fresh_context` without reading source or memorizing registry summary fields.
+
+### Changed
+
+- The package version is now `0.4.70`.
+- README and technical definition now document context-action catalog discovery alongside lifecycle and quality-action registry filters.
+
+### Safety
+
+- Context-action catalogs are static read-only metadata for filtering Forge-owned workflow registry projections.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules, task leases, persona gates, child-subflow validation gates and continuation plans.
+
 ## 0.4.69 - 2026-05-24
 
 ### Added

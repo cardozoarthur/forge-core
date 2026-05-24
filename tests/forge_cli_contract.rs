@@ -6636,6 +6636,70 @@ fn list_surfaces_quality_action_catalog_for_filter_discovery() {
 }
 
 #[test]
+fn list_surfaces_context_action_catalog_for_filter_discovery() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let catalog = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--context-actions",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let catalog_json: Value = serde_json::from_slice(&catalog).unwrap();
+    assert_eq!(catalog_json["status"], "context_actions_loaded");
+    assert_eq!(
+        catalog_json["schema_version"],
+        "forge.registry_context_action_catalog.v1"
+    );
+    assert_eq!(catalog_json["filter_field"], "context_action");
+    assert!(catalog_json["actions"].as_array().unwrap().len() >= 10);
+
+    let wait_for_dependencies = find_context_action(&catalog_json, "wait_for_dependencies");
+    assert_eq!(
+        wait_for_dependencies["filter_value"],
+        "wait_for_dependencies"
+    );
+    assert_eq!(wait_for_dependencies["readiness"], "blocked");
+    assert!(wait_for_dependencies["description"]
+        .as_str()
+        .unwrap()
+        .contains("dependency tasks"));
+    assert!(wait_for_dependencies["trigger"]
+        .as_str()
+        .unwrap()
+        .contains("dependencies are not ready"));
+
+    let start_handoff = find_context_action(&catalog_json, "start_executor_handoff");
+    assert_eq!(start_handoff["filter_value"], "start_executor_handoff");
+    assert_eq!(start_handoff["readiness"], "ready");
+    assert!(start_handoff["description"]
+        .as_str()
+        .unwrap()
+        .contains("executor handoff"));
+
+    let partial_retry = find_context_action(&catalog_json, "partial_retry_with_fresh_context");
+    assert_eq!(
+        partial_retry["filter_value"],
+        "partial_retry_with_fresh_context"
+    );
+    assert_eq!(partial_retry["readiness"], "retry");
+    assert!(partial_retry["trigger"]
+        .as_str()
+        .unwrap()
+        .contains("checkpoint route differs"));
+}
+
+#[test]
 fn list_surfaces_reusable_code_node_subflows_with_compatibility_keys() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -8852,6 +8916,15 @@ fn find_workflow<'a>(json: &'a Value, id: &str) -> &'a Value {
 }
 
 fn find_quality_action<'a>(json: &'a Value, action: &str) -> &'a Value {
+    json["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["action"] == action)
+        .unwrap()
+}
+
+fn find_context_action<'a>(json: &'a Value, action: &str) -> &'a Value {
     json["actions"]
         .as_array()
         .unwrap()

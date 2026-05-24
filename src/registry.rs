@@ -19,6 +19,8 @@ const REGISTRY_CONTEXT_ACTION_SCHEMA_VERSION: &str = "forge.registry_context_act
 const REGISTRY_CONTEXT_QUALITY_SCHEMA_VERSION: &str = "forge.registry_context_quality.v1";
 const REGISTRY_EXECUTION_POLICY_SCHEMA_VERSION: &str = "forge.registry_execution_policy.v1";
 const REGISTRY_QUALITY_ACTION_SCHEMA_VERSION: &str = "forge.registry_quality_action.v1";
+const REGISTRY_CONTEXT_ACTION_CATALOG_SCHEMA_VERSION: &str =
+    "forge.registry_context_action_catalog.v1";
 const REGISTRY_QUALITY_ACTION_CATALOG_SCHEMA_VERSION: &str =
     "forge.registry_quality_action_catalog.v1";
 
@@ -181,10 +183,27 @@ pub struct RegistryQualityActionCatalog {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct RegistryContextActionCatalog {
+    pub status: String,
+    pub schema_version: String,
+    pub filter_field: String,
+    pub actions: Vec<RegistryContextActionCatalogEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RegistryQualityActionCatalogEntry {
     pub action: String,
     pub filter_value: String,
     pub possible_priorities: Vec<String>,
+    pub description: String,
+    pub trigger: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RegistryContextActionCatalogEntry {
+    pub action: String,
+    pub filter_value: String,
+    pub readiness: String,
     pub description: String,
     pub trigger: String,
 }
@@ -350,6 +369,91 @@ pub fn quality_action_catalog() -> RegistryQualityActionCatalog {
                 "context quality and dependencies allow executor handoff",
             ),
         ],
+    }
+}
+
+pub fn context_action_catalog() -> RegistryContextActionCatalog {
+    RegistryContextActionCatalog {
+        status: "context_actions_loaded".to_string(),
+        schema_version: REGISTRY_CONTEXT_ACTION_CATALOG_SCHEMA_VERSION.to_string(),
+        filter_field: "context_action".to_string(),
+        actions: vec![
+            context_action_catalog_entry(
+                "ready_for_handoff",
+                "ready",
+                "Find workflows with at least one task whose context and dependencies are ready.",
+                "one or more tasks are ready for executor handoff",
+            ),
+            context_action_catalog_entry(
+                "blocked_tasks",
+                "blocked",
+                "Find workflows with tasks blocked before executor handoff.",
+                "one or more tasks are not ready for handoff",
+            ),
+            context_action_catalog_entry(
+                "start_executor_handoff",
+                "ready",
+                "Find workflows where an executor handoff can be started now.",
+                "context, quality and dependencies allow executor handoff",
+            ),
+            context_action_catalog_entry(
+                "wait_for_dependencies",
+                "blocked",
+                "Find workflows whose next step is waiting for dependency tasks.",
+                "dependencies are not ready for executor handoff",
+            ),
+            context_action_catalog_entry(
+                "increase_context_budget",
+                "blocked",
+                "Find workflows where required context needs more budget before handoff.",
+                "required context was omitted by the active context budget",
+            ),
+            context_action_catalog_entry(
+                "repair_context_and_wait_for_dependencies",
+                "blocked",
+                "Find workflows that need context repair while dependencies are still blocked.",
+                "required context is missing and dependencies are not ready",
+            ),
+            context_action_catalog_entry(
+                "refresh_context_before_resume",
+                "resume",
+                "Find workflows that need fresh context before resuming a checkpointed task.",
+                "checkpoint context is stale after workflow mutation",
+            ),
+            context_action_catalog_entry(
+                "resume_from_checkpoint",
+                "resume",
+                "Find workflows that can resume from a current checkpoint.",
+                "checkpoint context is current for the task route",
+            ),
+            context_action_catalog_entry(
+                "partial_retry_with_fresh_context",
+                "retry",
+                "Find workflows where a partial retry should rebuild context before handoff.",
+                "checkpoint route differs from current context route",
+            ),
+            context_action_catalog_entry(
+                "partial_retry_recommended",
+                "retry",
+                "Find workflows with any checkpointed task that recommends partial retry.",
+                "a checkpointed task requires fresh context before continuation",
+            ),
+        ],
+    }
+}
+
+fn context_action_catalog_entry(
+    action: &str,
+    readiness: &str,
+    description: &str,
+    trigger: &str,
+) -> RegistryContextActionCatalogEntry {
+    RegistryContextActionCatalogEntry {
+        action: action.to_string(),
+        filter_value: action.to_string(),
+        readiness: readiness.to_string(),
+        description: description.to_string(),
+        trigger: trigger.to_string(),
     }
 }
 

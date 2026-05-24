@@ -264,6 +264,9 @@ read-only summaries, so operators and async callers can see which task is ready,
 blocked by missing context or blocked by dependencies without reconstructing the
 context package manually. Those summaries also carry routing quality aggregates and
 per-task quality contracts for context-budget and profile-pressure triage.
+`forge list --context-actions` exposes the valid registry filter values for
+handoff, resume and retry actions, so operators can discover context-action filters
+without memorizing summary field names or reading source code.
 `forge inspect <workflow-id> --task <task-id>` provides a focused terminal and JSON
 inspection view for one task. It preserves the selected node's context-route,
 persona, execution-policy, handoff and child-subflow projections while limiting the
