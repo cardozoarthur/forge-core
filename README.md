@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.75`
+Current version: `0.4.76`
 
 This is the first functional CLI + Skill version:
 
@@ -54,7 +54,7 @@ This is the first functional CLI + Skill version:
 - Codex/OpenCode-compatible `forge-core` skill
 - executor sync that detects installed/configured CLIs and persists human authorization policy
 - runtime sync that detects Docker/Kubernetes/Knative and persists human authorization policy
-- local cluster node registry with capability/trust metadata and dry-run placement decisions
+- local cluster node registry with capability/trust metadata, dry-run placement decisions and distributed handoff manifests
 - n8n-aware research planning that catalogs workflow primitives and evaluates Forge primitive candidates before graph promotion
 - goal-oriented tasks with subtasks, impediments, acceptance criteria and rework readiness checks
 - runtime workflow mutation for goals and artifacts with origin trace from `codex`, `opencode`, `forge_cli` or skills
@@ -62,6 +62,7 @@ This is the first functional CLI + Skill version:
 - async request handoff for skill callers: submit a goal, receive `run_id`, continue later with Forge
 - persisted task leases so two executors cannot acquire the same workflow task concurrently
 - executor handoff packets that combine strict context readiness, lease metadata, routing cache keys, checksums and validation gates
+- cluster handoff packets that choose an eligible node, lease the task to that node and return a content-addressed sync manifest without remote execution
 - executor response validation for adapter outputs before Forge accepts completion evidence
 - self-evolution runner for bounded Codex/OpenCode cycles until a stop date
 - versioned self-evolution prompt packets with SHA-256 checksums in cycle reports
@@ -269,6 +270,7 @@ forge cluster register \
   --output json
 forge cluster list --output json
 forge cluster place --workflow <workflow-id> --task task-009 --output json
+forge cluster handoff --workflow <workflow-id> --task task-001 --budget 1200 --ttl-seconds 900 --output json
 ```
 
 The cluster registry records reported CPU, memory, OS, GPUs, installed software,
@@ -276,7 +278,13 @@ Python/Node/Docker/GPU availability, network reachability, status,
 cost/latency/reliability, trust level and sandbox permissions. Placement is a
 read-only policy decision: Forge can select a node that satisfies deterministic
 task requirements, but it does not connect over SSH, execute remote code or mutate
-external machines.
+external machines. `forge cluster handoff` layers that placement decision over the
+normal executor handoff contract: it leases the task to the selected node id and
+returns `forge.cluster_task_handoff.v1` with the placement report, executor handoff
+packet, node-scoped lease ref and `forge.cluster_sync_manifest.v1`. The sync
+manifest carries context, checkpoint, artifact and shard hashes so a future
+distributed adapter can copy or verify only content-addressed inputs after an
+explicit remote-execution policy exists.
 
 Runtime resources are scope-guarded:
 

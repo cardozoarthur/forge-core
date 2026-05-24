@@ -6,7 +6,8 @@ use forge_core::checkpoint::{
     load_latest_task_checkpoint, record_task_checkpoint, TaskCheckpointRequest,
 };
 use forge_core::cluster::{
-    list_cluster_nodes, place_task_on_cluster, register_cluster_node, ClusterNodeInput,
+    build_cluster_task_handoff, list_cluster_nodes, place_task_on_cluster, register_cluster_node,
+    ClusterNodeInput,
 };
 use forge_core::context::build_context_package_with_checkpoint;
 use forge_core::execution::run_simulated;
@@ -314,6 +315,18 @@ enum ClusterCommands {
         workflow: String,
         #[arg(long)]
         task: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Handoff {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long, default_value_t = 1200)]
+        budget: usize,
+        #[arg(long, default_value_t = 900)]
+        ttl_seconds: u64,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -898,6 +911,20 @@ fn run() -> Result<i32> {
                 let store = ForgeStore::open(cli.store)?;
                 let report = place_task_on_cluster(&store, &workflow, &task)?;
                 let exit_code = if report.selected_node.is_some() { 0 } else { 1 };
+                print_response(output, &report)?;
+                Ok(exit_code)
+            }
+            ClusterCommands::Handoff {
+                workflow,
+                task,
+                budget,
+                ttl_seconds,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report =
+                    build_cluster_task_handoff(&store, &workflow, &task, budget, ttl_seconds)?;
+                let exit_code = if report.allowed { 0 } else { 1 };
                 print_response(output, &report)?;
                 Ok(exit_code)
             }

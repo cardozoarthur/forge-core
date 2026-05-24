@@ -1,4 +1,6 @@
-use crate::graph::{AtomicTask, ExecutorKind};
+use crate::context::ContextReplayShardRef;
+use crate::graph::{ArtifactRecord, AtomicTask, ExecutorKind};
+use crate::handoff::{build_task_handoff, TaskHandoffReport};
 use crate::storage::ForgeStore;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -10,6 +12,8 @@ const CLUSTER_REGISTRY_SCHEMA_VERSION: &str = "forge.cluster_registry.v1";
 const CLUSTER_PLACEMENT_SCHEMA_VERSION: &str = "forge.cluster_placement.v1";
 const CLUSTER_PLACEMENT_REQUIREMENTS_SCHEMA_VERSION: &str =
     "forge.cluster_placement_requirements.v1";
+const CLUSTER_TASK_HANDOFF_SCHEMA_VERSION: &str = "forge.cluster_task_handoff.v1";
+const CLUSTER_SYNC_MANIFEST_SCHEMA_VERSION: &str = "forge.cluster_sync_manifest.v1";
 
 #[derive(Debug, Clone)]
 pub struct ClusterNodeInput {
@@ -125,6 +129,62 @@ pub struct ClusterPlacementReport {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ClusterTaskHandoffReport {
+    pub schema_version: String,
+    pub status: String,
+    pub allowed: bool,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub selected_node_id: Option<String>,
+    pub remote_execution_enabled: bool,
+    pub external_mutation_allowed: bool,
+    pub trust_policy: String,
+    pub placement: ClusterPlacementReport,
+    pub task_handoff: Option<TaskHandoffReport>,
+    pub cluster_node_lease: Option<ClusterNodeLeaseRef>,
+    pub sync_manifest: Option<ClusterSyncManifest>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClusterNodeLeaseRef {
+    pub node_id: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub lease_id: String,
+    pub lease_scope: String,
+    pub lease_expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClusterSyncManifest {
+    pub schema_version: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub selected_node_id: String,
+    pub lease_id: Option<String>,
+    pub context_sha256: String,
+    pub context_routing_cache_key: String,
+    pub context_routing_lineage_sha256: String,
+    pub checkpoint_ref: Option<ClusterCheckpointRef>,
+    pub shard_refs: Vec<ContextReplayShardRef>,
+    pub artifact_refs: Vec<ArtifactRecord>,
+    pub sync_mode: String,
+    pub remote_execution_enabled: bool,
+    pub external_mutation_allowed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClusterCheckpointRef {
+    pub checkpoint_id: String,
+    pub context_sha256: String,
+    pub context_routing_cache_key: Option<String>,
+    pub workflow_revision: u64,
+    pub state: String,
+    pub created_at: DateTime<Utc>,
+}
+
 pub fn register_cluster_node(
     store: &ForgeStore,
     input: ClusterNodeInput,
@@ -232,6 +292,90 @@ pub fn place_task_on_cluster(
     })
 }
 
+pub fn build_cluster_task_handoff(
+    store: &ForgeStore,
+    workflow_id: &str,
+    task_id: &str,
+    budget: usize,
+    ttl_seconds: u64,
+) -> Result<ClusterTaskHandoffReport> {
+    let workflow = store.load_workflow(workflow_id)?;
+    let placement = place_task_on_cluster(store, workflow_id, task_id)?;
+    let Some(selected_node) = placement.selected_node.as_ref() else {
+        return Ok(ClusterTaskHandoffReport {
+            schema_version: CLUSTER_TASK_HANDOFF_SCHEMA_VERSION.to_string(),
+            status: "placement_blocked".to_string(),
+            allowed: false,
+            workflow_id: workflow_id.to_string(),
+            task_id: task_id.to_string(),
+            selected_node_id: None,
+            remote_execution_enabled: false,
+            external_mutation_allowed: false,
+            trust_policy: "explicit_trust_required_no_external_mutation".to_string(),
+            placement,
+            task_handoff: None,
+            cluster_node_lease: None,
+            sync_manifest: None,
+            reason: "no eligible cluster node available for task handoff".to_string(),
+        });
+    };
+
+    let selected_node_id = selected_node.node_id.clone();
+    let task_handoff = build_task_handoff(
+        store,
+        workflow_id,
+        task_id,
+        &selected_node_id,
+        budget,
+        ttl_seconds,
+    )?;
+    let cluster_node_lease = task_handoff
+        .lease
+        .as_ref()
+        .map(|lease| ClusterNodeLeaseRef {
+            node_id: selected_node_id.clone(),
+            workflow_id: lease.workflow_id.clone(),
+            task_id: lease.task_id.clone(),
+            lease_id: lease.lease_id.clone(),
+            lease_scope: "task_on_cluster_node".to_string(),
+            lease_expires_at: lease.expires_at,
+        });
+    let sync_manifest = build_sync_manifest(&workflow, &selected_node_id, &task_handoff);
+    let allowed = task_handoff.allowed;
+    let status = if allowed {
+        "cluster_handoff_ready".to_string()
+    } else {
+        task_handoff.status.clone()
+    };
+    let reason = if allowed {
+        format!(
+            "selected {selected_node_id} and prepared a content-addressed sync manifest without remote execution"
+        )
+    } else {
+        task_handoff
+            .reason
+            .clone()
+            .unwrap_or_else(|| "cluster handoff blocked before remote execution".to_string())
+    };
+
+    Ok(ClusterTaskHandoffReport {
+        schema_version: CLUSTER_TASK_HANDOFF_SCHEMA_VERSION.to_string(),
+        status,
+        allowed,
+        workflow_id: workflow_id.to_string(),
+        task_id: task_id.to_string(),
+        selected_node_id: Some(selected_node_id),
+        remote_execution_enabled: false,
+        external_mutation_allowed: false,
+        trust_policy: "explicit_trust_required_no_external_mutation".to_string(),
+        placement,
+        task_handoff: Some(task_handoff),
+        cluster_node_lease,
+        sync_manifest: Some(sync_manifest),
+        reason,
+    })
+}
+
 impl ClusterNode {
     fn from_input(
         input: ClusterNodeInput,
@@ -285,6 +429,49 @@ impl ClusterNode {
             created_at,
             updated_at,
         }
+    }
+}
+
+fn build_sync_manifest(
+    workflow: &crate::graph::Workflow,
+    selected_node_id: &str,
+    task_handoff: &TaskHandoffReport,
+) -> ClusterSyncManifest {
+    let checkpoint_ref = task_handoff
+        .context
+        .latest_checkpoint
+        .as_ref()
+        .map(|checkpoint| ClusterCheckpointRef {
+            checkpoint_id: checkpoint.checkpoint_id.clone(),
+            context_sha256: checkpoint.context_sha256.clone(),
+            context_routing_cache_key: checkpoint.context_routing_cache_key.clone(),
+            workflow_revision: checkpoint.workflow_revision,
+            state: checkpoint.state.clone(),
+            created_at: checkpoint.created_at,
+        });
+
+    ClusterSyncManifest {
+        schema_version: CLUSTER_SYNC_MANIFEST_SCHEMA_VERSION.to_string(),
+        workflow_id: task_handoff.workflow_id.clone(),
+        task_id: task_handoff.task_id.clone(),
+        selected_node_id: selected_node_id.to_string(),
+        lease_id: task_handoff
+            .lease
+            .as_ref()
+            .map(|lease| lease.lease_id.clone()),
+        context_sha256: task_handoff.context.context_sha256.clone(),
+        context_routing_cache_key: task_handoff.context.routing_fingerprint.cache_key.clone(),
+        context_routing_lineage_sha256: task_handoff
+            .context
+            .routing_fingerprint
+            .lineage_sha256
+            .clone(),
+        checkpoint_ref,
+        shard_refs: task_handoff.context.replay_manifest.shard_refs.clone(),
+        artifact_refs: workflow.artifacts.clone(),
+        sync_mode: "content_addressed_hash_manifest_only".to_string(),
+        remote_execution_enabled: false,
+        external_mutation_allowed: false,
     }
 }
 

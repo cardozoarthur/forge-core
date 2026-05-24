@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.76 - 2026-05-24
+
+### Added
+
+- Added `forge cluster handoff --workflow <id> --task <task-id>` with schema `forge.cluster_task_handoff.v1`.
+- Cluster handoff now composes deterministic cluster placement with the existing strict executor handoff contract, acquiring the task lease with the selected node id as the executor.
+- Added a node-scoped `cluster_node_lease` ref with lease id, workflow/task identity, selected node id, lease scope and expiry.
+- Added `forge.cluster_sync_manifest.v1`, a content-addressed hash manifest for distributed task staging. It carries context checksums, routing cache keys, lineage hash, checkpoint refs, artifact refs and replay shard refs without copying or executing remote content.
+- Added CLI contract coverage proving a trusted LAN node can be selected, leased and returned with a sync manifest, and that a second cluster handoff is blocked by the existing task lease.
+- Added `docs/reports/forge-core-v0.4.76-report-2026-05-24.md` with the cycle report.
+
+### Changed
+
+- The package version is now `0.4.76`.
+- README and technical definition now document cluster handoff as the safe staging step after registry placement and before any remote execution adapter.
+
+### Safety
+
+- Cluster handoff does not open SSH sessions, execute remote commands, copy files to external machines, authorize AI executors, install Knative or mutate Docker/Kubernetes/Knative/user resources.
+- The returned sync manifest explicitly keeps `remote_execution_enabled=false` and `external_mutation_allowed=false`; it is an auditable hash contract for future permission-scoped adapters.
+
 ## 0.4.75 - 2026-05-24
 
 ### Added

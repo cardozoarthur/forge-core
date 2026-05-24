@@ -50,7 +50,7 @@ Close coupling is still valuable when it reduces friction. The target architectu
 
 ## v0 Boundary
 
-The current version is a local Rust CLI and skill package. It includes SQLite persistence, simulated execution, AI/non-AI/wait/notification task kinds, executor sync/policy, runtime substrate sync/policy, goal-oriented work items, rework validation, runtime goal/artifact mutation, cost report generation and controlled improvement artifacts with changelog generation. It does not yet include distributed execution, real provider adapters, SaaS UI or WASM plugins.
+The current version is a local Rust CLI and skill package. It includes SQLite persistence, simulated execution, AI/non-AI/wait/notification task kinds, executor sync/policy, runtime substrate sync/policy, goal-oriented work items, rework validation, runtime goal/artifact mutation, cluster registry/placement metadata, cluster handoff manifests, cost report generation and controlled improvement artifacts with changelog generation. It does not yet include remote distributed execution, real provider adapters, SaaS UI or WASM plugins.
 
 ## Executor Contract Direction
 
@@ -154,11 +154,18 @@ returns a dry-run placement decision with candidate reasons. A local Python code
 node, for example, requires a registered online and reachable node with the
 `python` capability, a trusted LAN/local trust class and the declared sandbox
 permission.
+`forge cluster handoff --workflow <id> --task <task-id>` turns an eligible
+placement into a bounded handoff packet. It acquires the normal Forge task lease
+using the selected node id as the executor, returns a node-scoped lease ref and
+emits `forge.cluster_sync_manifest.v1` with context, checkpoint, artifact and
+context-shard hashes. The manifest is hash-only and declares remote execution and
+external mutation disabled, so it is an auditable staging contract rather than a
+remote runner.
 
 This stage intentionally does not open SSH sessions, run remote commands, mutate
 Docker/Kubernetes/Knative resources or execute remote AI. It gives Forge an
-auditable scheduling precondition so later distributed handoff and node-lease
-work can build on explicit capabilities and trust policy.
+auditable scheduling and handoff precondition so later remote adapters can build
+on explicit capabilities, node leases, content hashes and trust policy.
 
 ## Runtime Substrate Contract
 

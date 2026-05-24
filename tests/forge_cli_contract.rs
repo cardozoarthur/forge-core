@@ -9433,6 +9433,186 @@ fn cluster_registry_records_nodes_and_places_deterministic_code_task_by_capabili
         .contains(&Value::String("missing capability python".to_string())));
 }
 
+#[test]
+fn cluster_handoff_selects_node_leases_task_and_returns_hash_sync_manifest() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "register",
+            "--node-id",
+            "lan-linux-command",
+            "--name",
+            "LAN Linux Command Worker",
+            "--endpoint",
+            "ssh://forge@lan-linux",
+            "--os",
+            "linux",
+            "--arch",
+            "x86_64",
+            "--cpu-cores",
+            "8",
+            "--memory-gb",
+            "32",
+            "--software",
+            "python3",
+            "--capability",
+            "command",
+            "--capability",
+            "python",
+            "--python",
+            "--network-reachable",
+            "--status",
+            "online",
+            "--trust",
+            "trusted_lan",
+            "--sandbox",
+            "local_process_no_network",
+            "--latency-ms",
+            "5",
+            "--reliability",
+            "0.98",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let planned_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Prepare distributed cluster handoff without external mutation",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned: Value = serde_json::from_slice(&planned_output).unwrap();
+    let workflow_id = planned["workflow_id"].as_str().unwrap();
+    let task_id = planned["tasks"][0]["id"].as_str().unwrap();
+
+    let handoff = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
+    assert_eq!(
+        handoff_json["schema_version"],
+        "forge.cluster_task_handoff.v1"
+    );
+    assert_eq!(handoff_json["status"], "cluster_handoff_ready");
+    assert_eq!(handoff_json["allowed"], true);
+    assert_eq!(handoff_json["selected_node_id"], "lan-linux-command");
+    assert_eq!(handoff_json["remote_execution_enabled"], false);
+    assert_eq!(handoff_json["external_mutation_allowed"], false);
+    assert_eq!(
+        handoff_json["placement"]["selected_node"]["node_id"],
+        "lan-linux-command"
+    );
+    assert_eq!(
+        handoff_json["task_handoff"]["selected_executor"],
+        "lan-linux-command"
+    );
+
+    let node_lease = &handoff_json["cluster_node_lease"];
+    assert_eq!(node_lease["node_id"], "lan-linux-command");
+    assert_eq!(node_lease["workflow_id"], workflow_id);
+    assert_eq!(node_lease["task_id"], task_id);
+    assert_eq!(node_lease["lease_scope"], "task_on_cluster_node");
+    assert_eq!(
+        node_lease["lease_id"],
+        handoff_json["task_handoff"]["lease"]["lease_id"]
+    );
+
+    let sync_manifest = &handoff_json["sync_manifest"];
+    assert_eq!(
+        sync_manifest["schema_version"],
+        "forge.cluster_sync_manifest.v1"
+    );
+    assert_eq!(sync_manifest["workflow_id"], workflow_id);
+    assert_eq!(sync_manifest["task_id"], task_id);
+    assert_eq!(sync_manifest["selected_node_id"], "lan-linux-command");
+    assert_eq!(
+        sync_manifest["context_sha256"],
+        handoff_json["task_handoff"]["context"]["context_sha256"]
+    );
+    assert_eq!(
+        sync_manifest["context_routing_cache_key"],
+        handoff_json["task_handoff"]["context"]["routing_fingerprint"]["cache_key"]
+    );
+    assert_eq!(
+        sync_manifest["sync_mode"],
+        "content_addressed_hash_manifest_only"
+    );
+    assert_eq!(sync_manifest["external_mutation_allowed"], false);
+    assert!(sync_manifest["shard_refs"].as_array().unwrap().len() >= 5);
+    assert!(sync_manifest["shard_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|shard| shard["section"] == "execution_policy"
+            && shard["content_sha256"].as_str().unwrap().len() == 64));
+    assert_eq!(sync_manifest["artifact_refs"], serde_json::json!([]));
+
+    let conflict = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cluster",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let conflict_json: Value = serde_json::from_slice(&conflict).unwrap();
+    assert_eq!(conflict_json["status"], "lease_conflict");
+    assert_eq!(conflict_json["allowed"], false);
+    assert_eq!(
+        conflict_json["task_handoff"]["current_lease"]["executor"],
+        "lan-linux-command"
+    );
+}
+
 fn find_executor<'a>(json: &'a Value, id: &str) -> &'a Value {
     json["executors"]
         .as_array()
