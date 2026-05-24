@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.57 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v25` with a versioned `routing_economy` ledger for context-cost audit.
+- The economy contract uses schema `forge.context.routing_economy.v1` and reports executor profile, reasoning/deterministic flags, baseline bytes, selected bytes, compression savings, budget omissions, profile-filtered omissions, total avoided bytes, reduction basis points and deterministic no-AI model-call avoidance.
+- Context routing fingerprints now include a `routing_economy` component, so executor cache keys account for cost/economy routing decisions alongside quality, budget, persona and context-delta contracts.
+- `forge inspect --output json` now projects the economy ledger for each terminal node, and the human diagram prints compact economy decision/avoided-byte markers.
+- Added CLI contract coverage proving AI routes expose bounded-context economy and deterministic no-AI code nodes explicitly mark a model call as avoided.
+
+### Changed
+
+- The context routing policy is now `task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_v25`.
+- The package version is now `0.4.57`.
+
+### Safety
+
+- Routing economy is read-only metadata derived from Forge-owned workflow/task state and deterministic shard selection.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules, task leases, persona gates and child-subflow validation gates.
+
 ## 0.4.56 - 2026-05-24
 
 ### Added

@@ -91,8 +91,8 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v24`) with a deterministic
-`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_v24` routing policy.
+`forge context` emits a versioned context packet (`forge.context.v25`) with a deterministic
+`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_v25` routing policy.
 The packet keeps the legacy `content` body for executors, and also returns workflow
 revision, artifact count, persona routing metadata for human-facing nodes, a versioned
 persona profile and persona contract, executor profile metadata, a versioned routing contract, execution policy metadata, dependency readiness summaries, proposed
@@ -104,7 +104,8 @@ byte counts, summaries and SHA-256 checksums. The packet also exposes `context_r
 `handoff_blockers`, a `routing_summary`, a versioned `routing_contract`, a versioned
 `routing_repair` budget recommendation, a versioned `routing_quality` score/warning contract,
 a node-scoped `persona_profile` and `persona_contract` for human-facing artifacts, a versioned `next_action`
-resume/handoff decision and a versioned `routing_fingerprint`
+resume/handoff decision, a versioned `routing_economy` ledger with selected, compressed,
+omitted and no-AI model-call avoidance metrics, and a versioned `routing_fingerprint`
 with component hashes and a cache key so executor adapters can reuse or invalidate
 bounded context without reparsing full packets. Adapters can block handoff when the
 minimum correct context was omitted or dependency tasks are not ready.

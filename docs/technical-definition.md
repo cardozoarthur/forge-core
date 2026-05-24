@@ -190,8 +190,8 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v24` and routing policy
-`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_v24`. Each packet
+Current `forge context` packets use schema `forge.context.v25` and routing policy
+`task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_v25`. Each packet
 includes the executor-facing content, the full context checksum, workflow revision,
 artifact count, node-scoped persona routing metadata plus a versioned persona profile
 and persona contract for human-facing tasks, executor
@@ -213,8 +213,11 @@ allowed/required/optional section set and profile hash. The repair contract turn
 missing required sections into a deterministic action and recommended budget so
 operators can retry with the smallest known budget increase instead of guessing. The
 budget plan exposes the required context floor, selected bytes, optional pressure,
-missing required sections and recommended budget so executor adapters can choose the
-smallest correct handoff budget before spending model or runtime work. The
+and recommended budget. The `routing_economy` contract records baseline bytes, selected bytes,
+compression savings, budget omissions, profile-filtered omissions, total avoided bytes,
+reduction basis points and whether a deterministic no-AI profile avoided a model call.
+Together these contracts let executor adapters choose the smallest correct handoff
+budget before spending model or runtime work. The
 persona profile gives the selected profile id, routing rationale, source-model
 summaries and profile checksum. The persona contract binds the node's mode, scope,
 voice, tone, instruction source, source models, validation gate, audit flag and

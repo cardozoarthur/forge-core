@@ -2,8 +2,8 @@ use crate::checkpoint::load_workflow_checkpoints;
 use crate::context::{
     build_context_package_with_checkpoint, context_next_action, summarize_context_handoff_tasks,
     ContextBudgetPlan, ContextDelta, ContextHandoffBlocker, ContextHandoffSummary,
-    ContextHandoffTask, ContextNextAction, ContextPackage, ContextRoutingQuality,
-    ContextRoutingRepair, ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
+    ContextHandoffTask, ContextNextAction, ContextPackage, ContextRoutingEconomy,
+    ContextRoutingQuality, ContextRoutingRepair, ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
 };
 use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, SubtaskSpec, TaskStatus,
@@ -80,6 +80,7 @@ pub struct ContextInspectionRoute {
     pub routing_summary: ContextRoutingSummary,
     pub routing_repair: ContextRoutingRepair,
     pub budget_plan: ContextBudgetPlan,
+    pub routing_economy: ContextRoutingEconomy,
     pub routing_quality: ContextRoutingQuality,
     pub next_action: ContextNextAction,
     pub context_delta: ContextDelta,
@@ -287,6 +288,7 @@ fn context_route(package: &ContextPackage) -> ContextInspectionRoute {
         routing_summary: package.routing_summary.clone(),
         routing_repair: package.routing_repair.clone(),
         budget_plan: package.budget_plan.clone(),
+        routing_economy: package.routing_economy.clone(),
         routing_quality: package.routing_quality.clone(),
         next_action: context_next_action(package),
         context_delta: package.context_delta.clone(),
@@ -556,8 +558,14 @@ fn render_diagram(
                 .unwrap_or("adapter"),
             node.execution_policy.reuse_hint
         );
+        let economy = format!(
+            " economy {} avoided {} reduction_bps {}",
+            node.context_route.routing_economy.cost_decision,
+            node.context_route.routing_economy.total_avoided_bytes,
+            node.context_route.routing_economy.reduction_bps
+        );
         lines.push(format!(
-            "{} {} [{}] {}{}{} handoff {} executor {}{}{}",
+            "{} {} [{}] {}{}{} handoff {} executor {}{}{}{}",
             node.id,
             node.title,
             node.status,
@@ -567,7 +575,8 @@ fn render_diagram(
             node.handoff_status,
             node.executor,
             context_route,
-            execution_policy
+            execution_policy,
+            economy
         ));
 
         if verbose {

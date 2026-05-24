@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v24";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v25";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
 const ROUTING_CONTRACT_SCHEMA_VERSION: &str = "forge.context.routing_contract.v1";
 const ROUTING_REPAIR_SCHEMA_VERSION: &str = "forge.context.routing_repair.v1";
@@ -16,6 +16,7 @@ const BUDGET_PLAN_SCHEMA_VERSION: &str = "forge.context.budget_plan.v1";
 const PERSONA_PROFILE_SCHEMA_VERSION: &str = "forge.context.persona_profile.v1";
 const PERSONA_CONTRACT_SCHEMA_VERSION: &str = "forge.context.persona_contract.v2";
 const CONTEXT_DELTA_SCHEMA_VERSION: &str = "forge.context.delta.v1";
+const ROUTING_ECONOMY_SCHEMA_VERSION: &str = "forge.context.routing_economy.v1";
 const CONTEXT_SELECTOR_VERSION: &str = "forge.context.selector.v1";
 const EXECUTOR_PROFILE_SCHEMA_VERSION: &str = "forge.context.executor_profile.v1";
 const CONTEXT_NEXT_ACTION_SCHEMA_VERSION: &str = "forge.inspect_context_action.v1";
@@ -23,7 +24,7 @@ const CONTEXT_ROUTING_QUALITY_SCHEMA_VERSION: &str = "forge.context_routing_qual
 const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
     "forge.context_routing_quality_summary.v1";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_v24";
+    "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_economy_v25";
 const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
@@ -117,6 +118,7 @@ pub struct ContextPackage {
     pub routing_repair: ContextRoutingRepair,
     pub budget_plan: ContextBudgetPlan,
     pub routing_summary: ContextRoutingSummary,
+    pub routing_economy: ContextRoutingEconomy,
     pub routing_quality: ContextRoutingQuality,
     pub next_action: ContextNextAction,
     pub context_delta: ContextDelta,
@@ -360,6 +362,25 @@ pub struct ContextRoutingSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ContextRoutingEconomy {
+    pub schema_version: String,
+    pub executor_profile_id: String,
+    pub reasoning_allowed: bool,
+    pub deterministic: bool,
+    pub baseline_bytes: usize,
+    pub selected_bytes: usize,
+    pub compression_saved_bytes: usize,
+    pub budget_omitted_bytes: usize,
+    pub profile_filtered_bytes: usize,
+    pub total_avoided_bytes: usize,
+    pub reduction_bps: u32,
+    pub model_call_avoided: bool,
+    pub estimated_model_calls_avoided: u32,
+    pub cost_decision: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ContextRoutingQuality {
     pub schema_version: String,
     pub status: String,
@@ -536,6 +557,7 @@ struct RoutingFingerprintInput<'a> {
     routing_contract: &'a ContextRoutingContract,
     routing_repair: &'a ContextRoutingRepair,
     budget_plan: &'a ContextBudgetPlan,
+    routing_economy: &'a ContextRoutingEconomy,
     routing_quality: &'a ContextRoutingQuality,
     persona_profile: Option<&'a ContextPersonaProfile>,
     persona_contract: Option<&'a ContextPersonaContract>,
@@ -938,6 +960,7 @@ pub fn build_context_package_with_checkpoint(
         budget,
         effective_budget,
     );
+    let routing_economy = build_routing_economy(&profile, &routing_summary, &shards);
     let routing_quality = build_routing_quality(
         &routing_summary,
         &shards,
@@ -962,6 +985,7 @@ pub fn build_context_package_with_checkpoint(
         routing_contract: &routing_contract,
         routing_repair: &routing_repair,
         budget_plan: &budget_plan,
+        routing_economy: &routing_economy,
         routing_quality: &routing_quality,
         persona_profile: persona_profile.as_ref(),
         persona_contract: persona_contract.as_ref(),
@@ -1017,6 +1041,7 @@ pub fn build_context_package_with_checkpoint(
         routing_repair,
         budget_plan,
         routing_summary,
+        routing_economy,
         routing_quality,
         next_action,
         context_delta,
@@ -1600,6 +1625,70 @@ fn build_budget_plan(
     }
 }
 
+fn build_routing_economy(
+    profile: &ExecutorContextProfile,
+    summary: &ContextRoutingSummary,
+    shards: &[ContextShard],
+) -> ContextRoutingEconomy {
+    let budget_omitted_bytes = shards
+        .iter()
+        .filter(|shard| shard.routing_decision == "omitted_budget")
+        .map(|shard| shard.original_bytes)
+        .sum::<usize>();
+    let profile_filtered_bytes = shards
+        .iter()
+        .filter(|shard| shard.profile_excluded)
+        .map(|shard| shard.original_bytes)
+        .sum::<usize>();
+    let baseline_bytes = summary.original_bytes;
+    let selected_bytes = summary.selected_bytes;
+    let total_avoided_bytes = baseline_bytes.saturating_sub(selected_bytes);
+    let reduction_bps = if baseline_bytes == 0 {
+        0
+    } else {
+        ((total_avoided_bytes as u128 * 10_000) / baseline_bytes as u128)
+            .min(10_000)
+            .try_into()
+            .unwrap_or(10_000)
+    };
+    let model_call_avoided = profile.deterministic && !profile.reasoning_allowed;
+    let estimated_model_calls_avoided = u32::from(model_call_avoided);
+    let (cost_decision, reason) = if model_call_avoided {
+        (
+            "no_ai_deterministic_route",
+            "executor profile forbids reasoning and routes only deterministic minimum context, avoiding a model call",
+        )
+    } else if summary.budget_omitted_shards > 0 || summary.compressed_shards > 0 {
+        (
+            "model_context_reduced",
+            "selected a bounded AI context with compression or omission before executor handoff",
+        )
+    } else {
+        (
+            "model_context_full",
+            "selected the full allowed context for a reasoning-capable executor",
+        )
+    };
+
+    ContextRoutingEconomy {
+        schema_version: ROUTING_ECONOMY_SCHEMA_VERSION.to_string(),
+        executor_profile_id: profile.id.to_string(),
+        reasoning_allowed: profile.reasoning_allowed,
+        deterministic: profile.deterministic,
+        baseline_bytes,
+        selected_bytes,
+        compression_saved_bytes: summary.compression_saved_bytes,
+        budget_omitted_bytes,
+        profile_filtered_bytes,
+        total_avoided_bytes,
+        reduction_bps,
+        model_call_avoided,
+        estimated_model_calls_avoided,
+        cost_decision: cost_decision.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
 fn minimum_routable_shard_bytes(shard: &ContextShard) -> usize {
     let compressed_bytes = format!("[compressed {}]\n{}\n", shard.section, shard.summary).len();
     shard.original_bytes.min(compressed_bytes)
@@ -1734,6 +1823,7 @@ fn build_routing_fingerprint(
     let routing_contract = serde_json::to_string(input.routing_contract)?;
     let routing_repair = serde_json::to_string(input.routing_repair)?;
     let budget_plan = serde_json::to_string(input.budget_plan)?;
+    let routing_economy = serde_json::to_string(input.routing_economy)?;
     let routing_quality = serde_json::to_string(input.routing_quality)?;
     let persona_profile = serde_json::to_string(&input.persona_profile)?;
     let persona_contract = serde_json::to_string(&input.persona_contract)?;
@@ -1794,6 +1884,7 @@ fn build_routing_fingerprint(
         fingerprint_component("routing_contract", routing_contract),
         fingerprint_component("routing_repair", routing_repair),
         fingerprint_component("budget_plan", budget_plan),
+        fingerprint_component("routing_economy", routing_economy),
         fingerprint_component("routing_quality", routing_quality),
         fingerprint_component("persona_profile", persona_profile),
         fingerprint_component("persona_contract", persona_contract),
