@@ -1,8 +1,8 @@
 use crate::checkpoint::load_workflow_checkpoints;
 use crate::context::{
-    build_context_package_with_checkpoint, context_next_action, ContextHandoffBlocker,
-    ContextHandoffSummary, ContextHandoffTask, ContextNextAction, ContextPackage,
-    ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
+    build_context_package_with_checkpoint, context_next_action, summarize_context_handoff_tasks,
+    ContextHandoffBlocker, ContextHandoffSummary, ContextHandoffTask, ContextNextAction,
+    ContextPackage, ContextRoutingQuality, ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
 };
 use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, SubtaskSpec, TaskStatus,
@@ -76,6 +76,7 @@ pub struct ContextInspectionRoute {
     pub included_sections: Vec<String>,
     pub omitted_sections: Vec<String>,
     pub routing_summary: ContextRoutingSummary,
+    pub routing_quality: ContextRoutingQuality,
     pub next_action: ContextNextAction,
 }
 
@@ -177,34 +178,12 @@ fn handoff_task(task: &AtomicTask, package: &ContextPackage) -> ContextHandoffTa
         blocking_refs,
         context_sha256: package.context_sha256.clone(),
         resume_context_status: package.resume_context_status.clone(),
+        routing_quality: package.routing_quality.clone(),
     }
 }
 
 fn summarize_handoff_tasks(tasks: Vec<ContextHandoffTask>) -> ContextHandoffSummary {
-    let ready = tasks.iter().filter(|task| task.handoff_ready).count();
-    let blocked_missing_context = tasks
-        .iter()
-        .filter(|task| task.handoff_status == "blocked_missing_context")
-        .count();
-    let blocked_dependencies = tasks
-        .iter()
-        .filter(|task| task.handoff_status == "blocked_dependencies")
-        .count();
-    let blocked_missing_context_and_dependencies = tasks
-        .iter()
-        .filter(|task| task.handoff_status == "blocked_missing_context_and_dependencies")
-        .count();
-    let total = tasks.len();
-
-    ContextHandoffSummary {
-        total,
-        ready,
-        blocked: total.saturating_sub(ready),
-        blocked_missing_context,
-        blocked_dependencies,
-        blocked_missing_context_and_dependencies,
-        tasks,
-    }
+    summarize_context_handoff_tasks(tasks)
 }
 
 fn task_node(
@@ -287,6 +266,7 @@ fn context_route(package: &ContextPackage) -> ContextInspectionRoute {
         included_sections: package.included_sections.clone(),
         omitted_sections: package.omitted_sections.clone(),
         routing_summary: package.routing_summary.clone(),
+        routing_quality: package.routing_quality.clone(),
         next_action: context_next_action(package),
     }
 }

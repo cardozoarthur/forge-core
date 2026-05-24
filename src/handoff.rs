@@ -1,6 +1,7 @@
 use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{
     build_context_package_with_checkpoint, ContextHandoffBlocker, ContextPackage,
+    ContextRoutingQuality,
 };
 use crate::graph::{ExecutionPolicySpec, ExecutorKind, PersonaRoutingSpec, ValidationRule};
 use crate::lease::{acquire_task_lease, TaskLease};
@@ -9,7 +10,7 @@ use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-const EXECUTOR_HANDOFF_SCHEMA_VERSION: &str = "forge.executor_handoff.v5";
+const EXECUTOR_HANDOFF_SCHEMA_VERSION: &str = "forge.executor_handoff.v6";
 const PERSONA_HANDOFF_SCHEMA_VERSION: &str = "forge.persona_handoff.v1";
 
 #[derive(Debug, Clone, Serialize)]
@@ -46,6 +47,7 @@ pub struct ExecutorHandoffPacket {
     pub context_routing_cache_key: String,
     pub context_routing_lineage_sha256: String,
     pub context_bytes: usize,
+    pub context_routing_quality: ContextRoutingQuality,
     pub handoff_ready: bool,
     pub handoff_status: String,
     pub handoff_blockers: Vec<ContextHandoffBlocker>,
@@ -222,6 +224,7 @@ impl ExecutorHandoffPacket {
                 .lineage_sha256
                 .clone(),
             context_bytes: parts.context.context_bytes,
+            context_routing_quality: parts.context.routing_quality.clone(),
             handoff_ready: parts.context.handoff_ready,
             handoff_status: parts.context.handoff_status.clone(),
             handoff_blockers: parts.context.handoff_blockers.clone(),

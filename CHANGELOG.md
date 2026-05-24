@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.43 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v17` with a versioned `routing_quality` contract.
+- Context routing quality uses schema `forge.context_routing_quality.v1` and reports status, score, warnings, recommendations and section refs for missing required context, budget pressure, compressed context and profile-filtered optional context.
+- The context routing fingerprint now includes a `routing_quality` component so executor replay/cache keys account for quality-relevant routing state.
+- `forge inspect`, `forge request status` and context handoff summaries now expose `forge.context_routing_quality_summary.v1` aggregates plus per-task quality contracts.
+- `forge task handoff` now emits `forge.executor_handoff.v6` and includes the selected context routing quality contract in the top-level adapter packet.
+
+### Changed
+
+- The routing policy is now `task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_v17`.
+- Operators can distinguish dependency waits from context-budget/profile pressure without reopening full context packets or recomputing shard manifests.
+
+### Safety
+
+- Routing quality is read-only metadata derived from Forge-owned workflow/task state and deterministic context shard selection.
+- This change does not acquire leases, complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules and task leases.
+
 ## 0.4.42 - 2026-05-24
 
 ### Added

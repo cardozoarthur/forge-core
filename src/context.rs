@@ -8,11 +8,14 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v16";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v17";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
 const CONTEXT_NEXT_ACTION_SCHEMA_VERSION: &str = "forge.inspect_context_action.v1";
+const CONTEXT_ROUTING_QUALITY_SCHEMA_VERSION: &str = "forge.context_routing_quality.v1";
+const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
+    "forge.context_routing_quality_summary.v1";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_v16";
+    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_v17";
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
 const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
@@ -100,6 +103,7 @@ pub struct ContextPackage {
     pub context_sha256: String,
     pub routing_fingerprint: ContextRoutingFingerprint,
     pub routing_summary: ContextRoutingSummary,
+    pub routing_quality: ContextRoutingQuality,
     pub context_ready: bool,
     pub required_sections: Vec<String>,
     pub missing_required_sections: Vec<String>,
@@ -203,6 +207,7 @@ pub struct ContextHandoffSummary {
     pub blocked_missing_context: usize,
     pub blocked_dependencies: usize,
     pub blocked_missing_context_and_dependencies: usize,
+    pub routing_quality: ContextRoutingQualitySummary,
     pub tasks: Vec<ContextHandoffTask>,
 }
 
@@ -219,6 +224,7 @@ pub struct ContextHandoffTask {
     pub blocking_refs: Vec<String>,
     pub context_sha256: String,
     pub resume_context_status: String,
+    pub routing_quality: ContextRoutingQuality,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -238,6 +244,38 @@ pub struct ContextRoutingSummary {
     pub effective_budget: usize,
     pub remaining_budget: usize,
     pub budget_utilization_bps: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextRoutingQuality {
+    pub schema_version: String,
+    pub status: String,
+    pub score_bps: u32,
+    pub warnings: Vec<ContextRoutingQualityWarning>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextRoutingQualityWarning {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    pub recommendation: String,
+    pub refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextRoutingQualitySummary {
+    pub schema_version: String,
+    pub tasks: usize,
+    pub passed: usize,
+    pub warning: usize,
+    pub blocked: usize,
+    pub total_warnings: usize,
+    pub blocking_warnings: usize,
+    pub warning_warnings: usize,
+    pub advisory_warnings: usize,
+    pub min_score_bps: u32,
+    pub average_score_bps: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -323,6 +361,7 @@ struct RoutingFingerprintInput<'a> {
     shards: &'a [ContextShard],
     child_subflows: &'a [ChildSubflowRef],
     resume_context_status: &'a str,
+    routing_quality: &'a ContextRoutingQuality,
     context_sha256: &'a str,
 }
 
@@ -369,9 +408,14 @@ pub fn build_context_handoff_summary(
             blocking_refs,
             context_sha256: package.context_sha256,
             resume_context_status: package.resume_context_status,
+            routing_quality: package.routing_quality,
         });
     }
 
+    Ok(summarize_context_handoff_tasks(tasks))
+}
+
+pub fn summarize_context_handoff_tasks(tasks: Vec<ContextHandoffTask>) -> ContextHandoffSummary {
     let ready = tasks.iter().filter(|task| task.handoff_ready).count();
     let blocked_missing_context = tasks
         .iter()
@@ -386,16 +430,18 @@ pub fn build_context_handoff_summary(
         .filter(|task| task.handoff_status == "blocked_missing_context_and_dependencies")
         .count();
     let total = tasks.len();
+    let routing_quality = summarize_routing_quality(&tasks);
 
-    Ok(ContextHandoffSummary {
+    ContextHandoffSummary {
         total,
         ready,
         blocked: total.saturating_sub(ready),
         blocked_missing_context,
         blocked_dependencies,
         blocked_missing_context_and_dependencies,
+        routing_quality,
         tasks,
-    })
+    }
 }
 
 pub fn build_context_package_with_checkpoint(
@@ -686,6 +732,12 @@ pub fn build_context_package_with_checkpoint(
     let handoff_ready = handoff_blockers.is_empty();
     let handoff_status = derive_handoff_status(&handoff_blockers);
     let context_sha256 = hex_sha256(content.as_bytes());
+    let routing_quality = build_routing_quality(
+        &routing_summary,
+        &shards,
+        &missing_required_sections,
+        &profile_omitted_sections,
+    );
     let routing_fingerprint = build_routing_fingerprint(RoutingFingerprintInput {
         workflow_id: &workflow.id,
         task_id: &task.id,
@@ -701,6 +753,7 @@ pub fn build_context_package_with_checkpoint(
         shards: &shards,
         child_subflows: &task.child_subflows,
         resume_context_status,
+        routing_quality: &routing_quality,
         context_sha256: &context_sha256,
     })?;
 
@@ -731,6 +784,7 @@ pub fn build_context_package_with_checkpoint(
         context_sha256,
         routing_fingerprint,
         routing_summary,
+        routing_quality,
         context_ready,
         required_sections,
         missing_required_sections,
@@ -955,11 +1009,166 @@ fn build_routing_summary(
     }
 }
 
+fn build_routing_quality(
+    summary: &ContextRoutingSummary,
+    shards: &[ContextShard],
+    missing_required_sections: &[String],
+    profile_omitted_sections: &[String],
+) -> ContextRoutingQuality {
+    let mut warnings = Vec::new();
+
+    if !missing_required_sections.is_empty() {
+        warnings.push(routing_quality_warning(
+            "required_context_missing",
+            "blocking",
+            "required context sections were omitted before executor handoff",
+            "increase_context_budget",
+            missing_required_sections.to_vec(),
+        ));
+    }
+
+    if summary.budget_omitted_shards > 0 {
+        warnings.push(routing_quality_warning(
+            "budget_pressure",
+            "warning",
+            "one or more context shards were omitted by the effective budget",
+            "increase_context_budget",
+            unique_sections(
+                shards
+                    .iter()
+                    .filter(|shard| shard.routing_decision == "omitted_budget")
+                    .map(|shard| shard.section.as_str()),
+            ),
+        ));
+    }
+
+    if summary.compressed_shards > 0 {
+        warnings.push(routing_quality_warning(
+            "compressed_context",
+            "advisory",
+            "one or more shards were summarized to fit the context budget",
+            "review_context_summary_before_reuse",
+            unique_sections(
+                shards
+                    .iter()
+                    .filter(|shard| shard.included && shard.compressed)
+                    .map(|shard| shard.section.as_str()),
+            ),
+        ));
+    }
+
+    if summary.profile_omitted_shards > 0 {
+        warnings.push(routing_quality_warning(
+            "profile_filtered_optional_context",
+            "advisory",
+            "the executor profile filtered context sections that are not part of its contract",
+            "verify_executor_profile_matches_node_policy",
+            unique_sections(profile_omitted_sections.iter().map(String::as_str)),
+        ));
+    }
+
+    let status = if warnings
+        .iter()
+        .any(|warning| warning.severity == "blocking")
+    {
+        "blocked"
+    } else if warnings.is_empty() {
+        "pass"
+    } else {
+        "warning"
+    };
+    let penalty = warnings
+        .iter()
+        .map(|warning| match warning.severity.as_str() {
+            "blocking" => 5_000,
+            "warning" => 1_000,
+            "advisory" => 250,
+            _ => 0,
+        })
+        .sum::<u32>();
+
+    ContextRoutingQuality {
+        schema_version: CONTEXT_ROUTING_QUALITY_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        score_bps: 10_000_u32.saturating_sub(penalty),
+        warnings,
+    }
+}
+
+fn routing_quality_warning(
+    code: &str,
+    severity: &str,
+    message: &str,
+    recommendation: &str,
+    refs: Vec<String>,
+) -> ContextRoutingQualityWarning {
+    ContextRoutingQualityWarning {
+        code: code.to_string(),
+        severity: severity.to_string(),
+        message: message.to_string(),
+        recommendation: recommendation.to_string(),
+        refs,
+    }
+}
+
+fn unique_sections<'a>(sections: impl Iterator<Item = &'a str>) -> Vec<String> {
+    sections
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn summarize_routing_quality(tasks: &[ContextHandoffTask]) -> ContextRoutingQualitySummary {
+    let mut summary = ContextRoutingQualitySummary {
+        schema_version: CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION.to_string(),
+        tasks: tasks.len(),
+        passed: 0,
+        warning: 0,
+        blocked: 0,
+        total_warnings: 0,
+        blocking_warnings: 0,
+        warning_warnings: 0,
+        advisory_warnings: 0,
+        min_score_bps: 10_000,
+        average_score_bps: 0,
+    };
+
+    if tasks.is_empty() {
+        return summary;
+    }
+
+    let mut score_total = 0_u64;
+    for task in tasks {
+        match task.routing_quality.status.as_str() {
+            "pass" => summary.passed += 1,
+            "warning" => summary.warning += 1,
+            "blocked" => summary.blocked += 1,
+            _ => {}
+        }
+        summary.total_warnings += task.routing_quality.warnings.len();
+        for warning in &task.routing_quality.warnings {
+            match warning.severity.as_str() {
+                "blocking" => summary.blocking_warnings += 1,
+                "warning" => summary.warning_warnings += 1,
+                "advisory" => summary.advisory_warnings += 1,
+                _ => {}
+            }
+        }
+        summary.min_score_bps = summary.min_score_bps.min(task.routing_quality.score_bps);
+        score_total += u64::from(task.routing_quality.score_bps);
+    }
+    summary.average_score_bps = (score_total / tasks.len() as u64) as u32;
+
+    summary
+}
+
 fn build_routing_fingerprint(
     input: RoutingFingerprintInput<'_>,
 ) -> Result<ContextRoutingFingerprint> {
     let dependency_state = serde_json::to_string(input.dependency_summary)?;
     let child_subflows = serde_json::to_string(input.child_subflows)?;
+    let routing_quality = serde_json::to_string(input.routing_quality)?;
     let source_shards = input
         .shards
         .iter()
@@ -1014,6 +1223,7 @@ fn build_routing_fingerprint(
         fingerprint_component("child_subflows", child_subflows),
         fingerprint_component("resume_context", input.resume_context_status.to_string()),
         fingerprint_component("budget_ledger", budget_ledger),
+        fingerprint_component("routing_quality", routing_quality),
         fingerprint_component("context_payload", input.context_sha256.to_string()),
     ];
     let seed = ContextRoutingFingerprintSeed {

@@ -190,8 +190,8 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v16` and routing policy
-`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_v16`. Each packet
+Current `forge context` packets use schema `forge.context.v17` and routing policy
+`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_v17`. Each packet
 includes the executor-facing content, the full context checksum, workflow revision,
 artifact count, node-scoped persona routing metadata for human-facing tasks, executor
 profile metadata, execution policy metadata, dependency readiness summaries, proposed
@@ -201,8 +201,12 @@ source, priority, compression state, profile exclusion state, required/missing-r
 state, remaining-budget before/after values, byte count, summary and shard checksum.
 Packets also include `context_ready`,
 `required_sections`, `missing_required_sections`, `handoff_ready`, `handoff_status`,
-`handoff_blockers` and aggregate `routing_summary` metrics so handoff policy can block
-incomplete context or pending dependencies before an executor starts work.
+`handoff_blockers`, aggregate `routing_summary` metrics and a versioned
+`routing_quality` contract. The quality contract scores each packet and emits explicit
+warnings for missing required context, budget pressure, compressed summaries and
+profile-filtered optional context, so adapters and operators can audit routing risk
+without reconstructing shard decisions. Handoff policy can still block incomplete
+context or pending dependencies before an executor starts work.
 
 Executor profiles let Forge route different envelopes without changing workflow
 authority. Deterministic `command` and `wait` nodes use a no-AI profile that shrinks
@@ -218,7 +222,8 @@ required sections and dependency-not-ready holds without hiding routing evidence
 `forge inspect` and `forge request status` project that same handoff decision as
 read-only summaries, so operators and async callers can see which task is ready,
 blocked by missing context or blocked by dependencies without reconstructing the
-context package manually.
+context package manually. Those summaries also carry routing quality aggregates and
+per-task quality contracts for context-budget and profile-pressure triage.
 When the workflow registry has attached a proposed compatible child subflow, the
 context package carries the structured binding plus a compact `child_subflows` shard
 from `subflow_registry`, which lets executors reuse Forge's planning decision without
