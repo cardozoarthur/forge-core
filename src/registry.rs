@@ -30,6 +30,7 @@ pub struct WorkflowRegistryReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowRegistryFilterReport {
     pub lifecycle: String,
+    pub quality_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +38,12 @@ pub enum WorkflowLifecycleFilter {
     All,
     Running,
     NonRunning,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkflowRegistryFilters {
+    pub lifecycle: WorkflowLifecycleFilter,
+    pub quality_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -179,6 +186,13 @@ pub fn list_workflows_filtered(
     store: &ForgeStore,
     filter: WorkflowLifecycleFilter,
 ) -> Result<WorkflowRegistryReport> {
+    list_workflows_with_filters(store, WorkflowRegistryFilters::new(filter))
+}
+
+pub fn list_workflows_with_filters(
+    store: &ForgeStore,
+    filters: WorkflowRegistryFilters,
+) -> Result<WorkflowRegistryReport> {
     let workflows = store.load_workflows()?;
     let runs_by_workflow = load_runs_by_workflow(store)?;
     let mut rows = Vec::new();
@@ -200,7 +214,7 @@ pub fn list_workflows_filtered(
         ));
     }
 
-    rows.retain(|row| filter.matches(row));
+    rows.retain(|row| filters.matches(row));
     let running = rows.iter().filter(|row| row.running).count();
     let reusable_subflows = rows.iter().map(|row| row.reusable_subflows.len()).sum();
     let context_handoff =
@@ -234,11 +248,37 @@ pub fn list_workflows_filtered(
     Ok(WorkflowRegistryReport {
         status: "loaded".to_string(),
         filter: WorkflowRegistryFilterReport {
-            lifecycle: filter.label().to_string(),
+            lifecycle: filters.lifecycle.label().to_string(),
+            quality_action: filters.quality_action,
         },
         summary,
         workflows: rows,
     })
+}
+
+impl WorkflowRegistryFilters {
+    pub fn new(lifecycle: WorkflowLifecycleFilter) -> Self {
+        Self {
+            lifecycle,
+            quality_action: None,
+        }
+    }
+
+    pub fn with_quality_action(mut self, quality_action: Option<String>) -> Self {
+        self.quality_action = quality_action;
+        self
+    }
+
+    fn matches(&self, row: &WorkflowRegistryRow) -> bool {
+        if !self.lifecycle.matches(row) {
+            return false;
+        }
+
+        match &self.quality_action {
+            Some(action) => row.quality_action.action == *action,
+            None => true,
+        }
+    }
 }
 
 impl WorkflowLifecycleFilter {

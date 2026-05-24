@@ -14,8 +14,8 @@ use forge_core::inspection::inspect_workflow;
 use forge_core::intent::parse_intent;
 use forge_core::lease::{acquire_task_lease, release_task_lease};
 use forge_core::registry::{
-    attach_reuse_candidates_as_child_subflows, find_reuse_candidates, list_workflows_filtered,
-    WorkflowLifecycleFilter,
+    attach_reuse_candidates_as_child_subflows, find_reuse_candidates, list_workflows_with_filters,
+    WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
 use forge_core::request::{load_request_status, start_async_request};
 use forge_core::runtime::{
@@ -50,6 +50,8 @@ enum Commands {
     List {
         #[arg(long, value_enum, default_value_t = WorkflowLifecycleArg::All)]
         lifecycle: WorkflowLifecycleArg,
+        #[arg(long = "quality-action")]
+        quality_action: Option<String>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -424,9 +426,18 @@ fn run() -> Result<i32> {
             print_response(output, &response)?;
             Ok(0)
         }
-        Commands::List { lifecycle, output } => {
+        Commands::List {
+            lifecycle,
+            quality_action,
+            output,
+        } => {
             let store = ForgeStore::open(cli.store)?;
-            let report = list_workflows_filtered(&store, lifecycle.into())?;
+            let quality_action = quality_action
+                .map(|action| action.trim().to_string())
+                .filter(|action| !action.is_empty());
+            let filters =
+                WorkflowRegistryFilters::new(lifecycle.into()).with_quality_action(quality_action);
+            let report = list_workflows_with_filters(&store, filters)?;
             print_response(output, &report)?;
             Ok(0)
         }

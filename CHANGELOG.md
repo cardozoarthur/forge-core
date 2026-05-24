@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.45 - 2026-05-24
+
+### Added
+
+- `forge list` now accepts `--quality-action <action>` so operators can slice workflow inventory by the next Context Routing Engine intervention.
+- The registry filter report now includes `filter.quality_action`, keeping lifecycle and quality-action filters auditable in JSON output.
+- Added CLI contract coverage proving `forge list --lifecycle running --quality-action increase_context_budget` returns only the matching lifecycle/action slice and recomputes registry summaries over that slice.
+
+### Changed
+
+- Registry listing now uses a composable `WorkflowRegistryFilters` contract internally, preserving the existing lifecycle-only API while enabling new read-only triage filters.
+
+### Safety
+
+- Quality-action filtering is a read-only projection over Forge-owned workflow state and deterministic context-quality recommendations.
+- This change does not acquire leases, complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by `forge task handoff`, strict context readiness, dependency readiness and task leases.
+
 ## 0.4.44 - 2026-05-24
 
 ### Added
