@@ -6,9 +6,9 @@ use crate::graph::{
 use anyhow::{bail, Result};
 use serde::Serialize;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v10";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v11";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_summary_v10";
+    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_summary_required_v11";
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
 const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
 const ALL_CONTEXT_SECTIONS: &[&str] = &[
@@ -45,6 +45,27 @@ const NOTIFICATION_CONTEXT_SECTIONS: &[&str] = &[
     "validation_rules",
     "dependencies",
 ];
+const REASONING_REQUIRED_CONTEXT_SECTIONS: &[&str] = &[
+    "local_objective",
+    "workflow_goal",
+    "execution_policy",
+    "context_requirements",
+    "validation_rules",
+];
+const NO_AI_REQUIRED_CONTEXT_SECTIONS: &[&str] = &[
+    "local_objective",
+    "execution_policy",
+    "child_subflows",
+    "context_requirements",
+    "validation_rules",
+];
+const NOTIFICATION_REQUIRED_CONTEXT_SECTIONS: &[&str] = &[
+    "local_objective",
+    "persona_routing",
+    "execution_policy",
+    "context_requirements",
+    "validation_rules",
+];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ContextPackage {
@@ -68,6 +89,9 @@ pub struct ContextPackage {
     pub context_bytes: usize,
     pub context_sha256: String,
     pub routing_summary: ContextRoutingSummary,
+    pub context_ready: bool,
+    pub required_sections: Vec<String>,
+    pub missing_required_sections: Vec<String>,
     pub included_sections: Vec<String>,
     pub omitted_sections: Vec<String>,
     pub profile_omitted_sections: Vec<String>,
@@ -93,9 +117,11 @@ pub struct ContextShard {
     pub section: String,
     pub source: String,
     pub priority: u8,
+    pub required: bool,
     pub included: bool,
     pub compressed: bool,
     pub profile_excluded: bool,
+    pub missing_required: bool,
     pub routing_decision: String,
     pub decision_reason: String,
     pub bytes: usize,
@@ -110,6 +136,8 @@ pub struct ContextRoutingSummary {
     pub included_shards: usize,
     pub omitted_shards: usize,
     pub compressed_shards: usize,
+    pub required_shards: usize,
+    pub required_omitted_shards: usize,
     pub profile_omitted_shards: usize,
     pub budget_omitted_shards: usize,
     pub selected_bytes: usize,
@@ -129,6 +157,7 @@ pub struct ContextExecutorProfile {
     pub deterministic: bool,
     pub max_context_bytes: Option<usize>,
     pub allowed_sections: Vec<String>,
+    pub required_sections: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -138,6 +167,7 @@ struct ExecutorContextProfile {
     deterministic: bool,
     max_context_bytes: Option<usize>,
     allowed_sections: &'static [&'static str],
+    required_sections: &'static [&'static str],
 }
 
 struct ContextShardCandidate {
@@ -319,6 +349,7 @@ pub fn build_context_package_with_checkpoint(
     let mut included_sections = Vec::new();
     let mut omitted_sections = Vec::new();
     let mut profile_omitted_sections = Vec::new();
+    let mut required_sections = Vec::new();
     let mut shards = Vec::new();
 
     candidates.sort_by(|left, right| {
@@ -332,6 +363,10 @@ pub fn build_context_package_with_checkpoint(
         if candidate.content.is_empty() {
             continue;
         }
+        let required = profile.required_sections.contains(&candidate.section);
+        if required {
+            required_sections.push(candidate.section.to_string());
+        }
         let summary = summarize_shard(&candidate.content);
         let original_bytes = candidate.content.len();
         if !profile.allowed_sections.contains(&candidate.section) {
@@ -341,9 +376,11 @@ pub fn build_context_package_with_checkpoint(
                 section: candidate.section.to_string(),
                 source: candidate.source.to_string(),
                 priority: candidate.priority,
+                required,
                 included: false,
                 compressed: false,
                 profile_excluded: true,
+                missing_required: required,
                 routing_decision: "omitted_profile".to_string(),
                 decision_reason: format!(
                     "section is not allowed by executor profile {}",
@@ -398,9 +435,11 @@ pub fn build_context_package_with_checkpoint(
             section: candidate.section.to_string(),
             source: candidate.source.to_string(),
             priority: candidate.priority,
+            required,
             included,
             compressed,
             profile_excluded: false,
+            missing_required: required && !included,
             routing_decision: routing_decision.to_string(),
             decision_reason: decision_reason.to_string(),
             bytes: selected_content.len(),
@@ -411,6 +450,12 @@ pub fn build_context_package_with_checkpoint(
     }
 
     let routing_summary = build_routing_summary(&shards, effective_budget, content.len());
+    let missing_required_sections = shards
+        .iter()
+        .filter(|shard| shard.missing_required)
+        .map(|shard| shard.section.clone())
+        .collect::<Vec<_>>();
+    let context_ready = missing_required_sections.is_empty();
 
     Ok(ContextPackage {
         schema_version: CONTEXT_SCHEMA_VERSION.to_string(),
@@ -421,7 +466,7 @@ pub fn build_context_package_with_checkpoint(
         artifact_count: workflow.artifacts.len(),
         lineage,
         persona,
-        executor_profile: profile.to_public(&task.executor),
+        executor_profile: profile.to_public(&task.executor, &required_sections),
         execution_policy: task.execution_policy.clone(),
         child_subflow_count: task.child_subflows.len(),
         child_subflows: task.child_subflows.clone(),
@@ -433,6 +478,9 @@ pub fn build_context_package_with_checkpoint(
         context_bytes: content.len(),
         context_sha256: hex_sha256(content.as_bytes()),
         routing_summary,
+        context_ready,
+        required_sections,
+        missing_required_sections,
         included_sections,
         omitted_sections,
         profile_omitted_sections,
@@ -449,6 +497,11 @@ fn build_routing_summary(
     let total_shards = shards.len();
     let included_shards = shards.iter().filter(|shard| shard.included).count();
     let compressed_shards = shards.iter().filter(|shard| shard.compressed).count();
+    let required_shards = shards.iter().filter(|shard| shard.required).count();
+    let required_omitted_shards = shards
+        .iter()
+        .filter(|shard| shard.required && !shard.included)
+        .count();
     let profile_omitted_shards = shards.iter().filter(|shard| shard.profile_excluded).count();
     let budget_omitted_shards = shards
         .iter()
@@ -479,6 +532,8 @@ fn build_routing_summary(
         included_shards,
         omitted_shards: total_shards.saturating_sub(included_shards),
         compressed_shards,
+        required_shards,
+        required_omitted_shards,
         profile_omitted_shards,
         budget_omitted_shards,
         selected_bytes,
@@ -637,6 +692,7 @@ fn executor_context_profile(task: &AtomicTask) -> ExecutorContextProfile {
             deterministic: true,
             max_context_bytes: Some(DETERMINISTIC_CONTEXT_BUDGET),
             allowed_sections: NO_AI_CONTEXT_SECTIONS,
+            required_sections: NO_AI_REQUIRED_CONTEXT_SECTIONS,
         },
         ExecutorKind::Notification => ExecutorContextProfile {
             id: "no_ai_notification",
@@ -644,6 +700,7 @@ fn executor_context_profile(task: &AtomicTask) -> ExecutorContextProfile {
             deterministic: true,
             max_context_bytes: Some(NOTIFICATION_CONTEXT_BUDGET),
             allowed_sections: NOTIFICATION_CONTEXT_SECTIONS,
+            required_sections: NOTIFICATION_REQUIRED_CONTEXT_SECTIONS,
         },
         ExecutorKind::Ai => ExecutorContextProfile {
             id: "ai_reasoning",
@@ -651,6 +708,7 @@ fn executor_context_profile(task: &AtomicTask) -> ExecutorContextProfile {
             deterministic: false,
             max_context_bytes: None,
             allowed_sections: ALL_CONTEXT_SECTIONS,
+            required_sections: REASONING_REQUIRED_CONTEXT_SECTIONS,
         },
         ExecutorKind::Mixed => ExecutorContextProfile {
             id: "mixed_execution",
@@ -658,12 +716,17 @@ fn executor_context_profile(task: &AtomicTask) -> ExecutorContextProfile {
             deterministic: false,
             max_context_bytes: None,
             allowed_sections: ALL_CONTEXT_SECTIONS,
+            required_sections: REASONING_REQUIRED_CONTEXT_SECTIONS,
         },
     }
 }
 
 impl ExecutorContextProfile {
-    fn to_public(self, executor: &ExecutorKind) -> ContextExecutorProfile {
+    fn to_public(
+        self,
+        executor: &ExecutorKind,
+        required_sections: &[String],
+    ) -> ContextExecutorProfile {
         ContextExecutorProfile {
             id: self.id.to_string(),
             executor: executor_kind(executor).to_string(),
@@ -675,6 +738,7 @@ impl ExecutorContextProfile {
                 .iter()
                 .map(|section| (*section).to_string())
                 .collect(),
+            required_sections: required_sections.to_vec(),
         }
     }
 }

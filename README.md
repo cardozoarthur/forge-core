@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.20`
+Current version: `0.4.24`
 
 This is the first functional CLI + Skill version:
 
@@ -29,6 +29,7 @@ This is the first functional CLI + Skill version:
 - SQLite persistence
 - deterministic atomic task graph generation
 - versioned, sharded bounded context package generation with subflow-aware routing
+- strict context readiness gates for executor handoff
 - validation gates
 - simulated execution runtime
 - autonomous mixed AI/non-AI workflow planning
@@ -79,14 +80,17 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v7`) with a deterministic
-`task_local_revisioned_persona_compressed_executor_policy_subflow_budget_v7` routing policy.
+`forge context` emits a versioned context packet (`forge.context.v11`) with a deterministic
+`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_summary_required_v11` routing policy.
 The packet keeps the legacy `content` body for executors, and also returns workflow
 revision, artifact count, persona routing metadata for human-facing nodes, executor
 profile metadata, execution policy metadata, proposed child-subflow bindings, lineage
 hashes and a shard manifest with included/omitted sections, profile exclusions,
-compression flags, source labels, priorities, byte counts, summaries and SHA-256
-checksums. Deterministic command and wait nodes receive a smaller no-AI context
+compression flags, required/missing-required markers, source labels, priorities, byte
+counts, summaries and SHA-256 checksums. The packet also exposes `context_ready`,
+`required_sections`, `missing_required_sections` and a `routing_summary` so executor
+adapters can block handoff when the minimum correct context was omitted. Deterministic
+command and wait nodes receive a smaller no-AI context
 envelope that preserves local objective, execution policy, proposed subflow reuse and
 validation context before lower-priority narrative sections, while AI and mixed nodes
 keep richer reasoning context. When a goal explicitly calls for repeated local Python
@@ -98,6 +102,15 @@ compact `child_subflows` shard so the executor sees Forge's reuse decision witho
 reconstructing it from history. Runtime goal, artifact and persona routing state are
 included in the context lineage so executors can detect stale context before resuming
 work.
+
+Use strict context mode when handing a package to an executor:
+
+```bash
+forge context --workflow <workflow-id> --task task-001 --budget 1200 --strict --output json
+```
+
+Strict mode still prints the replayable context package, but exits non-zero if
+`context_ready=false`.
 
 Skill-style async handoff:
 
@@ -206,6 +219,7 @@ The current test suite validates:
 - planning creates a persistent atomic graph;
 - validation blocks promotion until tasks are complete;
 - context packages stay task-local, budget-bounded, executor-profiled, versioned and sharded;
+- strict context mode blocks executor handoff when required sections are omitted;
 - controlled improvement never auto-promotes without validation;
 - artifact listing returns SHA-256 hashed outputs;
 - workflow registry listing preserves initial requests and lifecycle state;

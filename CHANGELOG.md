@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.24 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v11` with routing policy `task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_summary_required_v11`.
+- Context packets expose `context_ready`, `required_sections` and `missing_required_sections` so executor adapters can tell whether the package contains the minimum correct context for the selected executor profile.
+- Context shard manifests now mark each shard with `required` and `missing_required`.
+- `routing_summary` now includes `required_shards` and `required_omitted_shards` for readiness and cost audits.
+- `forge context --strict` prints the same auditable JSON package but exits non-zero when required sections are missing.
+
+### Changed
+
+- Executor context profiles now carry explicit required section contracts in addition to section allow-lists and byte caps.
+- Context contract tests now target schema `forge.context.v11`.
+
+### Safety
+
+- Strict context readiness is read-only validation metadata. It does not mutate workflow state, complete tasks, select executors, authorize CLIs, execute local code, mutate Docker/Kubernetes/Knative resources or promote subflows.
+- Non-strict `forge context` remains backward-compatible for inspection and debugging. The strict path only changes the process exit code after emitting replayable JSON evidence.
+
+### Validation
+
+- Added CLI contract coverage proving `forge context --strict` blocks an executor handoff when a tight budget omits required context shards.
+
 ## 0.4.23 - 2026-05-24
 
 ### Added

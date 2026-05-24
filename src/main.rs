@@ -69,6 +69,8 @@ enum Commands {
         task: String,
         #[arg(long, default_value_t = 1200)]
         budget: usize,
+        #[arg(long)]
+        strict: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -422,6 +424,7 @@ fn run() -> Result<i32> {
             workflow,
             task,
             budget,
+            strict,
             output,
         } => {
             let store = ForgeStore::open(cli.store)?;
@@ -430,7 +433,11 @@ fn run() -> Result<i32> {
             let context =
                 build_context_package_with_checkpoint(&workflow, &task, budget, latest_checkpoint)?;
             print_response(output, &context)?;
-            Ok(0)
+            Ok(if strict && !context.context_ready {
+                1
+            } else {
+                0
+            })
         }
         Commands::Run {
             workflow,

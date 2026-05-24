@@ -27,7 +27,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 4. Inspect the generated atomic tasks, task goals, subtasks, impediments, async policy and validation rules.
 5. Use `forge workflow update-goal ... --origin codex|opencode|forge_cli|skill` when the human changes direction during execution.
 6. Use `forge workflow attach-artifact ... --origin codex|opencode|forge_cli|skill` when new artifacts appear during execution.
-7. Use `forge context --workflow <id> --task <task-id> --budget <bytes> --output json` before giving an agent task-specific context.
+7. Use `forge context --workflow <id> --task <task-id> --budget <bytes> --strict --output json` before giving an agent task-specific context.
 8. Run `forge validate --workflow <id> --output json` before promotion. If `rework_tasks` is not empty, return those tasks to work.
 9. Run `forge improve --workflow <id> --target-version <version> --output json` only to generate a controlled experiment and changelog. Do not auto-promote without benchmark and validation evidence.
 
@@ -59,7 +59,7 @@ forge workflow attach-artifact --workflow <workflow-id> --path ./artifact.md --k
 forge runtime guard --substrate knative --resource service/forge-node --namespace forge --action update --owner forge --output json
 forge list --output json
 forge status --workflow <workflow-id> --output json
-forge context --workflow <workflow-id> --task task-001 --budget 1200 --output json
+forge context --workflow <workflow-id> --task task-001 --budget 1200 --strict --output json
 forge run --workflow <workflow-id> --simulate --output json
 forge validate --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
