@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.51 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v22` with a versioned `budget_plan` object for minimum-correct context routing.
+- The budget plan uses schema `forge.context.budget_plan.v1` and records requested/effective budgets, selected bytes, required/original/minimum bytes, omitted required/optional bytes, compression savings, missing required sections, omitted-by-budget sections, status and a recommended budget.
+- Context routing fingerprints now include a `budget_plan` component, so executor cache keys account for budget-plan changes alongside repair, quality and persona contracts.
+- `forge inspect --output json` now projects the same budget plan for every terminal DAG node, and the human diagram prints a compact `budget_plan minimum/recommended status` marker.
+- Added CLI contract coverage proving budget plans are exposed directly by `forge context` and projected through `forge inspect`.
+
+### Changed
+
+- The context routing policy is now `task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_v22`.
+- Budget repair guidance is now split into a repair action and a reusable minimum-correct budget plan, so adapters can distinguish required-context floor from optional budget pressure.
+- The package version is now `0.4.51`.
+
+### Safety
+
+- Budget plans are read-only metadata derived from Forge-owned workflow/task state and deterministic shard selection.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules, task leases and validation-before-promotion semantics.
+
 ## 0.4.50 - 2026-05-24
 
 ### Added

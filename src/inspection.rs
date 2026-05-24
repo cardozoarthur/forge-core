@@ -1,9 +1,9 @@
 use crate::checkpoint::load_workflow_checkpoints;
 use crate::context::{
     build_context_package_with_checkpoint, context_next_action, summarize_context_handoff_tasks,
-    ContextHandoffBlocker, ContextHandoffSummary, ContextHandoffTask, ContextNextAction,
-    ContextPackage, ContextRoutingQuality, ContextRoutingRepair, ContextRoutingSummary,
-    DEFAULT_CONTEXT_BUDGET,
+    ContextBudgetPlan, ContextHandoffBlocker, ContextHandoffSummary, ContextHandoffTask,
+    ContextNextAction, ContextPackage, ContextRoutingQuality, ContextRoutingRepair,
+    ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
 };
 use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, SubtaskSpec, TaskStatus,
@@ -78,6 +78,7 @@ pub struct ContextInspectionRoute {
     pub omitted_sections: Vec<String>,
     pub routing_summary: ContextRoutingSummary,
     pub routing_repair: ContextRoutingRepair,
+    pub budget_plan: ContextBudgetPlan,
     pub routing_quality: ContextRoutingQuality,
     pub next_action: ContextNextAction,
 }
@@ -269,6 +270,7 @@ fn context_route(package: &ContextPackage) -> ContextInspectionRoute {
         omitted_sections: package.omitted_sections.clone(),
         routing_summary: package.routing_summary.clone(),
         routing_repair: package.routing_repair.clone(),
+        budget_plan: package.budget_plan.clone(),
         routing_quality: package.routing_quality.clone(),
         next_action: context_next_action(package),
     }
@@ -336,13 +338,16 @@ fn render_diagram(
             )
         };
         let context_route = format!(
-            " context {} {} {}/{} cache {} next {}",
+            " context {} {} {}/{} cache {} next {} budget_plan {}/{} {}",
             node.context_route.profile_id,
             node.context_route.handoff_status,
             node.context_route.context_bytes,
             node.context_route.effective_budget,
             short_hash(&node.context_route.routing_cache_key),
-            node.context_route.next_action.action
+            node.context_route.next_action.action,
+            node.context_route.budget_plan.minimum_correct_budget_bytes,
+            node.context_route.budget_plan.recommended_budget_bytes,
+            node.context_route.budget_plan.status
         );
         let execution_policy = format!(
             " policy {} {} {} {} {}",

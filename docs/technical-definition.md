@@ -190,8 +190,8 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v21` and routing policy
-`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21`. Each packet
+Current `forge context` packets use schema `forge.context.v22` and routing policy
+`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_v22`. Each packet
 includes the executor-facing content, the full context checksum, workflow revision,
 artifact count, node-scoped persona routing metadata and a versioned persona contract for human-facing tasks, executor
 profile metadata, a versioned routing contract, execution policy metadata, dependency
@@ -202,8 +202,8 @@ state, remaining-budget before/after values, byte count, summary and shard check
 Packets also include `context_ready`,
 `required_sections`, `missing_required_sections`, `handoff_ready`, `handoff_status`,
 `handoff_blockers`, aggregate `routing_summary` metrics and a versioned
-`routing_contract`, `routing_repair` budget recommendation and `routing_quality`
-contract. Packets also carry a versioned `next_action` decision so executor adapters
+`routing_contract`, `routing_repair` budget recommendation, `budget_plan` minimum-correct budget contract and
+`routing_quality` contract. Packets also carry a versioned `next_action` decision so executor adapters
 can distinguish fresh handoff, dependency waits, context-budget repair, stale
 checkpoint refresh and partial retry with fresh context without first asking for a
 separate inspection projection. The routing contract names the selector version, executor profile version,
@@ -211,6 +211,9 @@ profile id, selection strategy, requested and effective budget, minimum budget,
 allowed/required/optional section set and profile hash. The repair contract turns
 missing required sections into a deterministic action and recommended budget so
 operators can retry with the smallest known budget increase instead of guessing. The
+budget plan exposes the required context floor, selected bytes, optional pressure,
+missing required sections and recommended budget so executor adapters can choose the
+smallest correct handoff budget before spending model or runtime work. The
 persona contract binds the node's mode, scope, voice, tone, instruction source,
 source models, validation gate and audit flag to the context lineage hash and
 persona-mode hash before executor handoff. The quality contract scores each packet and emits explicit warnings for missing required
