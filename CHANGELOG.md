@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.32 - 2026-05-24
+
+### Added
+
+- `forge context --output json` now includes a versioned `routing_fingerprint` contract.
+- The fingerprint uses schema `forge.context.routing_fingerprint.v1` and carries a stable `cache_key`, workflow revision, executor profile id, context SHA-256, lineage SHA-256 and named component hashes for routing policy, executor profile, lineage, budget, selected/omitted sections, missing required sections, dependency state, child subflows, resume state and context payload.
+- Added CLI contract coverage proving the fingerprint is stable for the same workflow/task/budget and changes after a traced workflow goal mutation.
+
+### Changed
+
+- Executor adapters can now make deterministic context cache/reuse decisions from Forge-owned routing metadata instead of comparing full context packet bodies.
+- The existing `forge.context.v14` packet remains backward compatible; this release adds a nested fingerprint schema rather than changing the top-level context schema.
+
+### Safety
+
+- The fingerprint is read-only metadata derived from Forge-owned workflow graph, lineage, dependency, checkpoint and context-routing state.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+
 ## 0.4.31 - 2026-05-24
 
 ### Added

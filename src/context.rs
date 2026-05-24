@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 
 const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v14";
+const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
 const ROUTING_POLICY: &str =
     "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_v14";
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
@@ -96,6 +97,7 @@ pub struct ContextPackage {
     pub effective_budget: usize,
     pub context_bytes: usize,
     pub context_sha256: String,
+    pub routing_fingerprint: ContextRoutingFingerprint,
     pub routing_summary: ContextRoutingSummary,
     pub context_ready: bool,
     pub required_sections: Vec<String>,
@@ -105,6 +107,24 @@ pub struct ContextPackage {
     pub profile_omitted_sections: Vec<String>,
     pub shards: Vec<ContextShard>,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextRoutingFingerprint {
+    pub schema_version: String,
+    pub cache_key: String,
+    pub workflow_revision: u64,
+    pub executor_profile_id: String,
+    pub context_sha256: String,
+    pub lineage_sha256: String,
+    pub components: Vec<ContextRoutingFingerprintComponent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextRoutingFingerprintComponent {
+    pub name: String,
+    pub value: String,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -243,6 +263,18 @@ struct ContextShardCandidate {
 }
 
 #[derive(Serialize)]
+struct ContextRoutingFingerprintSeed<'a> {
+    schema_version: &'static str,
+    workflow_id: &'a str,
+    task_id: &'a str,
+    workflow_revision: u64,
+    executor_profile_id: &'static str,
+    context_sha256: &'a str,
+    lineage_sha256: &'a str,
+    components: &'a [ContextRoutingFingerprintComponent],
+}
+
+#[derive(Serialize)]
 struct ContextLineageSeed {
     workflow_id: String,
     task_id: String,
@@ -254,6 +286,23 @@ struct ContextLineageSeed {
     persona_mode_sha256: String,
     persona_scope: String,
     revision_sources: Vec<String>,
+}
+
+struct RoutingFingerprintInput<'a> {
+    workflow_id: &'a str,
+    task_id: &'a str,
+    workflow_revision: u64,
+    profile: &'a ExecutorContextProfile,
+    requested_budget: usize,
+    effective_budget: usize,
+    lineage: &'a ContextLineage,
+    dependency_summary: &'a ContextDependencySummary,
+    included_sections: &'a [String],
+    omitted_sections: &'a [String],
+    missing_required_sections: &'a [String],
+    child_subflows: &'a [ChildSubflowRef],
+    resume_context_status: &'a str,
+    context_sha256: &'a str,
 }
 
 pub fn build_context_package(
@@ -592,6 +641,23 @@ pub fn build_context_package_with_checkpoint(
     let handoff_blockers = build_handoff_blockers(&missing_required_sections, &dependency_summary);
     let handoff_ready = handoff_blockers.is_empty();
     let handoff_status = derive_handoff_status(&handoff_blockers);
+    let context_sha256 = hex_sha256(content.as_bytes());
+    let routing_fingerprint = build_routing_fingerprint(RoutingFingerprintInput {
+        workflow_id: &workflow.id,
+        task_id: &task.id,
+        workflow_revision,
+        profile: &profile,
+        requested_budget: budget,
+        effective_budget,
+        lineage: &lineage,
+        dependency_summary: &dependency_summary,
+        included_sections: &included_sections,
+        omitted_sections: &omitted_sections,
+        missing_required_sections: &missing_required_sections,
+        child_subflows: &task.child_subflows,
+        resume_context_status,
+        context_sha256: &context_sha256,
+    })?;
 
     Ok(ContextPackage {
         schema_version: CONTEXT_SCHEMA_VERSION.to_string(),
@@ -617,7 +683,8 @@ pub fn build_context_package_with_checkpoint(
         requested_budget: budget,
         effective_budget,
         context_bytes: content.len(),
-        context_sha256: hex_sha256(content.as_bytes()),
+        context_sha256,
+        routing_fingerprint,
         routing_summary,
         context_ready,
         required_sections,
@@ -726,6 +793,70 @@ fn build_routing_summary(
         effective_budget,
         remaining_budget: effective_budget.saturating_sub(selected_bytes),
         budget_utilization_bps,
+    }
+}
+
+fn build_routing_fingerprint(
+    input: RoutingFingerprintInput<'_>,
+) -> Result<ContextRoutingFingerprint> {
+    let dependency_state = serde_json::to_string(input.dependency_summary)?;
+    let child_subflows = serde_json::to_string(input.child_subflows)?;
+    let components = vec![
+        fingerprint_component("routing_policy", ROUTING_POLICY.to_string()),
+        fingerprint_component(
+            "executor_profile",
+            format!(
+                "{}:reasoning={}:deterministic={}",
+                input.profile.id, input.profile.reasoning_allowed, input.profile.deterministic
+            ),
+        ),
+        fingerprint_component("lineage", input.lineage.lineage_sha256.clone()),
+        fingerprint_component(
+            "budget",
+            format!(
+                "requested={}:effective={}",
+                input.requested_budget, input.effective_budget
+            ),
+        ),
+        fingerprint_component("selected_sections", input.included_sections.join(",")),
+        fingerprint_component("omitted_sections", input.omitted_sections.join(",")),
+        fingerprint_component(
+            "missing_required_sections",
+            input.missing_required_sections.join(","),
+        ),
+        fingerprint_component("dependency_state", dependency_state),
+        fingerprint_component("child_subflows", child_subflows),
+        fingerprint_component("resume_context", input.resume_context_status.to_string()),
+        fingerprint_component("context_payload", input.context_sha256.to_string()),
+    ];
+    let seed = ContextRoutingFingerprintSeed {
+        schema_version: ROUTING_FINGERPRINT_SCHEMA_VERSION,
+        workflow_id: input.workflow_id,
+        task_id: input.task_id,
+        workflow_revision: input.workflow_revision,
+        executor_profile_id: input.profile.id,
+        context_sha256: input.context_sha256,
+        lineage_sha256: &input.lineage.lineage_sha256,
+        components: &components,
+    };
+    let cache_key = hex_sha256(serde_json::to_string(&seed)?.as_bytes());
+
+    Ok(ContextRoutingFingerprint {
+        schema_version: ROUTING_FINGERPRINT_SCHEMA_VERSION.to_string(),
+        cache_key,
+        workflow_revision: input.workflow_revision,
+        executor_profile_id: input.profile.id.to_string(),
+        context_sha256: input.context_sha256.to_string(),
+        lineage_sha256: input.lineage.lineage_sha256.clone(),
+        components,
+    })
+}
+
+fn fingerprint_component(name: &str, value: String) -> ContextRoutingFingerprintComponent {
+    ContextRoutingFingerprintComponent {
+        name: name.to_string(),
+        sha256: hex_sha256(value.as_bytes()),
+        value,
     }
 }
 

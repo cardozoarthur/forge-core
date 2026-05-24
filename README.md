@@ -91,8 +91,10 @@ child-subflow bindings, lineage hashes and a shard manifest with included/omitte
 compression flags, required/missing-required markers, source labels, priorities, byte
 counts, summaries and SHA-256 checksums. The packet also exposes `context_ready`,
 `required_sections`, `missing_required_sections`, `handoff_ready`, `handoff_status`,
-`handoff_blockers` and a `routing_summary` so executor adapters can block handoff
-when the minimum correct context was omitted or dependency tasks are not ready.
+`handoff_blockers`, a `routing_summary` and a versioned `routing_fingerprint`
+with component hashes and a cache key so executor adapters can reuse or invalidate
+bounded context without reparsing full packets. Adapters can block handoff when the
+minimum correct context was omitted or dependency tasks are not ready.
 Deterministic
 command and wait nodes receive a smaller no-AI context
 envelope that preserves local objective, execution policy, proposed subflow reuse and

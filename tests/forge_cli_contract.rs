@@ -1133,6 +1133,155 @@ fn context_package_tracks_runtime_mutation_lineage_and_current_goal() {
 }
 
 #[test]
+fn context_package_exposes_stable_routing_fingerprint_for_executor_cache_keys() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build fingerprinted context routing for repeated executor handoffs",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let task = find_task(json["tasks"].as_array().unwrap(), "Extract requirements");
+    let task_id = task["id"].as_str().unwrap();
+
+    let first_context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--budget",
+            "1100",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first_context: Value = serde_json::from_slice(&first_context_output).unwrap();
+    let fingerprint = &first_context["routing_fingerprint"];
+    assert_eq!(
+        fingerprint["schema_version"],
+        "forge.context.routing_fingerprint.v1"
+    );
+    assert_eq!(fingerprint["executor_profile_id"], "ai_reasoning");
+    assert_eq!(fingerprint["workflow_revision"], 0);
+    assert_eq!(fingerprint["cache_key"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        fingerprint["context_sha256"],
+        first_context["context_sha256"]
+    );
+
+    let components = fingerprint["components"].as_array().unwrap();
+    for component_name in [
+        "routing_policy",
+        "executor_profile",
+        "lineage",
+        "budget",
+        "selected_sections",
+        "dependency_state",
+        "context_payload",
+    ] {
+        assert!(
+            components
+                .iter()
+                .any(|component| component["name"] == component_name
+                    && component["sha256"].as_str().unwrap().len() == 64),
+            "missing routing fingerprint component {component_name}"
+        );
+    }
+
+    let repeated_context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--budget",
+            "1100",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let repeated_context: Value = serde_json::from_slice(&repeated_context_output).unwrap();
+    assert_eq!(
+        repeated_context["routing_fingerprint"]["cache_key"],
+        fingerprint["cache_key"]
+    );
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "update-goal",
+            "--workflow",
+            workflow_id,
+            "--goal",
+            "Build fingerprinted context routing after a goal mutation",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let mutated_context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--budget",
+            "1100",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mutated_context: Value = serde_json::from_slice(&mutated_context_output).unwrap();
+    assert_eq!(
+        mutated_context["routing_fingerprint"]["workflow_revision"],
+        1
+    );
+    assert_ne!(
+        mutated_context["routing_fingerprint"]["cache_key"],
+        fingerprint["cache_key"]
+    );
+}
+
+#[test]
 fn planned_human_facing_tasks_include_node_scoped_persona_routing() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
