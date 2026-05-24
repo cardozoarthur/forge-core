@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.56`
+Current version: `0.4.59`
 
 This is the first functional CLI + Skill version:
 
@@ -57,6 +57,7 @@ This is the first functional CLI + Skill version:
 - async request handoff for skill callers: submit a goal, receive `run_id`, continue later with Forge
 - persisted task leases so two executors cannot acquire the same workflow task concurrently
 - executor handoff packets that combine strict context readiness, lease metadata, routing cache keys, checksums and validation gates
+- executor response validation for adapter outputs before Forge accepts completion evidence
 - self-evolution runner for bounded Codex/OpenCode cycles until a stop date
 - versioned self-evolution prompt packets with SHA-256 checksums in cycle reports
 - versioned improvement artifacts with strong changelog generation
@@ -84,6 +85,7 @@ forge list --quality-action increase_context_budget --output json
 forge inspect <workflow-id> --verbose --output json
 forge status --workflow <workflow-id> --output json
 forge workflow validate-subflow --workflow <workflow-id> --task task-011 --child-workflow <child-workflow-id> --child-task task-011 --origin codex --output json
+forge task validate-response --workflow <workflow-id> --task task-001 --response ./executor-response.json --output json
 forge context --workflow <workflow-id> --task task-001 --budget 1200 --output json
 forge run --workflow <workflow-id> --simulate --output json
 forge validate --workflow <workflow-id> --output json
@@ -167,6 +169,19 @@ persona nodes also carry a versioned `persona_contract` with the derived profile
 profile checksum, node-scoped mode, voice, tone, instruction source, source model
 summaries, persona validation gate and lineage hashes so adapters do not have to
 infer soul/personality routing from the nested context body.
+
+Before an adapter result is treated as usable completion evidence, validate its
+response contract:
+
+```bash
+forge task validate-response --workflow <workflow-id> --task task-001 --response ./executor-response.json --output json
+```
+
+The response must use `forge.executor_response.v1`, match the task id, include a
+replayable `trace_ref`, report non-negative cost/token values and, when marked
+`completed`, include at least one passing validation evidence item. The command is
+read-only with respect to task state: it records an audit event and exits non-zero
+for rejected responses instead of silently promoting work.
 
 Skill-style async handoff:
 

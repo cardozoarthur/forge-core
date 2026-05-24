@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.59 - 2026-05-24
+
+### Added
+
+- Added `forge task validate-response` for bounded executor adapter outputs.
+- Added `forge.executor_response.v1` as the executor result shape expected by Forge: task id, status, artifact refs, trace ref, cost and validation evidence.
+- Added `forge.executor_response_validation.v1` acceptance reports with response checksum, validation summary and structured violation codes.
+- Completed responses now require at least one passing validation evidence item before the response contract is accepted.
+- Added CLI contract coverage for accepted and rejected executor responses.
+
+### Changed
+
+- The package version is now `0.4.59`.
+
+### Safety
+
+- Response validation is read-only with respect to workflow task state. It records an audit event but does not complete tasks, promote workflows, acquire leases, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Forge remains the authority for accepting executor output: adapter responses are evidence to validate, not completion by themselves.
+
 ## 0.4.58 - 2026-05-24
 
 ### Added

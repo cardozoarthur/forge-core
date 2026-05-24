@@ -7469,6 +7469,186 @@ fn task_handoff_does_not_acquire_lease_when_strict_context_is_blocked() {
 }
 
 #[test]
+fn task_validate_response_accepts_completed_executor_response_with_passing_evidence() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Validate executor response contracts",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let task_id = json["tasks"][0]["id"].as_str().unwrap();
+    let response_path = temp.path().join("executor-response.json");
+    fs::write(
+        &response_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "forge.executor_response.v1",
+            "task_id": task_id,
+            "status": "completed",
+            "artifacts": ["artifacts/executor-response-summary.md"],
+            "trace_ref": "traces/task-001.jsonl",
+            "cost": {
+                "estimated_usd": 0.12,
+                "tokens_in": 1200,
+                "tokens_out": 220
+            },
+            "validation_evidence": [
+                {
+                    "command": "cargo test",
+                    "exit_code": 0,
+                    "summary": "tests passed"
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let validation_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "validate-response",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--response",
+            response_path.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let validation: Value = serde_json::from_slice(&validation_output).unwrap();
+    assert_eq!(
+        validation["schema_version"],
+        "forge.executor_response_validation.v1"
+    );
+    assert_eq!(validation["status"], "accepted");
+    assert_eq!(validation["accepted"], true);
+    assert_eq!(validation["workflow_id"], workflow_id);
+    assert_eq!(validation["task_id"], task_id);
+    assert_eq!(validation["response_status"], "completed");
+    assert_eq!(
+        validation["response_schema_version"],
+        "forge.executor_response.v1"
+    );
+    assert_eq!(validation["validation_summary"]["total"], 1);
+    assert_eq!(validation["validation_summary"]["passing"], 1);
+    assert_eq!(validation["validation_summary"]["failing"], 0);
+    assert_eq!(validation["violations"], serde_json::json!([]));
+    assert_eq!(validation["response_sha256"].as_str().unwrap().len(), 64);
+}
+
+#[test]
+fn task_validate_response_rejects_completed_executor_response_without_passing_evidence() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Reject invalid executor response contracts",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let task_id = json["tasks"][0]["id"].as_str().unwrap();
+    let response_path = temp.path().join("bad-executor-response.json");
+    fs::write(
+        &response_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "forge.executor_response.v1",
+            "task_id": task_id,
+            "status": "completed",
+            "artifacts": [],
+            "trace_ref": "",
+            "cost": {
+                "estimated_usd": -1.0,
+                "tokens_in": 10,
+                "tokens_out": 4
+            },
+            "validation_evidence": [
+                {
+                    "command": "cargo test",
+                    "exit_code": 1,
+                    "summary": "tests failed"
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let validation_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "validate-response",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--response",
+            response_path.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+
+    let validation: Value = serde_json::from_slice(&validation_output).unwrap();
+    assert_eq!(validation["status"], "rejected");
+    assert_eq!(validation["accepted"], false);
+    assert_eq!(validation["validation_summary"]["failing"], 1);
+    assert!(validation["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|violation| violation["code"] == "trace_ref_required"));
+    assert!(validation["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|violation| violation["code"] == "cost_estimated_usd_non_negative"));
+    assert!(validation["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|violation| violation["code"] == "completed_requires_passing_validation_evidence"));
+}
+
+#[test]
 fn self_run_rejects_stop_date_in_the_past() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

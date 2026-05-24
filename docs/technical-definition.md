@@ -90,6 +90,13 @@ The executor response should be structured enough for validation, cost reporting
 }
 ```
 
+Forge validates adapter outputs through `forge task validate-response`. The current
+contract uses `forge.executor_response.v1` for executor output and
+`forge.executor_response_validation.v1` for Forge's acceptance report. A completed
+response must match the target task, include a replayable trace reference, report
+finite non-negative cost/token values and carry at least one passing validation
+evidence item. Rejected responses are audit events, not task promotion events.
+
 ## Goal-Oriented Work Contract
 
 Every task and subtask must have a goal. A task is not promotable just because an executor returned output. Forge must evaluate whether the task is definitively ready.

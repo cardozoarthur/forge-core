@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
+use forge_core::adapter::validate_executor_response_file;
 use forge_core::artifact::list_workflow_artifacts;
 use forge_core::checkpoint::{
     load_latest_task_checkpoint, record_task_checkpoint, TaskCheckpointRequest,
@@ -338,6 +339,16 @@ enum TaskCommands {
         context_routing_cache_key: Option<String>,
         #[arg(long = "workflow-revision")]
         workflow_revision: u64,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ValidateResponse {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        response: PathBuf,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -842,6 +853,18 @@ fn run() -> Result<i32> {
                 )?;
                 print_response(output, &report)?;
                 Ok(0)
+            }
+            TaskCommands::ValidateResponse {
+                workflow,
+                task,
+                response,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = validate_executor_response_file(&store, &workflow, &task, &response)?;
+                let exit_code = if report.accepted { 0 } else { 1 };
+                print_response(output, &report)?;
+                Ok(exit_code)
             }
         },
         Commands::Request { command } => match command {
