@@ -9,7 +9,7 @@ use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-const EXECUTOR_HANDOFF_SCHEMA_VERSION: &str = "forge.executor_handoff.v1";
+const EXECUTOR_HANDOFF_SCHEMA_VERSION: &str = "forge.executor_handoff.v2";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskHandoffReport {
@@ -41,6 +41,9 @@ pub struct ExecutorHandoffPacket {
     pub context_schema_version: String,
     pub context_routing_policy: String,
     pub context_sha256: String,
+    pub context_routing_fingerprint_schema_version: String,
+    pub context_routing_cache_key: String,
+    pub context_routing_lineage_sha256: String,
     pub context_bytes: usize,
     pub handoff_ready: bool,
     pub handoff_status: String,
@@ -170,6 +173,17 @@ impl ExecutorHandoffPacket {
             context_schema_version: parts.context.schema_version.clone(),
             context_routing_policy: parts.context.routing_policy.clone(),
             context_sha256: parts.context.context_sha256.clone(),
+            context_routing_fingerprint_schema_version: parts
+                .context
+                .routing_fingerprint
+                .schema_version
+                .clone(),
+            context_routing_cache_key: parts.context.routing_fingerprint.cache_key.clone(),
+            context_routing_lineage_sha256: parts
+                .context
+                .routing_fingerprint
+                .lineage_sha256
+                .clone(),
             context_bytes: parts.context.context_bytes,
             handoff_ready: parts.context.handoff_ready,
             handoff_status: parts.context.handoff_status.clone(),

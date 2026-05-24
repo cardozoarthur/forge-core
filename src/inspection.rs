@@ -53,6 +53,9 @@ pub struct TaskInspectionNode {
 pub struct ContextInspectionRoute {
     pub schema_version: String,
     pub routing_policy: String,
+    pub routing_fingerprint_schema_version: String,
+    pub routing_cache_key: String,
+    pub routing_lineage_sha256: String,
     pub profile_id: String,
     pub reasoning_allowed: bool,
     pub deterministic: bool,
@@ -221,6 +224,9 @@ fn context_route(package: &ContextPackage) -> ContextInspectionRoute {
     ContextInspectionRoute {
         schema_version: package.schema_version.clone(),
         routing_policy: package.routing_policy.clone(),
+        routing_fingerprint_schema_version: package.routing_fingerprint.schema_version.clone(),
+        routing_cache_key: package.routing_fingerprint.cache_key.clone(),
+        routing_lineage_sha256: package.routing_fingerprint.lineage_sha256.clone(),
         profile_id: package.executor_profile.id.clone(),
         reasoning_allowed: package.executor_profile.reasoning_allowed,
         deterministic: package.executor_profile.deterministic,
@@ -301,11 +307,12 @@ fn render_diagram(
             )
         };
         let context_route = format!(
-            " context {} {} {}/{}",
+            " context {} {} {}/{} cache {}",
             node.context_route.profile_id,
             node.context_route.handoff_status,
             node.context_route.context_bytes,
-            node.context_route.effective_budget
+            node.context_route.effective_budget,
+            short_hash(&node.context_route.routing_cache_key)
         );
         lines.push(format!(
             "{} {} [{}] {}{}{} handoff {} executor {}{}",
@@ -358,4 +365,8 @@ fn executor_kind(executor: &ExecutorKind) -> &'static str {
         ExecutorKind::Notification => "notification",
         ExecutorKind::Mixed => "mixed",
     }
+}
+
+fn short_hash(value: &str) -> &str {
+    value.get(..12).unwrap_or(value)
 }

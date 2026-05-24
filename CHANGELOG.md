@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.33 - 2026-05-24
+
+### Added
+
+- `forge inspect --output json` now projects the Context Routing Engine fingerprint into each node's compact `context_route`.
+- Terminal inspection diagrams include a short routing cache key beside the context profile, handoff status and selected/effective bytes.
+- `forge task handoff` now emits `forge.executor_handoff.v2` with the context routing fingerprint schema, cache key and lineage hash.
+
+### Changed
+
+- Bounded executor adapters can now read the context cache identity from the handoff packet without opening the full nested `context.routing_fingerprint` body.
+- Operators can compare inspect output and handoff packets against the same Forge-owned routing cache key.
+
+### Safety
+
+- The new fields are read-only projections derived from the existing `forge.context.routing_fingerprint.v1` contract.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+
 ## 0.4.32 - 2026-05-24
 
 ### Added

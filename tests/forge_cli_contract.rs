@@ -1606,12 +1606,18 @@ fn inspect_exposes_context_route_summary_for_each_terminal_node() {
     let route = &deterministic["context_route"];
     assert_eq!(route["schema_version"], "forge.context.v14");
     assert_eq!(route["routing_policy"], "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_v14");
+    assert_eq!(
+        route["routing_fingerprint_schema_version"],
+        "forge.context.routing_fingerprint.v1"
+    );
     assert_eq!(route["profile_id"], "no_ai_deterministic");
     assert_eq!(route["reasoning_allowed"], false);
     assert_eq!(route["deterministic"], true);
     assert_eq!(route["requested_budget"], 1200);
     assert!(route["effective_budget"].as_u64().unwrap() < 1200);
     assert_eq!(route["context_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(route["routing_cache_key"].as_str().unwrap().len(), 64);
+    assert_eq!(route["routing_lineage_sha256"].as_str().unwrap().len(), 64);
     assert_eq!(
         route["handoff_status"],
         "blocked_missing_context_and_dependencies"
@@ -4252,7 +4258,7 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
     assert_eq!(handoff_json["context"]["handoff_status"], "ready");
 
     let packet = &handoff_json["packet"];
-    assert_eq!(packet["schema_version"], "forge.executor_handoff.v1");
+    assert_eq!(packet["schema_version"], "forge.executor_handoff.v2");
     assert_eq!(packet["workflow_id"], workflow_id);
     assert_eq!(packet["task_id"], task_id);
     assert_eq!(packet["selected_executor"], "codex");
@@ -4267,6 +4273,22 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
     assert_eq!(
         packet["context_sha256"],
         handoff_json["context"]["context_sha256"]
+    );
+    assert_eq!(
+        packet["context_routing_fingerprint_schema_version"],
+        "forge.context.routing_fingerprint.v1"
+    );
+    assert_eq!(
+        packet["context_routing_cache_key"],
+        handoff_json["context"]["routing_fingerprint"]["cache_key"]
+    );
+    assert_eq!(
+        packet["context_routing_cache_key"].as_str().unwrap().len(),
+        64
+    );
+    assert_eq!(
+        packet["context_routing_lineage_sha256"],
+        handoff_json["context"]["routing_fingerprint"]["lineage_sha256"]
     );
     assert_eq!(
         packet["context_bytes"],

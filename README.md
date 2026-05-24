@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.31`
+Current version: `0.4.33`
 
 This is the first functional CLI + Skill version:
 
@@ -52,7 +52,7 @@ This is the first functional CLI + Skill version:
 - async workflow substrate policy with scope guards for Forge-owned resources
 - async request handoff for skill callers: submit a goal, receive `run_id`, continue later with Forge
 - persisted task leases so two executors cannot acquire the same workflow task concurrently
-- executor handoff packets that combine strict context readiness, lease metadata, checksums and validation gates
+- executor handoff packets that combine strict context readiness, lease metadata, routing cache keys, checksums and validation gates
 - self-evolution runner for bounded Codex/OpenCode cycles until a stop date
 - versioned self-evolution prompt packets with SHA-256 checksums in cycle reports
 - versioned improvement artifacts with strong changelog generation
@@ -111,9 +111,10 @@ work.
 
 `forge inspect --output json` projects a compact `context_route` for every DAG node.
 The route reuses the same versioned context package and includes the executor profile,
-effective budget, context checksum, handoff status, resume status, missing required
-sections and routing summary. Human terminal diagrams also show the profile, handoff
-state and selected/effective context bytes for each node.
+effective budget, context checksum, routing fingerprint schema, routing cache key,
+lineage hash, handoff status, resume status, missing required sections and routing
+summary. Human terminal diagrams also show the profile, handoff state,
+selected/effective context bytes and short routing cache key for each node.
 
 Use strict context mode when handing a package to an executor:
 
@@ -131,9 +132,10 @@ forge task handoff --workflow <workflow-id> --task task-001 --executor codex --b
 ```
 
 The command reuses the strict context readiness contract, acquires a Forge task
-lease only when `handoff_ready=true`, and returns `forge.executor_handoff.v1`
+lease only when `handoff_ready=true`, and returns `forge.executor_handoff.v2`
 with the selected executor, task executor kind, lease id, context SHA-256,
-expected output, execution policy mode and validation gate.
+routing fingerprint schema, routing cache key, lineage hash, expected output,
+execution policy mode and validation gate.
 
 Skill-style async handoff:
 
