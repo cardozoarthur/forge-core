@@ -5473,6 +5473,104 @@ fn plan_persists_reuse_candidates_as_proposed_child_subflows_for_inspection() {
 }
 
 #[test]
+fn request_start_reuses_compatible_subflows_before_persisting_async_workflow() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let first = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with repeated local Python cost calculations without AI and email ops@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first_json: Value = serde_json::from_slice(&first).unwrap();
+    let first_workflow_id = first_json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            first_workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Run a cron workflow with frequent local Python cost calculations without AI and email finance@example.com",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let second_workflow_id = started_json["workflow_id"].as_str().unwrap();
+    assert_eq!(started_json["status"], "accepted");
+    assert_eq!(started_json["attached_subflows"], 1);
+    assert_eq!(
+        started_json["reuse_candidates"][0]["candidate_workflow_id"],
+        first_workflow_id
+    );
+    assert_eq!(
+        started_json["reuse_candidates"][0]["requested_task_id"],
+        "task-011"
+    );
+    assert_eq!(
+        started_json["reuse_candidates"][0]["attachable_as_child_subflow"],
+        true
+    );
+
+    let inspection = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            second_workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let inspection_json: Value = serde_json::from_slice(&inspection).unwrap();
+    assert_eq!(inspection_json["subflow_count"], 1);
+    assert_eq!(
+        inspection_json["subflows"][0]["workflow_id"],
+        first_workflow_id
+    );
+    assert_eq!(inspection_json["subflows"][0]["task_id"], "task-011");
+    assert_eq!(inspection_json["subflows"][0]["binding_status"], "proposed");
+}
+
+#[test]
 fn context_package_carries_proposed_child_subflow_routing_for_reused_nodes() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

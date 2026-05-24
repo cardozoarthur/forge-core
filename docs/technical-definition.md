@@ -190,8 +190,8 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v22` and routing policy
-`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_v22`. Each packet
+Current `forge context` packets use schema `forge.context.v23` and routing policy
+`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_persona_contract_next_action_delta_v23`. Each packet
 includes the executor-facing content, the full context checksum, workflow revision,
 artifact count, node-scoped persona routing metadata and a versioned persona contract for human-facing tasks, executor
 profile metadata, a versioned routing contract, execution policy metadata, dependency
@@ -321,7 +321,7 @@ Required user-facing goals:
 
 Before creating a new workflow from scratch, Forge should inspect available workflows and reusable flow definitions. If an existing flow can satisfy part of the new objective, Forge should propose or attach it as a child subflow instead of duplicating orchestration logic.
 
-The first reuse contract is deterministic and registry-derived. `forge list` exposes reusable local code-node subflows with a compatibility key based on execution policy, language, entrypoint and validation gate, plus a context lineage hash derived from the task-local context requirements and validation rules. `forge plan` reports compatible `reuse_candidates` from existing workflows before saving the new workflow and persists the best attachable candidate per requested task as a proposed `child_subflows` link. This gives `forge inspect` a recursive subflow surface without spending a model call, executing local Python/Node.js work or automatically promoting reused subflows.
+The first reuse contract is deterministic and registry-derived. `forge list` exposes reusable local code-node subflows with a compatibility key based on execution policy, language, entrypoint and validation gate, plus a context lineage hash derived from the task-local context requirements and validation rules. `forge plan` and `forge request start` report compatible `reuse_candidates` from existing workflows before saving the new workflow and persist the best attachable candidate per requested task as a proposed `child_subflows` link. This gives direct planning and skill-style async requests the same recursive subflow surface without spending a model call, executing local Python/Node.js work or automatically promoting reused subflows.
 
 ## Async Request Contract
 

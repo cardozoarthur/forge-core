@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.53 - 2026-05-24
+
+### Added
+
+- `forge request start` now runs the same registry-derived subflow reuse pass as `forge plan` before persisting the async workflow.
+- The request-start JSON response now includes `reuse_candidates` and `attached_subflows`, so Codex/OpenCode skill callers can see when Forge reused a compatible deterministic child subflow instead of silently creating isolated duplicate work.
+- Added CLI contract coverage proving an async request attaches a previously completed reusable local Python code-node as a proposed child subflow and exposes it through `forge inspect`.
+
+### Changed
+
+- Async request creation now preserves Forge as the orchestration source of truth for flow reuse, aligning skill-style `request start` with direct planning behavior.
+- The package version is now `0.4.53`.
+
+### Safety
+
+- Reuse remains deterministic and registry-derived. Forge only attaches candidates already marked attachable by lifecycle and compatibility checks.
+- This change does not execute local Python/Node.js code, complete tasks, promote workflows, authorize CLIs, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Proposed child subflows remain auditable in persisted workflow state and validation/inspection surfaces before any executor handoff.
+
 ## 0.4.52 - 2026-05-24
 
 ### Added

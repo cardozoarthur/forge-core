@@ -5,6 +5,9 @@ use crate::context::{
 };
 use crate::graph::{create_workflow, TaskStatus, Workflow};
 use crate::intent::parse_intent;
+use crate::registry::{
+    attach_reuse_candidates_as_child_subflows, find_reuse_candidates, WorkflowReuseCandidate,
+};
 use crate::storage::ForgeStore;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -34,6 +37,8 @@ pub struct RequestStartReport {
     pub origin: String,
     #[serde(rename = "async")]
     pub async_run: bool,
+    pub reuse_candidates: Vec<WorkflowReuseCandidate>,
+    pub attached_subflows: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -111,7 +116,10 @@ pub fn start_async_request(
     goal: &str,
     origin: &str,
 ) -> Result<RequestStartReport> {
-    let workflow = create_workflow(parse_intent(goal));
+    let mut workflow = create_workflow(parse_intent(goal));
+    let reuse_candidates = find_reuse_candidates(store, &workflow)?;
+    let attached_subflows =
+        attach_reuse_candidates_as_child_subflows(&mut workflow, &reuse_candidates);
     let run = create_run_record(&workflow, origin, "accepted");
     store.save_workflow(&workflow)?;
     save_run_record(store, &run)?;
@@ -127,6 +135,8 @@ pub fn start_async_request(
         goal: run.goal,
         origin: run.origin,
         async_run: run.async_run,
+        reuse_candidates,
+        attached_subflows,
     })
 }
 
