@@ -190,8 +190,8 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v20` and routing policy
-`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20`. Each packet
+Current `forge context` packets use schema `forge.context.v21` and routing policy
+`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21`. Each packet
 includes the executor-facing content, the full context checksum, workflow revision,
 artifact count, node-scoped persona routing metadata and a versioned persona contract for human-facing tasks, executor
 profile metadata, a versioned routing contract, execution policy metadata, dependency
@@ -203,7 +203,10 @@ Packets also include `context_ready`,
 `required_sections`, `missing_required_sections`, `handoff_ready`, `handoff_status`,
 `handoff_blockers`, aggregate `routing_summary` metrics and a versioned
 `routing_contract`, `routing_repair` budget recommendation and `routing_quality`
-contract. The routing contract names the selector version, executor profile version,
+contract. Packets also carry a versioned `next_action` decision so executor adapters
+can distinguish fresh handoff, dependency waits, context-budget repair, stale
+checkpoint refresh and partial retry with fresh context without first asking for a
+separate inspection projection. The routing contract names the selector version, executor profile version,
 profile id, selection strategy, requested and effective budget, minimum budget,
 allowed/required/optional section set and profile hash. The repair contract turns
 missing required sections into a deterministic action and recommended budget so

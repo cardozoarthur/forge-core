@@ -317,10 +317,10 @@ fn context_controller_returns_versioned_shard_manifest() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
     assert_eq!(context["workflow_id"], workflow_id);
     assert_eq!(context["task_id"], task_id);
@@ -393,10 +393,10 @@ fn context_package_routes_dependency_readiness_as_structured_context() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
     assert_eq!(context["dependency_summary"]["total"], 1);
     assert_eq!(context["dependency_summary"]["pending"], 1);
@@ -475,10 +475,10 @@ fn strict_context_blocks_executor_handoff_when_dependencies_are_not_ready() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
     assert_eq!(context["context_ready"], true);
     assert_eq!(context["dependency_summary"]["ready"], false);
@@ -547,10 +547,10 @@ fn context_package_summarizes_routing_decisions_for_executor_cost_audit() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
 
     let shards = context["shards"].as_array().unwrap();
@@ -640,10 +640,10 @@ fn strict_context_blocks_executor_when_required_sections_are_missing() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
     assert_eq!(context["context_ready"], false);
     assert!(!context["missing_required_sections"]
@@ -715,10 +715,10 @@ fn context_controller_compresses_oversized_shards_before_omitting() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
     assert_eq!(context["executor_profile"]["id"], "ai_reasoning");
     assert!(context["context_bytes"].as_u64().unwrap() <= 420);
@@ -800,10 +800,10 @@ fn context_shards_explain_selection_decisions_for_budget_and_profile_routing() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
 
     let shards = context["shards"].as_array().unwrap();
@@ -889,10 +889,10 @@ fn context_package_applies_no_ai_profile_to_deterministic_executor_nodes() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
     assert_eq!(context["requested_budget"], 1600);
     assert!(context["effective_budget"].as_u64().unwrap() < 1600);
@@ -989,10 +989,10 @@ fn deterministic_code_nodes_carry_no_ai_execution_policy_in_context() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
     assert_eq!(context["execution_policy"]["mode"], "local_code_node");
     assert_eq!(
@@ -1104,10 +1104,10 @@ fn context_package_tracks_runtime_mutation_lineage_and_current_goal() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
     assert_eq!(context["workflow_revision"], 2);
     assert_eq!(context["artifact_count"], 1);
@@ -1329,10 +1329,10 @@ fn context_package_addresses_each_shard_by_source_content_for_routing_reuse() {
         .stdout
         .clone();
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
 
     let shards = context["shards"].as_array().unwrap();
@@ -1434,10 +1434,10 @@ fn context_shards_include_remaining_budget_ledger_for_replayable_selection() {
         .stdout
         .clone();
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
 
     let effective_budget = context["effective_budget"].as_u64().unwrap();
@@ -1521,10 +1521,10 @@ fn context_package_exposes_versioned_routing_contract_for_executor_adapters() {
         .clone();
     let context: Value = serde_json::from_slice(&context_output).unwrap();
 
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
 
     let contract = &context["routing_contract"];
@@ -1700,10 +1700,10 @@ fn context_package_recommends_budget_repair_for_missing_required_sections() {
         .clone();
     let context: Value = serde_json::from_slice(&context_output).unwrap();
 
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
     assert_eq!(
         context["routing_repair"]["schema_version"],
@@ -1940,10 +1940,10 @@ fn context_package_includes_persona_routing_lineage_for_human_facing_task() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
     assert_eq!(context["persona"]["mode"], "operator_report");
     assert_eq!(context["persona"]["scope"], "node");
@@ -2011,10 +2011,10 @@ fn context_package_exposes_versioned_persona_contract_for_human_facing_nodes() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
 
     let contract = &context["persona_contract"];
@@ -2261,8 +2261,8 @@ fn inspect_exposes_context_route_summary_for_each_terminal_node() {
     let nodes = inspection["nodes"].as_array().unwrap();
     let deterministic = find_task(nodes, "Run deterministic non-AI step");
     let route = &deterministic["context_route"];
-    assert_eq!(route["schema_version"], "forge.context.v20");
-    assert_eq!(route["routing_policy"], "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20");
+    assert_eq!(route["schema_version"], "forge.context.v21");
+    assert_eq!(route["routing_policy"], "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21");
     assert_eq!(
         route["routing_fingerprint_schema_version"],
         "forge.context.routing_fingerprint.v1"
@@ -2522,6 +2522,140 @@ fn inspect_projects_next_context_action_for_handoff_and_resume() {
             .unwrap()
             .len(),
         64
+    );
+}
+
+#[test]
+fn context_package_exposes_next_action_for_executor_resume_decisions() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build context packets with resumable executor guidance",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+
+    let initial_context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let initial_context: Value = serde_json::from_slice(&initial_context_output).unwrap();
+    assert_eq!(initial_context["schema_version"], "forge.context.v21");
+    assert_eq!(
+        initial_context["next_action"]["schema_version"],
+        "forge.inspect_context_action.v1"
+    );
+    assert_eq!(
+        initial_context["next_action"]["action"],
+        "start_executor_handoff"
+    );
+    assert_eq!(initial_context["next_action"]["ready_for_handoff"], true);
+    assert_eq!(
+        initial_context["next_action"]["partial_retry_recommended"],
+        false
+    );
+    assert_eq!(
+        initial_context["next_action"]["current_context_routing_cache_key"],
+        initial_context["routing_fingerprint"]["cache_key"]
+    );
+    assert_eq!(initial_context["next_action"]["checkpoint_id"], Value::Null);
+
+    let workflow_revision = initial_context["workflow_revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "checkpoint",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--executor",
+            "codex",
+            "--state",
+            "paused",
+            "--summary",
+            "Paused after context packet route",
+            "--context-sha256",
+            initial_context["context_sha256"].as_str().unwrap(),
+            "--context-routing-cache-key",
+            initial_context["routing_fingerprint"]["cache_key"]
+                .as_str()
+                .unwrap(),
+            "--workflow-revision",
+            &workflow_revision,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let resumed_context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let resumed_context: Value = serde_json::from_slice(&resumed_context_output).unwrap();
+    assert_eq!(
+        resumed_context["next_action"]["action"],
+        "partial_retry_with_fresh_context"
+    );
+    assert_eq!(
+        resumed_context["next_action"]["partial_retry_recommended"],
+        true
+    );
+    assert_eq!(
+        resumed_context["next_action"]["checkpoint_context_routing_cache_key"],
+        initial_context["routing_fingerprint"]["cache_key"]
+    );
+    assert_eq!(
+        resumed_context["next_action"]["current_context_routing_cache_key"],
+        resumed_context["routing_fingerprint"]["cache_key"]
     );
 }
 
@@ -5110,10 +5244,10 @@ fn context_package_carries_proposed_child_subflow_routing_for_reused_nodes() {
         .clone();
 
     let context: Value = serde_json::from_slice(&context_output).unwrap();
-    assert_eq!(context["schema_version"], "forge.context.v20");
+    assert_eq!(context["schema_version"], "forge.context.v21");
     assert_eq!(
         context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
     assert_eq!(context["child_subflow_count"], 1);
     assert_eq!(
@@ -5351,10 +5485,10 @@ fn context_package_includes_latest_checkpoint_and_marks_stale_after_goal_mutatio
         .stdout
         .clone();
     let checkpointed_context: Value = serde_json::from_slice(&checkpointed_context_output).unwrap();
-    assert_eq!(checkpointed_context["schema_version"], "forge.context.v20");
+    assert_eq!(checkpointed_context["schema_version"], "forge.context.v21");
     assert_eq!(
         checkpointed_context["routing_policy"],
-        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20"
+        "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21"
     );
     assert_eq!(
         checkpointed_context["latest_checkpoint"]["context_sha256"],
@@ -5669,7 +5803,7 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
         packet["lease_id"],
         handoff_json["lease"]["lease_id"].as_str().unwrap()
     );
-    assert_eq!(packet["context_schema_version"], "forge.context.v20");
+    assert_eq!(packet["context_schema_version"], "forge.context.v21");
     assert_eq!(
         packet["context_sha256"],
         handoff_json["context"]["context_sha256"]

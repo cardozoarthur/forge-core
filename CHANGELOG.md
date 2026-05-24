@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.50 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v21` with a top-level `next_action` decision for executor adapters.
+- The context-level decision reuses the existing `forge.inspect_context_action.v1` shape and reports whether the task should start handoff, wait for dependencies, increase context budget, refresh stale context, resume from checkpoint or partial-retry with fresh context.
+- Added CLI contract coverage proving a context packet exposes fresh handoff guidance and later switches to `partial_retry_with_fresh_context` when a checkpointed route differs from the current routed context.
+
+### Changed
+
+- The context routing policy is now `task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21`.
+- `forge inspect` now consumes the same `ContextNextAction` stored on the context package instead of recomputing an inspection-only decision.
+- The package version is now `0.4.50`.
+
+### Safety
+
+- The next-action decision is read-only metadata derived from Forge-owned workflow/task/checkpoint state, dependency readiness and deterministic context routing.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor ownership remains controlled by `forge task handoff`, strict context readiness, dependency readiness, validation rules and task leases.
+
 ## 0.4.49 - 2026-05-24
 
 ### Added

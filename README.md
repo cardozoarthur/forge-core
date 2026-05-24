@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.49`
+Current version: `0.4.50`
 
 This is the first functional CLI + Skill version:
 
@@ -89,8 +89,8 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v20`) with a deterministic
-`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20` routing policy.
+`forge context` emits a versioned context packet (`forge.context.v21`) with a deterministic
+`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21` routing policy.
 The packet keeps the legacy `content` body for executors, and also returns workflow
 revision, artifact count, persona routing metadata for human-facing nodes, a versioned
 persona contract, executor profile metadata, a versioned routing contract, execution policy metadata, dependency readiness summaries, proposed
@@ -100,7 +100,9 @@ content-addressed shard IDs, source hashes, remaining-budget before/after values
 byte counts, summaries and SHA-256 checksums. The packet also exposes `context_ready`,
 `required_sections`, `missing_required_sections`, `handoff_ready`, `handoff_status`,
 `handoff_blockers`, a `routing_summary`, a versioned `routing_contract`, a versioned
-`routing_repair` budget recommendation, a versioned `routing_quality` score/warning contract, a node-scoped `persona_contract` for human-facing artifacts and a versioned `routing_fingerprint`
+`routing_repair` budget recommendation, a versioned `routing_quality` score/warning contract,
+a node-scoped `persona_contract` for human-facing artifacts, a versioned `next_action`
+resume/handoff decision and a versioned `routing_fingerprint`
 with component hashes and a cache key so executor adapters can reuse or invalidate
 bounded context without reparsing full packets. Adapters can block handoff when the
 minimum correct context was omitted or dependency tasks are not ready.
@@ -123,7 +125,7 @@ contracts for every DAG node.
 The route reuses the same versioned context package and includes the executor profile,
 effective budget, context checksum, routing fingerprint schema, routing cache key,
 lineage hash, handoff status, resume status, missing required sections and routing
-summary. It also includes a versioned `next_action` projection
+summary. It also reuses the context packet's versioned `next_action` projection
 (`forge.inspect_context_action.v1`) so operators can see whether a node should start
 handoff, wait for dependencies, raise context budget, refresh stale context or retry
 from a checkpoint with fresh context. The execution policy projection

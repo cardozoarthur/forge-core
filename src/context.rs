@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v20";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v21";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
 const ROUTING_CONTRACT_SCHEMA_VERSION: &str = "forge.context.routing_contract.v1";
 const ROUTING_REPAIR_SCHEMA_VERSION: &str = "forge.context.routing_repair.v1";
@@ -20,7 +20,7 @@ const CONTEXT_ROUTING_QUALITY_SCHEMA_VERSION: &str = "forge.context_routing_qual
 const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
     "forge.context_routing_quality_summary.v1";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_v20";
+    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_persona_contract_next_action_v21";
 const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
@@ -113,6 +113,7 @@ pub struct ContextPackage {
     pub routing_repair: ContextRoutingRepair,
     pub routing_summary: ContextRoutingSummary,
     pub routing_quality: ContextRoutingQuality,
+    pub next_action: ContextNextAction,
     pub context_ready: bool,
     pub required_sections: Vec<String>,
     pub missing_required_sections: Vec<String>,
@@ -848,6 +849,15 @@ pub fn build_context_package_with_checkpoint(
         persona_contract: persona_contract.as_ref(),
         context_sha256: &context_sha256,
     })?;
+    let next_action = build_context_next_action(
+        &routing_fingerprint.cache_key,
+        &handoff_blockers,
+        context_ready,
+        dependency_summary.ready,
+        latest_checkpoint.as_ref(),
+        resume_context_status,
+        resume_context_reason,
+    );
 
     Ok(ContextPackage {
         schema_version: CONTEXT_SCHEMA_VERSION.to_string(),
@@ -880,6 +890,7 @@ pub fn build_context_package_with_checkpoint(
         routing_repair,
         routing_summary,
         routing_quality,
+        next_action,
         context_ready,
         required_sections,
         missing_required_sections,
@@ -892,16 +903,26 @@ pub fn build_context_package_with_checkpoint(
 }
 
 pub fn context_next_action(package: &ContextPackage) -> ContextNextAction {
-    let current_route = package.routing_fingerprint.cache_key.clone();
-    let blocking_refs = package
-        .handoff_blockers
+    package.next_action.clone()
+}
+
+fn build_context_next_action(
+    current_route: &str,
+    handoff_blockers: &[ContextHandoffBlocker],
+    context_ready: bool,
+    dependency_ready: bool,
+    latest_checkpoint: Option<&TaskCheckpoint>,
+    resume_context_status: &str,
+    resume_context_reason: &str,
+) -> ContextNextAction {
+    let blocking_refs = handoff_blockers
         .iter()
         .flat_map(|blocker| blocker.refs.iter().cloned())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
 
-    if !package.context_ready && !package.dependency_summary.ready {
+    if !context_ready && !dependency_ready {
         return ContextNextAction {
             schema_version: CONTEXT_NEXT_ACTION_SCHEMA_VERSION.to_string(),
             action: "repair_context_and_wait_for_dependencies".to_string(),
@@ -910,13 +931,13 @@ pub fn context_next_action(package: &ContextPackage) -> ContextNextAction {
             checkpoint_id: None,
             checkpoint_context_sha256: None,
             checkpoint_context_routing_cache_key: None,
-            current_context_routing_cache_key: current_route,
+            current_context_routing_cache_key: current_route.to_string(),
             reason: "required context is missing and dependency tasks are not ready".to_string(),
             blocking_refs,
         };
     }
 
-    if !package.context_ready {
+    if !context_ready {
         return ContextNextAction {
             schema_version: CONTEXT_NEXT_ACTION_SCHEMA_VERSION.to_string(),
             action: "increase_context_budget".to_string(),
@@ -925,14 +946,14 @@ pub fn context_next_action(package: &ContextPackage) -> ContextNextAction {
             checkpoint_id: None,
             checkpoint_context_sha256: None,
             checkpoint_context_routing_cache_key: None,
-            current_context_routing_cache_key: current_route,
+            current_context_routing_cache_key: current_route.to_string(),
             reason: "required context sections were omitted by budget or profile routing"
                 .to_string(),
             blocking_refs,
         };
     }
 
-    if !package.dependency_summary.ready {
+    if !dependency_ready {
         return ContextNextAction {
             schema_version: CONTEXT_NEXT_ACTION_SCHEMA_VERSION.to_string(),
             action: "wait_for_dependencies".to_string(),
@@ -941,13 +962,13 @@ pub fn context_next_action(package: &ContextPackage) -> ContextNextAction {
             checkpoint_id: None,
             checkpoint_context_sha256: None,
             checkpoint_context_routing_cache_key: None,
-            current_context_routing_cache_key: current_route,
+            current_context_routing_cache_key: current_route.to_string(),
             reason: "dependency tasks must complete before executor handoff".to_string(),
             blocking_refs,
         };
     }
 
-    let Some(checkpoint) = &package.latest_checkpoint else {
+    let Some(checkpoint) = latest_checkpoint else {
         return ContextNextAction {
             schema_version: CONTEXT_NEXT_ACTION_SCHEMA_VERSION.to_string(),
             action: "start_executor_handoff".to_string(),
@@ -956,7 +977,7 @@ pub fn context_next_action(package: &ContextPackage) -> ContextNextAction {
             checkpoint_id: None,
             checkpoint_context_sha256: None,
             checkpoint_context_routing_cache_key: None,
-            current_context_routing_cache_key: current_route,
+            current_context_routing_cache_key: current_route.to_string(),
             reason: "context and dependencies are ready; acquire an executor handoff lease"
                 .to_string(),
             blocking_refs,
@@ -964,32 +985,32 @@ pub fn context_next_action(package: &ContextPackage) -> ContextNextAction {
     };
 
     let checkpoint_route = checkpoint.context_routing_cache_key.clone();
-    let (action, partial_retry_recommended, reason) =
-        if package.resume_context_status == "checkpoint_stale" {
-            (
-                "refresh_context_before_resume",
-                false,
-                package.resume_context_reason.as_str(),
-            )
-        } else if checkpoint_route.is_none() {
-            (
-                "refresh_context_before_resume",
-                false,
-                "checkpoint does not carry a context routing cache key",
-            )
-        } else if checkpoint_route.as_deref() == Some(current_route.as_str()) {
-            (
-                "resume_from_checkpoint",
-                false,
-                "checkpoint route matches current context route",
-            )
-        } else {
-            (
-                "partial_retry_with_fresh_context",
-                true,
-                "checkpoint route differs from current context route",
-            )
-        };
+    let (action, partial_retry_recommended, reason) = if resume_context_status == "checkpoint_stale"
+    {
+        (
+            "refresh_context_before_resume",
+            false,
+            resume_context_reason,
+        )
+    } else if checkpoint_route.is_none() {
+        (
+            "refresh_context_before_resume",
+            false,
+            "checkpoint does not carry a context routing cache key",
+        )
+    } else if checkpoint_route.as_deref() == Some(current_route) {
+        (
+            "resume_from_checkpoint",
+            false,
+            "checkpoint route matches current context route",
+        )
+    } else {
+        (
+            "partial_retry_with_fresh_context",
+            true,
+            "checkpoint route differs from current context route",
+        )
+    };
 
     ContextNextAction {
         schema_version: CONTEXT_NEXT_ACTION_SCHEMA_VERSION.to_string(),
@@ -999,7 +1020,7 @@ pub fn context_next_action(package: &ContextPackage) -> ContextNextAction {
         checkpoint_id: Some(checkpoint.checkpoint_id.clone()),
         checkpoint_context_sha256: Some(checkpoint.context_sha256.clone()),
         checkpoint_context_routing_cache_key: checkpoint_route,
-        current_context_routing_cache_key: current_route,
+        current_context_routing_cache_key: current_route.to_string(),
         reason: reason.to_string(),
         blocking_refs,
     }
