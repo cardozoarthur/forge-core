@@ -190,17 +190,17 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v11` and routing policy
-`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_summary_required_v11`. Each packet
+Current `forge context` packets use schema `forge.context.v12` and routing policy
+`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_budget_summary_required_v12`. Each packet
 includes the executor-facing content, the full context checksum, workflow revision,
 artifact count, node-scoped persona routing metadata for human-facing tasks, executor
-profile metadata, execution policy metadata, proposed child-subflow bindings, requested
-and effective budgets, lineage hashes, included and omitted sections, profile-driven
-omissions, and a deterministic shard manifest with source, priority, compression state,
-profile exclusion state, required/missing-required state, byte count, summary and shard
-checksum. Packets also include `context_ready`, `required_sections`,
-`missing_required_sections` and aggregate `routing_summary` metrics so handoff policy can
-block incomplete context before an executor starts work.
+profile metadata, execution policy metadata, dependency readiness summaries, proposed
+child-subflow bindings, requested and effective budgets, lineage hashes, included and
+omitted sections, profile-driven omissions, and a deterministic shard manifest with
+source, priority, compression state, profile exclusion state, required/missing-required
+state, byte count, summary and shard checksum. Packets also include `context_ready`,
+`required_sections`, `missing_required_sections` and aggregate `routing_summary` metrics
+so handoff policy can block incomplete context before an executor starts work.
 
 Executor profiles let Forge route different envelopes without changing workflow
 authority. Deterministic `command` and `wait` nodes use a no-AI profile that shrinks

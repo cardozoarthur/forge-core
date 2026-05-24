@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.25`
+Current version: `0.4.26`
 
 This is the first functional CLI + Skill version:
 
@@ -80,12 +80,12 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 ```
 
-`forge context` emits a versioned context packet (`forge.context.v11`) with a deterministic
-`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_summary_required_v11` routing policy.
+`forge context` emits a versioned context packet (`forge.context.v12`) with a deterministic
+`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_budget_summary_required_v12` routing policy.
 The packet keeps the legacy `content` body for executors, and also returns workflow
 revision, artifact count, persona routing metadata for human-facing nodes, executor
-profile metadata, execution policy metadata, proposed child-subflow bindings, lineage
-hashes and a shard manifest with included/omitted sections, profile exclusions,
+profile metadata, execution policy metadata, dependency readiness summaries, proposed
+child-subflow bindings, lineage hashes and a shard manifest with included/omitted sections, profile exclusions,
 compression flags, required/missing-required markers, source labels, priorities, byte
 counts, summaries and SHA-256 checksums. The packet also exposes `context_ready`,
 `required_sections`, `missing_required_sections` and a `routing_summary` so executor

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.26 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v12` with routing policy `task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_budget_summary_required_v12`.
+- Context packets now include top-level `dependency_summary` and `dependency_refs` so executor adapters can inspect prerequisite readiness without reparsing the DAG or relying on loose dependency IDs.
+- The `dependencies` shard now renders dependency title, status and blocking/missing markers in the executor-facing content.
+
+### Changed
+
+- Context routing now treats dependency readiness as auditable handoff context instead of a compact ID list.
+- CLI contract tests now target schema `forge.context.v12`.
+
+### Safety
+
+- Dependency readiness is a read-only projection of Forge-owned workflow graph state. It does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, mutate Docker/Kubernetes/Knative resources or bypass validation gates.
+- Blocking dependency metadata is exposed for executor policy decisions, while promotion remains controlled by `forge validate`.
+
+### Validation
+
+- Added CLI contract coverage proving `forge context` emits structured dependency readiness and an executor-facing dependency shard for a blocked downstream task.
+
 ## 0.4.25 - 2026-05-24
 
 ### Added

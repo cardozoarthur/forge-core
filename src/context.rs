@@ -1,14 +1,15 @@
 use crate::artifact::hex_sha256;
 use crate::checkpoint::TaskCheckpoint;
 use crate::graph::{
-    AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, PersonaRoutingSpec, Workflow,
+    AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, PersonaRoutingSpec, TaskStatus,
+    Workflow,
 };
 use anyhow::{bail, Result};
 use serde::Serialize;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v11";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v12";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_budget_summary_required_v11";
+    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_budget_summary_required_v12";
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
 const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
 const ALL_CONTEXT_SECTIONS: &[&str] = &[
@@ -79,6 +80,8 @@ pub struct ContextPackage {
     pub persona: Option<PersonaRoutingSpec>,
     pub executor_profile: ContextExecutorProfile,
     pub execution_policy: ExecutionPolicySpec,
+    pub dependency_summary: ContextDependencySummary,
+    pub dependency_refs: Vec<ContextDependencyRef>,
     pub child_subflow_count: usize,
     pub child_subflows: Vec<ChildSubflowRef>,
     pub latest_checkpoint: Option<TaskCheckpoint>,
@@ -128,6 +131,30 @@ pub struct ContextShard {
     pub original_bytes: usize,
     pub content_sha256: String,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextDependencySummary {
+    pub total: usize,
+    pub completed: usize,
+    pub running: usize,
+    pub pending: usize,
+    pub blocked: usize,
+    pub failed: usize,
+    pub missing: usize,
+    pub ready: bool,
+    pub blocking_task_ids: Vec<String>,
+    pub missing_task_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextDependencyRef {
+    pub task_id: String,
+    pub title: String,
+    pub status: String,
+    pub required: bool,
+    pub blocking: bool,
+    pub missing: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,6 +269,8 @@ pub fn build_context_package_with_checkpoint(
     )?;
     let (resume_context_status, resume_context_reason) =
         resume_context_status(latest_checkpoint.as_ref(), workflow_revision);
+    let dependency_refs = build_dependency_refs(workflow, task);
+    let dependency_summary = summarize_dependency_refs(&dependency_refs);
 
     let mut candidates = vec![
         ContextShardCandidate {
@@ -324,7 +353,7 @@ pub fn build_context_package_with_checkpoint(
             section: "dependencies",
             source: "graph",
             priority: priority_for_profile(&profile, "dependencies", 70),
-            content: format!("Dependencies: {}\n", task.dependencies.join(", ")),
+            content: render_dependencies_context(&dependency_refs, &dependency_summary),
         },
         ContextShardCandidate {
             section: "work_item",
@@ -468,6 +497,8 @@ pub fn build_context_package_with_checkpoint(
         persona,
         executor_profile: profile.to_public(&task.executor, &required_sections),
         execution_policy: task.execution_policy.clone(),
+        dependency_summary,
+        dependency_refs,
         child_subflow_count: task.child_subflows.len(),
         child_subflows: task.child_subflows.clone(),
         latest_checkpoint,
@@ -543,6 +574,88 @@ fn build_routing_summary(
         effective_budget,
         remaining_budget: effective_budget.saturating_sub(selected_bytes),
         budget_utilization_bps,
+    }
+}
+
+fn build_dependency_refs(workflow: &Workflow, task: &AtomicTask) -> Vec<ContextDependencyRef> {
+    task.dependencies
+        .iter()
+        .map(|dependency_id| {
+            let Some(dependency) = workflow
+                .tasks
+                .iter()
+                .find(|candidate| &candidate.id == dependency_id)
+            else {
+                return ContextDependencyRef {
+                    task_id: dependency_id.clone(),
+                    title: "missing dependency".to_string(),
+                    status: "missing".to_string(),
+                    required: true,
+                    blocking: true,
+                    missing: true,
+                };
+            };
+
+            let blocking = dependency.status != TaskStatus::Completed;
+            ContextDependencyRef {
+                task_id: dependency.id.clone(),
+                title: dependency.title.clone(),
+                status: task_status(&dependency.status).to_string(),
+                required: true,
+                blocking,
+                missing: false,
+            }
+        })
+        .collect()
+}
+
+fn summarize_dependency_refs(dependencies: &[ContextDependencyRef]) -> ContextDependencySummary {
+    let completed = dependencies
+        .iter()
+        .filter(|dependency| dependency.status == "completed")
+        .count();
+    let running = dependencies
+        .iter()
+        .filter(|dependency| dependency.status == "running")
+        .count();
+    let pending = dependencies
+        .iter()
+        .filter(|dependency| dependency.status == "pending")
+        .count();
+    let blocked = dependencies
+        .iter()
+        .filter(|dependency| dependency.status == "blocked")
+        .count();
+    let failed = dependencies
+        .iter()
+        .filter(|dependency| dependency.status == "failed")
+        .count();
+    let missing = dependencies
+        .iter()
+        .filter(|dependency| dependency.missing)
+        .count();
+    let blocking_task_ids = dependencies
+        .iter()
+        .filter(|dependency| dependency.blocking)
+        .map(|dependency| dependency.task_id.clone())
+        .collect::<Vec<_>>();
+    let missing_task_ids = dependencies
+        .iter()
+        .filter(|dependency| dependency.missing)
+        .map(|dependency| dependency.task_id.clone())
+        .collect::<Vec<_>>();
+
+    ContextDependencySummary {
+        total: dependencies.len(),
+        completed,
+        running,
+        pending,
+        blocked,
+        failed,
+        missing,
+        ready: blocking_task_ids.is_empty(),
+        blocking_task_ids,
+        missing_task_ids,
     }
 }
 
@@ -634,6 +747,48 @@ fn render_child_subflows_context(child_subflows: &[ChildSubflowRef]) -> String {
         .join("")
 }
 
+fn render_dependencies_context(
+    dependencies: &[ContextDependencyRef],
+    summary: &ContextDependencySummary,
+) -> String {
+    if dependencies.is_empty() {
+        return "Dependency readiness: ready\nDependencies: none\n".to_string();
+    }
+
+    let mut lines = vec![
+        format!(
+            "Dependency readiness: {}",
+            if summary.ready { "ready" } else { "blocked" }
+        ),
+        format!(
+            "Dependencies total: {} completed: {} pending: {} running: {} blocked: {} failed: {} missing: {}",
+            summary.total,
+            summary.completed,
+            summary.pending,
+            summary.running,
+            summary.blocked,
+            summary.failed,
+            summary.missing
+        ),
+    ];
+
+    for dependency in dependencies {
+        let marker = if dependency.missing {
+            "missing"
+        } else if dependency.blocking {
+            "blocking"
+        } else {
+            "ready"
+        };
+        lines.push(format!(
+            "- {} {} [{}] {}",
+            dependency.task_id, dependency.title, dependency.status, marker
+        ));
+    }
+
+    format!("{}\n", lines.join("\n"))
+}
+
 fn render_checkpoint_context(checkpoint: &TaskCheckpoint, resume_status: &str) -> String {
     format!(
         "Latest checkpoint: {}\nTask: {}\nExecutor: {}\nState: {}\nWorkflow revision: {}\nContext sha256: {}\nResume status: {}\nSummary: {}\n",
@@ -646,6 +801,16 @@ fn render_checkpoint_context(checkpoint: &TaskCheckpoint, resume_status: &str) -
         resume_status,
         checkpoint.summary
     )
+}
+
+fn task_status(status: &TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Pending => "pending",
+        TaskStatus::Running => "running",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Blocked => "blocked",
+        TaskStatus::Failed => "failed",
+    }
 }
 
 fn resume_context_status(
