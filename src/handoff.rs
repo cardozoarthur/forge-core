@@ -9,7 +9,7 @@ use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-const EXECUTOR_HANDOFF_SCHEMA_VERSION: &str = "forge.executor_handoff.v2";
+const EXECUTOR_HANDOFF_SCHEMA_VERSION: &str = "forge.executor_handoff.v3";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskHandoffReport {
@@ -54,6 +54,19 @@ pub struct ExecutorHandoffPacket {
     pub execution_policy_mode: String,
     pub persona_mode: Option<String>,
     pub resume_context_status: String,
+    pub resume_plan: ExecutorHandoffResumePlan,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutorHandoffResumePlan {
+    pub status: String,
+    pub action: String,
+    pub partial_retry_recommended: bool,
+    pub checkpoint_id: Option<String>,
+    pub checkpoint_context_sha256: Option<String>,
+    pub checkpoint_context_routing_cache_key: Option<String>,
+    pub current_context_routing_cache_key: String,
+    pub reason: String,
 }
 
 struct PacketParts<'a> {
@@ -194,7 +207,67 @@ impl ExecutorHandoffPacket {
             execution_policy_mode: parts.execution_policy_mode,
             persona_mode: parts.persona_mode,
             resume_context_status: parts.context.resume_context_status.clone(),
+            resume_plan: build_resume_plan(parts.context),
         }
+    }
+}
+
+fn build_resume_plan(context: &ContextPackage) -> ExecutorHandoffResumePlan {
+    let current_route = context.routing_fingerprint.cache_key.clone();
+    let Some(checkpoint) = &context.latest_checkpoint else {
+        return ExecutorHandoffResumePlan {
+            status: "no_checkpoint".to_string(),
+            action: "start_fresh".to_string(),
+            partial_retry_recommended: false,
+            checkpoint_id: None,
+            checkpoint_context_sha256: None,
+            checkpoint_context_routing_cache_key: None,
+            current_context_routing_cache_key: current_route,
+            reason: "no checkpoint recorded for this workflow task".to_string(),
+        };
+    };
+
+    let checkpoint_route = checkpoint.context_routing_cache_key.clone();
+    let (status, action, partial_retry_recommended, reason) =
+        if context.resume_context_status == "checkpoint_stale" {
+            (
+                "checkpoint_stale",
+                "refresh_context_before_resume",
+                false,
+                context.resume_context_reason.as_str(),
+            )
+        } else if checkpoint_route.is_none() {
+            (
+                "checkpoint_route_unknown",
+                "refresh_context_before_resume",
+                false,
+                "checkpoint does not carry a context routing cache key",
+            )
+        } else if checkpoint_route.as_deref() == Some(current_route.as_str()) {
+            (
+                "checkpoint_route_current",
+                "resume_from_checkpoint",
+                false,
+                "checkpoint route matches current handoff route",
+            )
+        } else {
+            (
+                "checkpoint_route_changed",
+                "partial_retry_with_fresh_context",
+                true,
+                "checkpoint route differs from current handoff route",
+            )
+        };
+
+    ExecutorHandoffResumePlan {
+        status: status.to_string(),
+        action: action.to_string(),
+        partial_retry_recommended,
+        checkpoint_id: Some(checkpoint.checkpoint_id.clone()),
+        checkpoint_context_sha256: Some(checkpoint.context_sha256.clone()),
+        checkpoint_context_routing_cache_key: checkpoint_route,
+        current_context_routing_cache_key: current_route,
+        reason: reason.to_string(),
     }
 }
 

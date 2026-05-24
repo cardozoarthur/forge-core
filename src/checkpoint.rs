@@ -13,6 +13,8 @@ pub struct TaskCheckpoint {
     pub state: String,
     pub summary: String,
     pub context_sha256: String,
+    #[serde(default)]
+    pub context_routing_cache_key: Option<String>,
     pub workflow_revision: u64,
     pub created_at: DateTime<Utc>,
 }
@@ -30,6 +32,7 @@ pub struct TaskCheckpointRequest<'a> {
     pub state: &'a str,
     pub summary: &'a str,
     pub context_sha256: &'a str,
+    pub context_routing_cache_key: Option<&'a str>,
     pub workflow_revision: u64,
 }
 
@@ -57,6 +60,11 @@ pub fn record_task_checkpoint(
     if !is_sha256(request.context_sha256) {
         bail!("context sha256 must be a 64 character hex string");
     }
+    if let Some(cache_key) = request.context_routing_cache_key {
+        if !is_sha256(cache_key) {
+            bail!("context routing cache key must be a 64 character hex string");
+        }
+    }
 
     let checkpoint = TaskCheckpoint {
         checkpoint_id: format!("ckpt_{}", Uuid::new_v4().to_string().replace('-', "")),
@@ -66,6 +74,7 @@ pub fn record_task_checkpoint(
         state: request.state.to_string(),
         summary: request.summary.to_string(),
         context_sha256: request.context_sha256.to_string(),
+        context_routing_cache_key: request.context_routing_cache_key.map(str::to_string),
         workflow_revision: request.workflow_revision,
         created_at: Utc::now(),
     };

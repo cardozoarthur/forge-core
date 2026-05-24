@@ -4258,7 +4258,7 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
     assert_eq!(handoff_json["context"]["handoff_status"], "ready");
 
     let packet = &handoff_json["packet"];
-    assert_eq!(packet["schema_version"], "forge.executor_handoff.v2");
+    assert_eq!(packet["schema_version"], "forge.executor_handoff.v3");
     assert_eq!(packet["workflow_id"], workflow_id);
     assert_eq!(packet["task_id"], task_id);
     assert_eq!(packet["selected_executor"], "codex");
@@ -4334,6 +4334,187 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
     assert_eq!(conflict_json["packet"]["lease_status"], "lease_conflict");
     assert_eq!(conflict_json["packet"]["handoff_ready"], true);
     assert_eq!(conflict_json["current_lease"]["executor"], "codex");
+}
+
+#[test]
+fn task_handoff_packet_exposes_resume_plan_from_checkpoint_route_key() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Handoff resumable context route",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let task_id = json["tasks"][0]["id"].as_str().unwrap();
+
+    let first_handoff = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first_handoff_json: Value = serde_json::from_slice(&first_handoff).unwrap();
+    let first_packet = &first_handoff_json["packet"];
+    let first_lease_id = first_handoff_json["lease"]["lease_id"].as_str().unwrap();
+    let checkpoint_context_sha256 = first_packet["context_sha256"].as_str().unwrap();
+    let checkpoint_route_key = first_packet["context_routing_cache_key"].as_str().unwrap();
+    let checkpoint_revision = first_handoff_json["context"]["workflow_revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+
+    let checkpoint_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "checkpoint",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "codex",
+            "--state",
+            "paused",
+            "--summary",
+            "paused after first executor packet",
+            "--context-sha256",
+            checkpoint_context_sha256,
+            "--context-routing-cache-key",
+            checkpoint_route_key,
+            "--workflow-revision",
+            &checkpoint_revision,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let checkpoint_json: Value = serde_json::from_slice(&checkpoint_output).unwrap();
+    assert_eq!(
+        checkpoint_json["checkpoint"]["context_routing_cache_key"],
+        checkpoint_route_key
+    );
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "release",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--lease",
+            first_lease_id,
+            "--executor",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let resumed_handoff = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let resumed_handoff_json: Value = serde_json::from_slice(&resumed_handoff).unwrap();
+    let resumed_packet = &resumed_handoff_json["packet"];
+    assert_eq!(
+        resumed_packet["schema_version"],
+        "forge.executor_handoff.v3"
+    );
+    assert_eq!(
+        resumed_packet["resume_context_status"],
+        "checkpoint_current"
+    );
+    assert_eq!(
+        resumed_packet["resume_plan"]["checkpoint_id"],
+        checkpoint_json["checkpoint"]["checkpoint_id"]
+    );
+    assert_eq!(
+        resumed_packet["resume_plan"]["checkpoint_context_sha256"],
+        checkpoint_context_sha256
+    );
+    assert_eq!(
+        resumed_packet["resume_plan"]["checkpoint_context_routing_cache_key"],
+        checkpoint_route_key
+    );
+    assert_eq!(
+        resumed_packet["resume_plan"]["current_context_routing_cache_key"],
+        resumed_packet["context_routing_cache_key"]
+    );
+    assert_eq!(
+        resumed_packet["resume_plan"]["status"],
+        "checkpoint_route_changed"
+    );
+    assert_eq!(
+        resumed_packet["resume_plan"]["action"],
+        "partial_retry_with_fresh_context"
+    );
+    assert_eq!(
+        resumed_packet["resume_plan"]["partial_retry_recommended"],
+        true
+    );
+    assert_eq!(
+        resumed_packet["resume_plan"]["reason"],
+        "checkpoint route differs from current handoff route"
+    );
 }
 
 #[test]

@@ -311,6 +311,8 @@ enum TaskCommands {
         summary: String,
         #[arg(long = "context-sha256")]
         context_sha256: String,
+        #[arg(long = "context-routing-cache-key")]
+        context_routing_cache_key: Option<String>,
         #[arg(long = "workflow-revision")]
         workflow_revision: u64,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -744,6 +746,7 @@ fn run() -> Result<i32> {
                 state,
                 summary,
                 context_sha256,
+                context_routing_cache_key,
                 workflow_revision,
                 output,
             } => {
@@ -757,6 +760,7 @@ fn run() -> Result<i32> {
                         state: &state,
                         summary: &summary,
                         context_sha256: &context_sha256,
+                        context_routing_cache_key: context_routing_cache_key.as_deref(),
                         workflow_revision,
                     },
                 )?;

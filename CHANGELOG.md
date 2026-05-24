@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.34 - 2026-05-24
+
+### Added
+
+- `forge task checkpoint` now accepts an optional `--context-routing-cache-key` and persists it with the checkpoint record.
+- `forge task handoff` now emits `forge.executor_handoff.v3` with a `resume_plan` derived from the latest checkpoint and the current Context Routing Engine cache key.
+- The handoff `resume_plan` reports checkpoint identity, checkpoint context SHA-256, checkpoint routing cache key, current routing cache key, explicit resume status, adapter action and whether a partial retry with fresh context is recommended.
+
+### Changed
+
+- Executor adapters no longer need to infer resumability from `resume_context_status` alone. They can distinguish fresh starts, stale checkpoints, unknown checkpoint routes, unchanged routes and changed routes directly from the handoff envelope.
+- Current checkpoints whose recorded route differs from the current handoff route are surfaced as `checkpoint_route_changed` with action `partial_retry_with_fresh_context`.
+
+### Safety
+
+- The resume plan is read-only handoff metadata derived from Forge-owned checkpoint and context-routing state.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+
 ## 0.4.33 - 2026-05-24
 
 ### Added
