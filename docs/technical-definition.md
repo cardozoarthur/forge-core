@@ -268,6 +268,11 @@ per-task quality contracts for context-budget and profile-pressure triage.
 `forge list --context-actions` exposes the valid registry filter values for
 handoff, resume and retry actions, so operators can discover context-action filters
 without memorizing summary field names or reading source code.
+Every workflow row also exposes versioned `context_action_refs` entries with task id,
+title, executor, next action, handoff status, blocker refs, checkpoint refs and the
+current routing cache key. This keeps registry filtering actionable without forcing
+operators or adapters to open a full `forge inspect` view before deciding which task
+needs handoff, dependency wait, context repair, checkpoint resume or partial retry.
 `forge inspect <workflow-id> --task <task-id>` provides a focused terminal and JSON
 inspection view for one task. It preserves the selected node's context-route,
 persona, execution-policy, handoff and child-subflow projections while limiting the

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.72 - 2026-05-24
+
+### Added
+
+- `forge list --output json` workflow rows now include versioned `context_action_refs` entries with schema `forge.registry_context_action_ref.v1`.
+- Each context action ref records the task id, title, executor, next action, handoff status, context/dependency readiness, routing quality status, blocker refs, checkpoint refs, current routing cache key, context checksum and action reason.
+- Added CLI contract coverage proving registry rows expose the exact tasks behind aggregate context actions such as `partial_retry_with_fresh_context` and `wait_for_dependencies`.
+
+### Changed
+
+- The package version is now `0.4.72`.
+- README and technical definition now document per-task context-action refs for registry triage.
+
+### Safety
+
+- Context action refs are read-only registry metadata derived from deterministic context routing packages.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Executor handoff remains controlled by strict context readiness, dependency readiness, validation rules, task leases, persona gates, child-subflow validation gates and continuation plans.
+
 ## 0.4.71 - 2026-05-24
 
 ### Added

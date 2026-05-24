@@ -6362,6 +6362,58 @@ fn list_aggregates_context_next_actions_for_registry_rows() {
         1
     );
     assert_eq!(row["context_actions"]["partial_retry_recommended"], 1);
+
+    let refs = row["context_action_refs"].as_array().unwrap();
+    assert_eq!(refs.len() as u64, task_count);
+
+    let retry_ref = refs
+        .iter()
+        .find(|entry| entry["task_id"] == "task-001")
+        .unwrap();
+    assert_eq!(
+        retry_ref["schema_version"],
+        "forge.registry_context_action_ref.v1"
+    );
+    assert_eq!(retry_ref["task_id"], "task-001");
+    assert_eq!(retry_ref["title"], "Parse intent");
+    assert_eq!(retry_ref["executor"], "command");
+    assert_eq!(retry_ref["action"], "partial_retry_with_fresh_context");
+    assert_eq!(retry_ref["ready_for_handoff"], true);
+    assert_eq!(retry_ref["partial_retry_recommended"], true);
+    assert_eq!(retry_ref["handoff_status"], "ready");
+    assert_eq!(retry_ref["blocking_refs"], serde_json::json!([]));
+    assert!(retry_ref["checkpoint_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("ckpt_"));
+    assert_eq!(
+        retry_ref["current_context_routing_cache_key"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert!(retry_ref["reason"]
+        .as_str()
+        .unwrap()
+        .contains("checkpoint route differs"));
+
+    let wait_ref = refs
+        .iter()
+        .find(|entry| entry["task_id"] == "task-002")
+        .unwrap();
+    assert_eq!(wait_ref["action"], "wait_for_dependencies");
+    assert_eq!(wait_ref["ready_for_handoff"], false);
+    assert_eq!(wait_ref["partial_retry_recommended"], false);
+    assert_eq!(wait_ref["handoff_status"], "blocked_dependencies");
+    assert_eq!(wait_ref["blocking_refs"], serde_json::json!(["task-001"]));
+    assert_eq!(
+        wait_ref["current_context_routing_cache_key"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
 }
 
 #[test]

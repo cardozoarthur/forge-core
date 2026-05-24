@@ -18,6 +18,7 @@ const REGISTRY_CONTEXT_HANDOFF_SCHEMA_VERSION: &str = "forge.registry_context_ha
 const REGISTRY_CONTEXT_ACTION_SCHEMA_VERSION: &str = "forge.registry_context_action.v1";
 const REGISTRY_CONTEXT_QUALITY_SCHEMA_VERSION: &str = "forge.registry_context_quality.v1";
 const REGISTRY_EXECUTION_POLICY_SCHEMA_VERSION: &str = "forge.registry_execution_policy.v1";
+const REGISTRY_CONTEXT_ACTION_REF_SCHEMA_VERSION: &str = "forge.registry_context_action_ref.v1";
 const REGISTRY_QUALITY_ACTION_SCHEMA_VERSION: &str = "forge.registry_quality_action.v1";
 const REGISTRY_CONTEXT_ACTION_CATALOG_SCHEMA_VERSION: &str =
     "forge.registry_context_action_catalog.v1";
@@ -81,6 +82,7 @@ pub struct WorkflowRegistryRow {
     pub execution_policy: RegistryExecutionPolicySummary,
     pub context_handoff: RegistryContextHandoffSummary,
     pub context_actions: RegistryContextActionSummary,
+    pub context_action_refs: Vec<RegistryContextActionRef>,
     pub context_quality: RegistryContextQualitySummary,
     pub quality_action: RegistryQualityAction,
     pub reusable_subflows: Vec<ReusableSubflowRef>,
@@ -143,6 +145,28 @@ pub struct RegistryContextActionSummary {
     pub resume_from_checkpoint: usize,
     pub partial_retry_with_fresh_context: usize,
     pub partial_retry_recommended: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RegistryContextActionRef {
+    pub schema_version: String,
+    pub task_id: String,
+    pub title: String,
+    pub executor: String,
+    pub action: String,
+    pub ready_for_handoff: bool,
+    pub partial_retry_recommended: bool,
+    pub context_ready: bool,
+    pub dependency_ready: bool,
+    pub handoff_status: String,
+    pub routing_quality_status: String,
+    pub blocking_refs: Vec<String>,
+    pub checkpoint_id: Option<String>,
+    pub checkpoint_context_sha256: Option<String>,
+    pub checkpoint_context_routing_cache_key: Option<String>,
+    pub current_context_routing_cache_key: String,
+    pub context_sha256: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -240,6 +264,11 @@ pub struct WorkflowReuseCandidate {
     pub reason: String,
 }
 
+struct RegistryContextActionProjection {
+    summary: RegistryContextActionSummary,
+    refs: Vec<RegistryContextActionRef>,
+}
+
 pub fn list_workflows(store: &ForgeStore) -> Result<WorkflowRegistryReport> {
     list_workflows_filtered(store, WorkflowLifecycleFilter::All)
 }
@@ -267,12 +296,12 @@ pub fn list_workflows_with_filters(
         let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
         let handoff_summary =
             build_context_handoff_summary(&workflow, DEFAULT_CONTEXT_BUDGET, &checkpoints)?;
-        let action_summary = registry_context_action_summary(&workflow, &checkpoints)?;
+        let action_projection = registry_context_action_projection(&workflow, &checkpoints)?;
         rows.push(registry_row(
             &workflow,
             runs,
             &handoff_summary,
-            &action_summary,
+            &action_projection,
         ));
     }
 
@@ -669,7 +698,7 @@ fn registry_row(
     workflow: &Workflow,
     runs: &[RunRecord],
     handoff_summary: &ContextHandoffSummary,
-    action_summary: &RegistryContextActionSummary,
+    action_projection: &RegistryContextActionProjection,
 ) -> WorkflowRegistryRow {
     let task_summary = summarize_tasks(workflow);
     let lifecycle_state = derive_lifecycle_state(workflow, &task_summary);
@@ -698,7 +727,8 @@ fn registry_row(
         task_summary,
         execution_policy,
         context_handoff: RegistryContextHandoffSummary::from_handoff_summary(handoff_summary),
-        context_actions: action_summary.clone(),
+        context_actions: action_projection.summary.clone(),
+        context_action_refs: action_projection.refs.clone(),
         context_quality,
         quality_action,
         reusable_subflows,
@@ -1071,11 +1101,12 @@ impl RegistryQualityAction {
     }
 }
 
-fn registry_context_action_summary(
+fn registry_context_action_projection(
     workflow: &Workflow,
     checkpoints: &[TaskCheckpoint],
-) -> Result<RegistryContextActionSummary> {
+) -> Result<RegistryContextActionProjection> {
     let mut summary = RegistryContextActionSummary::for_workflow();
+    let mut refs = Vec::new();
 
     for task in &workflow.tasks {
         let latest_checkpoint = checkpoints
@@ -1091,9 +1122,37 @@ fn registry_context_action_summary(
         )?;
         let action = context_next_action(&package);
         summary.add_action(&action);
+        refs.push(registry_context_action_ref(task, &package, &action));
     }
 
-    Ok(summary)
+    Ok(RegistryContextActionProjection { summary, refs })
+}
+
+fn registry_context_action_ref(
+    task: &AtomicTask,
+    package: &crate::context::ContextPackage,
+    action: &ContextNextAction,
+) -> RegistryContextActionRef {
+    RegistryContextActionRef {
+        schema_version: REGISTRY_CONTEXT_ACTION_REF_SCHEMA_VERSION.to_string(),
+        task_id: task.id.clone(),
+        title: task.title.clone(),
+        executor: executor_kind(&task.executor).to_string(),
+        action: action.action.clone(),
+        ready_for_handoff: action.ready_for_handoff,
+        partial_retry_recommended: action.partial_retry_recommended,
+        context_ready: package.context_ready,
+        dependency_ready: package.dependency_summary.ready,
+        handoff_status: package.handoff_status.clone(),
+        routing_quality_status: package.routing_quality.status.clone(),
+        blocking_refs: action.blocking_refs.clone(),
+        checkpoint_id: action.checkpoint_id.clone(),
+        checkpoint_context_sha256: action.checkpoint_context_sha256.clone(),
+        checkpoint_context_routing_cache_key: action.checkpoint_context_routing_cache_key.clone(),
+        current_context_routing_cache_key: action.current_context_routing_cache_key.clone(),
+        context_sha256: package.context_sha256.clone(),
+        reason: action.reason.clone(),
+    }
 }
 
 fn initial_request(workflow: &Workflow, runs: &[RunRecord]) -> String {
