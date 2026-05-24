@@ -6489,6 +6489,80 @@ fn list_surfaces_reusable_code_node_subflows_with_compatibility_keys() {
 }
 
 #[test]
+fn list_aggregates_execution_policy_routes_for_registry_rows() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Run a cron workflow with repeated local Python cost calculations without AI and email ops@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let task_count = planned_json["tasks"].as_array().unwrap().len() as u64;
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--lifecycle",
+            "non-running",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    let summary = &listed_json["summary"]["execution_policy"];
+    assert_eq!(
+        summary["schema_version"],
+        "forge.registry_execution_policy.v1"
+    );
+    assert_eq!(summary["workflows"], 1);
+    assert_eq!(summary["total_tasks"], task_count);
+    assert_eq!(summary["ai_tasks"], 3);
+    assert_eq!(summary["mixed_tasks"], 1);
+    assert_eq!(summary["deterministic_tasks"], 8);
+    assert_eq!(summary["model_call_required_tasks"], 4);
+    assert_eq!(summary["model_call_avoided_tasks"], 8);
+    assert_eq!(summary["local_code_nodes"], 1);
+    assert_eq!(summary["reusable_local_code_nodes"], 1);
+    assert_eq!(summary["command_tasks"], 6);
+    assert_eq!(summary["wait_tasks"], 1);
+    assert_eq!(summary["notification_tasks"], 1);
+
+    let row = find_workflow(&listed_json, workflow_id);
+    assert_eq!(
+        row["execution_policy"]["schema_version"],
+        "forge.registry_execution_policy.v1"
+    );
+    assert_eq!(row["execution_policy"]["workflows"], 1);
+    assert_eq!(row["execution_policy"]["total_tasks"], task_count);
+    assert_eq!(row["execution_policy"]["ai_tasks"], 3);
+    assert_eq!(row["execution_policy"]["mixed_tasks"], 1);
+    assert_eq!(row["execution_policy"]["deterministic_tasks"], 8);
+    assert_eq!(row["execution_policy"]["local_code_nodes"], 1);
+    assert_eq!(row["execution_policy"]["reusable_local_code_nodes"], 1);
+    assert_eq!(row["reusable_subflows"].as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn plan_reports_compatible_reuse_candidates_before_creating_duplicate_code_nodes() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

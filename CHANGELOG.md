@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.67 - 2026-05-24
+
+### Added
+
+- `forge list --output json` now includes a versioned `execution_policy` summary on both the global registry summary and each workflow row.
+- The summary uses schema `forge.registry_execution_policy.v1` and counts AI, mixed, deterministic, no-AI, model-call-required, model-call-avoided, local-code and reusable local-code routes.
+- Added CLI contract coverage proving non-running registry slices expose execution-policy route counts for repeated local Python code-node workflows.
+
+### Changed
+
+- The package version is now `0.4.67`.
+
+### Safety
+
+- Execution-policy registry summaries are read-only metadata derived from Forge-owned workflow task policies.
+- This change does not execute local Python/Node.js code, complete tasks, promote workflows, authorize CLIs, install Knative or mutate Docker/Kubernetes/Knative resources.
+- Local-code reuse remains controlled by proposed child-subflow bindings and later validation gates.
+
 ## 0.4.66 - 2026-05-24
 
 ### Added

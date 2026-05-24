@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const REGISTRY_CONTEXT_HANDOFF_SCHEMA_VERSION: &str = "forge.registry_context_handoff.v1";
 const REGISTRY_CONTEXT_ACTION_SCHEMA_VERSION: &str = "forge.registry_context_action.v1";
 const REGISTRY_CONTEXT_QUALITY_SCHEMA_VERSION: &str = "forge.registry_context_quality.v1";
+const REGISTRY_EXECUTION_POLICY_SCHEMA_VERSION: &str = "forge.registry_execution_policy.v1";
 const REGISTRY_QUALITY_ACTION_SCHEMA_VERSION: &str = "forge.registry_quality_action.v1";
 const REGISTRY_QUALITY_ACTION_CATALOG_SCHEMA_VERSION: &str =
     "forge.registry_quality_action_catalog.v1";
@@ -54,6 +55,7 @@ pub struct WorkflowRegistrySummary {
     pub running: usize,
     pub non_running: usize,
     pub reusable_subflows: usize,
+    pub execution_policy: RegistryExecutionPolicySummary,
     pub context_handoff: RegistryContextHandoffSummary,
     pub context_actions: RegistryContextActionSummary,
     pub context_quality: RegistryContextQualitySummary,
@@ -72,6 +74,7 @@ pub struct WorkflowRegistryRow {
     pub workflow_revision: u64,
     pub artifact_count: usize,
     pub task_summary: RegistryTaskStatusSummary,
+    pub execution_policy: RegistryExecutionPolicySummary,
     pub context_handoff: RegistryContextHandoffSummary,
     pub context_actions: RegistryContextActionSummary,
     pub context_quality: RegistryContextQualitySummary,
@@ -88,6 +91,25 @@ pub struct RegistryTaskStatusSummary {
     pub completed: usize,
     pub blocked: usize,
     pub failed: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RegistryExecutionPolicySummary {
+    pub schema_version: String,
+    pub workflows: usize,
+    pub total_tasks: usize,
+    pub ai_tasks: usize,
+    pub command_tasks: usize,
+    pub wait_tasks: usize,
+    pub notification_tasks: usize,
+    pub mixed_tasks: usize,
+    pub ai_allowed_tasks: usize,
+    pub no_ai_tasks: usize,
+    pub deterministic_tasks: usize,
+    pub model_call_required_tasks: usize,
+    pub model_call_avoided_tasks: usize,
+    pub local_code_nodes: usize,
+    pub reusable_local_code_nodes: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -236,6 +258,12 @@ pub fn list_workflows_with_filters(
     rows.retain(|row| filters.matches(row));
     let running = rows.iter().filter(|row| row.running).count();
     let reusable_subflows = rows.iter().map(|row| row.reusable_subflows.len()).sum();
+    let execution_policy =
+        rows.iter()
+            .fold(RegistryExecutionPolicySummary::empty(), |mut total, row| {
+                total.add(&row.execution_policy);
+                total
+            });
     let context_handoff =
         rows.iter()
             .fold(RegistryContextHandoffSummary::empty(), |mut total, row| {
@@ -259,6 +287,7 @@ pub fn list_workflows_with_filters(
         running,
         non_running: rows.len().saturating_sub(running),
         reusable_subflows,
+        execution_policy,
         context_handoff,
         context_actions,
         context_quality,
@@ -513,6 +542,7 @@ fn registry_row(
         .map(|revision| revision.revision)
         .unwrap_or(0);
     let reusable_subflows = reusable_subflows(workflow, &lifecycle_state);
+    let execution_policy = RegistryExecutionPolicySummary::from_workflow(workflow);
     let context_quality = RegistryContextQualitySummary::from_handoff_summary(handoff_summary);
     let quality_action = RegistryQualityAction::from_summaries(handoff_summary, &context_quality);
 
@@ -528,12 +558,100 @@ fn registry_row(
         workflow_revision,
         artifact_count: workflow.artifacts.len(),
         task_summary,
+        execution_policy,
         context_handoff: RegistryContextHandoffSummary::from_handoff_summary(handoff_summary),
         context_actions: action_summary.clone(),
         context_quality,
         quality_action,
         reusable_subflows,
         created_at: workflow.created_at,
+    }
+}
+
+impl RegistryExecutionPolicySummary {
+    fn empty() -> Self {
+        Self {
+            schema_version: REGISTRY_EXECUTION_POLICY_SCHEMA_VERSION.to_string(),
+            workflows: 0,
+            total_tasks: 0,
+            ai_tasks: 0,
+            command_tasks: 0,
+            wait_tasks: 0,
+            notification_tasks: 0,
+            mixed_tasks: 0,
+            ai_allowed_tasks: 0,
+            no_ai_tasks: 0,
+            deterministic_tasks: 0,
+            model_call_required_tasks: 0,
+            model_call_avoided_tasks: 0,
+            local_code_nodes: 0,
+            reusable_local_code_nodes: 0,
+        }
+    }
+
+    fn from_workflow(workflow: &Workflow) -> Self {
+        let mut summary = Self {
+            workflows: 1,
+            ..Self::empty()
+        };
+
+        for task in &workflow.tasks {
+            summary.add_task(task);
+        }
+
+        summary
+    }
+
+    fn add_task(&mut self, task: &AtomicTask) {
+        self.total_tasks += 1;
+
+        match task.executor {
+            ExecutorKind::Ai => self.ai_tasks += 1,
+            ExecutorKind::Command => self.command_tasks += 1,
+            ExecutorKind::Wait => self.wait_tasks += 1,
+            ExecutorKind::Notification => self.notification_tasks += 1,
+            ExecutorKind::Mixed => self.mixed_tasks += 1,
+        }
+
+        let policy = &task.execution_policy;
+        if policy.ai_allowed {
+            self.ai_allowed_tasks += 1;
+        } else {
+            self.no_ai_tasks += 1;
+        }
+        if policy.deterministic {
+            self.deterministic_tasks += 1;
+        }
+
+        if policy.ai_allowed && !policy.deterministic {
+            self.model_call_required_tasks += 1;
+        } else if !policy.ai_allowed {
+            self.model_call_avoided_tasks += 1;
+        }
+
+        if is_local_code_node(policy) {
+            self.local_code_nodes += 1;
+            if policy.reuse_hint == "reuse_compatible_code_node" {
+                self.reusable_local_code_nodes += 1;
+            }
+        }
+    }
+
+    fn add(&mut self, other: &Self) {
+        self.workflows += other.workflows;
+        self.total_tasks += other.total_tasks;
+        self.ai_tasks += other.ai_tasks;
+        self.command_tasks += other.command_tasks;
+        self.wait_tasks += other.wait_tasks;
+        self.notification_tasks += other.notification_tasks;
+        self.mixed_tasks += other.mixed_tasks;
+        self.ai_allowed_tasks += other.ai_allowed_tasks;
+        self.no_ai_tasks += other.no_ai_tasks;
+        self.deterministic_tasks += other.deterministic_tasks;
+        self.model_call_required_tasks += other.model_call_required_tasks;
+        self.model_call_avoided_tasks += other.model_call_avoided_tasks;
+        self.local_code_nodes += other.local_code_nodes;
+        self.reusable_local_code_nodes += other.reusable_local_code_nodes;
     }
 }
 
@@ -905,7 +1023,7 @@ fn reusable_subflow(
 }
 
 fn execution_policy_reuse_key(policy: &ExecutionPolicySpec) -> Option<String> {
-    if policy.mode != "local_code_node" || policy.ai_allowed || !policy.deterministic {
+    if !is_local_code_node(policy) {
         return None;
     }
     let runtime = policy.code_runtime.as_ref()?;
@@ -913,6 +1031,13 @@ fn execution_policy_reuse_key(policy: &ExecutionPolicySpec) -> Option<String> {
         "{}:{}:{}:{}",
         policy.mode, runtime.language, runtime.entrypoint, policy.validation_gate
     ))
+}
+
+fn is_local_code_node(policy: &ExecutionPolicySpec) -> bool {
+    policy.mode == "local_code_node"
+        && !policy.ai_allowed
+        && policy.deterministic
+        && policy.code_runtime.is_some()
 }
 
 fn context_lineage_key(task: &AtomicTask) -> String {
