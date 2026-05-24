@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.36 - 2026-05-24
+
+### Added
+
+- `forge context` now emits schema `forge.context.v16` with a per-shard remaining-budget ledger.
+- Each context shard now carries `remaining_budget_before` and `remaining_budget_after`, making full, compressed, profile-omitted and budget-omitted routing decisions replayable without reconstructing the selector state.
+- The routing fingerprint now includes a `budget_ledger` component so executor cache keys account for the per-shard budget cursor.
+
+### Changed
+
+- The routing policy is now `task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_v16`.
+- Executor adapters can audit why a shard was included or omitted using the same context packet they already receive, instead of recomputing budget pressure from the final content payload.
+
+### Safety
+
+- The budget ledger is read-only metadata derived from Forge-owned workflow/task state and the deterministic context selector.
+- This change does not complete tasks, promote workflows, authorize CLIs, execute local Python/Node.js code, install Knative or mutate Docker/Kubernetes/Knative resources.
+
 ## 0.4.35 - 2026-05-24
 
 ### Added

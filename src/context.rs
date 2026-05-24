@@ -8,10 +8,10 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v15";
+const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v16";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
 const ROUTING_POLICY: &str =
-    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_v15";
+    "task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_v16";
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
 const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
@@ -154,6 +154,8 @@ pub struct ContextShard {
     pub missing_required: bool,
     pub routing_decision: String,
     pub decision_reason: String,
+    pub remaining_budget_before: usize,
+    pub remaining_budget_after: usize,
     pub bytes: usize,
     pub original_bytes: usize,
     pub source_sha256: String,
@@ -566,6 +568,7 @@ pub fn build_context_package_with_checkpoint(
             &source_sha256,
         );
         let sequence = shards.len();
+        let remaining_budget_before = effective_budget.saturating_sub(content.len());
         if !profile.allowed_sections.contains(&candidate.section) {
             omitted_sections.push(candidate.section.to_string());
             profile_omitted_sections.push(candidate.section.to_string());
@@ -585,6 +588,8 @@ pub fn build_context_package_with_checkpoint(
                     "section is not allowed by executor profile {}",
                     profile.id
                 ),
+                remaining_budget_before,
+                remaining_budget_after: remaining_budget_before,
                 bytes: 0,
                 original_bytes,
                 source_sha256,
@@ -630,6 +635,7 @@ pub fn build_context_package_with_checkpoint(
         } else {
             omitted_sections.push(candidate.section.to_string());
         }
+        let remaining_budget_after = remaining_budget_before.saturating_sub(selected_content.len());
 
         shards.push(ContextShard {
             sequence,
@@ -644,6 +650,8 @@ pub fn build_context_package_with_checkpoint(
             missing_required: required && !included,
             routing_decision: routing_decision.to_string(),
             decision_reason: decision_reason.to_string(),
+            remaining_budget_before,
+            remaining_budget_after,
             bytes: selected_content.len(),
             original_bytes,
             source_sha256,
@@ -834,6 +842,21 @@ fn build_routing_fingerprint(
         })
         .collect::<Vec<_>>()
         .join("|");
+    let budget_ledger = input
+        .shards
+        .iter()
+        .map(|shard| {
+            format!(
+                "{}:{}:{}:{}:{}",
+                shard.sequence,
+                shard.section,
+                shard.routing_decision,
+                shard.remaining_budget_before,
+                shard.remaining_budget_after
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|");
     let components = vec![
         fingerprint_component("routing_policy", ROUTING_POLICY.to_string()),
         fingerprint_component(
@@ -861,6 +884,7 @@ fn build_routing_fingerprint(
         fingerprint_component("dependency_state", dependency_state),
         fingerprint_component("child_subflows", child_subflows),
         fingerprint_component("resume_context", input.resume_context_status.to_string()),
+        fingerprint_component("budget_ledger", budget_ledger),
         fingerprint_component("context_payload", input.context_sha256.to_string()),
     ];
     let seed = ContextRoutingFingerprintSeed {

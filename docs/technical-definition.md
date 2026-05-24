@@ -190,15 +190,16 @@ Responsibilities:
 
 The goal is not simply smaller prompts. The goal is maximum relevance with traceable context lineage.
 
-Current `forge context` packets use schema `forge.context.v13` and routing policy
-`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_v13`. Each packet
+Current `forge context` packets use schema `forge.context.v16` and routing policy
+`task_local_revisioned_persona_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_v16`. Each packet
 includes the executor-facing content, the full context checksum, workflow revision,
 artifact count, node-scoped persona routing metadata for human-facing tasks, executor
 profile metadata, execution policy metadata, dependency readiness summaries, proposed
 child-subflow bindings, requested and effective budgets, lineage hashes, included and
 omitted sections, profile-driven omissions, and a deterministic shard manifest with
 source, priority, compression state, profile exclusion state, required/missing-required
-state, byte count, summary and shard checksum. Packets also include `context_ready`,
+state, remaining-budget before/after values, byte count, summary and shard checksum.
+Packets also include `context_ready`,
 `required_sections`, `missing_required_sections`, `handoff_ready`, `handoff_status`,
 `handoff_blockers` and aggregate `routing_summary` metrics so handoff policy can block
 incomplete context or pending dependencies before an executor starts work.
