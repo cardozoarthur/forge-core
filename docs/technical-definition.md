@@ -68,6 +68,10 @@ status, milestone status/manifest inspection and bounded artifact fetch. `forge 
 the same persisted run/workflow ids as `forge request start` plus
 `forge.agent_handoff_contract.v1`, so Codex/OpenCode can return `run_id`
 quickly and poll later without duplicating workflow state outside Forge.
+`forge.schedule.scan_due` returns `forge.worker_pool.v1` evidence when bounded
+parallel dispatch is used, and it reconciles idle scheduled workflows into
+Forge-owned scale-to-zero state instead of leaving that behavior to external
+loops or tmux wrappers.
 
 Executor integrations should converge on a bounded packet:
 

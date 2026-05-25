@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.120`
+Current version: `0.4.122`
 
 This is the first functional CLI + Skill version:
 
@@ -68,6 +68,7 @@ This is the first functional CLI + Skill version:
 - 0.5 milestone status and promotion manifest surfaces for release-gate inspection
 - native daily Goal research workflow planning and smoke execution for `hackathon` reports with Markdown/PDF artifacts and redacted Telegram delivery records
 - scheduler worker status includes a deterministic assignment plan that shows which due scheduled workflows fit the current bounded worker pool and which remain queued under backpressure
+- bounded parallel schedule scanning reports `forge.worker_pool.v1` execution evidence and still reconciles idle scheduled workflows into persisted scale-to-zero state
 - persisted task leases so two executors cannot acquire the same workflow task concurrently
 - executor handoff packets that combine strict context readiness, lease metadata, routing cache keys, checksums and validation gates
 - cluster handoff packets that choose an eligible node, lease the task to that node and return a content-addressed sync manifest without remote execution
