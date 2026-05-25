@@ -40,6 +40,13 @@ pub fn parse_intent(goal: &str) -> IntentSpec {
         deliverables.push("buffered deadline improvement loop".to_string());
         deliverables.push("Telegram delivery payload".to_string());
     }
+    if requires_daily_goal_research(&lower) {
+        deliverables.push("durable daily Goal research schedule".to_string());
+        deliverables.push("explicit Goal loop node".to_string());
+        deliverables.push("per-Goal research subflow lineage".to_string());
+        deliverables.push("Markdown and PDF Goal reports".to_string());
+        deliverables.push("Telegram delivery record".to_string());
+    }
 
     let mut risks = vec![
         "ambiguous objective can create non-atomic tasks".to_string(),
@@ -75,6 +82,13 @@ pub fn parse_intent(goal: &str) -> IntentSpec {
         );
         unknowns.push("team size, skills and available implementation time must be confirmed before build scope is locked".to_string());
     }
+    if requires_daily_goal_research(&lower) {
+        risks.push("recurring research must remain Forge-owned instead of becoming an ad hoc terminal loop".to_string());
+        risks.push("Telegram delivery records must not expose raw secrets".to_string());
+        unknowns.push(
+            "live DuckDuckGo and Playwright page availability can vary per daily run".to_string(),
+        );
+    }
 
     IntentSpec {
         goal: normalized.to_string(),
@@ -89,6 +103,12 @@ pub fn parse_intent(goal: &str) -> IntentSpec {
                 constraints
                     .push("final package deadline buffer before official submission".to_string());
                 constraints.push("PDF and explanation artifact delivered to Telegram".to_string());
+            }
+            if requires_daily_goal_research(&lower) {
+                constraints
+                    .push("cron and loop semantics remain native Forge graph state".to_string());
+                constraints.push("deterministic code handles stable repeated work".to_string());
+                constraints.push("AI is reserved for judgment and summarization".to_string());
             }
             constraints
         },
@@ -106,4 +126,11 @@ fn requires_hackathon_factory(lower_goal: &str) -> bool {
             || lower_goal.contains("software factory")
             || lower_goal.contains("fábrica")
             || lower_goal.contains("factory"))
+}
+
+fn requires_daily_goal_research(lower_goal: &str) -> bool {
+    (lower_goal.contains("daily goal research")
+        || lower_goal.contains("daily goal")
+        || lower_goal.contains("goal research workflow"))
+        && (lower_goal.contains("goal") || lower_goal.contains("goals"))
 }

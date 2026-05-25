@@ -30,6 +30,9 @@ use forge_core::request::{
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
 };
+use forge_core::schedule::{
+    create_daily_goal_research_workflow, run_daily_goal_research_smoke, update_workflow_schedule,
+};
 use forge_core::self_evolve::{run_self_evolution, SelfRunOptions};
 use forge_core::skill::install_skill;
 use forge_core::storage::ForgeStore;
@@ -147,6 +150,10 @@ enum Commands {
         #[command(subcommand)]
         command: RuntimeCommands,
     },
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCommands,
+    },
     Cluster {
         #[command(subcommand)]
         command: ClusterCommands,
@@ -259,6 +266,48 @@ enum RuntimeCommands {
         owner: String,
         #[arg(long)]
         allow_external: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ScheduleCommands {
+    CreateDailyGoalResearch {
+        #[arg(long = "goal")]
+        goals: Vec<String>,
+        #[arg(long, default_value = "America/Sao_Paulo")]
+        timezone: String,
+        #[arg(long, default_value = "0 8 * * *")]
+        cron: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    List {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Inspect {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Update {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        cron: Option<String>,
+        #[arg(long)]
+        timezone: Option<String>,
+        #[arg(long = "missed-run-policy")]
+        missed_run_policy: Option<String>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -690,7 +739,10 @@ fn run() -> Result<i32> {
             }
             let store = ForgeStore::open(cli.store)?;
             let mut workflow = store.load_workflow(&workflow)?;
-            let report = run_simulated(&mut workflow);
+            let mut report = run_simulated(&mut workflow);
+            if let Some(smoke) = run_daily_goal_research_smoke(&store, &mut workflow)? {
+                report.daily_goal_research = Some(serde_json::to_value(smoke)?);
+            }
             store.save_workflow(&workflow)?;
             store.record_event(
                 &workflow.id,
@@ -894,6 +946,70 @@ fn run() -> Result<i32> {
                 let exit_code = if report.allowed { 0 } else { 1 };
                 print_response(output, &report)?;
                 Ok(exit_code)
+            }
+        },
+        Commands::Schedule { command } => match command {
+            ScheduleCommands::CreateDailyGoalResearch {
+                goals,
+                timezone,
+                cron,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report =
+                    create_daily_goal_research_workflow(&store, goals, &timezone, &cron, &origin)?;
+                let workflow = report.workflow.clone();
+                let response = serde_json::json!({
+                    "status": report.status,
+                    "workflow_id": report.workflow_id,
+                    "origin": report.origin,
+                    "goals": report.goals,
+                    "workflow": workflow.clone(),
+                    "tasks": workflow.tasks,
+                    "schedule_summary": report.schedule_summary,
+                    "loop_summary": report.loop_summary,
+                    "attached_subflows": report.attached_subflows,
+                });
+                print_response(output, &response)?;
+                Ok(0)
+            }
+            ScheduleCommands::List { output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_workflows_with_filters(
+                    &store,
+                    WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            ScheduleCommands::Inspect { workflow, output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = inspect_workflow_with_focus(&store, &workflow, true, None)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            ScheduleCommands::Update {
+                workflow,
+                task,
+                cron,
+                timezone,
+                missed_run_policy,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = update_workflow_schedule(
+                    &store,
+                    &workflow,
+                    &task,
+                    cron.as_deref(),
+                    timezone.as_deref(),
+                    missed_run_policy.as_deref(),
+                    &origin,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
             }
         },
         Commands::Cluster { command } => match command {

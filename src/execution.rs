@@ -1,6 +1,7 @@
 use crate::graph::{TaskStatus, Workflow};
 use chrono::Utc;
 use serde::Serialize;
+use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskCost {
@@ -35,6 +36,8 @@ pub struct ExecutionReport {
     pub cost_report: CostReport,
     pub notifications: Vec<NotificationDelivery>,
     pub trace: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daily_goal_research: Option<Value>,
 }
 
 pub fn run_simulated(workflow: &mut Workflow) -> ExecutionReport {
@@ -94,5 +97,6 @@ pub fn run_simulated(workflow: &mut Workflow) -> ExecutionReport {
         },
         notifications,
         trace,
+        daily_goal_research: None,
     }
 }

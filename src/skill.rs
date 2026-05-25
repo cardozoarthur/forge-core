@@ -39,7 +39,8 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 - List active requests with `forge mcp call forge.request.list --input '{"status":"accepted"}' --output json`.
 - Cancel a request with `forge mcp call forge.request.cancel --input '{"run_id":"<run-id>","origin":"opencode"}' --output json`.
 - Resume a paused async handoff with `forge mcp call forge.run.resume --input '{"run_id":"<run-id>","origin":"opencode"}' --output json`.
-- Inspect or route work through `forge.workflow.inspect`, `forge.context.request`, `forge.workflow.attach_artifact`, `forge.workflow.update_goal`, `forge.validation.status` and `forge.artifact.fetch`.
+- Create scheduled Goal research through `forge.schedule.create_daily_goal_research`; inspect/list/mutate schedules through `forge.schedule.list`, `forge.workflow.inspect`, `forge.loop.inspect` and `forge.schedule.update`.
+- Inspect or route work through `forge.workflow.inspect`, `forge.context.request`, `forge.task.handoff`, `forge.workflow.attach_artifact`, `forge.workflow.update_goal`, `forge.validation.status` and `forge.artifact.fetch`.
 - MCP mutations must still go through Forge so revisions, artifact hashes, origins and validation gates are persisted.
 
 ## Safety Rules
@@ -76,6 +77,9 @@ forge workflow update-goal --workflow <workflow-id> --goal "new goal" --origin c
 forge workflow attach-artifact --workflow <workflow-id> --path ./artifact.md --kind report --origin opencode --output json
 forge mcp call forge.workflow.attach_artifact --input '{"workflow_id":"<workflow-id>","path":"./artifact.md","kind":"report","origin":"codex"}' --output json
 forge mcp call forge.context.request --input '{"workflow_id":"<workflow-id>","task_id":"task-001","budget":1200}' --output json
+forge mcp call forge.task.handoff --input '{"workflow_id":"<workflow-id>","task_id":"task-001","executor":"codex","budget":1200}' --output json
+forge schedule create-daily-goal-research --goal hackathon --timezone America/Sao_Paulo --cron "0 8 * * *" --origin codex --output json
+forge mcp call forge.schedule.create_daily_goal_research --input '{"goals":["hackathon"],"timezone":"America/Sao_Paulo","cron":"0 8 * * *","origin":"codex"}' --output json
 forge runtime guard --substrate knative --resource service/forge-node --namespace forge --action update --owner forge --output json
 forge list --output json
 forge status --workflow <workflow-id> --output json
