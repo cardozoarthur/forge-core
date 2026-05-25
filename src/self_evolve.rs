@@ -652,9 +652,21 @@ fn load_persisted_self_evolution_goal(store: &ForgeStore) -> Result<Option<Strin
     Ok(workflows
         .into_iter()
         .filter(is_self_evolution_workflow)
-        .map(|workflow| workflow.goal.trim().to_string())
-        .filter(|goal| !goal.is_empty())
-        .max_by_key(|goal| goal.len()))
+        .filter_map(|workflow| {
+            let goal = workflow.goal.trim().to_string();
+            if goal.is_empty() {
+                return None;
+            }
+            let changed_at = workflow
+                .revisions
+                .iter()
+                .map(|revision| revision.created_at)
+                .max()
+                .unwrap_or(workflow.created_at);
+            Some((changed_at, goal))
+        })
+        .max_by_key(|(changed_at, _)| *changed_at)
+        .map(|(_, goal)| goal))
 }
 
 fn is_self_evolution_workflow(workflow: &Workflow) -> bool {
