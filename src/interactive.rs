@@ -4,6 +4,7 @@ use crate::registry::{
 };
 use crate::request::start_async_request;
 use crate::runtime::load_runtimes;
+use crate::schedule::build_schedule_worker_status;
 use crate::storage::ForgeStore;
 use anyhow::Result;
 use serde::Serialize;
@@ -41,6 +42,7 @@ pub struct InteractiveDashboard {
     pub runtime_node_status: String,
     pub repository_context: String,
     pub estimated_costs: String,
+    pub scheduler_worker_status: String,
     pub useful_next_commands: Vec<String>,
     pub quick_actions: Vec<String>,
 }
@@ -149,6 +151,26 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
         format!("usable runtimes: {}", runtimes.usable.join(", "))
     };
 
+    let scheduler_worker_status = build_schedule_worker_status(store, "forge-scheduler", 1, 300)
+        .ok()
+        .map(|ws| {
+            let s = ws.summary;
+            let due = s.runnable_due_workflows;
+            let idle = s.idle_workflows;
+            let capacity = ws.worker_pool.available_workers;
+            let sleep = if ws.sleep.sleep_until_next_wakeup {
+                ws.sleep
+                    .next_wakeup_at
+                    .as_deref()
+                    .unwrap_or("now")
+                    .to_string()
+            } else {
+                "immediate".to_string()
+            };
+            format!("{due} due, {idle} idle, capacity {capacity}, next {sleep}")
+        })
+        .unwrap_or_else(|| "no scheduled workflows".to_string());
+
     Ok(InteractiveHomeReport {
         status: "interactive_home_ready".to_string(),
         schema_version: INTERACTIVE_HOME_SCHEMA_VERSION.to_string(),
@@ -171,11 +193,13 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 .unwrap_or_else(|_| "unknown".to_string()),
             estimated_costs: "available per workflow via /costs or forge run --simulate"
                 .to_string(),
+            scheduler_worker_status,
             useful_next_commands: vec![
                 "forge list".to_string(),
                 "forge inspect <workflow-id>".to_string(),
                 "forge request list".to_string(),
                 "forge schedule list".to_string(),
+                "forge schedule worker-status".to_string(),
             ],
             quick_actions: vec![
                 "/status".to_string(),
@@ -185,6 +209,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 "/sync".to_string(),
                 "/validate".to_string(),
                 "/logs".to_string(),
+                "/workers".to_string(),
             ],
         },
         slash_commands: slash_commands(),
@@ -262,6 +287,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Validation failures: {validation_failures}\n\
          Executor availability: {executor_availability}\n\
          Runtime/node status: {runtime_node_status}\n\
+         Scheduler worker status: {scheduler_worker_status}\n\
          Repository context: {repository_context}\n\
          Estimated costs: {estimated_costs}\n\
          Quick actions: {quick_actions}\n\
@@ -277,6 +303,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         validation_failures = d.validation_failures,
         executor_availability = d.executor_availability,
         runtime_node_status = d.runtime_node_status,
+        scheduler_worker_status = d.scheduler_worker_status,
         repository_context = d.repository_context,
         estimated_costs = d.estimated_costs,
         quick_actions = quick_actions,
@@ -686,6 +713,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             &["forge", "sync", "all"],
             true,
             "medium",
+        ),
+        slash(
+            "/workers",
+            "Workers",
+            "Show scheduler worker status.",
+            &["forge", "schedule", "worker-status"],
+            false,
+            "low",
         ),
     ]
 }

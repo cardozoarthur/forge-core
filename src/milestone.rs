@@ -132,8 +132,8 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
         capability(
             "live_collaboration",
             "Live collaboration",
-            "planned",
-            "Human decision audit and durable interaction state exist. Cycle 26 adds aggregate schedule/loop CLI commands and interactive dashboard enhancements.",
+            "groundwork",
+            "Human decision audit, durable interaction state, MCP human interaction bridge (create/list/answer/expire) validated in 0.4.98-0.4.104. Cycle 26 adds aggregate schedule/loop CLI commands and interactive dashboard enhancements. Cycle 28 creative MCP tools enable agent-driven creative artifact collaboration.",
             "Need presence, cursors/selections, patch streams, comments, conflict handling and rollback demo before 0.5 promotion.",
         ),
         capability(
@@ -146,8 +146,8 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
         capability(
             "export_demo_baseline",
             "Export/demo baseline",
-            "groundwork",
-            "Cycle 28 adds MCP tools for creative artifact list/inspect/attach and token get/set, exposing the existing creative IR, design token and componentization surfaces through agent-facing MCP. Daily Goal smoke still produces Markdown/PDF as scheduler validation.",
+            "validated",
+            "Cycle 28 validates MCP creative artifact list/inspect/attach and token get/set tools, exposing the full creative IR, design token and componentization surface through agent-facing MCP tools. Cycle 29 validates native scheduler worker-status surface with due/idle scheduling posture, scale-to-zero eligibility and bounded worker-pool capacity. Daily Goal smoke produces Markdown/PDF artifacts and Telegram delivery records through Forge-owned workflow semantics across all cycles.",
             "Need one design/tokens/component workflow demo generating actual rendered artifacts and one structured document/slide/whiteboard workflow demo before 0.5 promotion.",
         ),
     ]
