@@ -42,7 +42,7 @@ use forge_core::runtime::{
 };
 use forge_core::schedule::{
     create_daily_goal_research_workflow, run_daily_goal_research_smoke, run_due_workflow,
-    update_loop_state, update_workflow_schedule, ScheduleUpdateOptions,
+    scan_due_workflows, update_loop_state, update_workflow_schedule, ScheduleUpdateOptions,
 };
 use forge_core::self_evolve::{run_self_evolution, SelfRunOptions};
 use forge_core::skill::install_skill;
@@ -372,6 +372,14 @@ enum ScheduleCommands {
     RunDue {
         #[arg(long)]
         workflow: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ScanDue {
+        #[arg(long, default_value = "forge-scheduler")]
+        executor: String,
+        #[arg(long = "ttl-seconds", default_value_t = 300)]
+        ttl_seconds: u64,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -1289,6 +1297,16 @@ fn run() -> Result<i32> {
             ScheduleCommands::RunDue { workflow, output } => {
                 let store = ForgeStore::open(cli.store)?;
                 let report = run_due_workflow(&store, &workflow)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            ScheduleCommands::ScanDue {
+                executor,
+                ttl_seconds,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = scan_due_workflows(&store, &executor, ttl_seconds)?;
                 print_response(output, &report)?;
                 Ok(0)
             }

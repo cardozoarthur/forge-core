@@ -40,7 +40,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 - Cancel a request with `forge mcp call forge.request.cancel --input '{"run_id":"<run-id>","origin":"opencode"}' --output json`.
 - Resume a paused async handoff with `forge mcp call forge.run.resume --input '{"run_id":"<run-id>","origin":"opencode"}' --output json`.
 - Create scheduled Goal research through `forge.schedule.create_daily_goal_research`; inspect/list/mutate schedules through `forge.schedule.list`, `forge.workflow.inspect`, `forge.loop.inspect` and `forge.schedule.update`.
-- Use `forge.schedule.update` or `forge schedule update --next-run-at <RFC3339>` for explicit due timestamp mutation, and `forge.schedule.run_due` only when Forge-owned cron work is due. Paused/stopped loop nodes must not advance.
+- Use `forge.schedule.update` or `forge schedule update --next-run-at <RFC3339>` for explicit due timestamp mutation, `forge.schedule.run_due` for one workflow, and `forge.schedule.scan_due` when Forge should scan all scheduled workflows, lease due nodes locally and record idle scale-to-zero decisions. Paused/stopped loop nodes must not advance.
 - Inspect or route work through `forge.workflow.inspect`, `forge.context.request`, `forge.task.handoff`, `forge.workflow.attach_artifact`, `forge.workflow.update_goal`, `forge.validation.status` and `forge.artifact.fetch`.
 - MCP mutations must still go through Forge so revisions, artifact hashes, origins and validation gates are persisted.
 
@@ -86,6 +86,8 @@ forge mcp call forge.schedule.update --input '{"workflow_id":"<workflow-id>","ta
 forge schedule pause --workflow <workflow-id> --task task-010 --origin codex --output json
 forge schedule resume --workflow <workflow-id> --task task-010 --origin codex --output json
 forge schedule run-due --workflow <workflow-id> --output json
+forge schedule scan-due --executor forge-scheduler --ttl-seconds 300 --output json
+forge mcp call forge.schedule.scan_due --input '{"executor":"mcp-scheduler","ttl_seconds":300}' --output json
 forge runtime guard --substrate knative --resource service/forge-node --namespace forge --action update --owner forge --output json
 forge list --output json
 forge status --workflow <workflow-id> --output json

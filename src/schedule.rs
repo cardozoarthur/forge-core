@@ -4,6 +4,7 @@ use crate::graph::{
     ScheduleRunRecord, ScheduleSpec, TaskStatus, Workflow, WorkflowRevision,
 };
 use crate::intent::parse_intent;
+use crate::lease::{acquire_task_lease, release_task_lease};
 use crate::registry::{attach_reuse_candidates_as_child_subflows, find_reuse_candidates};
 use crate::storage::ForgeStore;
 use anyhow::{Context, Result};
@@ -17,6 +18,7 @@ const SCHEDULE_SUMMARY_SCHEMA_VERSION: &str = "forge.schedule.summary.v1";
 const LOOP_SUMMARY_SCHEMA_VERSION: &str = "forge.loop.summary.v1";
 const MISSED_RUN_RECONCILIATION_SCHEMA_VERSION: &str = "forge.missed_run_reconciliation.v1";
 const SCALE_TO_ZERO_DECISION_SCHEMA_VERSION: &str = "forge.scale_to_zero_decision.v1";
+const SCHEDULE_SCAN_DUE_SCHEMA_VERSION: &str = "forge.schedule.scan_due.v1";
 const MISSED_RUN_GRACE_MINUTES: i64 = 5;
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -131,6 +133,43 @@ pub struct ScaleToZeroDecision {
     pub next_wakeup_at: Option<String>,
     pub scheduled_nodes: usize,
     pub due_nodes: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ScheduleScanDueSummary {
+    pub scanned_workflows: usize,
+    pub due_workflows: usize,
+    pub leased_workflows: usize,
+    pub lease_conflicts: usize,
+    pub executed_workflows: usize,
+    pub idle_workflows: usize,
+    pub scale_to_zero_workflows: usize,
+    pub skipped_workflows: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduleScanWorkflowReport {
+    pub workflow_id: String,
+    pub goal: String,
+    pub status: String,
+    pub schedule_task_id: Option<String>,
+    pub due_nodes: usize,
+    pub lease_status: String,
+    pub lease_id: Option<String>,
+    pub lease_released: bool,
+    pub current_lease_id: Option<String>,
+    pub run_due: Option<ScheduleRunDueReport>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduleScanDueReport {
+    pub schema_version: String,
+    pub status: String,
+    pub executor: String,
+    pub ttl_seconds: u64,
+    pub summary: ScheduleScanDueSummary,
+    pub results: Vec<ScheduleScanWorkflowReport>,
 }
 
 pub fn summarize_schedules(tasks: &[AtomicTask]) -> ScheduleSummary {
@@ -707,10 +746,144 @@ pub fn run_due_workflow(
     }))
 }
 
+pub fn scan_due_workflows(
+    store: &ForgeStore,
+    executor: &str,
+    ttl_seconds: u64,
+) -> Result<ScheduleScanDueReport> {
+    let mut summary = ScheduleScanDueSummary::default();
+    let mut results = Vec::new();
+
+    for workflow in store.load_workflows()? {
+        let schedule_summary = summarize_schedules(&workflow.tasks);
+        if schedule_summary.scheduled_nodes == 0 {
+            continue;
+        }
+        summary.scanned_workflows += 1;
+
+        let due_schedule_task_id = first_due_schedule_task_id(&workflow);
+        if let Some(schedule_task_id) = due_schedule_task_id {
+            summary.due_workflows += 1;
+            let lease_report = acquire_task_lease(
+                store,
+                &workflow.id,
+                &schedule_task_id,
+                executor,
+                ttl_seconds,
+            )?;
+            if !lease_report.allowed {
+                summary.lease_conflicts += 1;
+                summary.skipped_workflows += 1;
+                results.push(ScheduleScanWorkflowReport {
+                    workflow_id: workflow.id,
+                    goal: workflow.goal,
+                    status: "lease_conflict".to_string(),
+                    schedule_task_id: Some(schedule_task_id),
+                    due_nodes: schedule_summary.due_nodes,
+                    lease_status: lease_report.status,
+                    lease_id: None,
+                    lease_released: false,
+                    current_lease_id: lease_report.current_lease.map(|lease| lease.lease_id),
+                    run_due: None,
+                    reason: "scheduled task already has an active lease".to_string(),
+                });
+                continue;
+            }
+
+            summary.leased_workflows += 1;
+            let lease_id = lease_report
+                .lease
+                .as_ref()
+                .map(|lease| lease.lease_id.clone());
+            let run_due = run_due_workflow(store, &workflow.id)?;
+            let lease_released = if let Some(lease_id) = lease_id.as_deref() {
+                release_task_lease(store, &workflow.id, &schedule_task_id, lease_id, executor)?
+                    .released
+            } else {
+                false
+            };
+            if run_due.as_ref().is_some_and(|report| report.due_executed) {
+                summary.executed_workflows += 1;
+            }
+            if run_due
+                .as_ref()
+                .is_some_and(|report| report.scale_to_zero.applied)
+            {
+                summary.scale_to_zero_workflows += 1;
+            }
+            let status = run_due
+                .as_ref()
+                .map(|report| report.status.clone())
+                .unwrap_or_else(|| "no_scheduled_work".to_string());
+            results.push(ScheduleScanWorkflowReport {
+                workflow_id: workflow.id,
+                goal: workflow.goal,
+                status,
+                schedule_task_id: Some(schedule_task_id),
+                due_nodes: schedule_summary.due_nodes,
+                lease_status: lease_report.status,
+                lease_id,
+                lease_released,
+                current_lease_id: None,
+                run_due,
+                reason: "due scheduled workflow executed under local lease".to_string(),
+            });
+            continue;
+        }
+
+        summary.idle_workflows += 1;
+        let run_due = run_due_workflow(store, &workflow.id)?;
+        if run_due
+            .as_ref()
+            .is_some_and(|report| report.scale_to_zero.applied)
+        {
+            summary.scale_to_zero_workflows += 1;
+        }
+        let status = run_due
+            .as_ref()
+            .map(|report| report.status.clone())
+            .unwrap_or_else(|| "no_scheduled_work".to_string());
+        results.push(ScheduleScanWorkflowReport {
+            workflow_id: workflow.id,
+            goal: workflow.goal,
+            status,
+            schedule_task_id: None,
+            due_nodes: schedule_summary.due_nodes,
+            lease_status: "not_required".to_string(),
+            lease_id: None,
+            lease_released: false,
+            current_lease_id: None,
+            run_due,
+            reason: "no due cron nodes; recorded idle schedule state".to_string(),
+        });
+    }
+
+    Ok(ScheduleScanDueReport {
+        schema_version: SCHEDULE_SCAN_DUE_SCHEMA_VERSION.to_string(),
+        status: "schedule_scan_completed".to_string(),
+        executor: executor.to_string(),
+        ttl_seconds,
+        summary,
+        results,
+    })
+}
+
 fn can_scale_to_zero_when_idle(summary: &ScheduleSummary) -> bool {
     summary.scheduled_nodes > 0
         && summary.due_nodes == 0
         && summary.scale_to_zero_when_idle_nodes == summary.scheduled_nodes
+}
+
+fn first_due_schedule_task_id(workflow: &Workflow) -> Option<String> {
+    let now = Utc::now();
+    workflow.tasks.iter().find_map(|task| {
+        task.schedule.as_ref().and_then(|schedule| {
+            schedule
+                .next_run_at
+                .filter(|next_run_at| *next_run_at <= now)
+                .map(|_| task.id.clone())
+        })
+    })
 }
 
 fn scale_to_zero_decision(
