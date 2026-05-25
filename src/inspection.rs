@@ -7,9 +7,10 @@ use crate::context::{
     ContextRoutingRepair, ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
 };
 use crate::graph::{
-    AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, LoopSpec, NativeSubflowSpec,
-    ScheduleSpec, SubtaskSpec, TaskStatus, ValidationRule, Workflow,
+    AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, HumanInteractionSpec, LoopSpec,
+    NativeSubflowSpec, ScheduleSpec, SubtaskSpec, TaskStatus, ValidationRule, Workflow,
 };
+use crate::interaction::{summarize_human_interactions, HumanInteractionSummary};
 use crate::registry::{list_workflows, WorkflowRegistryRow};
 use crate::schedule::{summarize_loops, summarize_schedules, LoopSummary, ScheduleSummary};
 use crate::storage::ForgeStore;
@@ -37,6 +38,7 @@ pub struct WorkflowInspectionReport {
     pub subflows: Vec<SubflowInspection>,
     pub schedule_summary: ScheduleSummary,
     pub loop_summary: LoopSummary,
+    pub human_interaction_summary: HumanInteractionSummary,
     pub handoff_summary: ContextHandoffSummary,
     pub nodes: Vec<TaskInspectionNode>,
     pub diagram: String,
@@ -72,6 +74,7 @@ pub struct TaskInspectionNode {
     pub schedule: Option<ScheduleSpec>,
     pub loop_control: Option<LoopSpec>,
     pub native_subflow: Option<NativeSubflowSpec>,
+    pub human_interaction: Option<HumanInteractionSpec>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -205,6 +208,7 @@ pub fn inspect_workflow_with_focus(
     let subflows = collect_subflows(store, workflow_id, &nodes);
     let schedule_summary = summarize_schedules(&workflow.tasks);
     let loop_summary = summarize_loops(&workflow.tasks);
+    let human_interaction_summary = summarize_human_interactions(&workflow.tasks);
     let diagram = render_diagram(
         &registry_row,
         &nodes,
@@ -230,6 +234,7 @@ pub fn inspect_workflow_with_focus(
         subflows,
         schedule_summary,
         loop_summary,
+        human_interaction_summary,
         handoff_summary,
         nodes,
         diagram,
@@ -322,6 +327,7 @@ fn task_node(
         schedule: task.schedule.clone(),
         loop_control: task.loop_control.clone(),
         native_subflow: task.native_subflow.clone(),
+        human_interaction: task.human_interaction.clone(),
     }
 }
 
@@ -757,8 +763,21 @@ fn render_diagram(
                 )
             })
             .unwrap_or_default();
+        let human_interaction = node
+            .human_interaction
+            .as_ref()
+            .map(|interaction| {
+                format!(
+                    " human_interaction {} {} required {} decisions {}",
+                    interaction.kind,
+                    interaction.state,
+                    interaction.required,
+                    interaction.decisions.len()
+                )
+            })
+            .unwrap_or_default();
         lines.push(format!(
-            "{} {} [{}] {}{}{}{}{}{} handoff {} executor {}{}{}{}",
+            "{} {} [{}] {}{}{}{}{}{}{} handoff {} executor {}{}{}{}",
             node.id,
             node.title,
             node.status,
@@ -768,6 +787,7 @@ fn render_diagram(
             schedule,
             loop_control,
             native_subflow,
+            human_interaction,
             node.handoff_status,
             node.executor,
             context_route,

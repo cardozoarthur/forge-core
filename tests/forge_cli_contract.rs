@@ -13997,6 +13997,416 @@ fn interactive_retention_requires_approval_before_deleting_artifact_workflow() {
         .contains("external side effect"));
 }
 
+#[test]
+fn human_interaction_choice_gate_pauses_run_and_surfaces_pending_state() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Prepare a risky deployment that needs a human approve refine or combine decision",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let task = find_task(
+        planned_json["tasks"].as_array().unwrap(),
+        "Extract requirements",
+    );
+    let task_id = task["id"].as_str().unwrap();
+
+    let created = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interaction",
+            "create-choice",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--kind",
+            "approve_reject_refine_combine",
+            "--prompt",
+            "Choose the deployment direction before execution continues",
+            "--choice",
+            "approve=Approve",
+            "--choice",
+            "refine=Refine",
+            "--choice",
+            "combine=Combine",
+            "--timeout-seconds",
+            "3600",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    assert_eq!(created_json["status"], "human_interaction_created");
+    assert_eq!(
+        created_json["interaction"]["schema_version"],
+        "forge.human_interaction.v1"
+    );
+    assert_eq!(created_json["interaction"]["state"], "pending");
+    assert_eq!(created_json["task_status"], "blocked");
+    assert_eq!(
+        created_json["interaction"]["choices"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+
+    let run = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let run_json: Value = serde_json::from_slice(&run).unwrap();
+    assert_eq!(run_json["status"], "blocked_on_human_interaction");
+    assert_eq!(run_json["blocked_interaction"]["task_id"], task_id);
+    assert_eq!(run_json["blocked_interaction"]["state"], "pending");
+    assert_eq!(run_json["completed_tasks"], 0);
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "status",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status_json["human_interaction_summary"]["pending"], 1);
+    assert_eq!(status_json["human_interaction_summary"]["answered"], 0);
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    let row = find_workflow(&listed_json, workflow_id);
+    assert_eq!(row["human_interaction_summary"]["pending"], 1);
+
+    let inspected = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--verbose",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected_json: Value = serde_json::from_slice(&inspected).unwrap();
+    assert_eq!(inspected_json["human_interaction_summary"]["pending"], 1);
+    let inspected_task = find_task(
+        inspected_json["nodes"].as_array().unwrap(),
+        "Extract requirements",
+    );
+    assert_eq!(inspected_task["human_interaction"]["state"], "pending");
+    assert!(inspected_json["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("human_interaction approve_reject_refine_combine pending"));
+}
+
+#[test]
+fn human_interaction_form_answer_validates_required_fields_and_resumes_workflow() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Configure notification and budget inputs before running a workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let task = find_task(planned_json["tasks"].as_array().unwrap(), "Parse intent");
+    let task_id = task["id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interaction",
+            "create-form",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--prompt",
+            "Provide notification and budget settings",
+            "--field",
+            "telegram_channel_ref:text:required:configured_telegram_destination",
+            "--field",
+            "budget_usd:number:required:5",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interaction",
+            "answer",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--field",
+            "telegram_channel_ref=configured_telegram_destination",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "missing required form field: budget_usd",
+        ));
+
+    let answered = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interaction",
+            "answer",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--field",
+            "telegram_channel_ref=configured_telegram_destination",
+            "--field",
+            "budget_usd=5",
+            "--rationale",
+            "Use the configured Telegram destination and a bounded budget",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let answered_json: Value = serde_json::from_slice(&answered).unwrap();
+    assert_eq!(answered_json["status"], "human_interaction_answered");
+    assert_eq!(answered_json["interaction"]["state"], "answered");
+    assert_eq!(answered_json["task_status"], "pending");
+    assert_eq!(answered_json["decision"]["field_values"]["budget_usd"], "5");
+    assert_eq!(
+        answered_json["decision"]["affected_tasks"],
+        serde_json::json!([task_id])
+    );
+    assert_eq!(answered_json["decision"]["origin"], "codex");
+
+    let run = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let run_json: Value = serde_json::from_slice(&run).unwrap();
+    assert_eq!(run_json["status"], "completed");
+}
+
+#[test]
+fn human_interaction_timeout_keeps_workflow_blocked_with_audit_state() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Request a risk acknowledgement before deleting temporary state",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let task = find_task(planned_json["tasks"].as_array().unwrap(), "Validate build");
+    let task_id = task["id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interaction",
+            "create-choice",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--kind",
+            "risk_acknowledgement",
+            "--prompt",
+            "Acknowledge deletion risk before continuing",
+            "--choice",
+            "acknowledge=Acknowledge",
+            "--timeout-seconds",
+            "0",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let expired = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interaction",
+            "expire",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let expired_json: Value = serde_json::from_slice(&expired).unwrap();
+    assert_eq!(expired_json["status"], "human_interaction_timed_out");
+    assert_eq!(expired_json["interaction"]["state"], "timed_out");
+    assert_eq!(
+        expired_json["interaction"]["on_timeout"],
+        "keep_blocked_and_notify"
+    );
+    assert_eq!(expired_json["task_status"], "blocked");
+
+    let run = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let run_json: Value = serde_json::from_slice(&run).unwrap();
+    assert_eq!(run_json["status"], "blocked_on_human_interaction");
+    assert_eq!(run_json["blocked_interaction"]["state"], "timed_out");
+
+    let inspected = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--verbose",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected_json: Value = serde_json::from_slice(&inspected).unwrap();
+    assert_eq!(inspected_json["human_interaction_summary"]["timed_out"], 1);
+}
+
 fn find_slash_command<'a>(json: &'a Value, name: &str) -> &'a Value {
     json["commands"]
         .as_array()

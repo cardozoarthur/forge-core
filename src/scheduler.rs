@@ -257,6 +257,7 @@ mod tests {
                 async_policy: crate::graph::AsyncPolicy::default(),
                 execution_policy: crate::graph::ExecutionPolicySpec::default(),
                 child_subflows: vec![],
+                human_interaction: None,
                 status: TaskStatus::Pending,
             });
         }

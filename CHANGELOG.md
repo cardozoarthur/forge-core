@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.98 - 2026-05-25
+
+### Added
+
+- Added Forge-owned human interaction node state as 0.5 groundwork for long-running workflows that pause for structured human judgment.
+- Added `forge interaction create-choice`, `forge interaction create-form`, `forge interaction answer`, `forge interaction expire` and `forge interaction list`.
+- Human interaction nodes now support choice prompts, form schemas, required-field validation, timeout state, durable decision records, rationale, origin, affected task/goal metadata and workflow revisions.
+- `forge run --simulate` now refuses to skip pending or timed-out required human interactions and returns `blocked_on_human_interaction` with the blocking task and interaction id.
+- `forge status`, `forge list`, `forge inspect` and the interactive dashboard now surface pending/timed-out human interaction counts.
+- Added CLI contract coverage for choice-gate pause behavior, required form validation, durable answer/resume behavior, timeout handling and inspect/list/status visibility.
+
+### Changed
+
+- The package version is now `0.4.98`.
+
+### Safety
+
+- Human decisions are persisted only in Forge-owned workflow JSON and event history.
+- Answering a gate resumes the task by returning it to pending work; timeout keeps the workflow blocked instead of silently progressing.
+- This is labeled as `0.5 groundwork`; it does not claim the full Forge 0.5 creative runtime, web collaboration surface or MCP human approval bridge is complete.
+- No Docker, Kubernetes, Knative or external user resources are mutated.
+
 ## 0.4.97 - 2026-05-25
 
 ### Added

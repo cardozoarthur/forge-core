@@ -17,6 +17,11 @@ use forge_core::handoff::build_task_handoff;
 use forge_core::improve::generate_improvement;
 use forge_core::inspection::inspect_workflow_with_focus;
 use forge_core::intent::parse_intent;
+use forge_core::interaction::{
+    answer_human_interaction, create_choice_interaction, create_form_interaction,
+    expire_human_interaction, list_human_interactions, summarize_human_interactions,
+    CreateChoiceInteractionRequest,
+};
 use forge_core::interactive::{
     build_interactive_home, render_interactive_home, route_interactive_input, slash_command_catalog,
 };
@@ -182,6 +187,10 @@ enum Commands {
     Interactive {
         #[command(subcommand)]
         command: InteractiveCommands,
+    },
+    Interaction {
+        #[command(subcommand)]
+        command: InteractionCommands,
     },
     #[command(name = "self")]
     SelfRun {
@@ -631,6 +640,74 @@ enum InteractiveCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum InteractionCommands {
+    CreateChoice {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long, default_value = "single_choice")]
+        kind: String,
+        #[arg(long)]
+        prompt: String,
+        #[arg(long = "choice")]
+        choices: Vec<String>,
+        #[arg(long = "timeout-seconds")]
+        timeout_seconds: Option<u64>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    CreateForm {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        prompt: String,
+        #[arg(long = "field")]
+        fields: Vec<String>,
+        #[arg(long = "timeout-seconds")]
+        timeout_seconds: Option<u64>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Answer {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long = "selected")]
+        selected_options: Vec<String>,
+        #[arg(long = "field")]
+        field_values: Vec<String>,
+        #[arg(long)]
+        rationale: Option<String>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Expire {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    List {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum SelfCommands {
     Run {
         #[arg(long, default_value = ".")]
@@ -789,6 +866,7 @@ fn run() -> Result<i32> {
                 "tasks": workflow.tasks,
                 "artifacts": workflow.artifacts,
                 "revisions": workflow.revisions,
+                "human_interaction_summary": summarize_human_interactions(&workflow.tasks),
             });
             print_response(output, &response)?;
             Ok(0)
@@ -823,8 +901,11 @@ fn run() -> Result<i32> {
             let store = ForgeStore::open(cli.store)?;
             let mut workflow = store.load_workflow(&workflow)?;
             let mut report = run_simulated(&mut workflow);
-            if let Some(smoke) = run_daily_goal_research_smoke(&store, &mut workflow)? {
-                report.daily_goal_research = Some(serde_json::to_value(smoke)?);
+            let completed = report.status == "completed";
+            if completed {
+                if let Some(smoke) = run_daily_goal_research_smoke(&store, &mut workflow)? {
+                    report.daily_goal_research = Some(serde_json::to_value(smoke)?);
+                }
             }
             store.save_workflow(&workflow)?;
             store.record_event(
@@ -833,7 +914,7 @@ fn run() -> Result<i32> {
                 &serde_json::to_value(&report)?,
             )?;
             print_response(output, &report)?;
-            Ok(0)
+            Ok(if completed { 0 } else { 1 })
         }
         Commands::Validate { workflow, output } => {
             let store = ForgeStore::open(cli.store)?;
@@ -1444,6 +1525,95 @@ fn run() -> Result<i32> {
             } => {
                 let store = ForgeStore::open(cli.store)?;
                 let report = route_interactive_input(&store, &input, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+        },
+        Commands::Interaction { command } => match command {
+            InteractionCommands::CreateChoice {
+                workflow,
+                task,
+                kind,
+                prompt,
+                choices,
+                timeout_seconds,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = create_choice_interaction(
+                    &store,
+                    CreateChoiceInteractionRequest {
+                        workflow_id: &workflow,
+                        task_id: &task,
+                        kind: &kind,
+                        prompt: &prompt,
+                        choices: &choices,
+                        timeout_seconds,
+                        origin: &origin,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            InteractionCommands::CreateForm {
+                workflow,
+                task,
+                prompt,
+                fields,
+                timeout_seconds,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = create_form_interaction(
+                    &store,
+                    &workflow,
+                    &task,
+                    &prompt,
+                    &fields,
+                    timeout_seconds,
+                    &origin,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            InteractionCommands::Answer {
+                workflow,
+                task,
+                selected_options,
+                field_values,
+                rationale,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = answer_human_interaction(
+                    &store,
+                    &workflow,
+                    &task,
+                    &selected_options,
+                    &field_values,
+                    rationale.as_deref(),
+                    &origin,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            InteractionCommands::Expire {
+                workflow,
+                task,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = expire_human_interaction(&store, &workflow, &task, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            InteractionCommands::List { output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_human_interactions(&store)?;
                 print_response(output, &report)?;
                 Ok(0)
             }
