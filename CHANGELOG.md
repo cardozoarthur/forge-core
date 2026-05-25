@@ -1,6 +1,27 @@
 # Changelog
 
-## 0.4.118 - 2026-05-25
+## 0.4.119 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 34: bounded concurrent WorkerPool with configurable concurrency, cancellation, backpressure reporting, wave-level scheduling and schema-versioned execution reports.
+- Added `forge.worker_pool.v1` schema as a reusable primitive for parallel research, artifact generation, executor handoff preparation and batched schedule scanning.
+- Promoted `research_artifact_baseline` milestone capability from `planned` to `groundwork` with WorkerPool infrastructure evidence and cycle 34 integration.
+- Added 9 unit tests for WorkerPool covering execution, backpressure, failure handling, cancellation, concurrency boundaries, empty job lists, wave scheduling and schema stability.
+- The milestone status now reports: validated=7, groundwork=2, planned=0 across 9 tracked capabilities.
+
+### Changed
+
+- The package version is now `0.4.119`.
+- The WorkerPool uses Rust `AtomicUsize` counters and `Vec::drain`-based chunking to avoid `Sync` trait issues with `Box<dyn FnOnce>` closures, ensuring safe parallel execution without `Mutex` contention on hot counters.
+- Milestone `research_artifact_baseline` evidence updated to reflect WorkerPool research-and-execution infrastructure, providing a concrete foundation for future Penpot, Stitch, v0, AGUI, Remotion and OBS research workflows.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- The WorkerPool is a bounded Forge-owned concurrent primitive that does not execute remote code or modify user infrastructure.
+- Milestone status remains informational; the 0.5 promotion gate still requires live collaboration and research artifact demo evidence before promotion.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` and `cargo build --release`.
 
 ### Added
 

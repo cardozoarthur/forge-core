@@ -25,4 +25,5 @@ pub mod self_evolve;
 pub mod skill;
 pub mod storage;
 pub mod validation;
+pub mod worker;
 pub mod workflow;
