@@ -13432,6 +13432,167 @@ fn schedule_run_due_skip_missed_policy_records_history_without_artifacts() {
 }
 
 #[test]
+fn schedule_run_due_reports_missed_run_reconciliation_for_cli_list_and_inspect() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let created = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--cron",
+            "0 8 * * *",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    let workflow_id = created_json["workflow_id"].as_str().unwrap().to_string();
+    let schedule_task_id = created_json["workflow"]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["schedule"].is_object())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let due_at = "2000-01-01T00:00:00Z";
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "update",
+            "--workflow",
+            &workflow_id,
+            "--task",
+            &schedule_task_id,
+            "--next-run-at",
+            due_at,
+            "--missed-run-policy",
+            "skip_missed",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let run_due = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "run-due",
+            "--workflow",
+            &workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let run_due_json: Value = serde_json::from_slice(&run_due).unwrap();
+    assert_eq!(run_due_json["status"], "missed_runs_skipped");
+    let reconciliation = run_due_json["missed_run_reconciliation"]
+        .as_array()
+        .unwrap();
+    assert_eq!(reconciliation.len(), 1);
+    assert_eq!(
+        reconciliation[0]["schema_version"],
+        "forge.missed_run_reconciliation.v1"
+    );
+    assert_eq!(reconciliation[0]["task_id"], schedule_task_id);
+    assert_eq!(reconciliation[0]["policy"], "skip_missed");
+    assert_eq!(reconciliation[0]["action"], "skipped_missed");
+    assert_eq!(reconciliation[0]["scheduled_at"], due_at);
+    assert_eq!(reconciliation[0]["run_status"], "skipped_missed");
+    assert_eq!(reconciliation[0]["artifacts_allowed"], false);
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    let row = listed_json["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["workflow_id"] == workflow_id)
+        .unwrap();
+    assert!(row["schedule_summary"]["missed_run_policies"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("skip_missed")));
+    assert!(row["schedule_summary"]["missed_run_reconciliation_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("skipped_missed")));
+
+    let inspected = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            &workflow_id,
+            "--verbose",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected_json: Value = serde_json::from_slice(&inspected).unwrap();
+    assert!(inspected_json["schedule_summary"]["missed_run_policies"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("skip_missed")));
+    assert!(
+        inspected_json["schedule_summary"]["missed_run_reconciliation_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("skipped_missed"))
+    );
+    let schedule_node = inspected_json["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["schedule"].is_object())
+        .unwrap();
+    let run_history = schedule_node["schedule"]["run_history"].as_array().unwrap();
+    assert_eq!(run_history[0]["missed_run_policy"], "skip_missed");
+    assert_eq!(run_history[0]["reconciliation_action"], "skipped_missed");
+}
+
+#[test]
 fn schedule_run_due_skips_paused_loop_nodes_without_artifacts() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
