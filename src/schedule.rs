@@ -543,6 +543,94 @@ pub struct ScheduleRunDueReport {
     pub scale_to_zero: ScaleToZeroDecision,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AggregateSummaryReport {
+    pub schema_version: String,
+    pub summary: ScheduleSummary,
+    pub loop_summary: LoopSummary,
+    pub workflow_count: usize,
+    pub scale_to_zero_workflows: usize,
+    pub paused_or_stopped_loop_workflows: usize,
+}
+
+pub fn aggregate_summary(tasks_by_workflow: &[&[AtomicTask]]) -> AggregateSummaryReport {
+    let mut total_schedule = ScheduleSummary {
+        schema_version: SCHEDULE_SUMMARY_SCHEMA_VERSION.to_string(),
+        ..ScheduleSummary::default()
+    };
+    let mut total_loop = LoopSummary {
+        schema_version: LOOP_SUMMARY_SCHEMA_VERSION.to_string(),
+        ..LoopSummary::default()
+    };
+    let mut workflow_count = 0usize;
+    let mut scale_to_zero_count = 0usize;
+    let mut paused_or_stopped_count = 0usize;
+
+    for tasks in tasks_by_workflow {
+        let s = summarize_schedules(tasks);
+        total_schedule.scheduled_nodes += s.scheduled_nodes;
+        total_schedule.cron_nodes += s.cron_nodes;
+        total_schedule.due_nodes += s.due_nodes;
+        total_schedule.missed_run_nodes += s.missed_run_nodes;
+        total_schedule.scale_to_zero_when_idle_nodes += s.scale_to_zero_when_idle_nodes;
+        for tz in s.timezones {
+            if !total_schedule.timezones.contains(&tz) {
+                total_schedule.timezones.push(tz);
+            }
+        }
+        for p in s.missed_run_policies {
+            if !total_schedule.missed_run_policies.contains(&p) {
+                total_schedule.missed_run_policies.push(p);
+            }
+        }
+        for a in s.missed_run_reconciliation_actions {
+            if !total_schedule
+                .missed_run_reconciliation_actions
+                .contains(&a)
+            {
+                total_schedule.missed_run_reconciliation_actions.push(a);
+            }
+        }
+        total_schedule.next_run_at =
+            earliest_next_run(total_schedule.next_run_at.take(), s.next_run_at);
+
+        let l = summarize_loops(tasks);
+        total_loop.loop_nodes += l.loop_nodes;
+        total_loop.loop_over_items_nodes += l.loop_over_items_nodes;
+        total_loop.bounded_repeat_nodes += l.bounded_repeat_nodes;
+        total_loop.retry_backoff_nodes += l.retry_backoff_nodes;
+        total_loop.while_until_nodes += l.while_until_nodes;
+        total_loop.infinite_recurring_subflow_nodes += l.infinite_recurring_subflow_nodes;
+        total_loop.total_items += l.total_items;
+
+        workflow_count += 1;
+        if s.due_nodes == 0
+            && s.scale_to_zero_when_idle_nodes == s.scheduled_nodes
+            && s.scheduled_nodes > 0
+        {
+            scale_to_zero_count += 1;
+        }
+        if l.loop_nodes > 0 {
+            let all_paused_or_stopped = tasks
+                .iter()
+                .filter_map(|t| t.loop_control.as_ref())
+                .all(|lc| lc.state == "paused" || lc.state == "stopped");
+            if all_paused_or_stopped {
+                paused_or_stopped_count += 1;
+            }
+        }
+    }
+
+    AggregateSummaryReport {
+        schema_version: "forge.schedule.aggregate_summary.v1".to_string(),
+        summary: total_schedule,
+        loop_summary: total_loop,
+        workflow_count,
+        scale_to_zero_workflows: scale_to_zero_count,
+        paused_or_stopped_loop_workflows: paused_or_stopped_count,
+    }
+}
+
 pub fn update_loop_state(
     store: &ForgeStore,
     workflow_id: &str,

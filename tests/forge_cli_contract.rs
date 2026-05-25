@@ -47,10 +47,11 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
     );
     assert_eq!(json["promotion_decision"]["decision"], "fail");
     assert_eq!(json["promotion_decision"]["promotable"], false);
-    assert!(json["promotion_decision"]["blocked_by"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!("creative_artifact_ir")));
+    let blocked_by = json["promotion_decision"]["blocked_by"].as_array().unwrap();
+    assert!(
+        !blocked_by.contains(&serde_json::json!("creative_artifact_ir")),
+        "creative_artifact_ir is now validated and should not block"
+    );
 
     let capabilities = json["capabilities"].as_array().unwrap();
     let scheduler = capabilities
@@ -63,12 +64,14 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .iter()
         .find(|capability| capability["id"] == "creative_artifact_ir")
         .unwrap();
-    assert_eq!(creative_ir["status"], "groundwork");
+    assert_eq!(creative_ir["status"], "validated");
     assert!(creative_ir["gap_before_promotion"]
         .as_str()
         .unwrap()
-        .contains("declarative import"));
-    assert!(json["summary"]["groundwork"].as_u64().unwrap() >= 3);
+        .contains("0.5"));
+    assert_eq!(json["summary"]["validated"].as_u64().unwrap(), 6);
+    assert_eq!(json["summary"]["groundwork"].as_u64().unwrap(), 0);
+    assert_eq!(json["summary"]["planned"].as_u64().unwrap(), 3);
 }
 
 #[test]
@@ -116,8 +119,15 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|capability| capability["id"] == "design_tokens"
-            && capability["status"] == "groundwork"));
+        .any(
+            |capability| capability["id"] == "design_tokens" && capability["status"] == "validated"
+        ));
+    assert!(json["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability["id"] == "live_collaboration"
+            && capability["status"] == "planned"));
 }
 
 #[test]
@@ -5531,6 +5541,8 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
     assert!(skill.contains("forge.workflow.attach_artifact"));
     assert!(skill.contains("forge.context.request"));
     assert!(skill.contains("forge.task.handoff"));
+    assert!(skill.contains("forge.schedule.summary"));
+    assert!(skill.contains("forge.schedule.loop_summary"));
 }
 
 #[test]
@@ -12651,6 +12663,224 @@ fn request_list_through_mcp_tool_returns_runs() {
 }
 
 #[test]
+fn schedule_summary_and_loop_summary_report_aggregate_state_across_workflows() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "summary",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.schedule.aggregate_summary.v1"
+    );
+    assert_eq!(json["workflow_count"], 0);
+    assert_eq!(json["summary"]["scheduled_nodes"], 0);
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Create a delivery platform",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(plan["status"], "planned");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--cron",
+            "0 8 * * *",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let research: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(research["status"], "daily_goal_research_workflow_created");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "summary",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.schedule.aggregate_summary.v1"
+    );
+    assert_eq!(json["workflow_count"], 2);
+    assert!(json["summary"]["scheduled_nodes"].as_u64().unwrap_or(0) >= 1);
+    assert!(json["summary"]["cron_nodes"].as_u64().unwrap_or(0) >= 1);
+    assert_eq!(json["loop_summary"]["loop_nodes"], 1);
+    assert_eq!(json["loop_summary"]["loop_over_items_nodes"], 1);
+    assert!(json["scale_to_zero_workflows"].as_u64().unwrap_or(0) >= 1);
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "loop-summary",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.schedule.aggregate_summary.v1"
+    );
+    assert!(json["loop_summary"]["loop_nodes"].as_u64().unwrap_or(0) >= 1);
+    assert!(json["loop_summary"]["total_items"].as_u64().unwrap_or(0) >= 1);
+}
+
+#[test]
+fn mcp_schedule_summary_tools_return_aggregate_state_for_agents() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let manifest = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let summary_tool = find_mcp_tool(&manifest_json, "forge.schedule.summary");
+    assert_eq!(summary_tool["async_safe"], true);
+    assert_eq!(summary_tool["mutates_workflow"], false);
+    let loop_summary_tool = find_mcp_tool(&manifest_json, "forge.schedule.loop_summary");
+    assert_eq!(loop_summary_tool["async_safe"], true);
+    assert_eq!(loop_summary_tool["mutates_workflow"], false);
+
+    let created = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--cron",
+            "0 8 * * *",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    assert_eq!(
+        created_json["status"],
+        "daily_goal_research_workflow_created"
+    );
+
+    let summary = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.schedule.summary"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let summary_json: Value = serde_json::from_slice(&summary).unwrap();
+    assert_eq!(summary_json["status"], "ok");
+    assert_eq!(summary_json["tool_name"], "forge.schedule.summary");
+    assert_eq!(
+        summary_json["result"]["schema_version"],
+        "forge.schedule.aggregate_summary.v1"
+    );
+    assert_eq!(summary_json["result"]["workflow_count"], 1);
+    assert_eq!(summary_json["result"]["summary"]["cron_nodes"], 1);
+    assert_eq!(summary_json["result"]["loop_summary"]["loop_nodes"], 1);
+
+    let loop_summary = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.schedule.loop_summary"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let loop_summary_json: Value = serde_json::from_slice(&loop_summary).unwrap();
+    assert_eq!(loop_summary_json["status"], "ok");
+    assert_eq!(
+        loop_summary_json["tool_name"],
+        "forge.schedule.loop_summary"
+    );
+    assert_eq!(loop_summary_json["result"]["workflow_count"], 1);
+    assert_eq!(
+        loop_summary_json["result"]["loop_summary"]["loop_over_items_nodes"],
+        1
+    );
+}
+
+#[test]
 fn schedule_create_cli_models_daily_goal_research_with_multiple_goals() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -16210,7 +16440,7 @@ fn design_token_serialization_round_trips_all_types() {
 }
 
 #[test]
-fn milestone_status_reports_creative_artifact_ir_capability_as_groundwork() {
+fn milestone_status_reports_creative_artifact_ir_capability_as_validated() {
     use forge_core::milestone::build_milestone_status;
 
     let report = build_milestone_status("0.5").unwrap();
@@ -16231,15 +16461,15 @@ fn milestone_status_reports_creative_artifact_ir_capability_as_groundwork() {
         .expect("componentization_ai_surfaces capability should exist");
 
     assert_eq!(
-        creative_ir.status, "groundwork",
-        "creative_artifact_ir should be groundwork"
+        creative_ir.status, "validated",
+        "creative_artifact_ir should be validated"
     );
     assert_eq!(
-        design_tokens.status, "groundwork",
-        "design_tokens should be groundwork"
+        design_tokens.status, "validated",
+        "design_tokens should be validated"
     );
     assert_eq!(
-        componentization.status, "groundwork",
-        "componentization_ai_surfaces should be groundwork"
+        componentization.status, "validated",
+        "componentization_ai_surfaces should be validated"
     );
 }

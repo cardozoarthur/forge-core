@@ -31,7 +31,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 - For async handoff, call `forge mcp call forge.run.start --input '{"goal":"<objective>","origin":"codex"}' --output json`, return `result.run_id` quickly, and let Forge remain the source of truth.
 - Poll later with `forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json`.
 - Resume a paused async handoff with `forge mcp call forge.run.resume --input '{"run_id":"<run-id>","origin":"opencode"}' --output json`.
-- Create scheduled Goal research through `forge.schedule.create_daily_goal_research`; inspect/list/mutate schedules through `forge.schedule.list`, `forge.workflow.inspect`, `forge.loop.inspect` and `forge.schedule.update`.
+- Create scheduled Goal research through `forge.schedule.create_daily_goal_research`; inspect/list/summarize/mutate schedules through `forge.schedule.list`, `forge.schedule.summary`, `forge.schedule.loop_summary`, `forge.workflow.inspect`, `forge.loop.inspect` and `forge.schedule.update`.
 - Use `forge.schedule.update` or `forge schedule update --next-run-at <RFC3339>` for explicit due timestamp mutation, `forge.schedule.run_due` for one workflow, and `forge.schedule.scan_due` when Forge should scan all scheduled workflows, lease due nodes locally and record idle scale-to-zero decisions. Paused/stopped loop nodes must not advance. If cron work is stale, read `missed_run_reconciliation` plus list/inspect schedule summaries before deciding whether a run was skipped, caught up or executed once.
 - Use `forge.interaction.create_choice`, `forge.interaction.create_form`, `forge.interaction.answer`, `forge.interaction.expire` and `forge.interaction.list` for agent-facing human approval/form bridges. These MCP tools must be preferred over ad hoc chat decisions when a workflow is paused on a human interaction node.
 - Inspect or route work through `forge.workflow.inspect`, `forge.context.request`, `forge.task.handoff`, `forge.workflow.attach_artifact`, `forge.workflow.update_goal`, `forge.validation.status` and `forge.artifact.fetch`.
@@ -72,6 +72,10 @@ forge mcp call forge.context.request --input '{"workflow_id":"<workflow-id>","ta
 forge mcp call forge.task.handoff --input '{"workflow_id":"<workflow-id>","task_id":"task-001","executor":"codex","budget":1200}' --output json
 forge schedule create-daily-goal-research --goal hackathon --timezone America/Sao_Paulo --cron "0 8 * * *" --origin codex --output json
 forge mcp call forge.schedule.create_daily_goal_research --input '{"goals":["hackathon"],"timezone":"America/Sao_Paulo","cron":"0 8 * * *","origin":"codex"}' --output json
+forge schedule summary --output json
+forge schedule loop-summary --output json
+forge mcp call forge.schedule.summary --output json
+forge mcp call forge.schedule.loop_summary --output json
 forge schedule update --workflow <workflow-id> --task task-009 --next-run-at 2026-05-26T11:00:00Z --origin codex --output json
 forge schedule update --workflow <workflow-id> --task task-009 --missed-run-policy skip_missed --origin codex --output json
 forge mcp call forge.schedule.update --input '{"workflow_id":"<workflow-id>","task_id":"task-009","next_run_at":"2026-05-26T11:00:00Z","origin":"codex"}' --output json

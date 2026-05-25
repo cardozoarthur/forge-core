@@ -64,7 +64,7 @@ This is the first functional CLI + Skill version:
 - runtime workflow mutation for goals and artifacts with origin trace from `codex`, `opencode`, `forge_cli` or skills
 - async workflow substrate policy with scope guards for Forge-owned resources
 - async request handoff for skill callers: submit a goal, receive `run_id`, continue later with Forge
-- MCP tool manifest and call surface for agent workflows: list, inspect, start/resume/status, schedule create/update/list, loop inspect, task handoff, context request, validation status and bounded artifact fetch
+- MCP tool manifest and call surface for agent workflows: list, inspect, start/resume/status, schedule create/update/list/summary, loop inspect/summary, task handoff, context request, validation status and bounded artifact fetch
 - native daily Goal research workflow planning and smoke execution for `hackathon` reports with Markdown/PDF artifacts and redacted Telegram delivery records
 - persisted task leases so two executors cannot acquire the same workflow task concurrently
 - executor handoff packets that combine strict context readiness, lease metadata, routing cache keys, checksums and validation gates
@@ -249,6 +249,8 @@ forge mcp call forge.workflow.inspect --input '{"workflow_id":"<workflow-id>","v
 forge mcp call forge.context.request --input '{"workflow_id":"<workflow-id>","task_id":"task-001","budget":1200}' --output json
 forge mcp call forge.task.handoff --input '{"workflow_id":"<workflow-id>","task_id":"task-001","executor":"codex","budget":1200}' --output json
 forge mcp call forge.schedule.create_daily_goal_research --input '{"goals":["hackathon"],"timezone":"America/Sao_Paulo","cron":"0 8 * * *","origin":"codex"}' --output json
+forge mcp call forge.schedule.summary --output json
+forge mcp call forge.schedule.loop_summary --output json
 forge mcp call forge.loop.inspect --input '{"workflow_id":"<workflow-id>"}' --output json
 forge mcp call forge.workflow.attach_artifact --input '{"workflow_id":"<workflow-id>","path":"./report.md","kind":"report","origin":"codex"}' --output json
 forge mcp call forge.artifact.fetch --input '{"workflow_id":"<workflow-id>","path":"artifacts/<workflow-id>/attached-report-report.md","max_bytes":4096}' --output json
