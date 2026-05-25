@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.95 - 2026-05-25
+
+### Added
+
+- Added executable missed-run semantics for scheduled Forge graph nodes.
+- `forge schedule run-due` now marks overdue `run_once_then_resume` executions as `missed=true` while still running the due Goal subflow and producing the Markdown/PDF/Telegram delivery artifacts.
+- Added `skip_missed` / `skip_and_resume` handling so a stale due cron can record a `skipped_missed` run-history entry, advance `next_run_at`, and avoid artifact generation.
+- Added CLI contract coverage for overdue run history and skip-missed behavior without exposing Telegram secrets.
+
+### Changed
+
+- The package version is now `0.4.95`.
+
+### Safety
+
+- Missed-run handling mutates only Forge-owned workflow schedule state and local artifact records.
+- `skip_missed` avoids executor work for stale recurring schedules, preserving lean deterministic economics.
+- No external Docker/Kubernetes/Knative resources are mutated.
+
 ## 0.4.94 - 2026-05-25
 
 ### Added
