@@ -1,4 +1,5 @@
 use crate::graph::{TaskStatus, Workflow};
+use crate::scheduler::{plan_parallel_execution, ParallelSchedulePlan};
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::Value;
@@ -38,6 +39,8 @@ pub struct ExecutionReport {
     pub trace: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daily_goal_research: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_plan: Option<ParallelSchedulePlan>,
 }
 
 pub fn run_simulated(workflow: &mut Workflow) -> ExecutionReport {
@@ -86,6 +89,8 @@ pub fn run_simulated(workflow: &mut Workflow) -> ExecutionReport {
     workflow.status = "completed".to_string();
     let total_estimated_cost_usd = by_task.iter().map(|cost| cost.estimated_cost_usd).sum();
 
+    let parallel_plan = Some(plan_parallel_execution(workflow));
+
     ExecutionReport {
         workflow_id: workflow.id.clone(),
         status: "completed".to_string(),
@@ -98,5 +103,6 @@ pub fn run_simulated(workflow: &mut Workflow) -> ExecutionReport {
         notifications,
         trace,
         daily_goal_research: None,
+        parallel_plan,
     }
 }
