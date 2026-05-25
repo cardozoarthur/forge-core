@@ -12981,7 +12981,8 @@ fn schedule_update_next_run_at_and_run_due_generates_goal_artifacts() {
     assert_eq!(run_history.len(), 1);
     assert_eq!(run_history[0]["scheduled_at"], due_at);
     assert_eq!(run_history[0]["status"], "completed");
-    assert_eq!(run_history[0]["missed"], false);
+    assert_eq!(run_history[0]["missed"], true);
+    assert_eq!(inspected_json["schedule_summary"]["missed_run_nodes"], 1);
 
     let artifacts = forge()
         .args([
@@ -13019,6 +13020,140 @@ fn schedule_update_next_run_at_and_run_due_generates_goal_artifacts() {
     assert!(delivery.contains("configured_telegram_chat_ref"));
     assert!(!delivery.contains("bot_token"));
     assert!(!delivery.contains("chat_id"));
+}
+
+#[test]
+fn schedule_run_due_skip_missed_policy_records_history_without_artifacts() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let created = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--cron",
+            "0 8 * * *",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    let workflow_id = created_json["workflow_id"].as_str().unwrap().to_string();
+    let schedule_task_id = created_json["workflow"]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["schedule"].is_object())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let due_at = "2000-01-01T00:00:00Z";
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "update",
+            "--workflow",
+            &workflow_id,
+            "--task",
+            &schedule_task_id,
+            "--next-run-at",
+            due_at,
+            "--missed-run-policy",
+            "skip_missed",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let run_due = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "run-due",
+            "--workflow",
+            &workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let run_due_json: Value = serde_json::from_slice(&run_due).unwrap();
+    assert_eq!(run_due_json["status"], "missed_runs_skipped");
+    assert_eq!(run_due_json["due_executed"], false);
+    assert!(run_due_json["daily_goal_research"].is_null());
+    assert_eq!(run_due_json["schedule_summary"]["missed_run_nodes"], 1);
+
+    let inspected = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            &workflow_id,
+            "--verbose",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected_json: Value = serde_json::from_slice(&inspected).unwrap();
+    let schedule_node = inspected_json["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["schedule"].is_object())
+        .unwrap();
+    let schedule = &schedule_node["schedule"];
+    assert_eq!(schedule["missed_run_policy"], "skip_missed");
+    assert_ne!(schedule["next_run_at"], due_at);
+    let run_history = schedule["run_history"].as_array().unwrap();
+    assert_eq!(run_history.len(), 1);
+    assert_eq!(run_history[0]["scheduled_at"], due_at);
+    assert_eq!(run_history[0]["status"], "skipped_missed");
+    assert_eq!(run_history[0]["missed"], true);
+
+    let artifacts = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "artifacts",
+            "--workflow",
+            &workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let artifacts_json: Value = serde_json::from_slice(&artifacts).unwrap();
+    assert!(artifacts_json["artifacts"].as_array().unwrap().is_empty());
 }
 
 #[test]

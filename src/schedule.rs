@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 const SCHEDULE_SUMMARY_SCHEMA_VERSION: &str = "forge.schedule.summary.v1";
 const LOOP_SUMMARY_SCHEMA_VERSION: &str = "forge.loop.summary.v1";
+const MISSED_RUN_GRACE_MINUTES: i64 = 5;
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ScheduleSummary {
@@ -318,6 +319,10 @@ fn run_daily_goal_research_smoke_with_schedule_mode(
 }
 
 fn record_schedule_run_history(workflow: &mut Workflow, due_only: bool) {
+    record_schedule_run_history_with_status(workflow, due_only, "completed");
+}
+
+fn record_schedule_run_history_with_status(workflow: &mut Workflow, due_only: bool, status: &str) {
     let started_at = Utc::now();
     let finished_at = Utc::now();
     for schedule in workflow
@@ -336,13 +341,14 @@ fn record_schedule_run_history(workflow: &mut Workflow, due_only: bool) {
         } else {
             started_at
         };
+        let missed = is_missed_run(scheduled_at, started_at);
         schedule.run_history.push(ScheduleRunRecord {
             run_id: format!("run_{}", Uuid::new_v4().to_string().replace('-', "")),
             scheduled_at,
             started_at: Some(started_at),
             finished_at: Some(finished_at),
-            status: "completed".to_string(),
-            missed: false,
+            status: status.to_string(),
+            missed,
         });
         schedule.next_run_at = Some(finished_at + Duration::days(1));
     }
@@ -522,6 +528,31 @@ pub fn run_due_workflow(
         }));
     }
 
+    if skip_due_missed_runs(&mut workflow) {
+        let workflow_id = workflow.id.clone();
+        let schedule_summary = summarize_schedules(&workflow.tasks);
+        store.save_workflow(&workflow)?;
+        store.record_event(
+            &workflow_id,
+            "missed_runs_skipped",
+            &serde_json::json!({
+                "workflow_id": workflow_id,
+                "policy": "skip_missed",
+            }),
+        )?;
+
+        return Ok(Some(ScheduleRunDueReport {
+            status: "missed_runs_skipped".to_string(),
+            workflow_id,
+            goal: workflow.goal.clone(),
+            due_executed: false,
+            blocked_loop_task_id: None,
+            blocked_loop_state: None,
+            daily_goal_research: None,
+            schedule_summary,
+        }));
+    }
+
     let workflow_id = workflow.id.clone();
     let daily_goal_research =
         run_daily_goal_research_smoke_with_schedule_mode(store, &mut workflow, true)?;
@@ -548,6 +579,46 @@ pub fn run_due_workflow(
         daily_goal_research,
         schedule_summary,
     }))
+}
+
+fn skip_due_missed_runs(workflow: &mut Workflow) -> bool {
+    let mut has_skipped = false;
+    for schedule in workflow
+        .tasks
+        .iter_mut()
+        .filter_map(|task| task.schedule.as_mut())
+    {
+        let Some(next_run_at) = schedule.next_run_at else {
+            continue;
+        };
+        let now = Utc::now();
+        if next_run_at > now
+            || !is_missed_run(next_run_at, now)
+            || !should_skip_missed_run(&schedule.missed_run_policy)
+        {
+            continue;
+        }
+
+        schedule.run_history.push(ScheduleRunRecord {
+            run_id: format!("run_{}", Uuid::new_v4().to_string().replace('-', "")),
+            scheduled_at: next_run_at,
+            started_at: Some(now),
+            finished_at: Some(now),
+            status: "skipped_missed".to_string(),
+            missed: true,
+        });
+        schedule.next_run_at = Some(now + Duration::days(1));
+        has_skipped = true;
+    }
+    has_skipped
+}
+
+fn is_missed_run(scheduled_at: DateTime<Utc>, started_at: DateTime<Utc>) -> bool {
+    scheduled_at + Duration::minutes(MISSED_RUN_GRACE_MINUTES) < started_at
+}
+
+fn should_skip_missed_run(policy: &str) -> bool {
+    matches!(policy, "skip_missed" | "skip_and_resume")
 }
 
 fn push_schedule_revision(workflow: &mut Workflow, origin: &str, summary: &str) -> u64 {
