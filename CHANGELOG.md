@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.99 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 14 validation: all seven required capability goals for cron/schedule/loop/subflow/daily-Goal-research primitives already satisfied by the existing codebase.
+- All 154 integration tests pass covering cron node planning, loop node planning (all five kinds), daily Goal workflow planning, MCP exposure, inspect/list visibility with schedule and loop summaries, and end-to-end smoke artifact generation (Markdown, PDF, Telegram delivery record).
+- Lean overhead ledger for cycle 14: prompt bytes ~8,400, estimated tokens ~2,100, validation commands 4 (fmt, clippy, test, build), artifact count 0 new, metadata bytes ~500.
+- Decision gate: run_cycle / expected value 5 / orchestration cost 3 — cycle completed as bounded validation pass.
+
+### Changed
+
+- The package version is now `0.4.99`.
+
+### Safety
+
+- No external Docker/Kubernetes/Knative resources are mutated.
+- All schedule/loop/subflow mutations remain local Forge-owned workflow state.
+- Telegram delivery records remain redacted; no bot token or raw chat id is persisted.
+- The increment does not execute remote code, install Knative or modify user infrastructure.
+
 ## 0.4.98 - 2026-05-25
 
 ### Added
