@@ -29,9 +29,14 @@ impl ForgeStore {
         }
         let connection = Connection::open(&path)
             .with_context(|| format!("failed to open SQLite store {}", path.display()))?;
+        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
         let store = Self { path, connection };
         store.migrate()?;
         Ok(store)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn base_dir(&self) -> PathBuf {

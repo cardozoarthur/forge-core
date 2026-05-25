@@ -17,8 +17,8 @@ use crate::request::{
 };
 use crate::schedule::{
     aggregate_summary, build_schedule_worker_status, create_daily_goal_research_workflow,
-    run_due_workflow, scan_due_workflows, update_loop_state, update_workflow_schedule,
-    ScheduleUpdateOptions,
+    run_due_workflow, scan_due_workflows, scan_due_workflows_parallel, update_loop_state,
+    update_workflow_schedule, ScheduleUpdateOptions,
 };
 use crate::storage::ForgeStore;
 use crate::validation::{validate_workflow, ValidationReport};
@@ -142,6 +142,7 @@ struct RunDueInput {
 #[derive(Debug, Deserialize)]
 struct ScanDueInput {
     executor: Option<String>,
+    max_workers: Option<usize>,
     ttl_seconds: Option<u64>,
 }
 
@@ -446,9 +447,10 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.schedule.scan_due",
                 "Scan Due Schedules",
-                "Scan Forge-owned scheduled workflows, lease due schedule nodes locally, run due work and report idle scale-to-zero decisions.",
+                "Scan Forge-owned scheduled workflows, lease due schedule nodes locally, run due work and report idle scale-to-zero decisions. Supports bounded parallel dispatch with max_workers.",
                 object_schema(&[
                     ("executor", "string", "scheduler executor id for local leases"),
+                    ("max_workers", "integer", "bounded concurrent worker count (1=sequential, >1=parallel WorkerPool dispatch)"),
                     ("ttl_seconds", "integer", "local schedule-task lease TTL"),
                 ], &[]),
                 "forge.schedule.scan_due.v1",
@@ -467,6 +469,19 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.schedule.worker_status.v1",
                 &["forge", "schedule", "worker-status", "--output", "json"],
                 ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.schedule.scan_due_parallel",
+                "Scan Due Schedules (Parallel)",
+                "Scan Forge-owned scheduled workflows with bounded concurrent WorkerPool dispatch. Each due workflow acquires its own lease, runs due work, and releases the lease in a worker thread.",
+                object_schema(&[
+                    ("executor", "string", "scheduler executor id for local leases"),
+                    ("max_workers", "integer", "bounded concurrent worker count"),
+                    ("ttl_seconds", "integer", "local schedule-task lease TTL"),
+                ], &[]),
+                "forge.schedule.scan_due.v1",
+                &["forge", "schedule", "scan-due", "--max-workers", "<n>", "--output", "json"],
+                ToolFlags::new(true, true),
             ),
             tool(
                 "forge.run.start",
@@ -863,8 +878,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let executor = input
                 .executor
                 .unwrap_or_else(|| "mcp-scheduler".to_string());
+            let max_workers = input.max_workers.unwrap_or(1);
             let ttl_seconds = input.ttl_seconds.unwrap_or(300);
-            serde_json::to_value(scan_due_workflows(store, &executor, ttl_seconds)?)?
+            serde_json::to_value(if max_workers > 1 {
+                scan_due_workflows_parallel(store, &executor, max_workers, ttl_seconds)?
+            } else {
+                scan_due_workflows(store, &executor, ttl_seconds)?
+            })?
         }
         "forge.schedule.worker_status" => {
             let input: WorkerStatusInput = parse_input(input)?;
