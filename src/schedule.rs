@@ -7,11 +7,12 @@ use crate::intent::parse_intent;
 use crate::lease::{acquire_task_lease, release_task_lease};
 use crate::registry::{attach_reuse_candidates_as_child_subflows, find_reuse_candidates};
 use crate::storage::ForgeStore;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
+use std::thread;
 use uuid::Uuid;
 
 const SCHEDULE_SUMMARY_SCHEMA_VERSION: &str = "forge.schedule.summary.v1";
@@ -20,6 +21,8 @@ const MISSED_RUN_RECONCILIATION_SCHEMA_VERSION: &str = "forge.missed_run_reconci
 const SCALE_TO_ZERO_DECISION_SCHEMA_VERSION: &str = "forge.scale_to_zero_decision.v1";
 const SCHEDULE_SCAN_DUE_SCHEMA_VERSION: &str = "forge.schedule.scan_due.v1";
 const SCHEDULE_WORKER_STATUS_SCHEMA_VERSION: &str = "forge.schedule.worker_status.v1";
+const DAILY_GOAL_EXECUTION_SCHEMA_VERSION: &str = "forge.daily_goal_research.execution.v1";
+const DAILY_GOAL_MAX_ARTIFACT_WORKERS: usize = 4;
 const MISSED_RUN_GRACE_MINUTES: i64 = 5;
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -85,6 +88,28 @@ pub struct DailyGoalResearchSmokeReport {
     pub workflow_id: String,
     pub goals: Vec<DailyGoalSmokeGoalReport>,
     pub artifact_count: usize,
+    pub execution: DailyGoalSmokeExecutionReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DailyGoalSmokeExecutionReport {
+    pub schema_version: String,
+    pub mode: String,
+    pub max_workers: usize,
+    pub worker_count: usize,
+    pub total_goals: usize,
+    pub bounded: bool,
+    pub concurrency_used: bool,
+    pub deterministic_output_order: bool,
+    pub goal_order: Vec<String>,
+    pub waves: Vec<DailyGoalSmokeExecutionWave>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DailyGoalSmokeExecutionWave {
+    pub level: usize,
+    pub worker_count: usize,
+    pub goals: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -454,34 +479,40 @@ fn run_daily_goal_research_smoke_with_schedule_mode(
 
     let schedule_runs = record_schedule_run_history(workflow, due_only);
 
-    let mut reports = Vec::new();
-    for goal in goals {
-        let lineage = build_daily_goal_artifact_lineage(workflow, &goal, &schedule_runs);
-        let markdown_path =
-            write_markdown_report(store.base_dir().as_path(), workflow, &goal, &lineage)?;
-        let pdf_path = write_pdf_report(store.base_dir().as_path(), workflow, &goal, &lineage)?;
-        let delivery = write_telegram_delivery_record(
-            store.base_dir().as_path(),
-            workflow,
-            &goal,
-            &markdown_path,
-            &pdf_path,
-            &lineage,
-        )?;
-        reports.push(DailyGoalSmokeGoalReport {
-            goal,
-            markdown_path,
-            pdf_path,
-            lineage,
-            telegram_delivery: delivery,
-        });
-    }
+    let execution = build_daily_goal_execution_report(&goals);
+    let goal_lineage = goals
+        .iter()
+        .map(|goal| {
+            (
+                goal.clone(),
+                build_daily_goal_artifact_lineage(workflow, goal, &schedule_runs),
+            )
+        })
+        .collect::<Vec<_>>();
+    let generated = generate_daily_goal_artifacts_bounded(
+        store.base_dir().as_path(),
+        &workflow.id,
+        &goal_lineage,
+        &execution,
+    )?;
+    let mut reports = generated
+        .into_iter()
+        .map(|artifacts| register_generated_goal_artifacts(workflow, artifacts))
+        .collect::<Vec<_>>();
+    reports.sort_by_key(|report| {
+        execution
+            .goal_order
+            .iter()
+            .position(|goal| goal == &report.goal)
+            .unwrap_or(usize::MAX)
+    });
 
     Ok(Some(DailyGoalResearchSmokeReport {
         status: "smoke_artifacts_generated".to_string(),
         workflow_id: workflow.id.clone(),
         artifact_count: reports.len() * 3,
         goals: reports,
+        execution,
     }))
 }
 
@@ -1473,78 +1504,157 @@ fn build_daily_goal_artifact_lineage(
     }
 }
 
-fn write_markdown_report(
+#[derive(Debug, Clone)]
+struct GeneratedDailyGoalArtifacts {
+    goal: String,
+    lineage: ArtifactLineageRecord,
+    markdown_path: String,
+    markdown_bytes: Vec<u8>,
+    pdf_path: String,
+    pdf_bytes: Vec<u8>,
+    telegram_delivery_path: String,
+    telegram_delivery_bytes: Vec<u8>,
+    telegram_delivery: TelegramDeliveryRecord,
+}
+
+fn build_daily_goal_execution_report(goals: &[String]) -> DailyGoalSmokeExecutionReport {
+    let worker_count = goals.len().clamp(1, DAILY_GOAL_MAX_ARTIFACT_WORKERS);
+    let waves = goals
+        .chunks(worker_count)
+        .enumerate()
+        .map(|(index, goals)| DailyGoalSmokeExecutionWave {
+            level: index + 1,
+            worker_count: goals.len(),
+            goals: goals.to_vec(),
+        })
+        .collect::<Vec<_>>();
+
+    DailyGoalSmokeExecutionReport {
+        schema_version: DAILY_GOAL_EXECUTION_SCHEMA_VERSION.to_string(),
+        mode: "bounded_parallel_goal_artifacts".to_string(),
+        max_workers: DAILY_GOAL_MAX_ARTIFACT_WORKERS,
+        worker_count,
+        total_goals: goals.len(),
+        bounded: true,
+        concurrency_used: worker_count > 1,
+        deterministic_output_order: true,
+        goal_order: goals.to_vec(),
+        waves,
+    }
+}
+
+fn generate_daily_goal_artifacts_bounded(
     base_dir: &Path,
-    workflow: &mut Workflow,
+    workflow_id: &str,
+    goal_lineage: &[(String, ArtifactLineageRecord)],
+    execution: &DailyGoalSmokeExecutionReport,
+) -> Result<Vec<GeneratedDailyGoalArtifacts>> {
+    let mut generated = Vec::new();
+
+    for wave in &execution.waves {
+        let wave_results = thread::scope(|scope| -> Result<Vec<GeneratedDailyGoalArtifacts>> {
+            let mut handles = Vec::new();
+            for goal in &wave.goals {
+                let lineage = goal_lineage
+                    .iter()
+                    .find_map(|(candidate, lineage)| (candidate == goal).then_some(lineage))
+                    .with_context(|| format!("missing lineage for Goal {goal}"))?
+                    .clone();
+                let base_dir = base_dir.to_path_buf();
+                let workflow_id = workflow_id.to_string();
+                let goal = goal.clone();
+                handles.push(scope.spawn(move || {
+                    generate_daily_goal_artifacts(&base_dir, &workflow_id, &goal, lineage)
+                }));
+            }
+
+            let mut results = Vec::new();
+            for handle in handles {
+                let result = handle
+                    .join()
+                    .map_err(|_| anyhow!("daily Goal artifact worker panicked"))??;
+                results.push(result);
+            }
+            Ok(results)
+        })?;
+        generated.extend(wave_results);
+    }
+
+    generated.sort_by_key(|artifacts| {
+        execution
+            .goal_order
+            .iter()
+            .position(|goal| goal == &artifacts.goal)
+            .unwrap_or(usize::MAX)
+    });
+    Ok(generated)
+}
+
+fn generate_daily_goal_artifacts(
+    base_dir: &Path,
+    workflow_id: &str,
     goal: &str,
-    lineage: &ArtifactLineageRecord,
-) -> Result<String> {
-    let relative_path = format!("artifacts/{}/goal-{goal}-report.md", workflow.id);
-    let full_path = base_dir.join(&relative_path);
+    lineage: ArtifactLineageRecord,
+) -> Result<GeneratedDailyGoalArtifacts> {
+    let markdown_path = format!("artifacts/{workflow_id}/goal-{goal}-report.md");
+    let markdown_bytes = daily_goal_markdown_report_bytes(workflow_id, goal);
+    write_artifact_file(base_dir, &markdown_path, &markdown_bytes)?;
+
+    let pdf_path = format!("artifacts/{workflow_id}/goal-{goal}-report.pdf");
+    let pdf_bytes = minimal_pdf_bytes(&format!("Daily Goal Research: {goal}"));
+    write_artifact_file(base_dir, &pdf_path, &pdf_bytes)?;
+
+    let telegram_delivery_path = format!("artifacts/{workflow_id}/telegram-delivery-{goal}.json");
+    let telegram_delivery =
+        telegram_delivery_record(goal, &markdown_path, &pdf_path, lineage.clone());
+    let telegram_delivery_bytes = serde_json::to_vec_pretty(&telegram_delivery)?;
+    write_artifact_file(base_dir, &telegram_delivery_path, &telegram_delivery_bytes)?;
+
+    Ok(GeneratedDailyGoalArtifacts {
+        goal: goal.to_string(),
+        lineage,
+        markdown_path,
+        markdown_bytes,
+        pdf_path,
+        pdf_bytes,
+        telegram_delivery_path,
+        telegram_delivery_bytes,
+        telegram_delivery,
+    })
+}
+
+fn write_artifact_file(base_dir: &Path, relative_path: &str, bytes: &[u8]) -> Result<()> {
+    let full_path = base_dir.join(relative_path);
     if let Some(parent) = full_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let content = format!(
+    fs::write(&full_path, bytes)?;
+    Ok(())
+}
+
+fn daily_goal_markdown_report_bytes(workflow_id: &str, goal: &str) -> Vec<u8> {
+    format!(
         "# Daily Goal Research: {goal}\n\n\
-         - Workflow: `{}`\n\
+         - Workflow: `{workflow_id}`\n\
          - Discovery: DuckDuckGo query plan for upcoming hackathons and marathons.\n\
          - Inspection: Playwright page/regulation review queued under Forge-owned semantics.\n\
          - Eligibility: first phase online, Pelotas/RS geography, Engineering Production + ADS fit.\n\
          - Economics: cost, travel burden and registration clarity are scored before recommendation.\n\
          - Ambition fit: opportunities are filtered for strong alignment with the user's stated ambitions.\n",
-        workflow.id
-    );
-    fs::write(&full_path, content.as_bytes())?;
-    upsert_artifact(
-        workflow,
-        "markdown_report",
-        &relative_path,
-        content.as_bytes(),
-        Some(lineage.clone()),
-    );
-    Ok(relative_path)
+    )
+    .into_bytes()
 }
 
-fn write_pdf_report(
-    base_dir: &Path,
-    workflow: &mut Workflow,
-    goal: &str,
-    lineage: &ArtifactLineageRecord,
-) -> Result<String> {
-    let relative_path = format!("artifacts/{}/goal-{goal}-report.pdf", workflow.id);
-    let full_path = base_dir.join(&relative_path);
-    if let Some(parent) = full_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let pdf = minimal_pdf_bytes(&format!("Daily Goal Research: {goal}"));
-    fs::write(&full_path, &pdf)?;
-    upsert_artifact(
-        workflow,
-        "pdf_report",
-        &relative_path,
-        &pdf,
-        Some(lineage.clone()),
-    );
-    Ok(relative_path)
-}
-
-fn write_telegram_delivery_record(
-    base_dir: &Path,
-    workflow: &mut Workflow,
+fn telegram_delivery_record(
     goal: &str,
     markdown_path: &str,
     pdf_path: &str,
-    lineage: &ArtifactLineageRecord,
-) -> Result<TelegramDeliveryRecord> {
-    let relative_path = format!("artifacts/{}/telegram-delivery-{goal}.json", workflow.id);
-    let full_path = base_dir.join(&relative_path);
-    if let Some(parent) = full_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let record = TelegramDeliveryRecord {
+    lineage: ArtifactLineageRecord,
+) -> TelegramDeliveryRecord {
+    TelegramDeliveryRecord {
         schema_version: "forge.telegram_delivery.v1".to_string(),
         goal: goal.to_string(),
-        lineage: lineage.clone(),
+        lineage,
         status: "recorded".to_string(),
         channel: "telegram".to_string(),
         configured_telegram_chat_ref: "configured_telegram_destination".to_string(),
@@ -1552,17 +1662,41 @@ fn write_telegram_delivery_record(
         pdf_path: pdf_path.to_string(),
         secret_exposed: false,
         simulated: true,
-    };
-    let bytes = serde_json::to_vec_pretty(&record)?;
-    fs::write(&full_path, &bytes)?;
+    }
+}
+
+fn register_generated_goal_artifacts(
+    workflow: &mut Workflow,
+    artifacts: GeneratedDailyGoalArtifacts,
+) -> DailyGoalSmokeGoalReport {
+    upsert_artifact(
+        workflow,
+        "markdown_report",
+        &artifacts.markdown_path,
+        &artifacts.markdown_bytes,
+        Some(artifacts.lineage.clone()),
+    );
+    upsert_artifact(
+        workflow,
+        "pdf_report",
+        &artifacts.pdf_path,
+        &artifacts.pdf_bytes,
+        Some(artifacts.lineage.clone()),
+    );
     upsert_artifact(
         workflow,
         "telegram_delivery",
-        &relative_path,
-        &bytes,
-        Some(lineage.clone()),
+        &artifacts.telegram_delivery_path,
+        &artifacts.telegram_delivery_bytes,
+        Some(artifacts.lineage.clone()),
     );
-    Ok(record)
+    DailyGoalSmokeGoalReport {
+        goal: artifacts.goal,
+        markdown_path: artifacts.markdown_path,
+        pdf_path: artifacts.pdf_path,
+        lineage: artifacts.lineage,
+        telegram_delivery: artifacts.telegram_delivery,
+    }
 }
 
 fn upsert_artifact(
