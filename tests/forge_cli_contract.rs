@@ -11,6 +11,118 @@ fn forge() -> Command {
 }
 
 #[test]
+fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "milestone",
+            "status",
+            "--version",
+            "0.5",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.milestone.status.v1");
+    assert_eq!(json["milestone"], "0.5");
+    assert_eq!(
+        json["status_vocabulary"],
+        serde_json::json!([
+            "implemented",
+            "validated",
+            "groundwork",
+            "planned",
+            "blocked"
+        ])
+    );
+    assert_eq!(json["promotion_decision"]["decision"], "fail");
+    assert_eq!(json["promotion_decision"]["promotable"], false);
+    assert!(json["promotion_decision"]["blocked_by"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("creative_artifact_ir")));
+
+    let capabilities = json["capabilities"].as_array().unwrap();
+    let scheduler = capabilities
+        .iter()
+        .find(|capability| capability["id"] == "scheduler_loop_subflow_foundation")
+        .unwrap();
+    assert_eq!(scheduler["status"], "validated");
+
+    let creative_ir = capabilities
+        .iter()
+        .find(|capability| capability["id"] == "creative_artifact_ir")
+        .unwrap();
+    assert_eq!(creative_ir["status"], "planned");
+    assert!(creative_ir["gap_before_promotion"]
+        .as_str()
+        .unwrap()
+        .contains("structured IR"));
+    assert!(json["summary"]["planned"].as_u64().unwrap() >= 4);
+}
+
+#[test]
+fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.milestone.status"
+            && tool["output_schema"] == "forge.milestone.status.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == false
+    }));
+
+    let call = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.milestone.status"])
+        .arg("--input")
+        .arg(r#"{"version":"0.5"}"#)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&call).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(
+        json["result"]["schema_version"],
+        "forge.milestone.status.v1"
+    );
+    assert_eq!(json["result"]["milestone"], "0.5");
+    assert_eq!(json["result"]["promotion_decision"]["decision"], "fail");
+    assert!(
+        json["result"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability["id"] == "design_tokens"
+                && capability["status"] == "planned")
+    );
+}
+
+#[test]
 fn plan_from_human_goal_creates_persistent_atomic_graph() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

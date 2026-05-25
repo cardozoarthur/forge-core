@@ -3,6 +3,7 @@ use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{build_context_package_with_checkpoint, DEFAULT_CONTEXT_BUDGET};
 use crate::handoff::build_task_handoff;
 use crate::inspection::inspect_workflow_with_focus;
+use crate::milestone::build_milestone_status;
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
@@ -192,6 +193,11 @@ struct ArtifactFetchInput {
     workflow_id: String,
     path: Option<String>,
     max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MilestoneStatusInput {
+    version: Option<String>,
 }
 
 pub fn mcp_tools_manifest() -> McpToolsManifest {
@@ -458,6 +464,23 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 &["forge", "artifacts", "--workflow", "<workflow-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
+            tool(
+                "forge.milestone.status",
+                "Inspect Forge Milestone Status",
+                "Inspect the Forge 0.5 milestone boundary, capability statuses and promotion gate.",
+                object_schema(&[("version", "string", "milestone version, currently 0.5")], &[]),
+                "forge.milestone.status.v1",
+                &[
+                    "forge",
+                    "milestone",
+                    "status",
+                    "--version",
+                    "0.5",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
         ],
     }
 }
@@ -650,6 +673,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         "forge.artifact.fetch" => {
             let input: ArtifactFetchInput = parse_input(input)?;
             serde_json::to_value(fetch_artifact(store, input)?)?
+        }
+        "forge.milestone.status" => {
+            let input: MilestoneStatusInput = parse_input(input)?;
+            let version = input.version.unwrap_or_else(|| "0.5".to_string());
+            serde_json::to_value(build_milestone_status(&version)?)?
         }
         other => bail!("unknown MCP tool: {other}"),
     };
