@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.118 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 33: Forge 0.5 milestone promotion manifest.
+- Added `forge milestone manifest --version 0.5 --output json`, returning `forge.milestone.manifest.v1` with requirements, completed capabilities, missing capabilities, validation evidence, demos, known gaps and the promotion decision.
+- Added MCP tool `forge.milestone.manifest` so Codex/OpenCode/other agents can inspect the full 0.5 release gate without scraping human docs.
+- Added CLI contract coverage for the manifest shape and MCP exposure.
+- Updated Forge skill guidance, README, technical definition and the visible 0.5 milestone document to point agents at the manifest before any 0.5 readiness claim.
+
+### Changed
+
+- The package version is now `0.4.118`.
+- The 0.5 milestone document now mirrors the code-level status surface: live collaboration is `groundwork`, export/demo baseline is `validated`, and research artifact baseline remains `planned`.
+- This remains `0.5 groundwork` and release-governance infrastructure; it does not claim the Forge 0.5 creative runtime is complete.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- The milestone manifest is a read-only projection over Forge's static 0.5 capability contract.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` and `cargo build --release`.
+
 ## 0.4.117 - 2026-05-25
 
 ### Added

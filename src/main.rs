@@ -28,7 +28,7 @@ use forge_core::interactive::{
 use forge_core::ir::{CreativeArtifact, TokenCollection};
 use forge_core::lease::{acquire_task_lease, release_task_lease};
 use forge_core::mcp::{call_mcp_tool, mcp_tools_manifest};
-use forge_core::milestone::build_milestone_status;
+use forge_core::milestone::{build_milestone_manifest, build_milestone_status};
 use forge_core::registry::{
     attach_reuse_candidates_as_child_subflows, context_action_catalog, find_reuse_candidates,
     list_workflows_with_filters, quality_action_catalog, WorkflowLifecycleFilter,
@@ -787,6 +787,12 @@ enum InteractionCommands {
 #[derive(Debug, Subcommand)]
 enum MilestoneCommands {
     Status {
+        #[arg(long, default_value = "0.5")]
+        version: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Manifest {
         #[arg(long, default_value = "0.5")]
         version: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -1880,6 +1886,11 @@ fn run() -> Result<i32> {
         Commands::Milestone { command } => match command {
             MilestoneCommands::Status { version, output } => {
                 let report = build_milestone_status(&version)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MilestoneCommands::Manifest { version, output } => {
+                let report = build_milestone_manifest(&version)?;
                 print_response(output, &report)?;
                 Ok(0)
             }

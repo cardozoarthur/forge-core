@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.90`
+Current version: `0.4.118`
 
 This is the first functional CLI + Skill version:
 
@@ -65,6 +65,7 @@ This is the first functional CLI + Skill version:
 - async workflow substrate policy with scope guards for Forge-owned resources
 - async request handoff for skill callers: submit a goal, receive `run_id`, continue later with Forge
 - MCP tool manifest and call surface for agent workflows: list, inspect, start/resume/status, schedule create/update/list/summary, loop inspect/summary, task handoff, context request, validation status and bounded artifact fetch
+- 0.5 milestone status and promotion manifest surfaces for release-gate inspection
 - native daily Goal research workflow planning and smoke execution for `hackathon` reports with Markdown/PDF artifacts and redacted Telegram delivery records
 - persisted task leases so two executors cannot acquire the same workflow task concurrently
 - executor handoff packets that combine strict context readiness, lease metadata, routing cache keys, checksums and validation gates
@@ -114,6 +115,7 @@ forge run --workflow <workflow-id> --simulate --output json
 forge validate --workflow <workflow-id> --output json
 forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
+forge milestone manifest --version 0.5 --output json
 ```
 
 `forge context` emits a versioned context packet (`forge.context.v30`) with a deterministic
