@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.122 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 37: parallel scheduler scan now preserves idle workflow reconciliation and WorkerPool execution evidence.
+- `forge schedule scan-due --max-workers <n>` now emits an optional `worker_pool` field with `forge.worker_pool.v1` when bounded parallel dispatch is active.
+- Added CLI contract coverage proving parallel `scan-due` with no due workflows still returns idle workflow results, records scale-to-zero decisions and persists the workflow lifecycle state as `scaled_to_zero`.
+
+### Changed
+
+- The package version is now `0.4.122`.
+- `scan_due_workflows_parallel` now reconciles idle scheduled workflows before concurrent due-work dispatch, instead of only counting them in the summary.
+- This remains `0.5 groundwork` for Forge-owned scheduler/runtime concurrency. It does not claim that the Forge 0.5 creative runtime is complete.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- Idle workflow reconciliation only mutates Forge-owned SQLite workflow state through existing `run_due_workflow` scale-to-zero semantics.
+- Due workflow execution remains protected by task leases and bounded WorkerPool dispatch.
+
 ## 0.4.121 - 2026-05-25
 
 ### Added

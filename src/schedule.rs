@@ -7,7 +7,7 @@ use crate::intent::parse_intent;
 use crate::lease::{acquire_task_lease, release_task_lease};
 use crate::registry::{attach_reuse_candidates_as_child_subflows, find_reuse_candidates};
 use crate::storage::ForgeStore;
-use crate::worker::{Job, WorkerPool};
+use crate::worker::{Job, WorkerPool, WorkerPoolReport};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::Serialize;
@@ -204,6 +204,8 @@ pub struct ScheduleScanDueReport {
     pub executor: String,
     pub ttl_seconds: u64,
     pub summary: ScheduleScanDueSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_pool: Option<WorkerPoolReport>,
     pub results: Vec<ScheduleScanWorkflowReport>,
 }
 
@@ -1090,6 +1092,7 @@ pub fn scan_due_workflows(
         executor: executor.to_string(),
         ttl_seconds,
         summary,
+        worker_pool: None,
         results,
     })
 }
@@ -1108,6 +1111,7 @@ pub fn scan_due_workflows_parallel(
 
     let all_workflows = store.load_workflows()?;
     let mut due_candidates = Vec::new();
+    let mut idle_candidates = Vec::new();
 
     for workflow in &all_workflows {
         let schedule_summary = summarize_schedules(&workflow.tasks);
@@ -1119,24 +1123,15 @@ pub fn scan_due_workflows_parallel(
             due_candidates.push(workflow.id.clone());
         } else {
             summary.idle_workflows += 1;
+            idle_candidates.push(workflow.id.clone());
         }
     }
 
     summary.due_workflows = due_candidates.len();
-    if due_candidates.is_empty() {
-        return Ok(ScheduleScanDueReport {
-            schema_version: SCHEDULE_SCAN_DUE_SCHEMA_VERSION.to_string(),
-            status: "no_due_workflows".to_string(),
-            executor: executor.to_string(),
-            ttl_seconds,
-            summary: ScheduleScanDueSummary {
-                parallel: true,
-                max_workers,
-                ..summary
-            },
-            results: Vec::new(),
-        });
-    }
+    let mut idle_results = idle_candidates
+        .iter()
+        .map(|workflow_id| scan_idle_workflow_reconciliation(store, workflow_id))
+        .collect::<Result<Vec<_>>>()?;
 
     let jobs: Vec<_> = due_candidates
         .into_iter()
@@ -1168,10 +1163,13 @@ pub fn scan_due_workflows_parallel(
     summary.wave_count = worker_report.wave_count;
     summary.duration_ms = worker_report.duration_ms;
 
-    let mut final_results: Vec<ScheduleScanWorkflowReport> = Arc::try_unwrap(results)
+    let due_results: Vec<ScheduleScanWorkflowReport> = Arc::try_unwrap(results)
         .unwrap_or_else(|_| std::sync::Mutex::new(Vec::new()))
         .into_inner()
         .unwrap_or_default();
+    let mut final_results = Vec::new();
+    final_results.append(&mut idle_results);
+    final_results.extend(due_results);
 
     final_results.sort_by(|left, right| left.workflow_id.cmp(&right.workflow_id));
 
@@ -1195,13 +1193,16 @@ pub fn scan_due_workflows_parallel(
     summary.scale_to_zero_workflows = scale_to_zero;
     summary.lease_conflicts = lease_conflicts;
     summary.leased_workflows = final_results
-        .len()
-        .saturating_sub(lease_conflicts + skipped);
+        .iter()
+        .filter(|report| report.lease_id.is_some())
+        .count();
     summary.skipped_workflows = skipped;
 
     Ok(ScheduleScanDueReport {
         schema_version: SCHEDULE_SCAN_DUE_SCHEMA_VERSION.to_string(),
-        status: if executed > 0 {
+        status: if worker_report.failed_jobs > 0 {
+            "schedule_scan_completed_with_worker_failures"
+        } else if executed > 0 {
             "schedule_scan_completed_with_execution"
         } else if scale_to_zero > 0 {
             "schedule_scan_completed_scale_to_zero"
@@ -1212,7 +1213,37 @@ pub fn scan_due_workflows_parallel(
         executor: executor.to_string(),
         ttl_seconds,
         summary,
+        worker_pool: Some(worker_report),
         results: final_results,
+    })
+}
+
+fn scan_idle_workflow_reconciliation(
+    store: &ForgeStore,
+    workflow_id: &str,
+) -> Result<ScheduleScanWorkflowReport> {
+    let workflow = store.load_workflow(workflow_id)?;
+    let schedule_summary = summarize_schedules(&workflow.tasks);
+    let run_due = run_due_workflow(store, workflow_id)?;
+    let status = run_due
+        .as_ref()
+        .map(|report| report.status.clone())
+        .unwrap_or_else(|| "no_scheduled_work".to_string());
+
+    Ok(ScheduleScanWorkflowReport {
+        workflow_id: workflow.id,
+        goal: workflow.goal,
+        status,
+        schedule_task_id: None,
+        due_nodes: schedule_summary.due_nodes,
+        lease_status: "not_required".to_string(),
+        lease_id: None,
+        lease_released: false,
+        current_lease_id: None,
+        run_due,
+        reason:
+            "no due cron nodes; reconciled idle schedule state before bounded concurrent dispatch"
+                .to_string(),
     })
 }
 

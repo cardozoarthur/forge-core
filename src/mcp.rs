@@ -447,7 +447,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.schedule.scan_due",
                 "Scan Due Schedules",
-                "Scan Forge-owned scheduled workflows, lease due schedule nodes locally, run due work and report idle scale-to-zero decisions. Supports bounded parallel dispatch with max_workers.",
+                "Scan Forge-owned scheduled workflows, lease due schedule nodes locally, run due work and report idle scale-to-zero decisions. Supports bounded parallel dispatch with max_workers and returns WorkerPool evidence when parallel.",
                 object_schema(&[
                     ("executor", "string", "scheduler executor id for local leases"),
                     ("max_workers", "integer", "bounded concurrent worker count (1=sequential, >1=parallel WorkerPool dispatch)"),
@@ -473,7 +473,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.schedule.scan_due_parallel",
                 "Scan Due Schedules (Parallel)",
-                "Scan Forge-owned scheduled workflows with bounded concurrent WorkerPool dispatch. Each due workflow acquires its own lease, runs due work, and releases the lease in a worker thread.",
+                "Scan Forge-owned scheduled workflows with bounded concurrent WorkerPool dispatch. Idle workflows are reconciled into scale-to-zero state, while each due workflow acquires its own lease, runs due work, and releases the lease in a worker thread.",
                 object_schema(&[
                     ("executor", "string", "scheduler executor id for local leases"),
                     ("max_workers", "integer", "bounded concurrent worker count"),

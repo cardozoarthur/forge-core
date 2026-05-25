@@ -17424,7 +17424,7 @@ fn parallel_scan_due_reports_idle_workflows_without_due_nodes() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
 
-    forge()
+    let created = forge()
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -17442,7 +17442,12 @@ fn parallel_scan_due_reports_idle_workflows_without_due_nodes() {
             "json",
         ])
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    let workflow_id = created_json["workflow_id"].as_str().unwrap().to_string();
 
     let scanned = forge()
         .args([
@@ -17484,6 +17489,37 @@ fn parallel_scan_due_reports_idle_workflows_without_due_nodes() {
             .unwrap_or(0)
             == 0
     );
+    assert_eq!(scanned_json["summary"]["scale_to_zero_workflows"], 1);
+    assert_eq!(
+        scanned_json["worker_pool"]["schema_version"],
+        "forge.worker_pool.v1"
+    );
+    assert_eq!(scanned_json["worker_pool"]["total_jobs"], 0);
+    assert_eq!(scanned_json["worker_pool"]["completed_jobs"], 0);
+
+    let results = scanned_json["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["workflow_id"], workflow_id);
+    assert_eq!(results[0]["status"], "no_due_cron_nodes");
+    assert_eq!(results[0]["run_due"]["scale_to_zero"]["applied"], true);
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "status",
+            "--workflow",
+            &workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status_json["status"], "scaled_to_zero");
 }
 
 #[test]
