@@ -74,8 +74,8 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .unwrap()
         .contains("0.5"));
     assert_eq!(json["summary"]["validated"].as_u64().unwrap(), 7);
-    assert_eq!(json["summary"]["groundwork"].as_u64().unwrap(), 1);
-    assert_eq!(json["summary"]["planned"].as_u64().unwrap(), 1);
+    assert_eq!(json["summary"]["groundwork"].as_u64().unwrap(), 2);
+    assert_eq!(json["summary"]["planned"].as_u64().unwrap(), 0);
 }
 
 #[test]
