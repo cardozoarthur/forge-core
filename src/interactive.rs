@@ -32,6 +32,7 @@ pub struct InteractiveBanner {
 pub struct InteractiveDashboard {
     pub active_runs: usize,
     pub scheduled_workflows: usize,
+    pub looping_workflows: usize,
     pub paused_idle_workflows: usize,
     pub recent_artifacts: usize,
     pub pending_approvals: usize,
@@ -114,6 +115,11 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
         .iter()
         .filter(|workflow| workflow.schedule_summary.scheduled_nodes > 0)
         .count();
+    let looping_workflows = workflows
+        .workflows
+        .iter()
+        .filter(|workflow| workflow.loop_summary.loop_nodes > 0)
+        .count();
     let recent_artifacts = workflows
         .workflows
         .iter()
@@ -153,6 +159,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
         dashboard: InteractiveDashboard {
             active_runs,
             scheduled_workflows,
+            looping_workflows,
             paused_idle_workflows: workflows.summary.non_running,
             recent_artifacts,
             pending_approvals,
@@ -248,6 +255,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         "{mark}\n{name}\n\n\
          Active runs: {active_runs}\n\
          Scheduled workflows: {scheduled_workflows}\n\
+         Looping workflows: {looping_workflows}\n\
          Paused/idle workflows: {paused_idle_workflows}\n\
          Recent artifacts: {recent_artifacts}\n\
          Pending approvals: {pending_approvals}\n\
@@ -262,6 +270,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         name = report.banner.name,
         active_runs = d.active_runs,
         scheduled_workflows = d.scheduled_workflows,
+        looping_workflows = d.looping_workflows,
         paused_idle_workflows = d.paused_idle_workflows,
         recent_artifacts = d.recent_artifacts,
         pending_approvals = d.pending_approvals,

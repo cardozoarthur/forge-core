@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.4.112 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 27: MCP and skill exposure for native aggregate schedule/loop visibility.
+- Added MCP tools `forge.schedule.summary` and `forge.schedule.loop_summary`, both read-only and async-safe, returning the existing `forge.schedule.aggregate_summary.v1` projection.
+- Added CLI contract coverage proving agents can discover and call the aggregate schedule/loop summary tools after creating the native daily Goal research workflow.
+- Updated the generated Forge skill and repo skill with `forge.schedule.summary` and `forge.schedule.loop_summary` examples so Codex/OpenCode can inspect scheduled and looping workflow state without ad hoc scripts.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` and `cargo build --release`.
+
+### Changed
+
+- The package version is now `0.4.112`.
+- README and technical definition now list schedule summary and loop-summary as part of the agent-facing MCP surface.
+- This remains `0.5 groundwork` for scheduled/looping runtime and agent inspection semantics; it does not claim the Forge 0.5 creative runtime is complete.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- The new MCP tools are read-only projections over Forge-owned SQLite workflow state.
+- Schedule and loop mutations still require the existing Forge-owned mutation APIs with revision/origin trace.
+
+## 0.4.111 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 26: native Forge schedule summary and loop-summary CLI commands.
+- Added `forge schedule summary` and `forge schedule loop-summary` CLI commands that aggregate schedule and loop node state across all Forge-owned workflows.
+- Added `looping_workflows` count to the interactive home dashboard.
+- Added aggregate summary helper in `schedule.rs`: `aggregate_summary()` returns `AggregateSummaryReport` with consolidated `ScheduleSummary` and `LoopSummary` across workflow task lists.
+- Added CLI contract test `schedule_summary_and_loop_summary_report_aggregate_state_across_workflows` proving aggregate report surfaces scheduled/cron/loop nodes, workflow count, scale-to-zero and loop stats.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` (6 unit tests + 177 CLI contract tests) and `cargo build --release`.
+- Required smoke: `forge plan`, `forge schedule summary`, `forge schedule loop-summary` produce structured JSON output and human-readable aggregate reports.
+- Milestone capability statuses updated: `creative_artifact_ir`, `design_tokens` and `componentization_ai_surfaces` promoted from `groundwork` to `validated`, reflecting serde round-trip, CLI integration and test coverage.
+
+### Changed
+
+- The package version is now `0.4.111`.
+- Interactive home dashboard now surfaces `looping_workflows` alongside `scheduled_workflows` for a complete runtime operations overview.
+- Milestone 0.5 promotion gate now reports 6 validated capabilities (up from 3) and 3 planned capabilities (down from 6), correctly reflecting existing creative IR, design token and componentization validation evidence.
+- This remains `0.5 groundwork` for the scheduled/looping runtime and creative runtime tracks; it does not claim completion.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- Changes only affect Forge-owned CLI surfaces, aggregate reporting and milestone status projection.
+- All schedule/loop mutations remain guarded by lease acquisition, loop state validation and scale-to-zero semantics.
+
 ## 0.4.110 - 2026-05-25
 
 ### Added

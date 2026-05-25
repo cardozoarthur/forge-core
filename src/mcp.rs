@@ -15,8 +15,8 @@ use crate::request::{
     cancel_request, list_requests, load_request_status, resume_async_request, start_async_request,
 };
 use crate::schedule::{
-    create_daily_goal_research_workflow, run_due_workflow, scan_due_workflows, update_loop_state,
-    update_workflow_schedule, ScheduleUpdateOptions,
+    aggregate_summary, create_daily_goal_research_workflow, run_due_workflow, scan_due_workflows,
+    update_loop_state, update_workflow_schedule, ScheduleUpdateOptions,
 };
 use crate::storage::ForgeStore;
 use crate::validation::{validate_workflow, ValidationReport};
@@ -320,6 +320,24 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[("lifecycle", "string", "all|running|non-running")], &[]),
                 "forge.registry.workflow_list.v1",
                 &["forge", "schedule", "list", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.schedule.summary",
+                "Summarize Scheduled Workflows",
+                "Aggregate cron/schedule state across all Forge-owned workflows for agent runtime visibility.",
+                object_schema(&[], &[]),
+                "forge.schedule.aggregate_summary.v1",
+                &["forge", "schedule", "summary", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.schedule.loop_summary",
+                "Summarize Loop Nodes",
+                "Aggregate explicit loop node state across all Forge-owned workflows for agent runtime visibility.",
+                object_schema(&[], &[]),
+                "forge.schedule.aggregate_summary.v1",
+                &["forge", "schedule", "loop-summary", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -721,6 +739,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     .with_quality_action(clean_optional(input.quality_action))
                     .only_scheduled_or_looping();
             serde_json::to_value(list_workflows_with_filters(store, filters)?)?
+        }
+        "forge.schedule.summary" | "forge.schedule.loop_summary" => {
+            let workflows = store.load_workflows()?;
+            let task_slices: Vec<&[crate::graph::AtomicTask]> =
+                workflows.iter().map(|wf| wf.tasks.as_slice()).collect();
+            serde_json::to_value(aggregate_summary(&task_slices))?
         }
         "forge.loop.inspect" => {
             let input: LoopInspectInput = parse_input(input)?;

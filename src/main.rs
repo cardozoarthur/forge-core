@@ -41,8 +41,9 @@ use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
 };
 use forge_core::schedule::{
-    create_daily_goal_research_workflow, run_daily_goal_research_smoke, run_due_workflow,
-    scan_due_workflows, update_loop_state, update_workflow_schedule, ScheduleUpdateOptions,
+    aggregate_summary, create_daily_goal_research_workflow, run_daily_goal_research_smoke,
+    run_due_workflow, scan_due_workflows, update_loop_state, update_workflow_schedule,
+    ScheduleUpdateOptions,
 };
 use forge_core::self_evolve::{run_self_evolution, SelfRunOptions};
 use forge_core::skill::install_skill;
@@ -380,6 +381,14 @@ enum ScheduleCommands {
         executor: String,
         #[arg(long = "ttl-seconds", default_value_t = 300)]
         ttl_seconds: u64,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Summary {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    LoopSummary {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -1308,6 +1317,24 @@ fn run() -> Result<i32> {
             } => {
                 let store = ForgeStore::open(cli.store)?;
                 let report = scan_due_workflows(&store, &executor, ttl_seconds)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            ScheduleCommands::Summary { output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let workflows = store.load_workflows()?;
+                let task_slices: Vec<&[forge_core::graph::AtomicTask]> =
+                    workflows.iter().map(|wf| wf.tasks.as_slice()).collect();
+                let report = aggregate_summary(&task_slices);
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            ScheduleCommands::LoopSummary { output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let workflows = store.load_workflows()?;
+                let task_slices: Vec<&[forge_core::graph::AtomicTask]> =
+                    workflows.iter().map(|wf| wf.tasks.as_slice()).collect();
+                let report = aggregate_summary(&task_slices);
                 print_response(output, &report)?;
                 Ok(0)
             }
