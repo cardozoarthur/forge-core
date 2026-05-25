@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.91 - 2026-05-25
+
+### Added
+
+- Added `detect_loop_kind` to the graph builder so goals mentioning any of the five loop kinds (loop_over_items, bounded_repeat, retry_backoff, while_until, infinite_recurring_subflow) produce explicit loop nodes with appropriate subflow tasks.
+- Goals parsed from `daily_goal_research_goals` now correctly extract all comma-separated Goal names from the goal text, supporting multiple configured Goals in one workflow.
+- Added CLI contract tests: `schedule_create_cli_models_daily_goal_research_with_multiple_goals`, `mcp_schedule_update_mutates_cron_and_timezone`, `plan_models_loop_kinds_from_goal_text`, and `inspect_scheduled_workflow_diagram_exposes_loop_and_cron_details`.
+
+### Changed
+
+- `daily_goal_research_goals` now parses the `Goals:` section of the goal text to extract all configured Goal names instead of only matching the `hackathon` keyword.
+- `loop_node_task` helper creates loop control nodes for all five loop kinds with type-specific `max_iterations`, `condition`, `backoff_policy` and `subflow_mode`.
+
+### Safety
+
+- Loop detection remains goal-driven and only activates when the goal text explicitly references loop semantics.
+- Schedule update via MCP retains revision tracking and origin trace.
+- No external Docker/Kubernetes/Knative resources are mutated.
+
 ## 0.4.90 - 2026-05-25
 
 ### Added

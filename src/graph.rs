@@ -626,7 +626,10 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
     }
 
     if !autonomous_extensions_required {
-        if let Some(policy) = windows_software_policy.clone() {
+        let loop_kind = detect_loop_kind(&intent.goal);
+        if let Some(kind) = loop_kind {
+            tasks.push(loop_node_task("task-009", &["task-003"], kind));
+        } else if let Some(policy) = windows_software_policy.clone() {
             tasks.push(windows_software_task("task-009", &["task-003"], policy));
         } else if let Some(policy) = reusable_local_code_policy(local_code_policy.as_ref()) {
             tasks.push(deterministic_non_ai_task(
@@ -634,6 +637,53 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
                 &["task-003"],
                 policy.clone(),
             ));
+        }
+
+        if let Some(kind) = detect_loop_kind(&intent.goal) {
+            let loop_node_id = format!("task-{:03}", tasks.len());
+            let loop_id = tasks
+                .iter()
+                .find(|t| t.title.contains("Run explicit loop"))
+                .map(|t| t.id.clone())
+                .unwrap_or_else(|| "task-009".to_string());
+            let mut infinite_task = task(
+                &loop_node_id,
+                &format!("Execute {kind} subflow"),
+                &[&loop_id],
+                &["loop control", "loop items", "subflow mode"],
+                vec![rule(
+                    "loop_execution",
+                    &format!("{kind} subflow is executed with controlled stop/pause/mutate"),
+                    None,
+                )],
+                "Loop subflow execution trace",
+                (ExecutorKind::Command, 0.0002),
+            );
+            infinite_task.loop_control = Some(LoopSpec {
+                schema_version: loop_schema_version(),
+                kind: kind.clone(),
+                items: vec!["goal_item".to_string()],
+                max_iterations: match kind.as_str() {
+                    "bounded_repeat" | "retry_backoff" => Some(3),
+                    _ => None,
+                },
+                condition: match kind.as_str() {
+                    "while_until" => Some("goal_is_definitively_ready".to_string()),
+                    _ => None,
+                },
+                backoff_policy: match kind.as_str() {
+                    "retry_backoff" => Some("exponential_2s_30s_max".to_string()),
+                    _ => None,
+                },
+                subflow_mode: if kind == "infinite_recurring_subflow" {
+                    "infinite_per_item".to_string()
+                } else {
+                    "finite_per_item".to_string()
+                },
+                stop_policy: "pause_mutate_or_stop".to_string(),
+                state: "active".to_string(),
+            });
+            tasks.push(infinite_task);
         }
     }
 
@@ -1543,7 +1593,26 @@ fn requires_daily_goal_research(goal: &str) -> bool {
 fn daily_goal_research_goals(goal: &str) -> Vec<String> {
     let lower = goal.to_lowercase();
     let mut goals = Vec::new();
-    if lower.contains("hackathon") || lower.contains("maratona") {
+
+    if let Some(goals_start) = lower.find("goals:") {
+        let after = &lower[goals_start + "goals:".len()..];
+        let goals_str = after.split(['.', ';']).next().unwrap_or(after);
+        let in_pos = goals_str.find(" in ");
+        let cron_pos = goals_str.find(" cron ");
+        let timezone_pos = goals_str.find(" timezone ");
+        let end = in_pos
+            .or(cron_pos)
+            .or(timezone_pos)
+            .unwrap_or(goals_str.len());
+        for part in goals_str[..end].split(',') {
+            let trimmed = part.trim().trim_matches(|c: char| c == ',' || c == ' ');
+            if !trimmed.is_empty() {
+                goals.push(trimmed.to_string());
+            }
+        }
+    }
+
+    if goals.is_empty() && (lower.contains("hackathon") || lower.contains("maratona")) {
         goals.push("hackathon".to_string());
     }
 
@@ -1626,4 +1695,69 @@ fn extract_email(goal: &str) -> Option<String> {
         })
         .find(|token| token.contains('@') && token.contains('.'))
         .map(str::to_string)
+}
+
+fn detect_loop_kind(goal: &str) -> Option<String> {
+    let lower = goal.to_lowercase();
+    if lower.contains("loop over items")
+        || lower.contains("loop-over-items")
+        || lower.contains("loop_over_items")
+    {
+        Some("loop_over_items".to_string())
+    } else if lower.contains("bounded repeat")
+        || lower.contains("bounded_repeat")
+        || lower.contains("bounded-repeat")
+    {
+        Some("bounded_repeat".to_string())
+    } else if lower.contains("retry backoff")
+        || lower.contains("retry_backoff")
+        || lower.contains("retry-backoff")
+        || lower.contains("retry with backoff")
+    {
+        Some("retry_backoff".to_string())
+    } else if lower.contains("while condition")
+        || lower.contains("while_until")
+        || lower.contains("while/until")
+        || lower.contains("while-until")
+        || lower.contains("condition loop")
+    {
+        Some("while_until".to_string())
+    } else if lower.contains("infinite recurring")
+        || lower.contains("infinite_recurring_subflow")
+        || lower.contains("infinite-recurring")
+        || lower.contains("recurring subflow")
+    {
+        Some("infinite_recurring_subflow".to_string())
+    } else {
+        None
+    }
+}
+
+fn loop_node_task(id: &str, dependencies: &[&str], kind: String) -> AtomicTask {
+    let title = format!("Run explicit {kind} loop");
+    let mut t = task(
+        id,
+        &title,
+        dependencies,
+        &["loop control", "loop items"],
+        vec![rule(
+            "loop_kind",
+            &format!("loop node is type {kind} with controlled stop/pause/mutate"),
+            None,
+        )],
+        "Loop node execution trace",
+        (ExecutorKind::Command, 0.0002),
+    );
+    t.loop_control = Some(LoopSpec {
+        schema_version: loop_schema_version(),
+        kind,
+        items: Vec::new(),
+        max_iterations: None,
+        condition: None,
+        backoff_policy: None,
+        subflow_mode: "finite_per_item".to_string(),
+        stop_policy: "pause_mutate_or_stop".to_string(),
+        state: "active".to_string(),
+    });
+    t
 }

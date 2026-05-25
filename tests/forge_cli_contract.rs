@@ -12289,6 +12289,300 @@ fn request_list_through_mcp_tool_returns_runs() {
     assert_eq!(mcp["result"]["runs"][0]["status"], "accepted");
 }
 
+#[test]
+fn schedule_create_cli_models_daily_goal_research_with_multiple_goals() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--goal",
+            "blockchain",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--cron",
+            "0 8 * * *",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "daily_goal_research_workflow_created");
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    assert!(workflow_id.starts_with("wf_"));
+
+    assert_eq!(
+        json["goals"],
+        serde_json::json!(["blockchain", "hackathon"])
+    );
+    assert_eq!(json["schedule_summary"]["scheduled_nodes"], 1);
+    assert_eq!(json["loop_summary"]["loop_nodes"], 1);
+    assert_eq!(json["loop_summary"]["total_items"], 2);
+    assert_eq!(json["attached_subflows"], 0);
+
+    let inspect_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--verbose",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let inspection: Value = serde_json::from_slice(&inspect_output).unwrap();
+    assert_eq!(inspection["loop_summary"]["total_items"], 2);
+    assert!(inspection["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("loop loop_over_items items blockchain,hackathon"));
+}
+
+#[test]
+fn mcp_schedule_update_mutates_cron_and_timezone() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let created = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--cron",
+            "0 8 * * *",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    let workflow_id = created_json["workflow_id"].as_str().unwrap();
+    let tasks = created_json["workflow"]["tasks"].as_array().unwrap();
+    let schedule_task = tasks
+        .iter()
+        .find(|task| task["executor"] == "wait")
+        .unwrap();
+    let task_id = schedule_task["id"].as_str().unwrap();
+
+    let update_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "task_id": task_id,
+        "cron": "0 9 * * 1",
+        "timezone": "America/New_York",
+        "origin": "codex"
+    })
+    .to_string();
+
+    let updated = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.schedule.update"])
+        .arg("--input")
+        .arg(&update_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let updated_json: Value = serde_json::from_slice(&updated).unwrap();
+    assert_eq!(updated_json["status"], "ok");
+    assert_eq!(updated_json["result"]["status"], "schedule_updated");
+    assert_eq!(updated_json["result"]["schedule"]["cron"], "0 9 * * 1");
+    assert_eq!(
+        updated_json["result"]["schedule"]["timezone"],
+        "America/New_York"
+    );
+    assert!(updated_json["result"]["revision"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+fn plan_models_loop_kinds_from_goal_text() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    for (goal_suffix, expected_kind) in [
+        ("loop over items", "loop_over_items"),
+        ("bounded repeat", "bounded_repeat"),
+        ("retry backoff", "retry_backoff"),
+        ("retry with backoff", "retry_backoff"),
+        ("while condition", "while_until"),
+        ("while/until policy", "while_until"),
+        ("infinite recurring subflow", "infinite_recurring_subflow"),
+        ("recurring subflow", "infinite_recurring_subflow"),
+    ] {
+        let goal = format!("Run a {goal_suffix} workflow task");
+        let output = forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "plan",
+                "--goal",
+                &goal,
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        let tasks = json["tasks"].as_array().unwrap();
+        let loop_task = tasks
+            .iter()
+            .find(|task| {
+                task["loop_control"].is_object() && task["loop_control"]["kind"] == expected_kind
+            })
+            .unwrap_or_else(|| {
+                panic!("no task with loop_control kind {expected_kind} in goal {goal}")
+            });
+
+        assert_eq!(
+            loop_task["loop_control"]["kind"], expected_kind,
+            "goal: {goal}"
+        );
+
+        let subflow_task = tasks
+            .iter()
+            .find(|task| {
+                task["title"]
+                    .as_str()
+                    .map(|title| title.contains(expected_kind))
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(|| {
+                panic!("no subflow task for loop kind {expected_kind} in goal {goal}")
+            });
+
+        assert!(
+            subflow_task["loop_control"].is_object(),
+            "subflow task should have loop_control in goal {goal}"
+        );
+    }
+}
+
+#[test]
+fn inspect_scheduled_workflow_diagram_exposes_loop_and_cron_details() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--cron",
+            "0 8 * * *",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+
+    let inspect_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "inspect",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let inspection: Value = serde_json::from_slice(&inspect_output).unwrap();
+    assert_eq!(inspection["status"], "inspected");
+    assert_eq!(inspection["schedule_summary"]["cron_nodes"], 1);
+    assert_eq!(inspection["loop_summary"]["loop_over_items_nodes"], 1);
+    assert_eq!(
+        inspection["schedule_summary"]["scale_to_zero_when_idle_nodes"],
+        1
+    );
+
+    let diagram = inspection["diagram"].as_str().unwrap();
+    assert!(diagram.contains("cron 0 8 * * * America/Sao_Paulo"));
+    assert!(diagram.contains("loop loop_over_items"));
+    assert!(diagram.contains("scale_to_zero true"));
+    assert!(diagram.contains("native_subflow goal_research:hackathon"));
+
+    let nodes = inspection["nodes"].as_array().unwrap();
+    let schedule_node = nodes
+        .iter()
+        .find(|node| node["schedule"].is_object())
+        .unwrap();
+    assert_eq!(schedule_node["schedule"]["kind"], "cron");
+    assert_eq!(schedule_node["schedule"]["cron"], "0 8 * * *");
+    assert_eq!(schedule_node["schedule"]["timezone"], "America/Sao_Paulo");
+    assert_eq!(
+        schedule_node["schedule"]["missed_run_policy"],
+        "run_once_then_resume"
+    );
+    assert_eq!(schedule_node["schedule"]["scale_to_zero_when_idle"], true);
+
+    let loop_node = nodes
+        .iter()
+        .find(|node| node["loop_control"].is_object())
+        .unwrap();
+    assert_eq!(loop_node["loop_control"]["kind"], "loop_over_items");
+    assert_eq!(
+        loop_node["loop_control"]["items"],
+        serde_json::json!(["hackathon"])
+    );
+    assert_eq!(loop_node["loop_control"]["subflow_mode"], "finite_per_item");
+}
+
 fn write_fake_cli(bin: &Path, name: &str) {
     fs::create_dir_all(bin).unwrap();
     let path = bin.join(name);
