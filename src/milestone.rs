@@ -146,9 +146,9 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
         capability(
             "export_demo_baseline",
             "Export/demo baseline",
-            "planned",
-            "Daily Goal smoke produces Markdown/PDF as scheduler validation. Cycle 26 adds schedule summary and loop-summary CLI commands with tests.",
-            "Need one design/tokens/component workflow demo and one structured document/slide/whiteboard workflow demo before 0.5 promotion.",
+            "groundwork",
+            "Cycle 28 adds MCP tools for creative artifact list/inspect/attach and token get/set, exposing the existing creative IR, design token and componentization surfaces through agent-facing MCP. Daily Goal smoke still produces Markdown/PDF as scheduler validation.",
+            "Need one design/tokens/component workflow demo generating actual rendered artifacts and one structured document/slide/whiteboard workflow demo before 0.5 promotion.",
         ),
     ]
 }
