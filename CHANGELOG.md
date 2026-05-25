@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.96 - 2026-05-25
+
+### Added
+
+- Added optional `forge.artifact_lineage.v1` metadata to workflow artifact records.
+- Daily Goal research Markdown, PDF and Telegram delivery artifacts now carry explicit parent `workflow_id`, inherited schedule `run_id`, schedule task, loop task, Goal and native subflow lineage.
+- The daily Goal `schedule run-due` response and redacted Telegram delivery record now expose the same lineage, so agents can verify that recurring subflows did not lose run/artifact identity.
+- Added CLI contract coverage proving `hackathon` run-due artifacts preserve lineage without exposing Telegram secrets.
+
+### Changed
+
+- The package version is now `0.4.96`.
+
+### Safety
+
+- Artifact lineage is local Forge-owned metadata and is optional for older or manually attached artifacts.
+- The change does not execute external tools, reveal Telegram credentials, install Knative, or mutate Docker/Kubernetes/Knative resources.
+
 ## 0.4.95 - 2026-05-25
 
 ### Added

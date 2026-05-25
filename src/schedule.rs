@@ -1,7 +1,7 @@
 use crate::artifact::hex_sha256;
 use crate::graph::{
-    ArtifactRecord, AtomicTask, LoopSpec, NativeSubflowSpec, ScheduleRunRecord, ScheduleSpec,
-    TaskStatus, Workflow, WorkflowRevision,
+    ArtifactLineageRecord, ArtifactRecord, AtomicTask, LoopSpec, NativeSubflowSpec,
+    ScheduleRunRecord, ScheduleSpec, TaskStatus, Workflow, WorkflowRevision,
 };
 use crate::intent::parse_intent;
 use crate::registry::{attach_reuse_candidates_as_child_subflows, find_reuse_candidates};
@@ -85,6 +85,7 @@ pub struct DailyGoalSmokeGoalReport {
     pub goal: String,
     pub markdown_path: String,
     pub pdf_path: String,
+    pub lineage: ArtifactLineageRecord,
     pub telegram_delivery: TelegramDeliveryRecord,
 }
 
@@ -92,6 +93,7 @@ pub struct DailyGoalSmokeGoalReport {
 pub struct TelegramDeliveryRecord {
     pub schema_version: String,
     pub goal: String,
+    pub lineage: ArtifactLineageRecord,
     pub status: String,
     pub channel: String,
     pub configured_telegram_chat_ref: String,
@@ -289,23 +291,27 @@ fn run_daily_goal_research_smoke_with_schedule_mode(
         return Ok(None);
     }
 
-    record_schedule_run_history(workflow, due_only);
+    let schedule_runs = record_schedule_run_history(workflow, due_only);
 
     let mut reports = Vec::new();
     for goal in goals {
-        let markdown_path = write_markdown_report(store.base_dir().as_path(), workflow, &goal)?;
-        let pdf_path = write_pdf_report(store.base_dir().as_path(), workflow, &goal)?;
+        let lineage = build_daily_goal_artifact_lineage(workflow, &goal, &schedule_runs);
+        let markdown_path =
+            write_markdown_report(store.base_dir().as_path(), workflow, &goal, &lineage)?;
+        let pdf_path = write_pdf_report(store.base_dir().as_path(), workflow, &goal, &lineage)?;
         let delivery = write_telegram_delivery_record(
             store.base_dir().as_path(),
             workflow,
             &goal,
             &markdown_path,
             &pdf_path,
+            &lineage,
         )?;
         reports.push(DailyGoalSmokeGoalReport {
             goal,
             markdown_path,
             pdf_path,
+            lineage,
             telegram_delivery: delivery,
         });
     }
@@ -318,18 +324,31 @@ fn run_daily_goal_research_smoke_with_schedule_mode(
     }))
 }
 
-fn record_schedule_run_history(workflow: &mut Workflow, due_only: bool) {
-    record_schedule_run_history_with_status(workflow, due_only, "completed");
+#[derive(Debug, Clone)]
+struct ScheduleRunEmission {
+    schedule_task_id: String,
+    run_id: String,
 }
 
-fn record_schedule_run_history_with_status(workflow: &mut Workflow, due_only: bool, status: &str) {
+fn record_schedule_run_history(
+    workflow: &mut Workflow,
+    due_only: bool,
+) -> Vec<ScheduleRunEmission> {
+    record_schedule_run_history_with_status(workflow, due_only, "completed")
+}
+
+fn record_schedule_run_history_with_status(
+    workflow: &mut Workflow,
+    due_only: bool,
+    status: &str,
+) -> Vec<ScheduleRunEmission> {
     let started_at = Utc::now();
     let finished_at = Utc::now();
-    for schedule in workflow
-        .tasks
-        .iter_mut()
-        .filter_map(|task| task.schedule.as_mut())
-    {
+    let mut emissions = Vec::new();
+    for task in workflow.tasks.iter_mut() {
+        let Some(schedule) = task.schedule.as_mut() else {
+            continue;
+        };
         let scheduled_at = if due_only {
             let Some(next_run_at) = schedule.next_run_at else {
                 continue;
@@ -342,8 +361,9 @@ fn record_schedule_run_history_with_status(workflow: &mut Workflow, due_only: bo
             started_at
         };
         let missed = is_missed_run(scheduled_at, started_at);
+        let run_id = format!("run_{}", Uuid::new_v4().to_string().replace('-', ""));
         schedule.run_history.push(ScheduleRunRecord {
-            run_id: format!("run_{}", Uuid::new_v4().to_string().replace('-', "")),
+            run_id: run_id.clone(),
             scheduled_at,
             started_at: Some(started_at),
             finished_at: Some(finished_at),
@@ -351,7 +371,12 @@ fn record_schedule_run_history_with_status(workflow: &mut Workflow, due_only: bo
             missed,
         });
         schedule.next_run_at = Some(finished_at + Duration::days(1));
+        emissions.push(ScheduleRunEmission {
+            schedule_task_id: task.id.clone(),
+            run_id,
+        });
     }
+    emissions
 }
 
 pub fn configured_goal_items(workflow: &Workflow) -> Vec<String> {
@@ -653,7 +678,66 @@ fn push_loop_revision(workflow: &mut Workflow, origin: &str, summary: &str) -> u
     revision
 }
 
-fn write_markdown_report(base_dir: &Path, workflow: &mut Workflow, goal: &str) -> Result<String> {
+fn build_daily_goal_artifact_lineage(
+    workflow: &Workflow,
+    goal: &str,
+    schedule_runs: &[ScheduleRunEmission],
+) -> ArtifactLineageRecord {
+    let schedule_task_id = schedule_runs
+        .first()
+        .map(|run| run.schedule_task_id.clone())
+        .or_else(|| {
+            workflow
+                .tasks
+                .iter()
+                .find(|task| task.schedule.is_some())
+                .map(|task| task.id.clone())
+        })
+        .unwrap_or_else(|| "unscheduled".to_string());
+    let run_id = schedule_runs
+        .first()
+        .map(|run| run.run_id.clone())
+        .unwrap_or_else(|| format!("run_{}", Uuid::new_v4().to_string().replace('-', "")));
+    let loop_task_id = workflow
+        .tasks
+        .iter()
+        .find(|task| {
+            task.loop_control
+                .as_ref()
+                .is_some_and(|loop_control| loop_control.items.iter().any(|item| item == goal))
+        })
+        .map(|task| task.id.clone())
+        .unwrap_or_else(|| "unknown_loop".to_string());
+    let subflow = workflow.tasks.iter().find_map(|task| {
+        task.native_subflow
+            .as_ref()
+            .filter(|subflow| subflow.goal == goal)
+    });
+    let subflow_id = subflow
+        .map(|subflow| subflow.subflow_id.clone())
+        .unwrap_or_else(|| format!("goal_research:{goal}"));
+    let triggered_by = subflow
+        .map(|subflow| subflow.triggered_by.clone())
+        .unwrap_or_else(|| format!("loop:{loop_task_id}"));
+
+    ArtifactLineageRecord {
+        schema_version: "forge.artifact_lineage.v1".to_string(),
+        workflow_id: workflow.id.clone(),
+        run_id,
+        schedule_task_id,
+        loop_task_id,
+        goal: goal.to_string(),
+        subflow_id,
+        triggered_by,
+    }
+}
+
+fn write_markdown_report(
+    base_dir: &Path,
+    workflow: &mut Workflow,
+    goal: &str,
+    lineage: &ArtifactLineageRecord,
+) -> Result<String> {
     let relative_path = format!("artifacts/{}/goal-{goal}-report.md", workflow.id);
     let full_path = base_dir.join(&relative_path);
     if let Some(parent) = full_path.parent() {
@@ -675,11 +759,17 @@ fn write_markdown_report(base_dir: &Path, workflow: &mut Workflow, goal: &str) -
         "markdown_report",
         &relative_path,
         content.as_bytes(),
+        Some(lineage.clone()),
     );
     Ok(relative_path)
 }
 
-fn write_pdf_report(base_dir: &Path, workflow: &mut Workflow, goal: &str) -> Result<String> {
+fn write_pdf_report(
+    base_dir: &Path,
+    workflow: &mut Workflow,
+    goal: &str,
+    lineage: &ArtifactLineageRecord,
+) -> Result<String> {
     let relative_path = format!("artifacts/{}/goal-{goal}-report.pdf", workflow.id);
     let full_path = base_dir.join(&relative_path);
     if let Some(parent) = full_path.parent() {
@@ -687,7 +777,13 @@ fn write_pdf_report(base_dir: &Path, workflow: &mut Workflow, goal: &str) -> Res
     }
     let pdf = minimal_pdf_bytes(&format!("Daily Goal Research: {goal}"));
     fs::write(&full_path, &pdf)?;
-    upsert_artifact(workflow, "pdf_report", &relative_path, &pdf);
+    upsert_artifact(
+        workflow,
+        "pdf_report",
+        &relative_path,
+        &pdf,
+        Some(lineage.clone()),
+    );
     Ok(relative_path)
 }
 
@@ -697,6 +793,7 @@ fn write_telegram_delivery_record(
     goal: &str,
     markdown_path: &str,
     pdf_path: &str,
+    lineage: &ArtifactLineageRecord,
 ) -> Result<TelegramDeliveryRecord> {
     let relative_path = format!("artifacts/{}/telegram-delivery-{goal}.json", workflow.id);
     let full_path = base_dir.join(&relative_path);
@@ -706,6 +803,7 @@ fn write_telegram_delivery_record(
     let record = TelegramDeliveryRecord {
         schema_version: "forge.telegram_delivery.v1".to_string(),
         goal: goal.to_string(),
+        lineage: lineage.clone(),
         status: "recorded".to_string(),
         channel: "telegram".to_string(),
         configured_telegram_chat_ref: "configured_telegram_destination".to_string(),
@@ -716,11 +814,23 @@ fn write_telegram_delivery_record(
     };
     let bytes = serde_json::to_vec_pretty(&record)?;
     fs::write(&full_path, &bytes)?;
-    upsert_artifact(workflow, "telegram_delivery", &relative_path, &bytes);
+    upsert_artifact(
+        workflow,
+        "telegram_delivery",
+        &relative_path,
+        &bytes,
+        Some(lineage.clone()),
+    );
     Ok(record)
 }
 
-fn upsert_artifact(workflow: &mut Workflow, kind: &str, relative_path: &str, bytes: &[u8]) {
+fn upsert_artifact(
+    workflow: &mut Workflow,
+    kind: &str,
+    relative_path: &str,
+    bytes: &[u8],
+    lineage: Option<ArtifactLineageRecord>,
+) {
     workflow
         .artifacts
         .retain(|artifact| artifact.path != relative_path);
@@ -730,6 +840,7 @@ fn upsert_artifact(workflow: &mut Workflow, kind: &str, relative_path: &str, byt
         path: relative_path.to_string(),
         sha256: hex_sha256(bytes),
         created_at: Utc::now(),
+        lineage,
     });
     workflow
         .tasks

@@ -104,6 +104,7 @@ pub fn attach_workflow_artifact(
         path: relative_path.clone(),
         sha256: sha256.clone(),
         created_at: Utc::now(),
+        lineage: None,
     };
     workflow.artifacts.push(artifact.clone());
     let revision = push_revision(
