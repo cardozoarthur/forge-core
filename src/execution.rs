@@ -1,4 +1,5 @@
 use crate::graph::{TaskStatus, Workflow};
+use crate::interaction::{blocking_human_interaction, HumanInteractionBlocker};
 use crate::scheduler::{plan_parallel_execution, ParallelSchedulePlan};
 use chrono::Utc;
 use serde::Serialize;
@@ -41,9 +42,41 @@ pub struct ExecutionReport {
     pub daily_goal_research: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallel_plan: Option<ParallelSchedulePlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_interaction: Option<HumanInteractionBlocker>,
 }
 
 pub fn run_simulated(workflow: &mut Workflow) -> ExecutionReport {
+    if let Some(blocker) = blocking_human_interaction(workflow) {
+        workflow.status = "blocked".to_string();
+        if let Some(task) = workflow
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == blocker.task_id)
+        {
+            task.status = TaskStatus::Blocked;
+            task.work_item.backlog_state = "blocked_on_human_interaction".to_string();
+        }
+        return ExecutionReport {
+            workflow_id: workflow.id.clone(),
+            status: "blocked_on_human_interaction".to_string(),
+            mode: "simulate".to_string(),
+            completed_tasks: 0,
+            cost_report: CostReport {
+                total_estimated_cost_usd: 0.0,
+                by_task: Vec::new(),
+            },
+            notifications: Vec::new(),
+            trace: vec![format!(
+                "{} blocked on human interaction {}",
+                blocker.task_id, blocker.interaction_id
+            )],
+            daily_goal_research: None,
+            parallel_plan: Some(plan_parallel_execution(workflow)),
+            blocked_interaction: Some(blocker),
+        };
+    }
+
     let mut trace = Vec::new();
     let mut by_task = Vec::new();
     let mut notifications = Vec::new();
@@ -104,5 +137,6 @@ pub fn run_simulated(workflow: &mut Workflow) -> ExecutionReport {
         trace,
         daily_goal_research: None,
         parallel_plan,
+        blocked_interaction: None,
     }
 }

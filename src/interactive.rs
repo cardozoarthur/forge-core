@@ -124,8 +124,14 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
         .iter()
         .map(|workflow| workflow.task_summary.failed + workflow.task_summary.blocked)
         .sum();
-    let pending_approvals =
-        usize::from(executors.needs_human_approval) + usize::from(runtimes.needs_human_approval);
+    let pending_human_interactions: usize = workflows
+        .workflows
+        .iter()
+        .map(|workflow| workflow.human_interaction_summary.pending_required)
+        .sum();
+    let pending_approvals = usize::from(executors.needs_human_approval)
+        + usize::from(runtimes.needs_human_approval)
+        + pending_human_interactions;
     let executor_availability = if executors.usable.is_empty() {
         "no allowed executors; run /sync before executor handoff".to_string()
     } else {

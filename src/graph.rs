@@ -1,6 +1,7 @@
 use crate::intent::IntentSpec;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -213,6 +214,86 @@ pub struct WorkItemSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HumanInteractionSpec {
+    #[serde(default = "human_interaction_schema_version")]
+    pub schema_version: String,
+    pub interaction_id: String,
+    pub kind: String,
+    pub prompt: String,
+    pub required: bool,
+    pub state: String,
+    pub explanation: String,
+    #[serde(default)]
+    pub choices: Vec<HumanChoiceOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form: Option<HumanFormSchema>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_at: Option<DateTime<Utc>>,
+    pub on_timeout: String,
+    pub created_at: DateTime<Utc>,
+    pub origin: String,
+    pub pending_decision_id: String,
+    #[serde(default)]
+    pub decisions: Vec<HumanDecisionRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HumanChoiceOption {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub effect: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HumanFormSchema {
+    #[serde(default = "human_form_schema_version")]
+    pub schema_version: String,
+    pub title: String,
+    pub review_before_submit: bool,
+    pub save_as_template_available: bool,
+    pub fields: Vec<HumanFormField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HumanFormField {
+    pub id: String,
+    pub label: String,
+    pub field_type: String,
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<String>,
+    pub help_text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HumanDecisionRecord {
+    #[serde(default = "human_decision_schema_version")]
+    pub schema_version: String,
+    pub decision_id: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub interaction_id: String,
+    pub kind: String,
+    pub status: String,
+    pub origin: String,
+    #[serde(default)]
+    pub selected_options: Vec<String>,
+    #[serde(default)]
+    pub field_values: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+    #[serde(default)]
+    pub affected_tasks: Vec<String>,
+    #[serde(default)]
+    pub affected_goals: Vec<String>,
+    #[serde(default)]
+    pub affected_artifacts: Vec<String>,
+    pub decided_at: DateTime<Utc>,
+    pub audit_event: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtomicTask {
     pub id: String,
     pub title: String,
@@ -239,6 +320,8 @@ pub struct AtomicTask {
     pub execution_policy: ExecutionPolicySpec,
     #[serde(default)]
     pub child_subflows: Vec<ChildSubflowRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_interaction: Option<HumanInteractionSpec>,
     pub status: TaskStatus,
 }
 
@@ -343,6 +426,18 @@ fn artifact_lineage_schema_version() -> String {
     "forge.artifact_lineage.v1".to_string()
 }
 
+fn human_interaction_schema_version() -> String {
+    "forge.human_interaction.v1".to_string()
+}
+
+fn human_form_schema_version() -> String {
+    "forge.human_form.v1".to_string()
+}
+
+fn human_decision_schema_version() -> String {
+    "forge.human_decision.v1".to_string()
+}
+
 fn task(
     id: &str,
     title: &str,
@@ -384,6 +479,7 @@ fn task(
         async_policy: AsyncPolicy::default(),
         execution_policy,
         child_subflows: Vec::new(),
+        human_interaction: None,
         status: TaskStatus::Pending,
     }
 }
