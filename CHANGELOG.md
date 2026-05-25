@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.97 - 2026-05-25
+
+### Added
+
+- Added a first Forge-owned interactive CLI contract under `forge interactive`.
+- `forge interactive home` renders a lightweight anvil mark, the `forge` name and an operational dashboard covering active runs, scheduled workflows, idle workflows, artifacts, pending approvals, validation failures, executor/runtime status, repository context, cost affordances and quick actions.
+- Added `forge interactive slash-commands --output json` with the initial slash-command catalog for `/help`, `/status`, `/list`, `/inspect`, `/runs`, `/workflows`, `/artifacts`, `/costs`, `/config`, `/sync`, `/executors`, `/runtimes`, `/validate`, `/approve`, `/reject`, `/goal`, `/attach`, `/resume`, `/pause`, `/stop`, `/delete`, `/export`, `/logs` and `/update`.
+- Added `forge interactive route --input <text>` so conversational input is classified as direct answer, explicit slash command, or workflow-backed async execution.
+- Workflow-backed conversational routing now returns the `workflow_id`, `run_id`, routing explanation and retention decision immediately.
+- Added retention policy output for conversational workflows, including human approval before deleting workflows that mention artifacts or external side effects.
+- Added CLI contract coverage for no-argument non-TTY safety, pseudo-terminal home rendering, slash-command discoverability, direct-answer routing, workflow-backed routing and retention approval.
+
+### Changed
+
+- In a TTY, running `forge` with no subcommand now renders the Forge interactive home instead of static command help.
+- Non-TTY no-argument usage remains script-safe and prints a concise help hint without opening the dashboard or creating a store.
+- The package version is now `0.4.97`.
+
+### Safety
+
+- The interactive router creates durable workflow/run state only for requests that need scheduled work, artifacts, external delivery, validation, research or multi-step execution.
+- Slash commands are surfaced with scriptable equivalent commands, mutation flags and risk levels instead of free-form hidden behavior.
+- Retention decisions do not delete workflow state automatically.
+- No Docker, Kubernetes, Knative or external user resources are mutated.
+
 ## 0.4.96 - 2026-05-25
 
 ### Added

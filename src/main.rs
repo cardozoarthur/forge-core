@@ -17,6 +17,9 @@ use forge_core::handoff::build_task_handoff;
 use forge_core::improve::generate_improvement;
 use forge_core::inspection::inspect_workflow_with_focus;
 use forge_core::intent::parse_intent;
+use forge_core::interactive::{
+    build_interactive_home, render_interactive_home, route_interactive_input, slash_command_catalog,
+};
 use forge_core::lease::{acquire_task_lease, release_task_lease};
 use forge_core::mcp::{call_mcp_tool, mcp_tools_manifest};
 use forge_core::registry::{
@@ -175,6 +178,10 @@ enum Commands {
     Mcp {
         #[command(subcommand)]
         command: McpCommands,
+    },
+    Interactive {
+        #[command(subcommand)]
+        command: InteractiveCommands,
     },
     #[command(name = "self")]
     SelfRun {
@@ -604,6 +611,26 @@ enum McpCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum InteractiveCommands {
+    Home {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    SlashCommands {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Route {
+        #[arg(long)]
+        input: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum SelfCommands {
     Run {
         #[arg(long, default_value = ".")]
@@ -660,74 +687,23 @@ fn main() {
     }
 }
 
-const FORGE_ASCII: &str = r#"
-              ▄▄▄▄▄▄▄
-             ███████████
-             ███████████
-              █████████
-           ▄█████████████▄
-          █████████████████
-         ███████████████████
-         ███████████████████
-         ███████████████████
-          █████████████████
-           ▀█████████████▀
-              █████████
-             ██       ██
-             ██       ██
-             ██       ██
-            ████     ████
-"#;
-
-fn show_dashboard(banner: &str) -> Result<i32> {
+fn show_dashboard(store_path: PathBuf) -> Result<i32> {
     if !std::io::stdin().is_terminal() {
         println!("Forge Core workflow runtime -- use `forge --help` for available commands");
         return Ok(0);
     }
 
-    println!("{banner}");
-    println!("{:^50}", "F O R G E   C O R E");
-    println!("{:^50}", "Workflow Runtime Engine");
-    println!();
-
-    let store = match ForgeStore::open(cli_store_path()) {
-        Ok(s) => s,
-        Err(_) => {
-            println!("  No workflow store found. Start with:");
-            println!("     forge plan --goal \"<your goal>\"");
-            println!("     forge --help");
-            return Ok(0);
-        }
-    };
-
-    if let Ok(report) = list_workflows_with_filters(
-        &store,
-        WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
-    ) {
-        println!(
-            "  Workflows: {} running, {} parked",
-            report.summary.running, report.summary.non_running
-        );
-    }
-
-    println!();
-    println!("  Quick commands:");
-    println!("     forge plan --goal \"<goal>\"");
-    println!("     forge list");
-    println!("     forge inspect <id>");
-    println!("     forge --help");
+    let store = ForgeStore::open(store_path)?;
+    let report = build_interactive_home(&store)?;
+    println!("{}", render_interactive_home(&report));
 
     Ok(0)
-}
-
-fn cli_store_path() -> PathBuf {
-    PathBuf::from(".forge/forge.sqlite")
 }
 
 fn run() -> Result<i32> {
     let cli = Cli::parse();
     let Some(command) = cli.command else {
-        return show_dashboard(FORGE_ASCII);
+        return show_dashboard(cli.store);
     };
     match command {
         Commands::Plan { goal, output } => {
@@ -1442,6 +1418,32 @@ fn run() -> Result<i32> {
                 let store = ForgeStore::open(cli.store)?;
                 let input = read_mcp_input(input, input_file)?;
                 let report = call_mcp_tool(&store, &tool, input)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+        },
+        Commands::Interactive { command } => match command {
+            InteractiveCommands::Home { output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_interactive_home(&store)?;
+                match output {
+                    OutputFormat::Json => print_response(output, &report)?,
+                    OutputFormat::Human => println!("{}", render_interactive_home(&report)),
+                }
+                Ok(0)
+            }
+            InteractiveCommands::SlashCommands { output } => {
+                let report = slash_command_catalog();
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            InteractiveCommands::Route {
+                input,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = route_interactive_input(&store, &input, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
             }

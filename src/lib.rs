@@ -10,6 +10,7 @@ pub mod handoff;
 pub mod improve;
 pub mod inspection;
 pub mod intent;
+pub mod interactive;
 pub mod lease;
 pub mod mcp;
 pub mod registry;

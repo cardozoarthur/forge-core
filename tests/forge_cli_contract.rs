@@ -13666,6 +13666,346 @@ fn parallel_scheduling_detects_independent_tasks_in_same_wave() {
         .unwrap_or(false));
 }
 
+#[test]
+fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args(["--store", store.to_str().unwrap(), "interactive", "home"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("forge"));
+    assert!(text.contains("Active runs"));
+    assert!(text.contains("Scheduled workflows"));
+    assert!(text.contains("Paused/idle workflows"));
+    assert!(text.contains("Recent artifacts"));
+    assert!(text.contains("Pending approvals"));
+    assert!(text.contains("Validation failures"));
+    assert!(text.contains("Executor availability"));
+    assert!(text.contains("Runtime/node status"));
+    assert!(text.contains("Repository context"));
+    assert!(text.contains("Estimated costs"));
+    assert!(text.contains("Quick actions"));
+    assert!(text.contains("/status"));
+    assert!(text.contains("/workflows"));
+}
+
+#[test]
+fn no_args_non_tty_stays_script_safe_and_does_not_open_dashboard() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "Forge Core workflow runtime -- use `forge --help`",
+        ));
+
+    assert!(!store.exists());
+}
+
+#[test]
+fn no_args_tty_renders_interactive_home_when_pseudo_terminal_is_available() {
+    let script = if Path::new("/usr/bin/script").exists() {
+        "/usr/bin/script"
+    } else if Path::new("/bin/script").exists() {
+        "/bin/script"
+    } else {
+        return;
+    };
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let binary = assert_cmd::cargo::cargo_bin("forge");
+    let command = format!("{} --store {}", binary.display(), store.display());
+
+    let output = std::process::Command::new(script)
+        .args(["-q", "-c", &command, "/dev/null"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("forge"));
+    assert!(stdout.contains("Active runs"));
+    assert!(stdout.contains("Quick actions"));
+    assert!(stdout.contains("/status"));
+}
+
+#[test]
+fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "slash-commands",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "slash_commands_loaded");
+    assert_eq!(
+        json["schema_version"],
+        "forge.interactive.slash_commands.v1"
+    );
+    for name in [
+        "/help",
+        "/status",
+        "/list",
+        "/inspect",
+        "/runs",
+        "/workflows",
+        "/artifacts",
+        "/costs",
+        "/config",
+        "/sync",
+        "/executors",
+        "/runtimes",
+        "/validate",
+        "/approve",
+        "/reject",
+        "/goal",
+        "/attach",
+        "/resume",
+        "/pause",
+        "/stop",
+        "/delete",
+        "/export",
+        "/logs",
+        "/update",
+    ] {
+        let command = find_slash_command(&json, name);
+        assert_eq!(command["name"], name);
+        assert_eq!(command["scriptable"], true);
+        assert!(command["equivalent_command"].as_array().unwrap().len() >= 2);
+    }
+
+    let status = find_slash_command(&json, "/status");
+    assert_eq!(status["risk_level"], "low");
+    assert_eq!(status["mutates_workflow"], false);
+    assert!(status["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("status".to_string())));
+}
+
+#[test]
+fn interactive_route_answers_simple_question_without_creating_workflow_state() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "route",
+            "--input",
+            "What is the current Forge status?",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "routed");
+    assert_eq!(json["input_kind"], "chat");
+    assert_eq!(json["routing_decision"], "direct_answer");
+    assert_eq!(json["workflow_created"], false);
+    assert_eq!(json["run_id"], Value::Null);
+    assert_eq!(json["workflow_id"], Value::Null);
+    assert!(json["answer"]
+        .as_str()
+        .unwrap()
+        .contains("Forge can answer this from current runtime state"));
+    assert_eq!(json["retention_decision"]["action"], "none");
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    assert_eq!(listed_json["summary"]["total"], 0);
+}
+
+#[test]
+fn interactive_route_complex_request_creates_async_workflow_and_retains_it() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let request = "Research upcoming hackathons every day, validate regulations, generate Markdown/PDF artifacts and send the report to Telegram";
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "route",
+            "--input",
+            request,
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "routed");
+    assert_eq!(json["input_kind"], "chat");
+    assert_eq!(json["routing_decision"], "new_workflow");
+    assert_eq!(json["workflow_created"], true);
+    assert!(json["run_id"].as_str().unwrap().starts_with("run_"));
+    assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
+    assert_eq!(json["retention_decision"]["action"], "retain");
+    assert_eq!(json["retention_decision"]["requires_human_approval"], false);
+    assert!(json["routing_explanation"]
+        .as_str()
+        .unwrap()
+        .contains("scheduled work"));
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            json["run_id"].as_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status_json["status"], "accepted");
+    assert_eq!(status_json["workflow_id"], json["workflow_id"]);
+    assert_eq!(status_json["requested_goal"], request);
+}
+
+#[test]
+fn interactive_route_slash_command_stays_command_mode_without_workflow() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "route",
+            "--input",
+            "/status --workflow wf_demo",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["input_kind"], "slash_command");
+    assert_eq!(json["routing_decision"], "slash_command");
+    assert_eq!(json["workflow_created"], false);
+    assert_eq!(json["slash_command"]["name"], "/status");
+    assert_eq!(json["slash_command"]["recognized"], true);
+    assert!(json["slash_command"]["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("status".to_string())));
+}
+
+#[test]
+fn interactive_retention_requires_approval_before_deleting_artifact_workflow() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "route",
+            "--input",
+            "Create a one-off PDF artifact, send it to Telegram, then delete the workflow after the answer",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["routing_decision"], "new_workflow");
+    assert_eq!(json["workflow_created"], true);
+    assert_eq!(json["retention_decision"]["action"], "keep_until_approved");
+    assert_eq!(json["retention_decision"]["requires_human_approval"], true);
+    assert!(json["retention_decision"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("artifact"));
+    assert!(json["retention_decision"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("external side effect"));
+}
+
+fn find_slash_command<'a>(json: &'a Value, name: &str) -> &'a Value {
+    json["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["name"] == name)
+        .unwrap()
+}
+
 fn write_fake_cli(bin: &Path, name: &str) {
     fs::create_dir_all(bin).unwrap();
     let path = bin.join(name);
