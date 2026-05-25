@@ -63,12 +63,12 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .iter()
         .find(|capability| capability["id"] == "creative_artifact_ir")
         .unwrap();
-    assert_eq!(creative_ir["status"], "planned");
+    assert_eq!(creative_ir["status"], "groundwork");
     assert!(creative_ir["gap_before_promotion"]
         .as_str()
         .unwrap()
-        .contains("structured IR"));
-    assert!(json["summary"]["planned"].as_u64().unwrap() >= 4);
+        .contains("declarative import"));
+    assert!(json["summary"]["groundwork"].as_u64().unwrap() >= 3);
 }
 
 #[test]
@@ -112,14 +112,12 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
     );
     assert_eq!(json["result"]["milestone"], "0.5");
     assert_eq!(json["result"]["promotion_decision"]["decision"], "fail");
-    assert!(
-        json["result"]["capabilities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|capability| capability["id"] == "design_tokens"
-                && capability["status"] == "planned")
-    );
+    assert!(json["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability["id"] == "design_tokens"
+            && capability["status"] == "groundwork"));
 }
 
 #[test]
@@ -11922,6 +11920,114 @@ fn find_runtime<'a>(json: &'a Value, id: &str) -> &'a Value {
         .unwrap()
 }
 
+#[test]
+fn parallel_execution_reports_concurrent_wave_metrics() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build three independent features at once: feature-a, feature-b, feature-c without any sequential dependencies",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+
+    let run_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let run: Value = serde_json::from_slice(&run_output).unwrap();
+    assert_eq!(run["mode"], "simulate_parallel");
+    assert!(run["concurrent_wave_count"].as_u64().unwrap() >= 1);
+    assert!(run["max_concurrent_tasks"].as_u64().unwrap() >= 1);
+    assert_eq!(run["status"], "completed");
+    assert!(
+        run["cost_report"]["total_estimated_cost_usd"]
+            .as_f64()
+            .unwrap()
+            > 0.0
+    );
+}
+
+#[test]
+fn dag_with_independent_branches_executes_concurrent_waves() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Research three independent topics: topic-alpha, topic-beta, topic-gamma then generate combined report",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+
+    let run_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let run: Value = serde_json::from_slice(&run_output).unwrap();
+    assert_eq!(run["status"], "completed");
+    assert!(run["completed_tasks"].as_u64().unwrap() >= 8);
+    assert!(
+        run["cost_report"]["total_estimated_cost_usd"]
+            .as_f64()
+            .unwrap()
+            > 0.0
+    );
+    assert_eq!(run["mode"], "simulate_parallel");
+    assert!(run["concurrent_wave_count"].as_u64().unwrap() >= 1);
+}
+
 fn find_workflow<'a>(json: &'a Value, id: &str) -> &'a Value {
     json["workflows"]
         .as_array()
@@ -14540,4 +14646,785 @@ fn write_fake_cli(bin: &Path, name: &str) {
         permissions.set_mode(0o755);
         fs::set_permissions(&path, permissions).unwrap();
     }
+}
+
+// -- Creative artifact IR tests --
+
+#[test]
+fn creative_artifact_attach_screen_is_listed_and_inspectable() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    // plan a workflow
+    let plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Design a landing page",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    let workflow_id = plan["workflow_id"].as_str().unwrap();
+
+    // attach a screen creative artifact
+    let attach_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "attach-creative",
+            "--workflow",
+            workflow_id,
+            "--title",
+            "Landing Page Hero",
+            "--kind",
+            "screen",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let attach: Value = serde_json::from_slice(&attach_output).unwrap();
+    assert_eq!(attach["status"], "creative_artifact_attached");
+    assert_eq!(attach["origin"], "forge_cli");
+    assert_eq!(attach["artifact"]["kind"], "Screen");
+    assert_eq!(attach["artifact"]["title"], "Landing Page Hero");
+    let artifact_id = attach["artifact"]["id"].as_str().unwrap();
+
+    // list creative artifacts
+    let list_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "list-creative",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list: Value = serde_json::from_slice(&list_output).unwrap();
+    assert_eq!(list["status"], "creative_artifacts_listed");
+    let artifacts = list["artifacts"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0]["id"], artifact_id);
+    assert_eq!(artifacts[0]["kind"], "Screen");
+
+    // inspect creative artifact
+    let inspect_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "inspect-creative",
+            "--workflow",
+            workflow_id,
+            "--artifact",
+            artifact_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspect: Value = serde_json::from_slice(&inspect_output).unwrap();
+    assert_eq!(inspect["status"], "creative_artifact_inspected");
+    assert_eq!(inspect["artifact"]["id"], artifact_id);
+    assert_eq!(inspect["artifact"]["kind"], "screen");
+    assert_eq!(inspect["artifact"]["content"]["type"], "screen");
+    assert_eq!(inspect["artifact"]["content"]["width_px"], 1440);
+    assert_eq!(inspect["artifact"]["content"]["height_px"], 900);
+}
+
+#[test]
+fn creative_artifact_all_kinds_can_be_attached() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Creative suite demo",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    let workflow_id = plan["workflow_id"].as_str().unwrap();
+
+    for (kind, title) in [
+        ("screen", "App Screen"),
+        ("whiteboard", "Brainstorm Board"),
+        ("document", "Requirements Doc"),
+        ("slide_deck", "Pitch Deck"),
+        ("component", "Button Component"),
+    ] {
+        let attach_output = forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "workflow",
+                "attach-creative",
+                "--workflow",
+                workflow_id,
+                "--title",
+                title,
+                "--kind",
+                kind,
+                "--origin",
+                "forge_cli",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let attach: Value = serde_json::from_slice(&attach_output).unwrap();
+        assert_eq!(attach["status"], "creative_artifact_attached");
+        assert_eq!(attach["artifact"]["title"], title);
+    }
+
+    // verify all 5 are listed
+    let list_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "list-creative",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list: Value = serde_json::from_slice(&list_output).unwrap();
+    assert_eq!(list["artifacts"].as_array().unwrap().len(), 5);
+}
+
+#[test]
+fn creative_artifact_unknown_kind_is_rejected() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Test rejection",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    let workflow_id = plan["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "attach-creative",
+            "--workflow",
+            workflow_id,
+            "--title",
+            "Bad",
+            "--kind",
+            "hologram",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn creative_artifact_inspect_missing_artifact_returns_error() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Test missing artifact",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    let workflow_id = plan["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "inspect-creative",
+            "--workflow",
+            workflow_id,
+            "--artifact",
+            "ca_nonexistent",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn token_collection_can_be_set_and_retrieved() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Design system setup",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    let workflow_id = plan["workflow_id"].as_str().unwrap();
+
+    // set token collection
+    let set_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "set-tokens",
+            "--workflow",
+            workflow_id,
+            "--name",
+            "Brand Tokens",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let set: Value = serde_json::from_slice(&set_output).unwrap();
+    assert_eq!(set["status"], "token_collection_set");
+
+    // get token collection
+    let get_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "get-tokens",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let get: Value = serde_json::from_slice(&get_output).unwrap();
+    assert_eq!(get["status"], "token_collection_loaded");
+    assert_eq!(get["token_collection"]["name"], "Brand Tokens");
+    assert_eq!(
+        get["token_collection"]["tokens"].as_array().unwrap().len(),
+        0
+    );
+}
+
+#[test]
+fn status_surfaces_creative_artifacts_and_token_presence() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Status creative check",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    let workflow_id = plan["workflow_id"].as_str().unwrap();
+
+    // no creative artifacts yet
+    let status_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "status",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: Value = serde_json::from_slice(&status_output).unwrap();
+    assert_eq!(status["creative_artifacts"].as_array().unwrap().len(), 0);
+    assert!(!status["has_token_collection"].as_bool().unwrap());
+
+    // add a creative artifact
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "attach-creative",
+            "--workflow",
+            workflow_id,
+            "--title",
+            "Hero Screen",
+            "--kind",
+            "screen",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    // status now shows creative artifact
+    let status_output2 = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "status",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status2: Value = serde_json::from_slice(&status_output2).unwrap();
+    assert_eq!(status2["creative_artifacts"].as_array().unwrap().len(), 1);
+    assert_eq!(status2["creative_artifacts"][0]["title"], "Hero Screen");
+
+    // set tokens
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "set-tokens",
+            "--workflow",
+            workflow_id,
+            "--name",
+            "Theme",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    // status now shows tokens
+    let status_output3 = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "status",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status3: Value = serde_json::from_slice(&status_output3).unwrap();
+    assert!(status3["has_token_collection"].as_bool().unwrap());
+}
+
+#[test]
+fn creative_artifact_round_trip_serialization_preserves_full_screen_content() {
+    use forge_core::ir::{
+        Breakpoint, CreativeArtifact, InteractionFlow, ScreenElement, ScreenSpec,
+    };
+    use std::collections::BTreeMap;
+
+    let spec = ScreenSpec {
+        schema_version: forge_core::ir::ir_schema_version(),
+        width_px: 1440,
+        height_px: 900,
+        background: "#1a1a2e".to_string(),
+        breakpoints: vec![
+            Breakpoint {
+                name: "tablet".to_string(),
+                max_width_px: 768,
+            },
+            Breakpoint {
+                name: "mobile".to_string(),
+                max_width_px: 375,
+            },
+        ],
+        elements: vec![
+            ScreenElement {
+                id: "el_1".to_string(),
+                component_ref: "header".to_string(),
+                x: 0.0,
+                y: 0.0,
+                width: 1440.0,
+                height: 80.0,
+                props: BTreeMap::new(),
+                visible: true,
+                locked: false,
+                layer: 0,
+            },
+            ScreenElement {
+                id: "el_2".to_string(),
+                component_ref: "hero".to_string(),
+                x: 0.0,
+                y: 80.0,
+                width: 1440.0,
+                height: 600.0,
+                props: BTreeMap::from([("heading".to_string(), "Welcome".to_string())]),
+                visible: true,
+                locked: false,
+                layer: 1,
+            },
+        ],
+        interactions: vec![InteractionFlow {
+            trigger: "click".to_string(),
+            action: "navigate".to_string(),
+            target_id: "el_2".to_string(),
+        }],
+    };
+
+    let artifact = CreativeArtifact::new_screen("Full Screen", spec.clone());
+
+    // round-trip through JSON
+    let json = serde_json::to_value(&artifact).unwrap();
+    let restored: CreativeArtifact = serde_json::from_value(json.clone()).unwrap();
+
+    assert_eq!(restored.title, "Full Screen");
+    assert_eq!(restored.tags.len(), 0);
+    assert_eq!(restored.patches.len(), 0);
+
+    match &restored.content {
+        forge_core::ir::CreativeContent::Screen(s) => {
+            assert_eq!(s.width_px, 1440);
+            assert_eq!(s.height_px, 900);
+            assert_eq!(s.background, "#1a1a2e");
+            assert_eq!(s.breakpoints.len(), 2);
+            assert_eq!(s.elements.len(), 2);
+            assert_eq!(s.interactions.len(), 1);
+            assert_eq!(s.elements[1].props.get("heading").unwrap(), "Welcome");
+        }
+        _ => panic!("expected Screen content"),
+    }
+}
+
+#[test]
+fn creative_artifact_document_with_sections_round_trips() {
+    use forge_core::ir::{CreativeArtifact, DocumentContent, DocumentSection, DocumentSpec};
+
+    let spec = DocumentSpec {
+        schema_version: forge_core::ir::ir_schema_version(),
+        title: "API Spec".to_string(),
+        author: "forge".to_string(),
+        front_matter: std::collections::BTreeMap::from([
+            ("version".to_string(), "1.0".to_string()),
+            ("status".to_string(), "draft".to_string()),
+        ]),
+        sections: vec![
+            DocumentSection {
+                id: "sec_1".to_string(),
+                heading: "Introduction".to_string(),
+                level: 1,
+                content: vec![DocumentContent::Text {
+                    value: "This API provides...".to_string(),
+                }],
+                children: vec![],
+            },
+            DocumentSection {
+                id: "sec_2".to_string(),
+                heading: "Endpoints".to_string(),
+                level: 1,
+                content: vec![
+                    DocumentContent::Code {
+                        language: "http".to_string(),
+                        code: "GET /api/v1/users".to_string(),
+                    },
+                    DocumentContent::Table {
+                        headers: vec!["Method".to_string(), "Path".to_string()],
+                        rows: vec![
+                            vec!["GET".to_string(), "/users".to_string()],
+                            vec!["POST".to_string(), "/users".to_string()],
+                        ],
+                    },
+                ],
+                children: vec![],
+            },
+        ],
+    };
+
+    let artifact = CreativeArtifact::new_document("API Spec v1", spec);
+    let json = serde_json::to_value(&artifact).unwrap();
+    let restored: CreativeArtifact = serde_json::from_value(json).unwrap();
+
+    match &restored.content {
+        forge_core::ir::CreativeContent::Document(d) => {
+            assert_eq!(d.title, "API Spec");
+            assert_eq!(d.author, "forge");
+            assert_eq!(d.front_matter.get("version").unwrap(), "1.0");
+            assert_eq!(d.sections.len(), 2);
+            assert_eq!(d.sections[1].content.len(), 2);
+            match &d.sections[1].content[1] {
+                DocumentContent::Table { headers, .. } => {
+                    assert_eq!(headers.len(), 2);
+                }
+                _ => panic!("expected Table content"),
+            }
+        }
+        _ => panic!("expected Document content"),
+    }
+}
+
+#[test]
+fn creative_artifact_component_with_variants_states_tokens_round_trips() {
+    use forge_core::ir::{
+        ComponentProp, ComponentSlot, ComponentSpec, ComponentState, ComponentVariant,
+        CreativeArtifact,
+    };
+
+    let spec = ComponentSpec {
+        schema_version: forge_core::ir::ir_schema_version(),
+        name: "Button".to_string(),
+        description: "Primary action button".to_string(),
+        props: vec![
+            ComponentProp {
+                name: "label".to_string(),
+                prop_type: "string".to_string(),
+                required: true,
+                default_value: None,
+                description: "Button label text".to_string(),
+            },
+            ComponentProp {
+                name: "variant".to_string(),
+                prop_type: "string".to_string(),
+                required: false,
+                default_value: Some("primary".to_string()),
+                description: "Visual variant".to_string(),
+            },
+        ],
+        variants: vec![
+            ComponentVariant {
+                name: "primary".to_string(),
+                props_override: std::collections::BTreeMap::new(),
+            },
+            ComponentVariant {
+                name: "secondary".to_string(),
+                props_override: std::collections::BTreeMap::new(),
+            },
+        ],
+        states: vec![
+            ComponentState {
+                name: "hover".to_string(),
+                styling: std::collections::BTreeMap::from([(
+                    "background".to_string(),
+                    "blue-600".to_string(),
+                )]),
+            },
+            ComponentState {
+                name: "disabled".to_string(),
+                styling: std::collections::BTreeMap::from([(
+                    "opacity".to_string(),
+                    "0.5".to_string(),
+                )]),
+            },
+        ],
+        slots: vec![ComponentSlot {
+            name: "icon".to_string(),
+            description: "Optional icon slot".to_string(),
+            required: false,
+        }],
+        token_dependencies: vec!["color.primary".to_string(), "spacing.md".to_string()],
+        code_template: Some("<button class=\"{variant}\">{label}</button>".to_string()),
+    };
+
+    let artifact = CreativeArtifact::new_component("Button", spec);
+    let json = serde_json::to_value(&artifact).unwrap();
+    let restored: CreativeArtifact = serde_json::from_value(json).unwrap();
+
+    match &restored.content {
+        forge_core::ir::CreativeContent::Component(c) => {
+            assert_eq!(c.name, "Button");
+            assert_eq!(c.props.len(), 2);
+            assert_eq!(c.variants.len(), 2);
+            assert_eq!(c.states.len(), 2);
+            assert_eq!(c.slots.len(), 1);
+            assert_eq!(c.token_dependencies.len(), 2);
+            assert!(c.code_template.is_some());
+            assert_eq!(c.states[0].styling.get("background").unwrap(), "blue-600");
+        }
+        _ => panic!("expected Component content"),
+    }
+}
+
+#[test]
+fn design_token_serialization_round_trips_all_types() {
+    use forge_core::ir::{DesignToken, SemanticAlias, TokenCollection, TokenType};
+    use std::collections::BTreeMap;
+
+    let collection = TokenCollection {
+        schema_version: forge_core::ir::ir_schema_version(),
+        name: "Brand".to_string(),
+        description: "Brand design tokens".to_string(),
+        tokens: vec![
+            DesignToken {
+                name: "color.primary".to_string(),
+                value: "#3B82F6".to_string(),
+                token_type: TokenType::Color,
+                description: "Primary brand color".to_string(),
+                group: "color".to_string(),
+                extensions: BTreeMap::new(),
+            },
+            DesignToken {
+                name: "spacing.md".to_string(),
+                value: "16px".to_string(),
+                token_type: TokenType::Spacing,
+                description: "Medium spacing".to_string(),
+                group: "spacing".to_string(),
+                extensions: BTreeMap::from([("scaling".to_string(), "1.5".to_string())]),
+            },
+            DesignToken {
+                name: "font.family.body".to_string(),
+                value: "Inter".to_string(),
+                token_type: TokenType::FontFamily,
+                description: "Body font".to_string(),
+                group: "typography".to_string(),
+                extensions: BTreeMap::new(),
+            },
+        ],
+        semantic_aliases: vec![SemanticAlias {
+            name: "semantic.brand".to_string(),
+            resolves_to: "color.primary".to_string(),
+            description: "Semantic brand color".to_string(),
+        }],
+    };
+
+    let json = serde_json::to_value(&collection).unwrap();
+    let restored: TokenCollection = serde_json::from_value(json).unwrap();
+
+    assert_eq!(restored.tokens.len(), 3);
+    assert_eq!(restored.semantic_aliases.len(), 1);
+    assert_eq!(restored.tokens[0].token_type, TokenType::Color);
+    assert_eq!(restored.tokens[1].token_type, TokenType::Spacing);
+    assert_eq!(restored.tokens[2].token_type, TokenType::FontFamily);
+    assert_eq!(restored.tokens[1].extensions.get("scaling").unwrap(), "1.5");
+    assert_eq!(restored.semantic_aliases[0].resolves_to, "color.primary");
+}
+
+#[test]
+fn milestone_status_reports_creative_artifact_ir_capability_as_groundwork() {
+    use forge_core::milestone::build_milestone_status;
+
+    let report = build_milestone_status("0.5").unwrap();
+    let creative_ir = report
+        .capabilities
+        .iter()
+        .find(|c| c.id == "creative_artifact_ir")
+        .expect("creative_artifact_ir capability should exist");
+    let design_tokens = report
+        .capabilities
+        .iter()
+        .find(|c| c.id == "design_tokens")
+        .expect("design_tokens capability should exist");
+    let componentization = report
+        .capabilities
+        .iter()
+        .find(|c| c.id == "componentization_ai_surfaces")
+        .expect("componentization_ai_surfaces capability should exist");
+
+    assert_eq!(
+        creative_ir.status, "groundwork",
+        "creative_artifact_ir should be groundwork"
+    );
+    assert_eq!(
+        design_tokens.status, "groundwork",
+        "design_tokens should be groundwork"
+    );
+    assert_eq!(
+        componentization.status, "groundwork",
+        "componentization_ai_surfaces should be groundwork"
+    );
 }

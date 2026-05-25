@@ -1,4 +1,5 @@
 use crate::intent::IntentSpec;
+use crate::ir;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -371,6 +372,10 @@ pub struct Workflow {
     #[serde(default)]
     pub artifacts: Vec<ArtifactRecord>,
     #[serde(default)]
+    pub creative_artifacts: Vec<ir::CreativeArtifact>,
+    #[serde(default)]
+    pub token_collection: Option<ir::TokenCollection>,
+    #[serde(default)]
     pub revisions: Vec<WorkflowRevision>,
 }
 
@@ -386,6 +391,8 @@ pub fn create_workflow(intent: IntentSpec) -> Workflow {
         intent,
         tasks,
         artifacts: Vec::new(),
+        creative_artifacts: Vec::new(),
+        token_collection: None,
         revisions: Vec::new(),
     }
 }

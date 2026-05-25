@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.4.102 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 17: Creative Artifact IR data model with ScreenSpec, WhiteboardSpec, DocumentSpec, SlideDeckSpec, ComponentSpec, DesignToken/TokenCollection, PatchByIntent types in new `src/ir.rs` module.
+- Added `creative_artifacts: Vec<CreativeArtifact>` and `token_collection: Option<TokenCollection>` fields to `Workflow` graph.
+- Added CLI commands: `forge workflow attach-creative`, `forge workflow list-creative`, `forge workflow inspect-creative`, `forge workflow set-tokens`, `forge workflow get-tokens`.
+- Added 13 new CLI contract tests covering creative artifact creation (all 5 kinds), listing, inspection, round-trip JSON serialization (screen, document, component), token collection set/get, status surface integration, and milestone status verification.
+- Milestone 0.5 capabilities `creative_artifact_ir`, `design_tokens`, `componentization_ai_surfaces` promoted from "planned" to "groundwork".
+
+### Changed
+
+- The package version is now `0.4.102`.
+- `forge status` output now includes `creative_artifacts` summary and `has_token_collection` boolean.
+- `Workflow` struct gains `creative_artifacts` and `token_collection` fields for creative runtime persistence.
+
+### Safety
+
+- No external Docker/Kubernetes/Knative resources are mutated.
+- Creative artifact IR types are pure data structures with no execution side effects.
+- All 169 existing tests continue to pass unchanged.
+- All new types use standard serde derive with no custom serialization logic.
+
+## 0.4.101 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 16: concurrent DAG execution in `run_simulated` now executes independent tasks in parallel waves using Rust threads, with cancellation support and wave-level concurrency tracking.
+- Added `concurrent_wave_count` and `max_concurrent_tasks` fields to `ExecutionReport` for operator visibility into parallel scheduling behavior.
+- Added CLI contract tests proving parallel execution produces concurrent execution waves with lineage, cost reporting and notification delivery preserved.
+- The scheduler/loop/subflow foundation milestone capability updated to note concurrent DAG execution evidence.
+
+### Changed
+
+- The package version is now `0.4.101`.
+- `run_simulated` now delegates to `run_simulated_parallel` which processes tasks in dependency-respecting waves with thread-level concurrency.
+
+### Safety
+
+- No external Docker/Kubernetes/Knative resources are mutated.
+- Parallel execution uses bounded thread pools per wave; thread join ensures proper cancellation propagation.
+- All lineage, validation, cost and notification semantics are preserved under concurrent execution.
+- The increment does not execute remote code, install Knative or modify user infrastructure.
+
 ## 0.4.100 - 2026-05-25
 
 ### Added

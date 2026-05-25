@@ -1,8 +1,9 @@
 use crate::artifact::copy_artifact;
 use crate::graph::{ArtifactRecord, TaskStatus, Workflow, WorkflowRevision};
+use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::storage::ForgeStore;
 use anyhow::{bail, Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::path::Path;
 use uuid::Uuid;
@@ -284,4 +285,179 @@ fn push_revision(
         created_at: Utc::now(),
     });
     revision
+}
+
+// -- Creative artifact management --
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreativeArtifactAttachReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub origin: String,
+    pub revision: u64,
+    pub artifact: CreativeArtifactSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreativeArtifactSummary {
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub created_at: DateTime<Utc>,
+    pub tag_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreativeArtifactListReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub artifacts: Vec<CreativeArtifactSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreativeArtifactInspectReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub artifact: CreativeArtifact,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenCollectionReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub token_collection: Option<TokenCollection>,
+    pub revision: u64,
+}
+
+pub fn attach_creative_artifact(
+    store: &ForgeStore,
+    workflow_id: &str,
+    artifact: CreativeArtifact,
+    origin: &str,
+) -> Result<CreativeArtifactAttachReport> {
+    let mut workflow = store.load_workflow(workflow_id)?;
+    workflow.creative_artifacts.push(artifact);
+    let summary = workflow.creative_artifacts.last().unwrap();
+    let revision = push_revision(
+        &mut workflow.revisions,
+        origin,
+        "creative_artifact_attached",
+        &format!(
+            "attached creative artifact {} as {:?}",
+            summary.id, summary.kind
+        ),
+    );
+    store.save_workflow(&workflow)?;
+    store.record_event(
+        workflow_id,
+        "creative_artifact_attached",
+        &serde_json::json!({
+            "origin": origin,
+            "artifact_id": summary.id,
+            "kind": format!("{:?}", summary.kind),
+            "revision": revision
+        }),
+    )?;
+
+    Ok(CreativeArtifactAttachReport {
+        status: "creative_artifact_attached".to_string(),
+        workflow_id: workflow_id.to_string(),
+        origin: origin.to_string(),
+        revision,
+        artifact: CreativeArtifactSummary {
+            id: summary.id.clone(),
+            title: summary.title.clone(),
+            kind: format!("{:?}", summary.kind),
+            created_at: summary.created_at,
+            tag_count: summary.tags.len(),
+        },
+    })
+}
+
+pub fn list_creative_artifacts(
+    store: &ForgeStore,
+    workflow_id: &str,
+) -> Result<CreativeArtifactListReport> {
+    let workflow = store.load_workflow(workflow_id)?;
+    let artifacts = workflow
+        .creative_artifacts
+        .iter()
+        .map(|a| CreativeArtifactSummary {
+            id: a.id.clone(),
+            title: a.title.clone(),
+            kind: format!("{:?}", a.kind),
+            created_at: a.created_at,
+            tag_count: a.tags.len(),
+        })
+        .collect();
+
+    Ok(CreativeArtifactListReport {
+        status: "creative_artifacts_listed".to_string(),
+        workflow_id: workflow_id.to_string(),
+        artifacts,
+    })
+}
+
+pub fn inspect_creative_artifact(
+    store: &ForgeStore,
+    workflow_id: &str,
+    artifact_id: &str,
+) -> Result<CreativeArtifactInspectReport> {
+    let workflow = store.load_workflow(workflow_id)?;
+    let artifact = workflow
+        .creative_artifacts
+        .iter()
+        .find(|a| a.id == artifact_id)
+        .with_context(|| format!("creative artifact not found: {artifact_id}"))?;
+
+    Ok(CreativeArtifactInspectReport {
+        status: "creative_artifact_inspected".to_string(),
+        workflow_id: workflow_id.to_string(),
+        artifact: artifact.clone(),
+    })
+}
+
+pub fn set_workflow_token_collection(
+    store: &ForgeStore,
+    workflow_id: &str,
+    token_collection: TokenCollection,
+    origin: &str,
+) -> Result<TokenCollectionReport> {
+    let mut workflow = store.load_workflow(workflow_id)?;
+    workflow.token_collection = Some(token_collection);
+    let revision = push_revision(
+        &mut workflow.revisions,
+        origin,
+        "token_collection_set",
+        "design token collection updated",
+    );
+    store.save_workflow(&workflow)?;
+    store.record_event(
+        workflow_id,
+        "token_collection_set",
+        &serde_json::json!({
+            "origin": origin,
+            "revision": revision
+        }),
+    )?;
+
+    Ok(TokenCollectionReport {
+        status: "token_collection_set".to_string(),
+        workflow_id: workflow_id.to_string(),
+        token_collection: workflow.token_collection.clone(),
+        revision,
+    })
+}
+
+pub fn get_workflow_token_collection(
+    store: &ForgeStore,
+    workflow_id: &str,
+) -> Result<TokenCollectionReport> {
+    let workflow = store.load_workflow(workflow_id)?;
+    Ok(TokenCollectionReport {
+        status: "token_collection_loaded".to_string(),
+        workflow_id: workflow_id.to_string(),
+        token_collection: workflow.token_collection.clone(),
+        revision: workflow.revisions.last().map(|r| r.revision).unwrap_or(0),
+    })
 }

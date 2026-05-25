@@ -25,6 +25,7 @@ use forge_core::interaction::{
 use forge_core::interactive::{
     build_interactive_home, render_interactive_home, route_interactive_input, slash_command_catalog,
 };
+use forge_core::ir::{CreativeArtifact, TokenCollection};
 use forge_core::lease::{acquire_task_lease, release_task_lease};
 use forge_core::mcp::{call_mcp_tool, mcp_tools_manifest};
 use forge_core::milestone::build_milestone_status;
@@ -48,7 +49,9 @@ use forge_core::skill::install_skill;
 use forge_core::storage::ForgeStore;
 use forge_core::validation::validate_workflow;
 use forge_core::workflow::{
-    attach_workflow_artifact, update_workflow_goal, validate_child_subflow_binding,
+    attach_creative_artifact, attach_workflow_artifact, get_workflow_token_collection,
+    inspect_creative_artifact, list_creative_artifacts, set_workflow_token_collection,
+    update_workflow_goal, validate_child_subflow_binding,
 };
 use serde::Serialize;
 use std::io::IsTerminal;
@@ -493,6 +496,48 @@ enum WorkflowCommands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
+    AttachCreative {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ListCreative {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    InspectCreative {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        artifact: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    SetTokens {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    GetTokens {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -874,12 +919,26 @@ fn run() -> Result<i32> {
         Commands::Status { workflow, output } => {
             let store = ForgeStore::open(cli.store)?;
             let workflow = store.load_workflow(&workflow)?;
+            let creative_summaries: Vec<serde_json::Value> = workflow
+                .creative_artifacts
+                .iter()
+                .map(|a| {
+                    serde_json::json!({
+                        "id": a.id,
+                        "title": a.title,
+                        "kind": format!("{:?}", a.kind),
+                        "created_at": a.created_at,
+                    })
+                })
+                .collect();
             let response = serde_json::json!({
                 "workflow_id": workflow.id,
                 "status": workflow.status,
                 "goal": workflow.goal,
                 "tasks": workflow.tasks,
                 "artifacts": workflow.artifacts,
+                "creative_artifacts": creative_summaries,
+                "has_token_collection": workflow.token_collection.is_some(),
                 "revisions": workflow.revisions,
                 "human_interaction_summary": summarize_human_interactions(&workflow.tasks),
             });
@@ -1368,6 +1427,123 @@ fn run() -> Result<i32> {
                     &child_task,
                     &origin,
                 )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::AttachCreative {
+                workflow,
+                title,
+                kind,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let artifact = match kind.as_str() {
+                    "screen" => CreativeArtifact::new_screen(
+                        &title,
+                        forge_core::ir::ScreenSpec {
+                            schema_version: forge_core::ir::ir_schema_version(),
+                            width_px: 1440,
+                            height_px: 900,
+                            background: "#ffffff".to_string(),
+                            breakpoints: Vec::new(),
+                            elements: Vec::new(),
+                            interactions: Vec::new(),
+                        },
+                    ),
+                    "whiteboard" => CreativeArtifact::new_whiteboard(
+                        &title,
+                        forge_core::ir::WhiteboardSpec {
+                            schema_version: forge_core::ir::ir_schema_version(),
+                            width_px: 1920,
+                            height_px: 1080,
+                            background: "#ffffff".to_string(),
+                            layers: Vec::new(),
+                            sticky_notes: Vec::new(),
+                            drawings: Vec::new(),
+                            text_blocks: Vec::new(),
+                            images: Vec::new(),
+                        },
+                    ),
+                    "document" => CreativeArtifact::new_document(
+                        &title,
+                        forge_core::ir::DocumentSpec {
+                            schema_version: forge_core::ir::ir_schema_version(),
+                            title: title.clone(),
+                            author: origin.clone(),
+                            front_matter: std::collections::BTreeMap::new(),
+                            sections: Vec::new(),
+                        },
+                    ),
+                    "slide_deck" => CreativeArtifact::new_slide_deck(
+                        &title,
+                        forge_core::ir::SlideDeckSpec {
+                            schema_version: forge_core::ir::ir_schema_version(),
+                            title: title.clone(),
+                            theme: "default".to_string(),
+                            slides: Vec::new(),
+                        },
+                    ),
+                    "component" => CreativeArtifact::new_component(
+                        &title,
+                        forge_core::ir::ComponentSpec {
+                            schema_version: forge_core::ir::ir_schema_version(),
+                            name: title.clone(),
+                            description: String::new(),
+                            props: Vec::new(),
+                            variants: Vec::new(),
+                            states: Vec::new(),
+                            slots: Vec::new(),
+                            token_dependencies: Vec::new(),
+                            code_template: None,
+                        },
+                    ),
+                    other => anyhow::bail!(
+                        "unknown creative artifact kind: {other}; expected one of: screen, whiteboard, document, slide_deck, component"
+                    ),
+                };
+                let report = attach_creative_artifact(&store, &workflow, artifact, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::ListCreative { workflow, output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_creative_artifacts(&store, &workflow)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::InspectCreative {
+                workflow,
+                artifact,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = inspect_creative_artifact(&store, &workflow, &artifact)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::SetTokens {
+                workflow,
+                name,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let token_collection = TokenCollection {
+                    schema_version: forge_core::ir::ir_schema_version(),
+                    name,
+                    description: String::new(),
+                    tokens: Vec::new(),
+                    semantic_aliases: Vec::new(),
+                };
+                let report =
+                    set_workflow_token_collection(&store, &workflow, token_collection, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::GetTokens { workflow, output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = get_workflow_token_collection(&store, &workflow)?;
                 print_response(output, &report)?;
                 Ok(0)
             }
