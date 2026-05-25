@@ -9,7 +9,10 @@ use crate::registry::{
 use crate::request::{
     cancel_request, list_requests, load_request_status, resume_async_request, start_async_request,
 };
-use crate::schedule::{create_daily_goal_research_workflow, update_workflow_schedule};
+use crate::schedule::{
+    create_daily_goal_research_workflow, run_due_workflow, update_loop_state,
+    update_workflow_schedule,
+};
 use crate::storage::ForgeStore;
 use crate::validation::{validate_workflow, ValidationReport};
 use crate::workflow::{attach_workflow_artifact, update_workflow_goal};
@@ -109,6 +112,18 @@ struct ScheduleUpdateInput {
 
 #[derive(Debug, Deserialize)]
 struct LoopInspectInput {
+    workflow_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoopStateInput {
+    workflow_id: String,
+    task_id: String,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunDueInput {
     workflow_id: String,
 }
 
@@ -257,6 +272,56 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.inspection.v1",
                 &["forge", "schedule", "inspect", "--workflow", "<workflow-id>", "--output", "json"],
                 ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.schedule.pause",
+                "Pause Loop Node",
+                "Pause a loop node in a scheduled workflow. Loop iterations will not advance while paused.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("task_id", "string", "loop task id"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id", "task_id"]),
+                "forge.loop_state_update.v1",
+                &["forge", "schedule", "pause", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.schedule.resume",
+                "Resume Loop Node",
+                "Resume a paused loop node in a scheduled workflow.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("task_id", "string", "loop task id"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id", "task_id"]),
+                "forge.loop_state_update.v1",
+                &["forge", "schedule", "resume", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.schedule.stop",
+                "Stop Loop Node",
+                "Stop a loop node permanently. The loop will not execute again.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("task_id", "string", "loop task id"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id", "task_id"]),
+                "forge.loop_state_update.v1",
+                &["forge", "schedule", "stop", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.schedule.run_due",
+                "Run Due Schedule",
+                "Execute a scheduled workflow that has due cron nodes (next_run_at <= now).",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                ], &["workflow_id"]),
+                "forge.schedule_run_due.v1",
+                &["forge", "schedule", "run-due", "--workflow", "<workflow-id>", "--output", "json"],
+                ToolFlags::new(true, true),
             ),
             tool(
                 "forge.run.start",
@@ -441,6 +506,43 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.missed_run_policy.as_deref(),
                 &origin,
             )?)?
+        }
+        "forge.schedule.pause" => {
+            let input: LoopStateInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(update_loop_state(
+                store,
+                &input.workflow_id,
+                &input.task_id,
+                "paused",
+                &origin,
+            )?)?
+        }
+        "forge.schedule.resume" => {
+            let input: LoopStateInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(update_loop_state(
+                store,
+                &input.workflow_id,
+                &input.task_id,
+                "active",
+                &origin,
+            )?)?
+        }
+        "forge.schedule.stop" => {
+            let input: LoopStateInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(update_loop_state(
+                store,
+                &input.workflow_id,
+                &input.task_id,
+                "stopped",
+                &origin,
+            )?)?
+        }
+        "forge.schedule.run_due" => {
+            let input: RunDueInput = parse_input(input)?;
+            serde_json::to_value(run_due_workflow(store, &input.workflow_id)?)?
         }
         "forge.schedule.list" => {
             let input: WorkflowListInput = parse_input(input)?;
