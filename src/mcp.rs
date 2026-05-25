@@ -16,8 +16,9 @@ use crate::request::{
     cancel_request, list_requests, load_request_status, resume_async_request, start_async_request,
 };
 use crate::schedule::{
-    aggregate_summary, create_daily_goal_research_workflow, run_due_workflow, scan_due_workflows,
-    update_loop_state, update_workflow_schedule, ScheduleUpdateOptions,
+    aggregate_summary, build_schedule_worker_status, create_daily_goal_research_workflow,
+    run_due_workflow, scan_due_workflows, update_loop_state, update_workflow_schedule,
+    ScheduleUpdateOptions,
 };
 use crate::storage::ForgeStore;
 use crate::validation::{validate_workflow, ValidationReport};
@@ -141,6 +142,13 @@ struct RunDueInput {
 #[derive(Debug, Deserialize)]
 struct ScanDueInput {
     executor: Option<String>,
+    ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerStatusInput {
+    executor: Option<String>,
+    max_workers: Option<usize>,
     ttl_seconds: Option<u64>,
 }
 
@@ -446,6 +454,19 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.schedule.scan_due.v1",
                 &["forge", "schedule", "scan-due", "--output", "json"],
                 ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.schedule.worker_status",
+                "Inspect Scheduler Worker Status",
+                "Inspect Forge-owned scheduler worker readiness, next wakeup, bounded worker-pool capacity, cancellation safe points and backpressure without executing due work.",
+                object_schema(&[
+                    ("executor", "string", "scheduler executor id for local leases"),
+                    ("max_workers", "integer", "bounded local worker-pool size"),
+                    ("ttl_seconds", "integer", "local schedule-task lease TTL"),
+                ], &[]),
+                "forge.schedule.worker_status.v1",
+                &["forge", "schedule", "worker-status", "--output", "json"],
+                ToolFlags::new(true, false),
             ),
             tool(
                 "forge.run.start",
@@ -827,6 +848,20 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 .unwrap_or_else(|| "mcp-scheduler".to_string());
             let ttl_seconds = input.ttl_seconds.unwrap_or(300);
             serde_json::to_value(scan_due_workflows(store, &executor, ttl_seconds)?)?
+        }
+        "forge.schedule.worker_status" => {
+            let input: WorkerStatusInput = parse_input(input)?;
+            let executor = input
+                .executor
+                .unwrap_or_else(|| "mcp-scheduler".to_string());
+            let max_workers = input.max_workers.unwrap_or(1);
+            let ttl_seconds = input.ttl_seconds.unwrap_or(300);
+            serde_json::to_value(build_schedule_worker_status(
+                store,
+                &executor,
+                max_workers,
+                ttl_seconds,
+            )?)?
         }
         "forge.schedule.list" => {
             let input: WorkflowListInput = parse_input(input)?;

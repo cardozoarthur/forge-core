@@ -19,6 +19,7 @@ const LOOP_SUMMARY_SCHEMA_VERSION: &str = "forge.loop.summary.v1";
 const MISSED_RUN_RECONCILIATION_SCHEMA_VERSION: &str = "forge.missed_run_reconciliation.v1";
 const SCALE_TO_ZERO_DECISION_SCHEMA_VERSION: &str = "forge.scale_to_zero_decision.v1";
 const SCHEDULE_SCAN_DUE_SCHEMA_VERSION: &str = "forge.schedule.scan_due.v1";
+const SCHEDULE_WORKER_STATUS_SCHEMA_VERSION: &str = "forge.schedule.worker_status.v1";
 const MISSED_RUN_GRACE_MINUTES: i64 = 5;
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -170,6 +171,79 @@ pub struct ScheduleScanDueReport {
     pub ttl_seconds: u64,
     pub summary: ScheduleScanDueSummary,
     pub results: Vec<ScheduleScanWorkflowReport>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ScheduleWorkerStatusSummary {
+    pub scanned_workflows: usize,
+    pub due_workflows: usize,
+    pub runnable_due_workflows: usize,
+    pub blocked_due_workflows: usize,
+    pub idle_workflows: usize,
+    pub scale_to_zero_workflows: usize,
+    pub paused_or_stopped_loop_workflows: usize,
+    pub scheduled_nodes: usize,
+    pub due_nodes: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduleWorkerPoolStatus {
+    pub max_workers: usize,
+    pub available_workers: usize,
+    pub assignable_due_workflows: usize,
+    pub worker_kind: String,
+    pub deterministic: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduleWorkerSleepPlan {
+    pub sleep_until_next_wakeup: bool,
+    pub next_wakeup_at: Option<String>,
+    pub sleep_seconds: u64,
+    pub mode: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduleWorkerBackpressure {
+    pub active: bool,
+    pub queued_due_workflows: usize,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduleWorkerCancellation {
+    pub supported: bool,
+    pub lease_ttl_seconds: u64,
+    pub safe_points: Vec<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduleWorkerWorkflowStatus {
+    pub workflow_id: String,
+    pub goal: String,
+    pub status: String,
+    pub due_nodes: usize,
+    pub next_wakeup_at: Option<String>,
+    pub scale_to_zero_eligible: bool,
+    pub blocked_loop_task_id: Option<String>,
+    pub blocked_loop_state: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduleWorkerStatusReport {
+    pub schema_version: String,
+    pub status: String,
+    pub executor: String,
+    pub observed_at: String,
+    pub ttl_seconds: u64,
+    pub summary: ScheduleWorkerStatusSummary,
+    pub worker_pool: ScheduleWorkerPoolStatus,
+    pub sleep: ScheduleWorkerSleepPlan,
+    pub backpressure: ScheduleWorkerBackpressure,
+    pub cancellation: ScheduleWorkerCancellation,
+    pub workflows: Vec<ScheduleWorkerWorkflowStatus>,
 }
 
 pub fn summarize_schedules(tasks: &[AtomicTask]) -> ScheduleSummary {
@@ -956,10 +1030,204 @@ pub fn scan_due_workflows(
     })
 }
 
+pub fn build_schedule_worker_status(
+    store: &ForgeStore,
+    executor: &str,
+    max_workers: usize,
+    ttl_seconds: u64,
+) -> Result<ScheduleWorkerStatusReport> {
+    let observed_at = Utc::now();
+    let max_workers = max_workers.max(1);
+    let workflows = store.load_workflows()?;
+    let mut summary = ScheduleWorkerStatusSummary::default();
+    let mut workflow_reports = Vec::new();
+    let mut next_wakeup_at: Option<DateTime<Utc>> = None;
+
+    for workflow in workflows {
+        let schedule_summary = summarize_schedules(&workflow.tasks);
+        if schedule_summary.scheduled_nodes == 0 {
+            continue;
+        }
+
+        summary.scanned_workflows += 1;
+        summary.scheduled_nodes += schedule_summary.scheduled_nodes;
+        summary.due_nodes += schedule_summary.due_nodes;
+        let scale_to_zero_eligible = can_scale_to_zero_when_idle(&schedule_summary);
+        if scale_to_zero_eligible {
+            summary.scale_to_zero_workflows += 1;
+        }
+
+        let blocked_loop = first_blocking_loop_state(&workflow);
+        let has_due = schedule_summary.due_nodes > 0;
+        if has_due {
+            summary.due_workflows += 1;
+            if blocked_loop.is_some() {
+                summary.blocked_due_workflows += 1;
+            } else {
+                summary.runnable_due_workflows += 1;
+            }
+        } else {
+            summary.idle_workflows += 1;
+        }
+        if blocked_loop.is_some() {
+            summary.paused_or_stopped_loop_workflows += 1;
+        }
+
+        for next in future_schedule_wakeups(&workflow, observed_at) {
+            next_wakeup_at = Some(match next_wakeup_at {
+                Some(current) => current.min(next),
+                None => next,
+            });
+        }
+
+        let status = if has_due && blocked_loop.is_some() {
+            "blocked_by_loop_state"
+        } else if has_due {
+            "due"
+        } else if scale_to_zero_eligible {
+            "idle_scale_to_zero"
+        } else {
+            "idle"
+        };
+        let (blocked_loop_task_id, blocked_loop_state) =
+            blocked_loop.unwrap_or((String::new(), String::new()));
+        workflow_reports.push(ScheduleWorkerWorkflowStatus {
+            workflow_id: workflow.id,
+            goal: workflow.goal,
+            status: status.to_string(),
+            due_nodes: schedule_summary.due_nodes,
+            next_wakeup_at: schedule_summary.next_run_at,
+            scale_to_zero_eligible,
+            blocked_loop_task_id: (!blocked_loop_task_id.is_empty())
+                .then_some(blocked_loop_task_id),
+            blocked_loop_state: (!blocked_loop_state.is_empty()).then_some(blocked_loop_state),
+        });
+    }
+
+    let assignable_due_workflows = summary.runnable_due_workflows.min(max_workers);
+    let queued_due_workflows = summary
+        .runnable_due_workflows
+        .saturating_sub(assignable_due_workflows);
+    let status = worker_status_label(&summary, next_wakeup_at);
+    let sleep = build_worker_sleep_plan(&summary, observed_at, next_wakeup_at);
+
+    Ok(ScheduleWorkerStatusReport {
+        schema_version: SCHEDULE_WORKER_STATUS_SCHEMA_VERSION.to_string(),
+        status,
+        executor: executor.to_string(),
+        observed_at: format_utc_rfc3339(observed_at),
+        ttl_seconds,
+        summary,
+        worker_pool: ScheduleWorkerPoolStatus {
+            max_workers,
+            available_workers: max_workers,
+            assignable_due_workflows,
+            worker_kind: "bounded_local_schedule_worker_pool".to_string(),
+            deterministic: true,
+        },
+        sleep,
+        backpressure: ScheduleWorkerBackpressure {
+            active: queued_due_workflows > 0,
+            queued_due_workflows,
+            reason: if queued_due_workflows > 0 {
+                "runnable due workflows exceed configured max_workers".to_string()
+            } else {
+                "runnable due workflows fit within configured max_workers".to_string()
+            },
+        },
+        cancellation: ScheduleWorkerCancellation {
+            supported: true,
+            lease_ttl_seconds: ttl_seconds,
+            safe_points: vec![
+                "before_acquiring_task_lease".to_string(),
+                "between_due_workflow_leases".to_string(),
+                "before_starting_executor_handoff".to_string(),
+            ],
+            reason: "worker status is read-only; scan-due can be cancelled between lease boundaries without mutating external resources".to_string(),
+        },
+        workflows: workflow_reports,
+    })
+}
+
 fn can_scale_to_zero_when_idle(summary: &ScheduleSummary) -> bool {
     summary.scheduled_nodes > 0
         && summary.due_nodes == 0
         && summary.scale_to_zero_when_idle_nodes == summary.scheduled_nodes
+}
+
+fn first_blocking_loop_state(workflow: &Workflow) -> Option<(String, String)> {
+    workflow.tasks.iter().find_map(|task| {
+        task.loop_control.as_ref().and_then(|loop_control| {
+            matches!(loop_control.state.as_str(), "paused" | "stopped")
+                .then(|| (task.id.clone(), loop_control.state.clone()))
+        })
+    })
+}
+
+fn future_schedule_wakeups(workflow: &Workflow, now: DateTime<Utc>) -> Vec<DateTime<Utc>> {
+    workflow
+        .tasks
+        .iter()
+        .filter_map(|task| {
+            task.schedule
+                .as_ref()
+                .and_then(|schedule| schedule.next_run_at)
+        })
+        .filter(|next_run_at| *next_run_at > now)
+        .collect()
+}
+
+fn worker_status_label(
+    summary: &ScheduleWorkerStatusSummary,
+    next_wakeup_at: Option<DateTime<Utc>>,
+) -> String {
+    if summary.scanned_workflows == 0 {
+        "no_scheduled_workflows".to_string()
+    } else if summary.runnable_due_workflows > 0 {
+        "ready_due_work".to_string()
+    } else if summary.blocked_due_workflows > 0 {
+        "blocked_due_work".to_string()
+    } else if next_wakeup_at.is_some() {
+        "sleeping_until_next_wakeup".to_string()
+    } else {
+        "idle_no_wakeup".to_string()
+    }
+}
+
+fn build_worker_sleep_plan(
+    summary: &ScheduleWorkerStatusSummary,
+    observed_at: DateTime<Utc>,
+    next_wakeup_at: Option<DateTime<Utc>>,
+) -> ScheduleWorkerSleepPlan {
+    if summary.runnable_due_workflows > 0 || summary.blocked_due_workflows > 0 {
+        return ScheduleWorkerSleepPlan {
+            sleep_until_next_wakeup: false,
+            next_wakeup_at: next_wakeup_at.map(format_utc_rfc3339),
+            sleep_seconds: 0,
+            mode: "ready".to_string(),
+            reason: "due scheduled work is present, so the worker should not sleep".to_string(),
+        };
+    }
+
+    let sleep_seconds = next_wakeup_at
+        .and_then(|next| (next - observed_at).to_std().ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    ScheduleWorkerSleepPlan {
+        sleep_until_next_wakeup: next_wakeup_at.is_some(),
+        next_wakeup_at: next_wakeup_at.map(format_utc_rfc3339),
+        sleep_seconds,
+        mode: if next_wakeup_at.is_some() {
+            "sleep_until_next_wakeup".to_string()
+        } else {
+            "idle_without_wakeup".to_string()
+        },
+        reason: if next_wakeup_at.is_some() {
+            "no due work exists; the worker can scale to zero until the next Forge-owned schedule wakeup".to_string()
+        } else {
+            "no scheduled workflows have a future wakeup".to_string()
+        },
+    }
 }
 
 fn first_due_schedule_task_id(workflow: &Workflow) -> Option<String> {

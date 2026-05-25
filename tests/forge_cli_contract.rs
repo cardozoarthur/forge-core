@@ -5543,6 +5543,8 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
     assert!(skill.contains("forge.task.handoff"));
     assert!(skill.contains("forge.schedule.summary"));
     assert!(skill.contains("forge.schedule.loop_summary"));
+    assert!(skill.contains("forge.schedule.worker_status"));
+    assert!(skill.contains("forge schedule worker-status"));
 }
 
 #[test]
@@ -12878,6 +12880,221 @@ fn mcp_schedule_summary_tools_return_aggregate_state_for_agents() {
         loop_summary_json["result"]["loop_summary"]["loop_over_items_nodes"],
         1
     );
+}
+
+#[test]
+fn schedule_worker_status_reports_sleep_backpressure_and_scale_to_zero_plan() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let idle = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--cron",
+            "0 8 * * *",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let idle_json: Value = serde_json::from_slice(&idle).unwrap();
+    let idle_workflow_id = idle_json["workflow_id"].as_str().unwrap();
+
+    let sleeping = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "worker-status",
+            "--executor",
+            "forge-scheduler",
+            "--max-workers",
+            "2",
+            "--ttl-seconds",
+            "120",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let sleeping_json: Value = serde_json::from_slice(&sleeping).unwrap();
+    assert_eq!(
+        sleeping_json["schema_version"],
+        "forge.schedule.worker_status.v1"
+    );
+    assert_eq!(sleeping_json["status"], "sleeping_until_next_wakeup");
+    assert_eq!(sleeping_json["executor"], "forge-scheduler");
+    assert_eq!(sleeping_json["worker_pool"]["max_workers"], 2);
+    assert_eq!(sleeping_json["worker_pool"]["assignable_due_workflows"], 0);
+    assert_eq!(sleeping_json["sleep"]["sleep_until_next_wakeup"], true);
+    assert!(sleeping_json["sleep"]["next_wakeup_at"]
+        .as_str()
+        .unwrap()
+        .contains('T'));
+    assert_eq!(sleeping_json["summary"]["scale_to_zero_workflows"], 1);
+    assert_eq!(
+        sleeping_json["workflows"][0]["workflow_id"],
+        idle_workflow_id
+    );
+    assert_eq!(
+        sleeping_json["workflows"][0]["scale_to_zero_eligible"],
+        true
+    );
+
+    for goal in ["marathon", "competition"] {
+        let created = forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "schedule",
+                "create-daily-goal-research",
+                "--goal",
+                goal,
+                "--cron",
+                "0 8 * * *",
+                "--timezone",
+                "America/Sao_Paulo",
+                "--origin",
+                "codex",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let created_json: Value = serde_json::from_slice(&created).unwrap();
+        let workflow_id = created_json["workflow_id"].as_str().unwrap();
+        let schedule_task_id = created_json["workflow"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["schedule"].is_object())
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "schedule",
+                "update",
+                "--workflow",
+                workflow_id,
+                "--task",
+                &schedule_task_id,
+                "--next-run-at",
+                "2000-01-01T00:00:00Z",
+                "--origin",
+                "codex",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    let ready = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "worker-status",
+            "--executor",
+            "forge-scheduler",
+            "--max-workers",
+            "1",
+            "--ttl-seconds",
+            "120",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ready_json: Value = serde_json::from_slice(&ready).unwrap();
+    assert_eq!(ready_json["status"], "ready_due_work");
+    assert_eq!(ready_json["summary"]["scanned_workflows"], 3);
+    assert_eq!(ready_json["summary"]["due_workflows"], 2);
+    assert_eq!(ready_json["summary"]["idle_workflows"], 1);
+    assert_eq!(ready_json["worker_pool"]["max_workers"], 1);
+    assert_eq!(ready_json["worker_pool"]["assignable_due_workflows"], 1);
+    assert_eq!(ready_json["backpressure"]["active"], true);
+    assert_eq!(ready_json["backpressure"]["queued_due_workflows"], 1);
+    assert_eq!(ready_json["sleep"]["sleep_until_next_wakeup"], false);
+    assert_eq!(ready_json["sleep"]["sleep_seconds"], 0);
+    assert_eq!(ready_json["cancellation"]["supported"], true);
+    assert_eq!(ready_json["cancellation"]["lease_ttl_seconds"], 120);
+}
+
+#[test]
+fn mcp_schedule_worker_status_tool_exposes_native_scheduler_worker_surface() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let manifest = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.schedule.worker_status");
+    assert_eq!(tool["output_schema"], "forge.schedule.worker_status.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.schedule.worker_status"])
+        .arg("--input")
+        .arg(r#"{"executor":"mcp-scheduler","max_workers":3,"ttl_seconds":90}"#)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["tool_name"], "forge.schedule.worker_status");
+    assert_eq!(
+        json["result"]["schema_version"],
+        "forge.schedule.worker_status.v1"
+    );
+    assert_eq!(json["result"]["executor"], "mcp-scheduler");
+    assert_eq!(json["result"]["worker_pool"]["max_workers"], 3);
+    assert_eq!(json["result"]["cancellation"]["lease_ttl_seconds"], 90);
 }
 
 #[test]

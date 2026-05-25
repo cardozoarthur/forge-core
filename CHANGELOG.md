@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.114 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 29: native scheduler worker status surface for Forge-owned cron/loop runtime semantics.
+- Added `forge schedule worker-status --executor <id> --max-workers <n> --ttl-seconds <n> --output json`, returning `forge.schedule.worker_status.v1` with due/idle workflow counts, next wakeup, scale-to-zero eligibility, bounded worker-pool capacity, cancellation safe points and backpressure.
+- Added MCP tool `forge.schedule.worker_status`, read-only and async-safe, so agents can inspect scheduler worker readiness before using `scan-due` or any external launcher.
+- Added CLI contract coverage proving worker status reports sleep-until-next-wakeup, scale-to-zero, bounded worker assignment and backpressure when due workflows exceed `max_workers`.
+- Updated the generated Forge skill with `forge.schedule.worker_status` and `forge schedule worker-status` examples.
+
+### Changed
+
+- The package version is now `0.4.114`.
+- This remains `0.5 groundwork` for scheduler/runtime operations. It does not claim the Forge 0.5 creative runtime is complete.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- `worker-status` is a read-only projection over Forge-owned SQLite workflow state; due execution remains behind `schedule run-due` and `schedule scan-due`.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` and `cargo build --release`.
+
 ## 0.4.113 - 2026-05-25
 
 ### Added
