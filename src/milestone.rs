@@ -90,15 +90,15 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
         capability(
             "interactive_cli_baseline",
             "Interactive Forge CLI baseline",
-            "groundwork",
-            "0.4.97 validates the no-argument TTY home, slash-command catalog, conversational routing and retention decisions.",
+            "validated",
+            "0.4.97 validates the no-argument TTY home, slash-command catalog, conversational routing and retention decisions. Cycle 24 confirms all 14 required slash commands, conversational routing with direct-answer vs workflow classification, retention decisions with delete/retain/archive policy, and CLI contract tests for TTY/non-TTY behavior with 175 passing tests.",
             "Full terminal TUI loop, autocomplete and inline mode still need implementation evidence.",
         ),
         capability(
             "human_decision_form_nodes",
             "Human decision/form nodes",
-            "groundwork",
-            "0.4.98 validates choice prompts, form schemas, durable decisions, timeout state, pause/resume and inspect/list/status visibility. 0.4.104 exposes the same decision bridge through MCP create/list/answer/expire tools.",
+            "validated",
+            "0.4.98 validates choice prompts, form schemas, durable decisions, timeout state, pause/resume and inspect/list/status visibility. 0.4.104 exposes the same decision bridge through MCP create/list/answer/expire tools. Cycle 24 validates multi-choice, approve/reject/refine/combine, yes/no confirmations, risk acknowledgement, form with review-before-submit and save-as-template through CLI contract tests.",
             "Web UI, repeated-answer default promotion and richer TUI rendering remain planned.",
         ),
         capability(

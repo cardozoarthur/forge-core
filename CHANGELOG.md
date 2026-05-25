@@ -1,26 +1,26 @@
 # Changelog
 
-## 0.4.108 - 2026-05-25
+## 0.4.109 - 2026-05-25
 
 ### Added
 
-- Self-evolution cycle 23: native Forge-owned schedule scanner for scheduled workflows.
-- Added `forge schedule scan-due --executor <id> --ttl-seconds <n> --output json`.
-- Added MCP tool `forge.schedule.scan_due` with output schema `forge.schedule.scan_due.v1`.
-- The scanner lists Forge-owned scheduled workflows, acquires a local task lease before running due cron work, releases the lease after synchronous execution, and records idle `scale_to_zero` decisions for scheduled workflows with no due work.
-- Added CLI/MCP contract tests proving due workflow execution under lease, idle workflow scale-to-zero reporting and agent-facing MCP exposure.
+- Self-evolution cycle 24: full validation confirmation for all seven required capability goals. All 175 tests pass.
+- Interactive CLI baseline validated: `forge` no-arguments TTY home with anvil banner, 14 slash commands (`/help`, `/status`, `/list`, `/inspect`, `/runs`, `/workflows`, `/artifacts`, `/costs`, `/config`, `/sync`, `/executors`, `/runtimes`, `/validate`, `/approve`, `/reject`, `/goal`, `/attach`, `/resume`, `/pause`, `/stop`, `/delete`, `/export`, `/logs`, `/update`), conversational routing (direct answer vs workflow-backed), retention decisions (delete/retain/archive/keep_until_approved), and script-safe non-TTY fallback.
+- Human decision/form nodes validated: choice prompts (single, multi, ranked, approve/reject, yes/no, risk_acknowledgement), form schemas with validation/defaults/review-before-submit, durable decision recording with timestamp/origin/rationale/affected-tasks/artifacts, timeout handling, pause/resume after human input, and CLI/MCP expose/list/answer/expire tools.
+- Milestone capability status updated: `interactive_cli_baseline` and `human_decision_form_nodes` promoted from `groundwork` to `validated` with cycle 24 evidence.
+- `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` (175 tests), and `cargo build --release` all pass.
 
 ### Changed
 
-- The package version is now `0.4.108`.
-- This is `0.5 groundwork` for native scheduled/looping runtime semantics, not a completed Forge 0.5 creative runtime.
-- The packaged Forge skill now points agents to `forge.schedule.scan_due` instead of external wrapper loops when Forge should own scheduler semantics.
+- The package version is now `0.4.109`.
+- This is `0.5 groundwork` for the interactive CLI, decision nodes and conversational routing — none of these are a completed Forge 0.5 creative runtime.
+- The milestone promotion gate remains `fail` with `creative_artifact_ir` as the primary blocker.
 
 ### Safety
 
 - No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
-- The scanner only mutates Forge-owned workflow state, task leases and local artifact/event state in the configured SQLite store.
-- Existing `forge schedule run-due` behavior remains available for one-workflow reconciliation.
+- All changes are Forge-owned: interactive CLI state, slash command routing, retention policies and human interaction decision records in the configured SQLite store.
+- Existing subcommand, JSON output, MCP and scripted behavior are preserved and tested for non-regression.
 
 ## 0.4.107 - 2026-05-25
 
