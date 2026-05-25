@@ -718,7 +718,8 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let filters =
                 WorkflowRegistryFilters::new(parse_lifecycle(input.lifecycle.as_deref())?)
                     .with_context_action(clean_optional(input.context_action))
-                    .with_quality_action(clean_optional(input.quality_action));
+                    .with_quality_action(clean_optional(input.quality_action))
+                    .only_scheduled_or_looping();
             serde_json::to_value(list_workflows_with_filters(store, filters)?)?
         }
         "forge.loop.inspect" => {

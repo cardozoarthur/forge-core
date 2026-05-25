@@ -393,6 +393,92 @@ fn inspect_and_list_surface_schedule_and_loop_visibility() {
 }
 
 #[test]
+fn schedule_list_surfaces_only_scheduled_or_looping_workflows_for_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let regular = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Create a delivery platform",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let regular_json: Value = serde_json::from_slice(&regular).unwrap();
+    let regular_workflow_id = regular_json["workflow_id"].as_str().unwrap().to_string();
+
+    let scheduled = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--cron",
+            "0 8 * * *",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let scheduled_json: Value = serde_json::from_slice(&scheduled).unwrap();
+    let scheduled_workflow_id = scheduled_json["workflow_id"].as_str().unwrap().to_string();
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "list",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    assert_eq!(listed_json["summary"]["total"], 1);
+    assert!(workflow_ids(&listed_json).contains(&scheduled_workflow_id));
+    assert!(!workflow_ids(&listed_json).contains(&regular_workflow_id));
+
+    let mcp_listed = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.schedule.list"])
+        .arg("--input")
+        .arg(r#"{}"#)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_listed).unwrap();
+    assert_eq!(mcp_json["status"], "ok");
+    assert_eq!(mcp_json["result"]["summary"]["total"], 1);
+    assert!(workflow_ids(&mcp_json["result"]).contains(&scheduled_workflow_id));
+    assert!(!workflow_ids(&mcp_json["result"]).contains(&regular_workflow_id));
+}
+
+#[test]
 fn mcp_creates_daily_goal_research_workflow_and_exposes_schedule_loop_tools() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -12035,6 +12121,15 @@ fn find_workflow<'a>(json: &'a Value, id: &str) -> &'a Value {
         .iter()
         .find(|workflow| workflow["workflow_id"] == id)
         .unwrap()
+}
+
+fn workflow_ids(json: &Value) -> Vec<String> {
+    json["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workflow| workflow["workflow_id"].as_str().unwrap().to_string())
+        .collect()
 }
 
 fn find_quality_action<'a>(json: &'a Value, action: &str) -> &'a Value {

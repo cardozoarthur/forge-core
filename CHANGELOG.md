@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.110 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 25: schedule/loop registry visibility tightened for Forge-owned scheduled work.
+- Added a CLI/MCP contract test proving `forge schedule list` and `forge.schedule.list` only surface workflows that actually contain schedule or loop nodes.
+- Added a registry filter flag for scheduled/looping workflows so the returned workflow rows and aggregate summary remain consistent.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` (6 unit tests + 176 CLI contract tests) and `cargo build --release`.
+- Required smokes passed: release `forge plan`, release `forge skill install`, and native daily `hackathon` Goal run through `schedule run-due`, producing Markdown, PDF and Telegram delivery record artifacts with `secret_exposed=false`.
+
+### Changed
+
+- The package version is now `0.4.110`.
+- `forge schedule list` now behaves as a schedule-specific operational surface instead of echoing the full workflow registry.
+- MCP `forge.schedule.list` now applies the same scheduled/looping-only filter for agent inspection.
+- This remains `0.5 groundwork` for scheduled/looping runtime semantics; it does not claim the Forge 0.5 creative runtime is complete.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- The change only affects Forge-owned registry projection and list visibility.
+- Global `cargo install --path . --force` was blocked by the sandbox read-only `/home/arthur/.cargo`; `.forge/local-install/bin/forge` was updated offline to `0.4.110`.
+
 ## 0.4.109 - 2026-05-25
 
 ### Added
