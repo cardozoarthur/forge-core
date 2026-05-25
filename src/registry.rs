@@ -40,6 +40,7 @@ pub struct WorkflowRegistryFilterReport {
     pub lifecycle: String,
     pub context_action: Option<String>,
     pub quality_action: Option<String>,
+    pub scheduled_or_looping: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +55,7 @@ pub struct WorkflowRegistryFilters {
     pub lifecycle: WorkflowLifecycleFilter,
     pub context_action: Option<String>,
     pub quality_action: Option<String>,
+    pub scheduled_or_looping: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -362,6 +364,7 @@ pub fn list_workflows_with_filters(
             lifecycle: filters.lifecycle.label().to_string(),
             context_action: filters.context_action,
             quality_action: filters.quality_action,
+            scheduled_or_looping: filters.scheduled_or_looping,
         },
         summary,
         workflows: rows,
@@ -523,6 +526,7 @@ impl WorkflowRegistryFilters {
             lifecycle,
             context_action: None,
             quality_action: None,
+            scheduled_or_looping: false,
         }
     }
 
@@ -536,8 +540,20 @@ impl WorkflowRegistryFilters {
         self
     }
 
+    pub fn only_scheduled_or_looping(mut self) -> Self {
+        self.scheduled_or_looping = true;
+        self
+    }
+
     fn matches(&self, row: &WorkflowRegistryRow) -> bool {
         if !self.lifecycle.matches(row) {
+            return false;
+        }
+
+        if self.scheduled_or_looping
+            && row.schedule_summary.scheduled_nodes == 0
+            && row.loop_summary.loop_nodes == 0
+        {
             return false;
         }
 

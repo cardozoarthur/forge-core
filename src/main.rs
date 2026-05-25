@@ -1224,7 +1224,8 @@ fn run() -> Result<i32> {
                 let store = ForgeStore::open(cli.store)?;
                 let report = list_workflows_with_filters(
                     &store,
-                    WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
+                    WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All)
+                        .only_scheduled_or_looping(),
                 )?;
                 print_response(output, &report)?;
                 Ok(0)
