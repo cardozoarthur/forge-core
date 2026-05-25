@@ -5552,7 +5552,7 @@ fn self_run_dry_run_creates_bounded_self_evolution_workflow_and_artifacts() {
             "--repo",
             repo.to_str().unwrap(),
             "--until",
-            "2026-05-25T10:00:00-03:00",
+            "2999-01-01T00:00:00-03:00",
             "--max-cycles",
             "1",
             "--executor",
@@ -5572,7 +5572,7 @@ fn self_run_dry_run_creates_bounded_self_evolution_workflow_and_artifacts() {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["status"], "planned");
     assert!(json["run_id"].as_str().unwrap().starts_with("run_"));
-    assert_eq!(json["stop_at"], "2026-05-25T10:00:00-03:00");
+    assert_eq!(json["stop_at"], "2999-01-01T00:00:00-03:00");
     assert_eq!(json["executors"], serde_json::json!(["codex", "opencode"]));
     assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
     assert!(json["cycle_reports"].as_array().unwrap().len() == 1);
@@ -5608,7 +5608,7 @@ fn self_run_prompt_packet_is_versioned_and_checksummed_for_executor_replay() {
             "--repo",
             repo.to_str().unwrap(),
             "--until",
-            "2026-05-25T10:00:00-03:00",
+            "2999-01-01T00:00:00-03:00",
             "--max-cycles",
             "1",
             "--executor",
@@ -5656,7 +5656,7 @@ fn self_run_declares_self_update_and_gh_publication_after_validation_contract() 
             "--repo",
             repo.to_str().unwrap(),
             "--until",
-            "2026-05-25T10:00:00-03:00",
+            "2999-01-01T00:00:00-03:00",
             "--max-cycles",
             "1",
             "--executor",
@@ -5719,7 +5719,7 @@ fn self_run_writes_validation_evidence_contract_artifact() {
             "--repo",
             repo.to_str().unwrap(),
             "--until",
-            "2026-05-25T10:00:00-03:00",
+            "2999-01-01T00:00:00-03:00",
             "--max-cycles",
             "1",
             "--executor",
@@ -5789,7 +5789,7 @@ fn self_run_exposes_operating_mode_overhead_ledger_and_decision_gate() {
             "--repo",
             repo.to_str().unwrap(),
             "--until",
-            "2026-05-25T10:00:00-03:00",
+            "2999-01-01T00:00:00-03:00",
             "--max-cycles",
             "1",
             "--executor",
@@ -5913,7 +5913,7 @@ fn self_run_stops_when_terminal_final_goal_contract_is_satisfied() {
             "--repo",
             repo.to_str().unwrap(),
             "--until",
-            "2026-05-25T10:00:00-03:00",
+            "2999-01-01T00:00:00-03:00",
             "--max-cycles",
             "1",
             "--mode",
@@ -5941,6 +5941,104 @@ fn self_run_stops_when_terminal_final_goal_contract_is_satisfied() {
         .as_str()
         .unwrap()
         .contains("terminal self-evolution goal is already satisfied"));
+}
+
+#[test]
+fn self_run_uses_latest_self_evolution_goal_instead_of_longest_goal() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let base_goal =
+        "Improve Forge Core autonomously with bounded executor cycles, validation gates, artifacts and changelog";
+    let terminal_goal = format!(
+        "{base_goal}. Stopping rule: when Forge has a validated lean/balanced/strict mode boundary, a measurable overhead ledger, and an automated self-evolution decision gate that can reject or stop cycles whose expected value is lower than orchestration cost, the self-evolution loop should mark the terminal goal reached, stop proposing new architecture by default, avoid further interaction, and only resume if a human gives a new explicit goal."
+    );
+    let latest_goal = format!(
+        "{base_goal}. New explicit human goal: prioritize MCP workflow invocation, reusable Codex/OpenCode skills, async agent handoff with run_id, bounded context contracts and validation artifacts."
+    );
+
+    let old_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            base_goal,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let old_plan: Value = serde_json::from_slice(&old_output).unwrap();
+    let old_workflow_id = old_plan["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "update-goal",
+            "--workflow",
+            old_workflow_id,
+            "--origin",
+            "codex",
+            "--goal",
+            &terminal_goal,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            &latest_goal,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let self_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2999-01-01T00:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--mode",
+            "balanced",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&self_output).unwrap();
+    assert_eq!(json["status"], "planned");
+    assert_eq!(json["decision_gate"]["decision"], "run_cycle");
+
+    let prompt_path = json["cycle_reports"][0]["prompt_path"].as_str().unwrap();
+    let prompt = fs::read_to_string(temp.path().join(prompt_path)).unwrap();
+    assert!(prompt.contains(&latest_goal));
+    assert!(!prompt.contains("terminal self-evolution goal is already satisfied"));
 }
 
 #[test]
@@ -6000,7 +6098,7 @@ fn self_run_rejects_low_value_bloat_cycle_in_lean_mode() {
             "--repo",
             repo.to_str().unwrap(),
             "--until",
-            "2026-05-25T10:00:00-03:00",
+            "2999-01-01T00:00:00-03:00",
             "--max-cycles",
             "1",
             "--mode",
@@ -6048,7 +6146,7 @@ fn request_status_surfaces_latest_validation_evidence_for_async_callers() {
             "--repo",
             repo.to_str().unwrap(),
             "--until",
-            "2026-05-25T10:00:00-03:00",
+            "2999-01-01T00:00:00-03:00",
             "--max-cycles",
             "1",
             "--executor",
