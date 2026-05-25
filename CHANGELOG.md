@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.115 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 30: milestone capability promotion and interactive dashboard worker-status surface.
+- Promoted `export_demo_baseline` from `groundwork` to `validated` with evidence from cycle 28 (MCP creative artifact/token tools) and cycle 29 (native scheduler worker-status surface).
+- Promoted `live_collaboration` from `planned` to `groundwork` with evidence from cycles 26-28 (aggregate schedule/loop CLI, interactive dashboard enhancements, creative MCP tools).
+- Milestone 0.5 summary now reports: validated=7, groundwork=1, planned=1.
+- Interactive home dashboard now includes a `Scheduler worker status` line with due/idle counts, worker capacity and next wakeup, derived from `forge.schedule.worker_status.v1`.
+- Added `/workers` slash command to the interactive command catalog, running `forge schedule worker-status`.
+- Added CLI contract coverage proving the updated milestone counts and `Scheduler worker status` dashboard section.
+
+### Changed
+
+- The package version is now `0.4.115`.
+- The interactive dashboard now calls `build_schedule_worker_status` with default parameters to surface real-time scheduler worker posture without additional operator input.
+- This remains `0.5 groundwork` for the scheduler runtime and creative runtime tracks; it does not claim the Forge 0.5 creative runtime is complete.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- `build_schedule_worker_status` is a read-only projection over Forge-owned SQLite workflow state; it does not execute remote code or mutate any resources.
+- The interactive dashboard and slash command additions are Forge-owned CLI surface with no external side effects.
+
 ## 0.4.114 - 2026-05-25
 
 ### Added

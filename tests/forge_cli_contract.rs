@@ -52,6 +52,10 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         !blocked_by.contains(&serde_json::json!("creative_artifact_ir")),
         "creative_artifact_ir is now validated and should not block"
     );
+    assert!(
+        !blocked_by.contains(&serde_json::json!("export_demo_baseline")),
+        "export_demo_baseline is now validated and should not block"
+    );
 
     let capabilities = json["capabilities"].as_array().unwrap();
     let scheduler = capabilities
@@ -69,9 +73,9 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .as_str()
         .unwrap()
         .contains("0.5"));
-    assert_eq!(json["summary"]["validated"].as_u64().unwrap(), 6);
+    assert_eq!(json["summary"]["validated"].as_u64().unwrap(), 7);
     assert_eq!(json["summary"]["groundwork"].as_u64().unwrap(), 1);
-    assert_eq!(json["summary"]["planned"].as_u64().unwrap(), 2);
+    assert_eq!(json["summary"]["planned"].as_u64().unwrap(), 1);
 }
 
 #[test]
@@ -127,7 +131,7 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
         .unwrap()
         .iter()
         .any(|capability| capability["id"] == "live_collaboration"
-            && capability["status"] == "planned"));
+            && capability["status"] == "groundwork"));
 }
 
 #[test]
@@ -14906,6 +14910,7 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     assert!(text.contains("Validation failures"));
     assert!(text.contains("Executor availability"));
     assert!(text.contains("Runtime/node status"));
+    assert!(text.contains("Scheduler worker status"));
     assert!(text.contains("Repository context"));
     assert!(text.contains("Estimated costs"));
     assert!(text.contains("Quick actions"));
@@ -15008,6 +15013,7 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         "/export",
         "/logs",
         "/update",
+        "/workers",
     ] {
         let command = find_slash_command(&json, name);
         assert_eq!(command["name"], name);
@@ -16695,8 +16701,8 @@ fn milestone_status_reports_creative_artifact_ir_capability_as_validated() {
         "componentization_ai_surfaces should be validated"
     );
     assert_eq!(
-        export_demo.status, "groundwork",
-        "export_demo_baseline should be groundwork after MCP creative/token exposure"
+        export_demo.status, "validated",
+        "export_demo_baseline should be validated after MCP creative/token exposure (cycle 28) and worker-status surface (cycle 29)"
     );
 }
 
