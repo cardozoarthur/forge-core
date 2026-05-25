@@ -4946,6 +4946,303 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
     assert!(skill.contains("description:"));
     assert!(skill.contains("forge plan"));
     assert!(skill.contains("forge validate"));
+    assert!(skill.contains("forge mcp tools"));
+    assert!(skill.contains("forge mcp call forge.run.start"));
+    assert!(skill.contains("forge.workflow.attach_artifact"));
+    assert!(skill.contains("forge.context.request"));
+}
+
+#[test]
+fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "mcp_tools_loaded");
+    assert_eq!(json["schema_version"], "forge.mcp.tools.v1");
+    assert_eq!(json["protocol"], "model_context_protocol");
+    assert!(json["tools"].as_array().unwrap().len() >= 10);
+
+    for tool_name in [
+        "forge.workflow.list",
+        "forge.workflow.inspect",
+        "forge.run.start",
+        "forge.run.resume",
+        "forge.run.status",
+        "forge.workflow.update_goal",
+        "forge.workflow.attach_artifact",
+        "forge.context.request",
+        "forge.validation.status",
+        "forge.artifact.fetch",
+    ] {
+        let tool = find_mcp_tool(&json, tool_name);
+        assert_eq!(tool["name"], tool_name);
+        assert_eq!(tool["input_schema"]["type"], "object");
+        assert!(tool["output_schema"]
+            .as_str()
+            .unwrap()
+            .starts_with("forge."));
+        assert!(tool["forge_command"].as_array().unwrap().len() >= 2);
+    }
+
+    let run_start = find_mcp_tool(&json, "forge.run.start");
+    assert_eq!(run_start["async_safe"], true);
+    assert_eq!(run_start["mutates_workflow"], true);
+    assert!(run_start["description"]
+        .as_str()
+        .unwrap()
+        .contains("return a run_id"));
+
+    let update_goal = find_mcp_tool(&json, "forge.workflow.update_goal");
+    assert_eq!(update_goal["mutates_workflow"], true);
+    assert!(update_goal["description"]
+        .as_str()
+        .unwrap()
+        .contains("revision"));
+}
+
+#[test]
+fn mcp_call_starts_resumes_and_polls_async_run_for_agent_handoff() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.run.start"])
+        .arg("--input")
+        .arg(r#"{"goal":"Improve Forge through MCP async handoff","origin":"codex"}"#)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    assert_eq!(started_json["schema_version"], "forge.mcp.call.v1");
+    assert_eq!(started_json["status"], "ok");
+    assert_eq!(started_json["tool_name"], "forge.run.start");
+    assert_eq!(started_json["result"]["status"], "accepted");
+    assert_eq!(started_json["result"]["async"], true);
+    let run_id = started_json["result"]["run_id"].as_str().unwrap();
+    let workflow_id = started_json["result"]["workflow_id"].as_str().unwrap();
+    assert!(run_id.starts_with("run_"));
+    assert!(workflow_id.starts_with("wf_"));
+    assert_eq!(
+        started_json["result"]["handoff_contract"]["schema_version"],
+        "forge.agent_handoff_contract.v1"
+    );
+    assert_eq!(
+        started_json["result"]["handoff_contract"]["run_id"],
+        started_json["result"]["run_id"]
+    );
+    assert_eq!(
+        started_json["result"]["handoff_contract"]["status_poll"]["tool"],
+        "forge.run.status"
+    );
+    assert_eq!(
+        started_json["result"]["handoff_contract"]["allowed_context"]["tool"],
+        "forge.context.request"
+    );
+    assert!(
+        started_json["result"]["handoff_contract"]["validation_rules"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("validate-before-promotion".to_string()))
+    );
+
+    let resume_input = serde_json::json!({
+        "run_id": run_id,
+        "origin": "opencode"
+    })
+    .to_string();
+    let resumed = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.run.resume"])
+        .arg("--input")
+        .arg(&resume_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let resumed_json: Value = serde_json::from_slice(&resumed).unwrap();
+    assert_eq!(resumed_json["status"], "ok");
+    assert_eq!(resumed_json["result"]["status"], "resumed");
+    assert_eq!(resumed_json["result"]["run_id"], run_id);
+    assert_eq!(resumed_json["result"]["workflow_id"], workflow_id);
+    assert_eq!(resumed_json["result"]["origin"], "opencode");
+    assert_eq!(
+        resumed_json["result"]["request_status"]["status"],
+        "resumed"
+    );
+
+    let status_input = serde_json::json!({ "run_id": run_id }).to_string();
+    let status = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.run.status"])
+        .arg("--input")
+        .arg(&status_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status_json["result"]["run_id"], run_id);
+    assert_eq!(status_json["result"]["workflow_id"], workflow_id);
+    assert_eq!(status_json["result"]["status"], "resumed");
+    assert_eq!(
+        status_json["result"]["handoff_summary"]["schema_version"],
+        "forge.context_handoff_summary.v1"
+    );
+}
+
+#[test]
+fn mcp_call_mutates_workflow_and_fetches_bounded_artifact_content() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let artifact = temp.path().join("mcp-note.md");
+    fs::write(
+        &artifact,
+        "# MCP artifact\n\nAttached through the Forge MCP tool surface.\n",
+    )
+    .unwrap();
+
+    let started = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.run.start"])
+        .arg("--input")
+        .arg(r#"{"goal":"Exercise MCP mutation tools","origin":"codex"}"#)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let workflow_id = started_json["result"]["workflow_id"].as_str().unwrap();
+
+    let update_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "goal": "Exercise MCP mutation tools with revision tracking",
+        "origin": "codex"
+    })
+    .to_string();
+    let updated = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.workflow.update_goal"])
+        .arg("--input")
+        .arg(&update_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let updated_json: Value = serde_json::from_slice(&updated).unwrap();
+    assert_eq!(updated_json["result"]["status"], "workflow_goal_updated");
+    assert_eq!(updated_json["result"]["revision"], 1);
+
+    let attach_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "path": artifact.to_str().unwrap(),
+        "kind": "mcp_note",
+        "origin": "opencode"
+    })
+    .to_string();
+    let attached = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.workflow.attach_artifact"])
+        .arg("--input")
+        .arg(&attach_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let attached_json: Value = serde_json::from_slice(&attached).unwrap();
+    assert_eq!(attached_json["result"]["status"], "artifact_attached");
+    assert_eq!(attached_json["result"]["revision"], 2);
+    let artifact_path = attached_json["result"]["artifact"]["path"]
+        .as_str()
+        .unwrap();
+
+    let fetch_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "path": artifact_path,
+        "max_bytes": 200
+    })
+    .to_string();
+    let fetched = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.artifact.fetch"])
+        .arg("--input")
+        .arg(&fetch_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let fetched_json: Value = serde_json::from_slice(&fetched).unwrap();
+    assert_eq!(
+        fetched_json["result"]["schema_version"],
+        "forge.mcp.artifact_fetch.v1"
+    );
+    assert_eq!(fetched_json["result"]["workflow_id"], workflow_id);
+    assert_eq!(fetched_json["result"]["artifact"]["path"], artifact_path);
+    assert_eq!(fetched_json["result"]["truncated"], false);
+    assert!(fetched_json["result"]["content_utf8"]
+        .as_str()
+        .unwrap()
+        .contains("Attached through the Forge MCP tool surface"));
+
+    let validation_input = serde_json::json!({ "workflow_id": workflow_id }).to_string();
+    let validation = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.validation.status"])
+        .arg("--input")
+        .arg(&validation_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let validation_json: Value = serde_json::from_slice(&validation).unwrap();
+    assert_eq!(
+        validation_json["result"]["schema_version"],
+        "forge.mcp.validation_status.v1"
+    );
+    assert_eq!(validation_json["result"]["validation"]["status"], "blocked");
+    assert_eq!(validation_json["result"]["validation"]["promotable"], false);
 }
 
 #[test]
@@ -11074,6 +11371,15 @@ fn find_context_action<'a>(json: &'a Value, action: &str) -> &'a Value {
         .unwrap()
         .iter()
         .find(|entry| entry["action"] == action)
+        .unwrap()
+}
+
+fn find_mcp_tool<'a>(json: &'a Value, name: &str) -> &'a Value {
+    json["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == name)
         .unwrap()
 }
 

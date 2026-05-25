@@ -50,9 +50,23 @@ Close coupling is still valuable when it reduces friction. The target architectu
 
 ## v0 Boundary
 
-The current version is a local Rust CLI and skill package. It includes SQLite persistence, simulated execution, AI/non-AI/wait/notification task kinds, executor sync/policy, runtime substrate sync/policy, goal-oriented work items, rework validation, runtime goal/artifact mutation, cluster registry/placement metadata, per-node cluster scheduling posture, explicit remote-AI placement blocking, cluster handoff manifests, cost report generation and controlled improvement artifacts with changelog generation. It does not yet include remote distributed execution, real provider adapters, SaaS UI or WASM plugins.
+The current version is a local Rust CLI, MCP tool surface and skill package. It includes SQLite persistence, simulated execution, AI/non-AI/wait/notification task kinds, executor sync/policy, runtime substrate sync/policy, goal-oriented work items, rework validation, runtime goal/artifact mutation, MCP tools for workflow list/inspect/start/resume/status/context/validation/artifact fetch, cluster registry/placement metadata, per-node cluster scheduling posture, explicit remote-AI placement blocking, cluster handoff manifests, cost report generation and controlled improvement artifacts with changelog generation. It does not yet include remote distributed execution, real provider adapters, SaaS UI or WASM plugins.
 
 ## Executor Contract Direction
+
+Agent integrations can discover the local MCP surface with:
+
+```bash
+forge mcp tools --output json
+```
+
+The current MCP manifest uses `forge.mcp.tools.v1` and exposes stable tools for
+workflow listing, graph inspection, async run start/resume/status, revisioned
+goal/artifact mutation, bounded context requests, validation status and bounded
+artifact fetch. `forge mcp call forge.run.start ...` returns the same persisted
+run/workflow ids as `forge request start` plus `forge.agent_handoff_contract.v1`,
+so Codex/OpenCode can return `run_id` quickly and poll later without duplicating
+workflow state outside Forge.
 
 Executor integrations should converge on a bounded packet:
 

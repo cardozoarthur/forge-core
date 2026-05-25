@@ -31,6 +31,15 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 8. Run `forge validate --workflow <id> --output json` before promotion. If `rework_tasks` is not empty, return those tasks to work.
 9. Run `forge improve --workflow <id> --target-version <version> --output json` only to generate a controlled experiment and changelog. Do not auto-promote without benchmark and validation evidence.
 
+## MCP Agent Surface
+
+- Use `forge mcp tools --output json` to discover stable agent-facing tools before wiring a Codex/OpenCode workflow.
+- For async handoff, call `forge mcp call forge.run.start --input '{"goal":"<objective>","origin":"codex"}' --output json`, return `result.run_id` quickly, and let Forge remain the source of truth.
+- Poll later with `forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json`.
+- Resume a paused async handoff with `forge mcp call forge.run.resume --input '{"run_id":"<run-id>","origin":"opencode"}' --output json`.
+- Inspect or route work through `forge.workflow.inspect`, `forge.context.request`, `forge.workflow.attach_artifact`, `forge.workflow.update_goal`, `forge.validation.status` and `forge.artifact.fetch`.
+- MCP mutations must still go through Forge so revisions, artifact hashes, origins and validation gates are persisted.
+
 ## Safety Rules
 
 - Never mark an execution step complete without validation evidence.
@@ -51,11 +60,17 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 forge plan --goal "Create a delivery platform" --output json
 forge request start --goal "Improve Forge Core" --origin codex --output json
 forge request status --run <run-id> --output json
+forge request resume --run <run-id> --origin codex --output json
+forge mcp tools --output json
+forge mcp call forge.run.start --input '{"goal":"Improve Forge Core","origin":"codex"}' --output json
+forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json
 forge sync all --home "$HOME" --allow codex --allow opencode --output json
 forge executors --output json
 forge runtimes --output json
 forge workflow update-goal --workflow <workflow-id> --goal "new goal" --origin codex --output json
 forge workflow attach-artifact --workflow <workflow-id> --path ./artifact.md --kind report --origin opencode --output json
+forge mcp call forge.workflow.attach_artifact --input '{"workflow_id":"<workflow-id>","path":"./artifact.md","kind":"report","origin":"codex"}' --output json
+forge mcp call forge.context.request --input '{"workflow_id":"<workflow-id>","task_id":"task-001","budget":1200}' --output json
 forge runtime guard --substrate knative --resource service/forge-node --namespace forge --action update --owner forge --output json
 forge list --output json
 forge status --workflow <workflow-id> --output json

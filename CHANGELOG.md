@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.88 - 2026-05-25
+
+### Added
+
+- Added `forge mcp tools --output json`, returning `forge.mcp.tools.v1` with stable agent-facing tool specs for workflow list/inspect, async run start/resume/status, goal/artifact mutation, bounded context requests, validation status and bounded artifact fetch.
+- Added `forge mcp call <tool> --input <json> --output json`, returning `forge.mcp.call.v1` while delegating all state changes to existing Forge workflow/request/artifact APIs.
+- Added `forge request resume --run <run-id> --origin <origin> --output json` so agent handoff flows can mark a run as resumed and receive the current request status in one call.
+- `forge request start` now includes `forge.agent_handoff_contract.v1` with run id, workflow id, Forge authority policy, allowed bounded-context tool, validation rules and status-poll command.
+- Generated Codex/OpenCode skills now document the MCP async handoff path and common MCP tools.
+- Added CLI contract coverage for MCP tool discovery, async start/resume/status handoff, revisioned MCP goal/artifact mutation, bounded artifact fetch and generated skill guidance.
+- Added `docs/reports/forge-core-v0.4.88-report-2026-05-25.md` with the cycle report.
+
+### Changed
+
+- The package version is now `0.4.88`.
+- Async handoff summaries now include a versioned `forge.context_handoff_summary.v1` schema marker.
+
+### Safety
+
+- The MCP layer is a deterministic local adapter over Forge-owned SQLite state and existing CLI contracts.
+- MCP mutations still flow through Forge workflow APIs, so origins, revisions, artifact hashes and validation gates remain auditable.
+- Artifact fetch is limited to Forge-owned artifact refs and bounded by `max_bytes`; it does not read arbitrary paths.
+- This increment does not execute remote code, install Knative, mutate Docker/Kubernetes/Knative resources or authorize remote AI executors.
+
 ## 0.4.86 - 2026-05-24
 
 ### Added
