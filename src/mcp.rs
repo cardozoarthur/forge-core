@@ -3,6 +3,10 @@ use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{build_context_package_with_checkpoint, DEFAULT_CONTEXT_BUDGET};
 use crate::handoff::build_task_handoff;
 use crate::inspection::inspect_workflow_with_focus;
+use crate::interaction::{
+    answer_human_interaction, create_choice_interaction, create_form_interaction,
+    expire_human_interaction, list_human_interactions, CreateChoiceInteractionRequest,
+};
 use crate::milestone::build_milestone_status;
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
@@ -165,6 +169,46 @@ struct WorkflowAttachArtifactInput {
     path: String,
     kind: String,
     origin: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct InteractionCreateChoiceInput {
+    workflow_id: String,
+    task_id: String,
+    kind: Option<String>,
+    prompt: String,
+    choices: Vec<String>,
+    timeout_seconds: Option<u64>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InteractionCreateFormInput {
+    workflow_id: String,
+    task_id: String,
+    prompt: String,
+    fields: Vec<String>,
+    timeout_seconds: Option<u64>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InteractionAnswerInput {
+    workflow_id: String,
+    task_id: String,
+    #[serde(default)]
+    selected_options: Vec<String>,
+    #[serde(default)]
+    field_values: Vec<String>,
+    rationale: Option<String>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InteractionExpireInput {
+    workflow_id: String,
+    task_id: String,
+    origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -415,6 +459,77 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
+                "forge.interaction.create_choice",
+                "Create Human Choice Interaction",
+                "Pause a workflow task on a Forge-owned human choice gate that can be answered from CLI, web or agent surfaces.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("task_id", "string", "task id"),
+                    ("kind", "string", "single_choice|multi_choice|ranked_choice|approve_reject_refine_combine|yes_no|risk_acknowledgement"),
+                    ("prompt", "string", "human-facing prompt"),
+                    ("choices", "array", "choice specs as id=Label|Description|Effect"),
+                    ("timeout_seconds", "integer", "optional timeout in seconds"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id", "task_id", "prompt", "choices"]),
+                "forge.human_interaction.v1",
+                &["forge", "interaction", "create-choice", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.interaction.create_form",
+                "Create Human Form Interaction",
+                "Pause a workflow task on a Forge-owned structured form with validation and durable decision state.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("task_id", "string", "task id"),
+                    ("prompt", "string", "human-facing form prompt"),
+                    ("fields", "array", "field specs as id:type:required|optional[:default]"),
+                    ("timeout_seconds", "integer", "optional timeout in seconds"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id", "task_id", "prompt", "fields"]),
+                "forge.human_interaction.v1",
+                &["forge", "interaction", "create-form", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.interaction.answer",
+                "Answer Human Interaction",
+                "Record a human decision or form answer and resume the blocked workflow task through Forge state.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("task_id", "string", "task id"),
+                    ("selected_options", "array", "choice option ids"),
+                    ("field_values", "array", "form values as id=value"),
+                    ("rationale", "string", "optional human rationale"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id", "task_id"]),
+                "forge.human_interaction.v1",
+                &["forge", "interaction", "answer", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.interaction.expire",
+                "Expire Human Interaction",
+                "Mark a timed-out human interaction blocked without letting the workflow skip the decision.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("task_id", "string", "task id"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id", "task_id"]),
+                "forge.human_interaction.v1",
+                &["forge", "interaction", "expire", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.interaction.list",
+                "List Human Interactions",
+                "List pending, answered and timed-out human interactions across Forge workflows for agent approval bridges.",
+                object_schema(&[], &[]),
+                "forge.human_interaction.list.v1",
+                &["forge", "interaction", "list", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.context.request",
                 "Request Bounded Context",
                 "Build the minimum correct task-local context package before executor handoff.",
@@ -631,6 +746,60 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &input.origin,
             )?)?
         }
+        "forge.interaction.create_choice" => {
+            let input: InteractionCreateChoiceInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            let kind = input.kind.unwrap_or_else(|| "single_choice".to_string());
+            serde_json::to_value(create_choice_interaction(
+                store,
+                CreateChoiceInteractionRequest {
+                    workflow_id: &input.workflow_id,
+                    task_id: &input.task_id,
+                    kind: &kind,
+                    prompt: &input.prompt,
+                    choices: &input.choices,
+                    timeout_seconds: input.timeout_seconds,
+                    origin: &origin,
+                },
+            )?)?
+        }
+        "forge.interaction.create_form" => {
+            let input: InteractionCreateFormInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(create_form_interaction(
+                store,
+                &input.workflow_id,
+                &input.task_id,
+                &input.prompt,
+                &input.fields,
+                input.timeout_seconds,
+                &origin,
+            )?)?
+        }
+        "forge.interaction.answer" => {
+            let input: InteractionAnswerInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(answer_human_interaction(
+                store,
+                &input.workflow_id,
+                &input.task_id,
+                &input.selected_options,
+                &input.field_values,
+                input.rationale.as_deref(),
+                &origin,
+            )?)?
+        }
+        "forge.interaction.expire" => {
+            let input: InteractionExpireInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(expire_human_interaction(
+                store,
+                &input.workflow_id,
+                &input.task_id,
+                &origin,
+            )?)?
+        }
+        "forge.interaction.list" => serde_json::to_value(list_human_interactions(store)?)?,
         "forge.context.request" => {
             let input: ContextRequestInput = parse_input(input)?;
             let workflow = store.load_workflow(&input.workflow_id)?;

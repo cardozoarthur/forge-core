@@ -14786,6 +14786,269 @@ fn human_interaction_timeout_keeps_workflow_blocked_with_audit_state() {
     assert_eq!(inspected_json["human_interaction_summary"]["timed_out"], 1);
 }
 
+#[test]
+fn mcp_exposes_human_interaction_bridge_tools() {
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+
+    for (name, output_schema, mutates_workflow) in [
+        (
+            "forge.interaction.create_choice",
+            "forge.human_interaction.v1",
+            true,
+        ),
+        (
+            "forge.interaction.create_form",
+            "forge.human_interaction.v1",
+            true,
+        ),
+        (
+            "forge.interaction.answer",
+            "forge.human_interaction.v1",
+            true,
+        ),
+        (
+            "forge.interaction.expire",
+            "forge.human_interaction.v1",
+            true,
+        ),
+        (
+            "forge.interaction.list",
+            "forge.human_interaction.list.v1",
+            false,
+        ),
+    ] {
+        let tool = find_mcp_tool(&manifest_json, name);
+        assert_eq!(tool["output_schema"], output_schema);
+        assert_eq!(tool["async_safe"], true);
+        assert_eq!(tool["mutates_workflow"], mutates_workflow);
+    }
+}
+
+#[test]
+fn mcp_human_interaction_choice_answer_round_trip_preserves_audit_state() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Prepare a deployment plan that requires agent-visible human approval",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let task = find_task(
+        planned_json["tasks"].as_array().unwrap(),
+        "Extract requirements",
+    );
+    let task_id = task["id"].as_str().unwrap();
+
+    let create_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "task_id": task_id,
+        "kind": "approve_reject_refine_combine",
+        "prompt": "Choose the safe deployment direction",
+        "choices": [
+            "approve=Approve|Proceed with current scope|resume workflow",
+            "refine=Refine|Request a narrower scope|keep workflow paused"
+        ],
+        "timeout_seconds": 3600,
+        "origin": "mcp"
+    })
+    .to_string();
+    let created = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interaction.create_choice"])
+        .arg("--input")
+        .arg(&create_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    assert_eq!(created_json["status"], "ok");
+    assert_eq!(
+        created_json["result"]["status"],
+        "human_interaction_created"
+    );
+    assert_eq!(created_json["result"]["workflow_id"], workflow_id);
+    assert_eq!(created_json["result"]["task_id"], task_id);
+    assert_eq!(created_json["result"]["interaction"]["state"], "pending");
+    assert_eq!(created_json["result"]["origin"], "mcp");
+
+    let listed = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interaction.list"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    assert_eq!(listed_json["result"]["summary"]["pending_required"], 1);
+    assert_eq!(
+        listed_json["result"]["interactions"][0]["interaction"]["kind"],
+        "approve_reject_refine_combine"
+    );
+
+    let answer_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "task_id": task_id,
+        "selected_options": ["approve"],
+        "rationale": "Approved through the MCP human approval bridge",
+        "origin": "mcp"
+    })
+    .to_string();
+    let answered = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interaction.answer"])
+        .arg("--input")
+        .arg(&answer_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let answered_json: Value = serde_json::from_slice(&answered).unwrap();
+    assert_eq!(
+        answered_json["result"]["status"],
+        "human_interaction_answered"
+    );
+    assert_eq!(answered_json["result"]["interaction"]["state"], "answered");
+    assert_eq!(answered_json["result"]["decision"]["origin"], "mcp");
+    assert_eq!(
+        answered_json["result"]["decision"]["selected_options"],
+        serde_json::json!(["approve"])
+    );
+    assert_eq!(answered_json["result"]["task_status"], "pending");
+}
+
+#[test]
+fn mcp_human_interaction_form_and_expire_validate_like_cli_surface() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Collect budget settings before running a scheduled workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let task_id = planned_json["tasks"][0]["id"].as_str().unwrap();
+
+    let form_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "task_id": task_id,
+        "prompt": "Provide budget settings",
+        "fields": [
+            "budget_usd:number:required:5",
+            "telegram_channel_ref:text:optional:configured_telegram_destination"
+        ],
+        "timeout_seconds": 0,
+        "origin": "mcp"
+    })
+    .to_string();
+    let created = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interaction.create_form"])
+        .arg("--input")
+        .arg(&form_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    assert_eq!(created_json["result"]["interaction"]["kind"], "form");
+    assert_eq!(
+        created_json["result"]["interaction"]["form"]["fields"][0]["id"],
+        "budget_usd"
+    );
+
+    let invalid_answer = serde_json::json!({
+        "workflow_id": workflow_id,
+        "task_id": task_id,
+        "field_values": ["telegram_channel_ref=configured_telegram_destination"],
+        "origin": "mcp"
+    })
+    .to_string();
+    forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interaction.answer"])
+        .arg("--input")
+        .arg(&invalid_answer)
+        .args(["--output", "json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "missing required form field: budget_usd",
+        ));
+
+    let expired = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interaction.expire"])
+        .arg("--input")
+        .arg(
+            serde_json::json!({
+                "workflow_id": workflow_id,
+                "task_id": task_id,
+                "origin": "mcp"
+            })
+            .to_string(),
+        )
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let expired_json: Value = serde_json::from_slice(&expired).unwrap();
+    assert_eq!(
+        expired_json["result"]["status"],
+        "human_interaction_timed_out"
+    );
+    assert_eq!(expired_json["result"]["interaction"]["state"], "timed_out");
+    assert_eq!(expired_json["result"]["task_status"], "blocked");
+}
+
 fn find_slash_command<'a>(json: &'a Value, name: &str) -> &'a Value {
     json["commands"]
         .as_array()

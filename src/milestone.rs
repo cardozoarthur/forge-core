@@ -98,8 +98,8 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
             "human_decision_form_nodes",
             "Human decision/form nodes",
             "groundwork",
-            "0.4.98 validates choice prompts, form schemas, durable decisions, timeout state, pause/resume and inspect/list/status visibility.",
-            "Web UI, MCP approval bridge, repeated-answer default promotion and richer TUI rendering remain planned.",
+            "0.4.98 validates choice prompts, form schemas, durable decisions, timeout state, pause/resume and inspect/list/status visibility. 0.4.104 exposes the same decision bridge through MCP create/list/answer/expire tools.",
+            "Web UI, repeated-answer default promotion and richer TUI rendering remain planned.",
         ),
         capability(
             "scheduler_loop_subflow_foundation",

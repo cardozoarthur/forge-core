@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.104 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 19: agent-facing MCP bridge for Forge-owned human interaction nodes.
+- Added MCP tools `forge.interaction.create_choice`, `forge.interaction.create_form`, `forge.interaction.answer`, `forge.interaction.expire` and `forge.interaction.list`.
+- The MCP bridge reuses the existing Forge interaction state machine, so choices, forms, required-field validation, timeout handling, durable decisions, workflow revisions and origin audit records stay consistent with the CLI/TUI surface.
+- Added CLI contract coverage proving MCP tool discovery, choice creation, list visibility, answer/resume audit state, form validation and timeout expiry.
+
+### Changed
+
+- The package version is now `0.4.104`.
+- The Forge 0.5 milestone documentation and status evidence now record the MCP human approval bridge as `0.5 groundwork`, not a completed 0.5 creative runtime.
+- The packaged Forge skill now instructs agents to use MCP interaction tools for paused human decision nodes instead of ad hoc chat decisions.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- MCP interaction mutations go through Forge-owned workflow state and preserve revision/origin traces.
+- The bridge does not auto-approve, auto-delete workflows or bypass validation gates.
+
 ## 0.4.103 - 2026-05-25
 
 ### Added
