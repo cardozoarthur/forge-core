@@ -15,7 +15,7 @@ use crate::request::{
     cancel_request, list_requests, load_request_status, resume_async_request, start_async_request,
 };
 use crate::schedule::{
-    create_daily_goal_research_workflow, run_due_workflow, update_loop_state,
+    create_daily_goal_research_workflow, run_due_workflow, scan_due_workflows, update_loop_state,
     update_workflow_schedule, ScheduleUpdateOptions,
 };
 use crate::storage::ForgeStore;
@@ -131,6 +131,12 @@ struct LoopStateInput {
 #[derive(Debug, Deserialize)]
 struct RunDueInput {
     workflow_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScanDueInput {
+    executor: Option<String>,
+    ttl_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -373,6 +379,18 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &["workflow_id"]),
                 "forge.schedule_run_due.v1",
                 &["forge", "schedule", "run-due", "--workflow", "<workflow-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.schedule.scan_due",
+                "Scan Due Schedules",
+                "Scan Forge-owned scheduled workflows, lease due schedule nodes locally, run due work and report idle scale-to-zero decisions.",
+                object_schema(&[
+                    ("executor", "string", "scheduler executor id for local leases"),
+                    ("ttl_seconds", "integer", "local schedule-task lease TTL"),
+                ], &[]),
+                "forge.schedule.scan_due.v1",
+                &["forge", "schedule", "scan-due", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -686,6 +704,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         "forge.schedule.run_due" => {
             let input: RunDueInput = parse_input(input)?;
             serde_json::to_value(run_due_workflow(store, &input.workflow_id)?)?
+        }
+        "forge.schedule.scan_due" => {
+            let input: ScanDueInput = parse_input(input)?;
+            let executor = input
+                .executor
+                .unwrap_or_else(|| "mcp-scheduler".to_string());
+            let ttl_seconds = input.ttl_seconds.unwrap_or(300);
+            serde_json::to_value(scan_due_workflows(store, &executor, ttl_seconds)?)?
         }
         "forge.schedule.list" => {
             let input: WorkflowListInput = parse_input(input)?;
