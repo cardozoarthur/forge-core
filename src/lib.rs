@@ -11,6 +11,7 @@ pub mod improve;
 pub mod inspection;
 pub mod intent;
 pub mod lease;
+pub mod mcp;
 pub mod registry;
 pub mod request;
 pub mod runtime;

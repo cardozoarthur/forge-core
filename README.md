@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.86`
+Current version: `0.4.88`
 
 This is the first functional CLI + Skill version:
 
@@ -63,6 +63,7 @@ This is the first functional CLI + Skill version:
 - runtime workflow mutation for goals and artifacts with origin trace from `codex`, `opencode`, `forge_cli` or skills
 - async workflow substrate policy with scope guards for Forge-owned resources
 - async request handoff for skill callers: submit a goal, receive `run_id`, continue later with Forge
+- MCP tool manifest and call surface for agent workflows: list, inspect, start/resume/status, context request, validation status and bounded artifact fetch
 - persisted task leases so two executors cannot acquire the same workflow task concurrently
 - executor handoff packets that combine strict context readiness, lease metadata, routing cache keys, checksums and validation gates
 - cluster handoff packets that choose an eligible node, lease the task to that node and return a content-addressed sync manifest without remote execution
@@ -221,13 +222,29 @@ Skill-style async handoff:
 ```bash
 forge request start --goal "Improve Forge Core" --origin codex --output json
 forge request status --run <run-id> --output json
+forge request resume --run <run-id> --origin codex --output json
 ```
 
 Codex/OpenCode should prefer this pattern when using Forge as a skill: make a short request, receive a `run_id`, and let Forge own the asynchronous workflow state.
-`forge request start` uses the same registry-derived reuse pass as `forge plan`, returning `reuse_candidates` and `attached_subflows` when Forge can attach a compatible deterministic child subflow before persisting the async workflow.
+`forge request start` uses the same registry-derived reuse pass as `forge plan`, returning `reuse_candidates`, `attached_subflows` and `forge.agent_handoff_contract.v1` when Forge can attach a compatible deterministic child subflow before persisting the async workflow.
 `forge request status` resolves the run id back to the current Forge workflow state, including the current goal, original requested goal, latest revision, artifact count, task status summary and context handoff summary for every task.
 The handoff summary includes aggregate routing quality counts and each task's quality contract, so async callers can distinguish dependency waits from context budget/profile pressure without opening full context packets.
 `forge list` exposes the workflow registry across planned and async workflows, including stable workflow ids, associated run ids, initial request, current goal, lifecycle state, task summary, execution-policy route counts and deterministic code-node subflows that can be reused by compatible future workflows. Completed finite workflows are projected as `scaled_to_zero` when there is no remaining task work. Operators can use `forge list --context-actions` to discover valid handoff/resume/retry filter values, then combine lifecycle slices with `--context-action <action>` to find workflows whose next context route includes a specific handoff action such as `wait_for_dependencies`, `increase_context_budget` or `partial_retry_with_fresh_context`. Each registry row also includes `context_action_refs`, a per-task list with the task id, title, executor, next action, handoff status, blocker refs, checkpoint refs and current routing cache key, so operators can jump directly from a filtered registry row to the affected tasks without opening a full inspection first.
+
+Agent-facing MCP surface:
+
+```bash
+forge mcp tools --output json
+forge mcp call forge.run.start --input '{"goal":"Improve Forge Core","origin":"codex"}' --output json
+forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json
+forge mcp call forge.run.resume --input '{"run_id":"<run-id>","origin":"opencode"}' --output json
+forge mcp call forge.workflow.inspect --input '{"workflow_id":"<workflow-id>","verbose":true}' --output json
+forge mcp call forge.context.request --input '{"workflow_id":"<workflow-id>","task_id":"task-001","budget":1200}' --output json
+forge mcp call forge.workflow.attach_artifact --input '{"workflow_id":"<workflow-id>","path":"./report.md","kind":"report","origin":"codex"}' --output json
+forge mcp call forge.artifact.fetch --input '{"workflow_id":"<workflow-id>","path":"artifacts/<workflow-id>/attached-report-report.md","max_bytes":4096}' --output json
+```
+
+The MCP call surface is a stable local adapter layer over the existing Forge CLI and SQLite state. It does not introduce a second source of truth: mutations still flow through `workflow update-goal` and `workflow attach-artifact`, validation remains explicit, and artifact reads are bounded to Forge-owned artifact refs.
 The registry-level `execution_policy` summary uses schema `forge.registry_execution_policy.v1` and aggregates AI, mixed, deterministic, no-AI, model-call-required, model-call-avoided, local-code and reusable local-code route counts for both the filtered global summary and every workflow row.
 The registry also includes compact `context_handoff`, `context_actions` and `context_quality` projections for every workflow and for the filtered global summary, so operators can see ready tasks, missing-context blockers, dependency blockers, routing quality pressure and the workflow-level `quality_action` recommendation without inspecting each task individually.
 `forge plan` and `forge request start` report `reuse_candidates` when the registry already contains a compatible reusable deterministic subflow, and persist the best attachable candidate per requested task as a proposed child subflow before duplicating local Python/Node.js work.

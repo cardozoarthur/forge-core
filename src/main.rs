@@ -18,12 +18,13 @@ use forge_core::improve::generate_improvement;
 use forge_core::inspection::inspect_workflow_with_focus;
 use forge_core::intent::parse_intent;
 use forge_core::lease::{acquire_task_lease, release_task_lease};
+use forge_core::mcp::{call_mcp_tool, mcp_tools_manifest};
 use forge_core::registry::{
     attach_reuse_candidates_as_child_subflows, context_action_catalog, find_reuse_candidates,
     list_workflows_with_filters, quality_action_catalog, WorkflowLifecycleFilter,
     WorkflowRegistryFilters,
 };
-use forge_core::request::{load_request_status, start_async_request};
+use forge_core::request::{load_request_status, resume_async_request, start_async_request};
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
 };
@@ -159,6 +160,10 @@ enum Commands {
     Request {
         #[command(subcommand)]
         command: RequestCommands,
+    },
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommands,
     },
     #[command(name = "self")]
     SelfRun {
@@ -463,6 +468,31 @@ enum RequestCommands {
     Status {
         #[arg(long = "run")]
         run_id: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Resume {
+        #[arg(long = "run")]
+        run_id: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum McpCommands {
+    Tools {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Call {
+        tool: String,
+        #[arg(long)]
+        input: Option<String>,
+        #[arg(long = "input-file")]
+        input_file: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -1088,6 +1118,35 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(0)
             }
+            RequestCommands::Resume {
+                run_id,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = resume_async_request(&store, &run_id, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+        },
+        Commands::Mcp { command } => match command {
+            McpCommands::Tools { output } => {
+                let manifest = mcp_tools_manifest();
+                print_response(output, &manifest)?;
+                Ok(0)
+            }
+            McpCommands::Call {
+                tool,
+                input,
+                input_file,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let input = read_mcp_input(input, input_file)?;
+                let report = call_mcp_tool(&store, &tool, input)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
         },
         Commands::SelfRun { command } => match command {
             SelfCommands::Run {
@@ -1128,4 +1187,17 @@ fn print_response<T: Serialize>(format: OutputFormat, value: &T) -> Result<()> {
         OutputFormat::Human => println!("{}", serde_json::to_string_pretty(value)?),
     }
     Ok(())
+}
+
+fn read_mcp_input(input: Option<String>, input_file: Option<PathBuf>) -> Result<serde_json::Value> {
+    match (input, input_file) {
+        (Some(_), Some(_)) => anyhow::bail!("use either --input or --input-file, not both"),
+        (Some(input), None) => Ok(serde_json::from_str(&input)?),
+        (None, Some(path)) => {
+            let bytes = std::fs::read(&path)
+                .map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display()))?;
+            Ok(serde_json::from_slice(&bytes)?)
+        }
+        (None, None) => Ok(serde_json::json!({})),
+    }
 }

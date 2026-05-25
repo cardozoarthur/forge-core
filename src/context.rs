@@ -29,6 +29,7 @@ const CONTEXT_NEXT_ACTION_SCHEMA_VERSION: &str = "forge.inspect_context_action.v
 const CONTEXT_ROUTING_QUALITY_SCHEMA_VERSION: &str = "forge.context_routing_quality.v1";
 const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
     "forge.context_routing_quality_summary.v1";
+const CONTEXT_HANDOFF_SUMMARY_SCHEMA_VERSION: &str = "forge.context_handoff_summary.v1";
 const CONTINUATION_PLAN_SCHEMA_VERSION: &str = "forge.context.continuation_plan.v1";
 const ROUTING_POLICY: &str =
     "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_shard_selection_audit_v30";
@@ -491,6 +492,7 @@ pub struct ContextHandoffBlocker {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ContextHandoffSummary {
+    pub schema_version: String,
     pub total: usize,
     pub ready: usize,
     pub blocked: usize,
@@ -990,6 +992,7 @@ pub fn summarize_context_handoff_tasks(tasks: Vec<ContextHandoffTask>) -> Contex
     let routing_quality = summarize_routing_quality(&tasks);
 
     ContextHandoffSummary {
+        schema_version: CONTEXT_HANDOFF_SUMMARY_SCHEMA_VERSION.to_string(),
         total,
         ready,
         blocked: total.saturating_sub(ready),
