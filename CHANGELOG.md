@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.93 - 2026-05-25
+
+### Added
+
+- Added `forge schedule update --next-run-at <RFC3339>` so operators and agents can revision a scheduled node's next due timestamp explicitly.
+- Added MCP `forge.schedule.update` support for `next_run_at`, keeping schedule timestamp mutation available through the agent-facing surface.
+- `forge schedule run-due` now executes the native daily Goal research artifact path when cron work is due, producing the Markdown report, PDF report and redacted Telegram delivery record through Forge-owned workflow semantics.
+- Added loop-state gating for due execution: paused or stopped loop nodes return `loop_not_runnable` without adding run history or artifacts.
+- Added CLI contract coverage for explicit next-run mutation, due daily Goal artifact execution, paused-loop gating and MCP schedule timestamp mutation.
+
+### Changed
+
+- The package version is now `0.4.93`.
+- Due schedule run history records the due `next_run_at` value as `scheduled_at` instead of using the current execution timestamp.
+
+### Safety
+
+- Due execution writes only Forge-owned local artifacts under the workflow artifact directory.
+- Telegram delivery remains a redacted delivery record; no bot token or raw chat id is persisted or printed.
+- Paused/stopped loop controls prevent due execution without mutating external resources.
+- No Docker, Kubernetes or Knative resources are mutated.
+
 ## 0.4.92 - 2026-05-25
 
 ### Added

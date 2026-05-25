@@ -12434,11 +12434,13 @@ fn mcp_schedule_update_mutates_cron_and_timezone() {
         .unwrap();
     let task_id = schedule_task["id"].as_str().unwrap();
 
+    let due_at = "2000-01-01T00:00:00Z";
     let update_input = serde_json::json!({
         "workflow_id": workflow_id,
         "task_id": task_id,
         "cron": "0 9 * * 1",
         "timezone": "America/New_York",
+        "next_run_at": due_at,
         "origin": "codex"
     })
     .to_string();
@@ -12464,6 +12466,7 @@ fn mcp_schedule_update_mutates_cron_and_timezone() {
         updated_json["result"]["schedule"]["timezone"],
         "America/New_York"
     );
+    assert_eq!(updated_json["result"]["schedule"]["next_run_at"], due_at);
     assert!(updated_json["result"]["revision"].as_u64().unwrap() >= 1);
 }
 
@@ -12851,6 +12854,322 @@ fn schedule_run_due_executes_after_simulate_advances_next_run() {
     let run_due_json: Value = serde_json::from_slice(&run_due).unwrap();
     assert_eq!(run_due_json["status"], "no_due_cron_nodes");
     assert_eq!(run_due_json["due_executed"], false);
+}
+
+#[test]
+fn schedule_update_next_run_at_and_run_due_generates_goal_artifacts() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let created = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--cron",
+            "0 8 * * *",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    let workflow_id = created_json["workflow_id"].as_str().unwrap().to_string();
+    let schedule_task_id = created_json["workflow"]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["schedule"].is_object())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let due_at = "2000-01-01T00:00:00Z";
+    let updated = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "update",
+            "--workflow",
+            &workflow_id,
+            "--task",
+            &schedule_task_id,
+            "--next-run-at",
+            due_at,
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let updated_json: Value = serde_json::from_slice(&updated).unwrap();
+    assert_eq!(updated_json["status"], "schedule_updated");
+    assert_eq!(updated_json["schedule"]["next_run_at"], due_at);
+
+    let run_due = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "run-due",
+            "--workflow",
+            &workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let run_due_json: Value = serde_json::from_slice(&run_due).unwrap();
+    assert_eq!(run_due_json["status"], "due_workflow_executed");
+    assert_eq!(run_due_json["due_executed"], true);
+    assert_eq!(
+        run_due_json["daily_goal_research"]["status"],
+        "smoke_artifacts_generated"
+    );
+    assert_eq!(run_due_json["daily_goal_research"]["artifact_count"], 3);
+    assert_eq!(
+        run_due_json["daily_goal_research"]["goals"][0]["goal"],
+        "hackathon"
+    );
+    assert_eq!(
+        run_due_json["daily_goal_research"]["goals"][0]["telegram_delivery"]["secret_exposed"],
+        false
+    );
+
+    let inspected = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            &workflow_id,
+            "--verbose",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected_json: Value = serde_json::from_slice(&inspected).unwrap();
+    let schedule_node = inspected_json["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["schedule"].is_object())
+        .unwrap();
+    let run_history = schedule_node["schedule"]["run_history"].as_array().unwrap();
+    assert_eq!(run_history.len(), 1);
+    assert_eq!(run_history[0]["scheduled_at"], due_at);
+    assert_eq!(run_history[0]["status"], "completed");
+    assert_eq!(run_history[0]["missed"], false);
+
+    let artifacts = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "artifacts",
+            "--workflow",
+            &workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let artifacts_json: Value = serde_json::from_slice(&artifacts).unwrap();
+    let paths = artifacts_json["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|artifact| artifact["path"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(paths
+        .iter()
+        .any(|path| path.ends_with("goal-hackathon-report.md")));
+    assert!(paths
+        .iter()
+        .any(|path| path.ends_with("goal-hackathon-report.pdf")));
+    let delivery_path = paths
+        .iter()
+        .find(|path| path.ends_with("telegram-delivery-hackathon.json"))
+        .unwrap();
+    let delivery = fs::read_to_string(temp.path().join(delivery_path)).unwrap();
+    assert!(delivery.contains("configured_telegram_chat_ref"));
+    assert!(!delivery.contains("bot_token"));
+    assert!(!delivery.contains("chat_id"));
+}
+
+#[test]
+fn schedule_run_due_skips_paused_loop_nodes_without_artifacts() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let created = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--cron",
+            "0 8 * * *",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    let workflow_id = created_json["workflow_id"].as_str().unwrap().to_string();
+    let tasks = created_json["workflow"]["tasks"].as_array().unwrap();
+    let schedule_task_id = tasks
+        .iter()
+        .find(|task| task["schedule"].is_object())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let loop_task_id = tasks
+        .iter()
+        .find(|task| task["loop_control"].is_object())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "pause",
+            "--workflow",
+            &workflow_id,
+            "--task",
+            &loop_task_id,
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "update",
+            "--workflow",
+            &workflow_id,
+            "--task",
+            &schedule_task_id,
+            "--next-run-at",
+            "2000-01-01T00:00:00Z",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let run_due = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "run-due",
+            "--workflow",
+            &workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let run_due_json: Value = serde_json::from_slice(&run_due).unwrap();
+    assert_eq!(run_due_json["status"], "loop_not_runnable");
+    assert_eq!(run_due_json["due_executed"], false);
+    assert_eq!(run_due_json["blocked_loop_state"], "paused");
+    assert_eq!(run_due_json["blocked_loop_task_id"], loop_task_id);
+
+    let inspected = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            &workflow_id,
+            "--verbose",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected_json: Value = serde_json::from_slice(&inspected).unwrap();
+    let schedule_node = inspected_json["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["schedule"].is_object())
+        .unwrap();
+    assert!(schedule_node["schedule"]["run_history"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let artifacts = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "artifacts",
+            "--workflow",
+            &workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let artifacts_json: Value = serde_json::from_slice(&artifacts).unwrap();
+    assert!(artifacts_json["artifacts"].as_array().unwrap().is_empty());
 }
 
 #[test]

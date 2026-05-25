@@ -104,7 +104,10 @@ forge inspect <workflow-id> --task task-008 --verbose --output json
 forge status --workflow <workflow-id> --output json
 forge workflow validate-subflow --workflow <workflow-id> --task task-011 --child-workflow <child-workflow-id> --child-task task-011 --origin codex --output json
 forge schedule create-daily-goal-research --goal hackathon --timezone America/Sao_Paulo --cron "0 8 * * *" --origin codex --output json
-forge schedule update --workflow <workflow-id> --task task-009 --cron "0 8 * * *" --timezone America/Sao_Paulo --origin codex --output json
+forge schedule update --workflow <workflow-id> --task task-009 --cron "0 8 * * *" --timezone America/Sao_Paulo --next-run-at 2026-05-26T11:00:00Z --origin codex --output json
+forge schedule pause --workflow <workflow-id> --task task-010 --origin codex --output json
+forge schedule resume --workflow <workflow-id> --task task-010 --origin codex --output json
+forge schedule run-due --workflow <workflow-id> --output json
 forge task validate-response --workflow <workflow-id> --task task-001 --response ./executor-response.json --output json
 forge context --workflow <workflow-id> --task task-001 --budget 1200 --output json
 forge run --workflow <workflow-id> --simulate --output json

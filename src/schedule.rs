@@ -7,7 +7,7 @@ use crate::intent::parse_intent;
 use crate::registry::{attach_reuse_candidates_as_child_subflows, find_reuse_candidates};
 use crate::storage::ForgeStore;
 use anyhow::{Context, Result};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
@@ -60,6 +60,15 @@ pub struct ScheduleUpdateReport {
     pub origin: String,
     pub revision: u64,
     pub schedule: ScheduleSpec,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScheduleUpdateOptions<'a> {
+    pub cron: Option<&'a str>,
+    pub timezone: Option<&'a str>,
+    pub missed_run_policy: Option<&'a str>,
+    pub next_run_at: Option<&'a str>,
+    pub origin: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -200,12 +209,17 @@ pub fn update_workflow_schedule(
     store: &ForgeStore,
     workflow_id: &str,
     task_id: &str,
-    cron: Option<&str>,
-    timezone: Option<&str>,
-    missed_run_policy: Option<&str>,
-    origin: &str,
+    options: ScheduleUpdateOptions<'_>,
 ) -> Result<ScheduleUpdateReport> {
     let mut workflow = store.load_workflow(workflow_id)?;
+    let parsed_next_run_at = options
+        .next_run_at
+        .map(|value| {
+            DateTime::parse_from_rfc3339(value)
+                .map(|parsed| parsed.with_timezone(&Utc))
+                .with_context(|| format!("invalid next_run_at RFC3339 timestamp: {value}"))
+        })
+        .transpose()?;
     let schedule = {
         let task = workflow
             .tasks
@@ -218,21 +232,21 @@ pub fn update_workflow_schedule(
             .schedule
             .as_mut()
             .with_context(|| format!("task {task_id} is not a scheduled node"))?;
-        if let Some(cron) = cron {
+        if let Some(cron) = options.cron {
             schedule.cron = cron.to_string();
         }
-        if let Some(timezone) = timezone {
+        if let Some(timezone) = options.timezone {
             schedule.timezone = timezone.to_string();
         }
-        if let Some(missed_run_policy) = missed_run_policy {
+        if let Some(missed_run_policy) = options.missed_run_policy {
             schedule.missed_run_policy = missed_run_policy.to_string();
         }
-        schedule.next_run_at = Some(Utc::now() + Duration::days(1));
+        schedule.next_run_at = parsed_next_run_at.or_else(|| Some(Utc::now() + Duration::days(1)));
         schedule.clone()
     };
     let revision = push_schedule_revision(
         &mut workflow,
-        origin,
+        options.origin,
         &format!("updated schedule for task {task_id}"),
     );
     store.save_workflow(&workflow)?;
@@ -240,7 +254,7 @@ pub fn update_workflow_schedule(
         workflow_id,
         "schedule_updated",
         &serde_json::json!({
-            "origin": origin,
+            "origin": options.origin,
             "task_id": task_id,
             "revision": revision,
             "schedule": schedule
@@ -251,7 +265,7 @@ pub fn update_workflow_schedule(
         status: "schedule_updated".to_string(),
         workflow_id: workflow_id.to_string(),
         task_id: task_id.to_string(),
-        origin: origin.to_string(),
+        origin: options.origin.to_string(),
         revision,
         schedule,
     })
@@ -261,12 +275,20 @@ pub fn run_daily_goal_research_smoke(
     store: &ForgeStore,
     workflow: &mut Workflow,
 ) -> Result<Option<DailyGoalResearchSmokeReport>> {
+    run_daily_goal_research_smoke_with_schedule_mode(store, workflow, false)
+}
+
+fn run_daily_goal_research_smoke_with_schedule_mode(
+    store: &ForgeStore,
+    workflow: &mut Workflow,
+    due_only: bool,
+) -> Result<Option<DailyGoalResearchSmokeReport>> {
     let goals = configured_goal_items(workflow);
     if goals.is_empty() {
         return Ok(None);
     }
 
-    record_schedule_run_history(workflow);
+    record_schedule_run_history(workflow, due_only);
 
     let mut reports = Vec::new();
     for goal in goals {
@@ -295,7 +317,7 @@ pub fn run_daily_goal_research_smoke(
     }))
 }
 
-fn record_schedule_run_history(workflow: &mut Workflow) {
+fn record_schedule_run_history(workflow: &mut Workflow, due_only: bool) {
     let started_at = Utc::now();
     let finished_at = Utc::now();
     for schedule in workflow
@@ -303,9 +325,20 @@ fn record_schedule_run_history(workflow: &mut Workflow) {
         .iter_mut()
         .filter_map(|task| task.schedule.as_mut())
     {
+        let scheduled_at = if due_only {
+            let Some(next_run_at) = schedule.next_run_at else {
+                continue;
+            };
+            if next_run_at > started_at {
+                continue;
+            }
+            next_run_at
+        } else {
+            started_at
+        };
         schedule.run_history.push(ScheduleRunRecord {
             run_id: format!("run_{}", Uuid::new_v4().to_string().replace('-', "")),
-            scheduled_at: started_at,
+            scheduled_at,
             started_at: Some(started_at),
             finished_at: Some(finished_at),
             status: "completed".to_string(),
@@ -379,6 +412,10 @@ pub struct ScheduleRunDueReport {
     pub workflow_id: String,
     pub goal: String,
     pub due_executed: bool,
+    pub blocked_loop_task_id: Option<String>,
+    pub blocked_loop_state: Option<String>,
+    pub daily_goal_research: Option<DailyGoalResearchSmokeReport>,
+    pub schedule_summary: ScheduleSummary,
 }
 
 pub fn update_loop_state(
@@ -457,11 +494,41 @@ pub fn run_due_workflow(
             workflow_id: workflow_id.to_string(),
             goal: workflow.goal.clone(),
             due_executed: false,
+            blocked_loop_task_id: None,
+            blocked_loop_state: None,
+            daily_goal_research: None,
+            schedule_summary: summarize_schedules(&workflow.tasks),
+        }));
+    }
+
+    if let Some((task_id, state)) = workflow.tasks.iter().find_map(|task| {
+        task.loop_control.as_ref().and_then(|loop_control| {
+            if matches!(loop_control.state.as_str(), "paused" | "stopped") {
+                Some((task.id.clone(), loop_control.state.clone()))
+            } else {
+                None
+            }
+        })
+    }) {
+        return Ok(Some(ScheduleRunDueReport {
+            status: "loop_not_runnable".to_string(),
+            workflow_id: workflow_id.to_string(),
+            goal: workflow.goal.clone(),
+            due_executed: false,
+            blocked_loop_task_id: Some(task_id),
+            blocked_loop_state: Some(state),
+            daily_goal_research: None,
+            schedule_summary: summarize_schedules(&workflow.tasks),
         }));
     }
 
     let workflow_id = workflow.id.clone();
-    record_schedule_run_history(&mut workflow);
+    let daily_goal_research =
+        run_daily_goal_research_smoke_with_schedule_mode(store, &mut workflow, true)?;
+    if daily_goal_research.is_none() {
+        record_schedule_run_history(&mut workflow, true);
+    }
+    let schedule_summary = summarize_schedules(&workflow.tasks);
     store.save_workflow(&workflow)?;
     store.record_event(
         &workflow_id,
@@ -476,6 +543,10 @@ pub fn run_due_workflow(
         workflow_id,
         goal: workflow.goal.clone(),
         due_executed: true,
+        blocked_loop_task_id: None,
+        blocked_loop_state: None,
+        daily_goal_research,
+        schedule_summary,
     }))
 }
 

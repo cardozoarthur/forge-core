@@ -11,7 +11,7 @@ use crate::request::{
 };
 use crate::schedule::{
     create_daily_goal_research_workflow, run_due_workflow, update_loop_state,
-    update_workflow_schedule,
+    update_workflow_schedule, ScheduleUpdateOptions,
 };
 use crate::storage::ForgeStore;
 use crate::validation::{validate_workflow, ValidationReport};
@@ -107,6 +107,7 @@ struct ScheduleUpdateInput {
     cron: Option<String>,
     timezone: Option<String>,
     missed_run_policy: Option<String>,
+    next_run_at: Option<String>,
     origin: Option<String>,
 }
 
@@ -249,6 +250,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("cron", "string", "optional five-field cron expression"),
                     ("timezone", "string", "optional IANA timezone"),
                     ("missed_run_policy", "string", "optional missed-run policy"),
+                    ("next_run_at", "string", "optional RFC3339 next due timestamp"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "task_id"]),
                 "forge.schedule_update.v1",
@@ -501,10 +503,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 store,
                 &input.workflow_id,
                 &input.task_id,
-                input.cron.as_deref(),
-                input.timezone.as_deref(),
-                input.missed_run_policy.as_deref(),
-                &origin,
+                ScheduleUpdateOptions {
+                    cron: input.cron.as_deref(),
+                    timezone: input.timezone.as_deref(),
+                    missed_run_policy: input.missed_run_policy.as_deref(),
+                    next_run_at: input.next_run_at.as_deref(),
+                    origin: &origin,
+                },
             )?)?
         }
         "forge.schedule.pause" => {

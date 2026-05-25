@@ -40,6 +40,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 - Cancel a request with `forge mcp call forge.request.cancel --input '{"run_id":"<run-id>","origin":"opencode"}' --output json`.
 - Resume a paused async handoff with `forge mcp call forge.run.resume --input '{"run_id":"<run-id>","origin":"opencode"}' --output json`.
 - Create scheduled Goal research through `forge.schedule.create_daily_goal_research`; inspect/list/mutate schedules through `forge.schedule.list`, `forge.workflow.inspect`, `forge.loop.inspect` and `forge.schedule.update`.
+- Use `forge.schedule.update` or `forge schedule update --next-run-at <RFC3339>` for explicit due timestamp mutation, and `forge.schedule.run_due` only when Forge-owned cron work is due. Paused/stopped loop nodes must not advance.
 - Inspect or route work through `forge.workflow.inspect`, `forge.context.request`, `forge.task.handoff`, `forge.workflow.attach_artifact`, `forge.workflow.update_goal`, `forge.validation.status` and `forge.artifact.fetch`.
 - MCP mutations must still go through Forge so revisions, artifact hashes, origins and validation gates are persisted.
 
@@ -80,6 +81,11 @@ forge mcp call forge.context.request --input '{"workflow_id":"<workflow-id>","ta
 forge mcp call forge.task.handoff --input '{"workflow_id":"<workflow-id>","task_id":"task-001","executor":"codex","budget":1200}' --output json
 forge schedule create-daily-goal-research --goal hackathon --timezone America/Sao_Paulo --cron "0 8 * * *" --origin codex --output json
 forge mcp call forge.schedule.create_daily_goal_research --input '{"goals":["hackathon"],"timezone":"America/Sao_Paulo","cron":"0 8 * * *","origin":"codex"}' --output json
+forge schedule update --workflow <workflow-id> --task task-009 --next-run-at 2026-05-26T11:00:00Z --origin codex --output json
+forge mcp call forge.schedule.update --input '{"workflow_id":"<workflow-id>","task_id":"task-009","next_run_at":"2026-05-26T11:00:00Z","origin":"codex"}' --output json
+forge schedule pause --workflow <workflow-id> --task task-010 --origin codex --output json
+forge schedule resume --workflow <workflow-id> --task task-010 --origin codex --output json
+forge schedule run-due --workflow <workflow-id> --output json
 forge runtime guard --substrate knative --resource service/forge-node --namespace forge --action update --owner forge --output json
 forge list --output json
 forge status --workflow <workflow-id> --output json
