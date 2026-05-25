@@ -243,12 +243,27 @@ pub struct AtomicTask {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactLineageRecord {
+    #[serde(default = "artifact_lineage_schema_version")]
+    pub schema_version: String,
+    pub workflow_id: String,
+    pub run_id: String,
+    pub schedule_task_id: String,
+    pub loop_task_id: String,
+    pub goal: String,
+    pub subflow_id: String,
+    pub triggered_by: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactRecord {
     pub id: String,
     pub kind: String,
     pub path: String,
     pub sha256: String,
     pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<ArtifactLineageRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,6 +337,10 @@ fn loop_schema_version() -> String {
 
 fn native_subflow_schema_version() -> String {
     "forge.native_subflow.v1".to_string()
+}
+
+fn artifact_lineage_schema_version() -> String {
+    "forge.artifact_lineage.v1".to_string()
 }
 
 fn task(

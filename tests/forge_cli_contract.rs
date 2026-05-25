@@ -12902,6 +12902,15 @@ fn schedule_update_next_run_at_and_run_due_generates_goal_artifacts() {
         .as_str()
         .unwrap()
         .to_string();
+    let loop_task_id = created_json["workflow"]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["loop_control"].is_object())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let due_at = "2000-01-01T00:00:00Z";
     let updated = forge()
@@ -12962,6 +12971,15 @@ fn schedule_update_next_run_at_and_run_due_generates_goal_artifacts() {
         run_due_json["daily_goal_research"]["goals"][0]["telegram_delivery"]["secret_exposed"],
         false
     );
+    let goal_lineage = &run_due_json["daily_goal_research"]["goals"][0]["lineage"];
+    let run_id = goal_lineage["run_id"].as_str().unwrap();
+    assert!(run_id.starts_with("run_"));
+    assert_eq!(goal_lineage["workflow_id"], workflow_id);
+    assert_eq!(goal_lineage["schedule_task_id"], schedule_task_id);
+    assert_eq!(goal_lineage["loop_task_id"], loop_task_id);
+    assert_eq!(goal_lineage["goal"], "hackathon");
+    assert_eq!(goal_lineage["subflow_id"], "goal_research:hackathon");
+    assert_eq!(goal_lineage["triggered_by"], format!("loop:{loop_task_id}"));
 
     let inspected = forge()
         .args([
@@ -13026,8 +13044,39 @@ fn schedule_update_next_run_at_and_run_due_generates_goal_artifacts() {
         .unwrap();
     let delivery = fs::read_to_string(temp.path().join(delivery_path)).unwrap();
     assert!(delivery.contains("configured_telegram_chat_ref"));
+    assert!(delivery.contains(&workflow_id));
+    assert!(delivery.contains(run_id));
     assert!(!delivery.contains("bot_token"));
     assert!(!delivery.contains("chat_id"));
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "status",
+            "--workflow",
+            &workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    for kind in ["markdown_report", "pdf_report", "telegram_delivery"] {
+        let artifact = status_json["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|artifact| artifact["kind"] == kind)
+            .unwrap_or_else(|| panic!("missing artifact kind {kind}"));
+        assert_eq!(artifact["lineage"]["workflow_id"], workflow_id);
+        assert_eq!(artifact["lineage"]["run_id"], run_id);
+        assert_eq!(artifact["lineage"]["goal"], "hackathon");
+        assert_eq!(artifact["lineage"]["subflow_id"], "goal_research:hackathon");
+    }
 }
 
 #[test]
