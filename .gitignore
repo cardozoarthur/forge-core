@@ -8,3 +8,6 @@
 /.vscode/
 *.log
 
+# Local ad-hoc workflow outputs and delivery receipts.
+docs/reports/simplex-*
+docs/reports/*-telegram-delivery-*.json
