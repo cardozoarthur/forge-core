@@ -767,6 +767,14 @@ fn simulated_run_generates_cost_report_and_email_notification_payload() {
         .as_str()
         .unwrap()
         .contains("total_estimated_cost_usd"));
+    assert!(run["parallel_plan"].is_object());
+    assert_eq!(
+        run["parallel_plan"]["schema_version"],
+        "forge.scheduler.parallel_plan.v1"
+    );
+    assert!(run["parallel_plan"]["total_waves"].as_u64().unwrap() >= 1);
+    assert!(!run["parallel_plan"]["waves"].as_array().unwrap().is_empty());
+    assert!(run["parallel_plan"]["total_tasks"].as_u64().unwrap() >= 1);
 }
 
 #[test]
@@ -13495,6 +13503,118 @@ fn mcp_call_schedule_run_due_returns_no_due_for_future_schedule() {
     assert_eq!(run_due_json["status"], "ok");
     assert_eq!(run_due_json["result"]["status"], "no_due_cron_nodes");
     assert_eq!(run_due_json["result"]["due_executed"], false);
+}
+
+#[test]
+fn simulated_run_includes_parallel_dag_schedule_plan() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Create a delivery platform",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+
+    let run_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let run: Value = serde_json::from_slice(&run_output).unwrap();
+    assert!(run["parallel_plan"].is_object());
+    assert_eq!(
+        run["parallel_plan"]["schema_version"],
+        "forge.scheduler.parallel_plan.v1"
+    );
+    let waves = run["parallel_plan"]["waves"].as_array().unwrap();
+    assert!(!waves.is_empty());
+    assert!(run["parallel_plan"]["total_waves"].as_u64().unwrap() >= 1);
+    assert!(run["parallel_plan"]["total_tasks"].as_u64().unwrap() >= 1);
+    for wave in waves {
+        assert!(!wave["task_ids"].as_array().unwrap().is_empty());
+        assert!(!wave["task_titles"].as_array().unwrap().is_empty());
+        assert!(wave["level"].as_u64().unwrap() >= 1);
+    }
+}
+
+#[test]
+fn parallel_scheduling_detects_independent_tasks_in_same_wave() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Daily goal research for Goals: hackathon, competition, marathon in America/Sao_Paulo cron 0 8 * * *",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+
+    let plan = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let run: Value = serde_json::from_slice(&plan).unwrap();
+    let waves = run["parallel_plan"]["waves"].as_array().unwrap();
+    let parallel_waves: Vec<&Value> = waves
+        .iter()
+        .filter(|w| w["concurrent"].as_bool().unwrap_or(false))
+        .collect();
+    assert!(
+        !parallel_waves.is_empty(),
+        "should have at least one wave with concurrent tasks for multi-Goal research"
+    );
+    assert!(run["parallel_plan"]["parallel_opportunity"]
+        .as_bool()
+        .unwrap_or(false));
 }
 
 fn write_fake_cli(bin: &Path, name: &str) {
