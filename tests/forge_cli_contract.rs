@@ -13248,6 +13248,49 @@ fn schedule_worker_status_reports_sleep_backpressure_and_scale_to_zero_plan() {
     assert_eq!(ready_json["summary"]["idle_workflows"], 1);
     assert_eq!(ready_json["worker_pool"]["max_workers"], 1);
     assert_eq!(ready_json["worker_pool"]["assignable_due_workflows"], 1);
+    assert_eq!(
+        ready_json["worker_pool"]["assignment_plan"]["schema_version"],
+        "forge.schedule.assignment_plan.v1"
+    );
+    assert_eq!(
+        ready_json["worker_pool"]["assignment_plan"]["max_workers"],
+        1
+    );
+    assert_eq!(
+        ready_json["worker_pool"]["assignment_plan"]["assigned"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        ready_json["worker_pool"]["assignment_plan"]["queued"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        ready_json["worker_pool"]["assignment_plan"]["assigned"][0]["lease_scope"],
+        "schedule_task"
+    );
+    assert_eq!(
+        ready_json["worker_pool"]["assignment_plan"]["assigned"][0]["wave"],
+        1
+    );
+    let assigned_workflow = ready_json["worker_pool"]["assignment_plan"]["assigned"][0]
+        ["workflow_id"]
+        .as_str()
+        .unwrap();
+    let queued_workflow = ready_json["worker_pool"]["assignment_plan"]["queued"][0]["workflow_id"]
+        .as_str()
+        .unwrap();
+    assert!(assigned_workflow < queued_workflow);
+    assert!(
+        ready_json["worker_pool"]["assignment_plan"]["deterministic_ordering"]
+            .as_bool()
+            .unwrap()
+    );
     assert_eq!(ready_json["backpressure"]["active"], true);
     assert_eq!(ready_json["backpressure"]["queued_due_workflows"], 1);
     assert_eq!(ready_json["sleep"]["sleep_until_next_wakeup"], false);
@@ -13303,6 +13346,15 @@ fn mcp_schedule_worker_status_tool_exposes_native_scheduler_worker_surface() {
     );
     assert_eq!(json["result"]["executor"], "mcp-scheduler");
     assert_eq!(json["result"]["worker_pool"]["max_workers"], 3);
+    assert_eq!(
+        json["result"]["worker_pool"]["assignment_plan"]["schema_version"],
+        "forge.schedule.assignment_plan.v1"
+    );
+    assert!(
+        json["result"]["worker_pool"]["assignment_plan"]["deterministic_ordering"]
+            .as_bool()
+            .unwrap()
+    );
     assert_eq!(json["result"]["cancellation"]["lease_ttl_seconds"], 90);
 }
 

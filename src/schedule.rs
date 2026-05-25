@@ -218,6 +218,30 @@ pub struct ScheduleWorkerPoolStatus {
     pub assignable_due_workflows: usize,
     pub worker_kind: String,
     pub deterministic: bool,
+    pub assignment_plan: ScheduleWorkerAssignmentPlan,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduleWorkerAssignmentPlan {
+    pub schema_version: String,
+    pub max_workers: usize,
+    pub assigned: Vec<ScheduleWorkerAssignment>,
+    pub queued: Vec<ScheduleWorkerAssignment>,
+    pub deterministic_ordering: bool,
+    pub ordering_key: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduleWorkerAssignment {
+    pub workflow_id: String,
+    pub goal: String,
+    pub schedule_task_id: String,
+    pub due_nodes: usize,
+    pub next_run_at: Option<String>,
+    pub lease_scope: String,
+    pub wave: usize,
+    pub queue_position: usize,
+    pub executor: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1072,6 +1096,7 @@ pub fn build_schedule_worker_status(
     let workflows = store.load_workflows()?;
     let mut summary = ScheduleWorkerStatusSummary::default();
     let mut workflow_reports = Vec::new();
+    let mut runnable_due = Vec::new();
     let mut next_wakeup_at: Option<DateTime<Utc>> = None;
 
     for workflow in workflows {
@@ -1096,6 +1121,15 @@ pub fn build_schedule_worker_status(
                 summary.blocked_due_workflows += 1;
             } else {
                 summary.runnable_due_workflows += 1;
+                if let Some(schedule_task_id) = first_due_schedule_task_id(&workflow) {
+                    runnable_due.push(ScheduleWorkerAssignmentCandidate {
+                        workflow_id: workflow.id.clone(),
+                        goal: workflow.goal.clone(),
+                        schedule_task_id,
+                        due_nodes: schedule_summary.due_nodes,
+                        next_run_at: schedule_summary.next_run_at.clone(),
+                    });
+                }
             }
         } else {
             summary.idle_workflows += 1;
@@ -1141,6 +1175,7 @@ pub fn build_schedule_worker_status(
         .saturating_sub(assignable_due_workflows);
     let status = worker_status_label(&summary, next_wakeup_at);
     let sleep = build_worker_sleep_plan(&summary, observed_at, next_wakeup_at);
+    let assignment_plan = build_assignment_plan(runnable_due, max_workers, executor);
 
     Ok(ScheduleWorkerStatusReport {
         schema_version: SCHEDULE_WORKER_STATUS_SCHEMA_VERSION.to_string(),
@@ -1155,6 +1190,7 @@ pub fn build_schedule_worker_status(
             assignable_due_workflows,
             worker_kind: "bounded_local_schedule_worker_pool".to_string(),
             deterministic: true,
+            assignment_plan,
         },
         sleep,
         backpressure: ScheduleWorkerBackpressure {
@@ -1178,6 +1214,65 @@ pub fn build_schedule_worker_status(
         },
         workflows: workflow_reports,
     })
+}
+
+#[derive(Debug, Clone)]
+struct ScheduleWorkerAssignmentCandidate {
+    workflow_id: String,
+    goal: String,
+    schedule_task_id: String,
+    due_nodes: usize,
+    next_run_at: Option<String>,
+}
+
+fn build_assignment_plan(
+    mut candidates: Vec<ScheduleWorkerAssignmentCandidate>,
+    max_workers: usize,
+    executor: &str,
+) -> ScheduleWorkerAssignmentPlan {
+    let max_workers = max_workers.max(1);
+    candidates.sort_by(|left, right| {
+        (
+            left.next_run_at.as_deref().unwrap_or(""),
+            left.workflow_id.as_str(),
+            left.schedule_task_id.as_str(),
+        )
+            .cmp(&(
+                right.next_run_at.as_deref().unwrap_or(""),
+                right.workflow_id.as_str(),
+                right.schedule_task_id.as_str(),
+            ))
+    });
+
+    let mut assigned = Vec::new();
+    let mut queued = Vec::new();
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        let assignment = ScheduleWorkerAssignment {
+            workflow_id: candidate.workflow_id,
+            goal: candidate.goal,
+            schedule_task_id: candidate.schedule_task_id,
+            due_nodes: candidate.due_nodes,
+            next_run_at: candidate.next_run_at,
+            lease_scope: "schedule_task".to_string(),
+            wave: (index / max_workers) + 1,
+            queue_position: index + 1,
+            executor: executor.to_string(),
+        };
+        if index < max_workers {
+            assigned.push(assignment);
+        } else {
+            queued.push(assignment);
+        }
+    }
+
+    ScheduleWorkerAssignmentPlan {
+        schema_version: "forge.schedule.assignment_plan.v1".to_string(),
+        max_workers,
+        assigned,
+        queued,
+        deterministic_ordering: true,
+        ordering_key: "next_run_at,workflow_id,schedule_task_id".to_string(),
+    }
 }
 
 fn can_scale_to_zero_when_idle(summary: &ScheduleSummary) -> bool {
