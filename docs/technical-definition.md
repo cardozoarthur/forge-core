@@ -40,7 +40,7 @@ Close coupling is still valuable when it reduces friction. The target architectu
 - Execution runtime: coordinates task execution and trace collection.
 - Executor policy: detects installed/configured CLIs and persists human authorization before use.
 - Runtime substrate policy: detects Docker/Kubernetes/Knative and persists human authorization before use.
-- Scheduled execution: represents future continuation with cron/wait tasks.
+- Scheduled execution: represents future continuation with cron/wait tasks and exposes deterministic bounded-worker assignment plans before due work is leased or executed.
 - Non-AI execution: runs deterministic command-style steps without requiring a live model call.
 - Notification execution: creates final notification payloads such as email cost reports.
 - Validation engine: blocks invalid promotion.
@@ -63,7 +63,7 @@ forge mcp tools --output json
 The current MCP manifest uses `forge.mcp.tools.v1` and exposes stable tools for
 workflow listing, graph inspection, async run start/resume/status, revisioned
 goal/artifact mutation, scheduled workflow create/update/list/run-due/scan-due,
-aggregate schedule and loop summaries, bounded context requests, validation
+worker-status assignment plans, aggregate schedule and loop summaries, bounded context requests, validation
 status, milestone status/manifest inspection and bounded artifact fetch. `forge mcp call forge.run.start ...` returns
 the same persisted run/workflow ids as `forge request start` plus
 `forge.agent_handoff_contract.v1`, so Codex/OpenCode can return `run_id`

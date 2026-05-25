@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.120 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 35: scheduler worker-status deterministic assignment plan for bounded due-work dispatch.
+- Added `forge.schedule.assignment_plan.v1` under `forge.schedule.worker_status.v1`, listing assigned and queued due scheduled workflows with schedule task id, due node count, lease scope, wave, queue position, executor and deterministic ordering key.
+- Added CLI and MCP contract coverage proving `worker-status` exposes assignment planning while preserving backpressure and cancellation metadata.
+
+### Changed
+
+- The package version is now `0.4.120`.
+- Updated the Forge skill, README and technical definition so agents inspect worker assignment plans before scheduler handoff instead of inventing ad hoc loops.
+- This remains `0.5 groundwork` for Forge-owned scheduler/runtime concurrency. It does not claim that the Forge 0.5 creative runtime is complete.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- `worker-status` remains read-only; it plans local assignment visibility but does not acquire leases or execute due workflows.
+
 ## 0.4.119 - 2026-05-25
 
 ### Added
