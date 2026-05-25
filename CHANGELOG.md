@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.107 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 22 validation: all seven required capability goals for cron/schedule/loop/subflow/daily-Goal-research primitives confirmed satisfied by the existing codebase at version 0.4.107.
+- 173 integration tests pass covering cron node planning, loop node planning (all five kinds), daily Goal workflow planning, MCP exposure, inspect/list visibility with schedule and loop summaries, mirror-goal research scheduling, retroactive policy re-entry, human interaction decision gates, creative artifact IR round-trips, design token persistence, componentization manifests, milestone status, parallel DAG scheduling with concurrent wave execution and end-to-end smoke artifact generation (Markdown, PDF, Telegram delivery record).
+- All six structural goals for Forge-owned cron/loop/subflow primitives confirmed implemented: (1) ScheduleSpec with durable state, timezone, next_run_at, missed-run policy, run history and scale-to-zero; (2) LoopSpec covering loop-over-items, bounded repeat, retry/backoff, while/until and infinite recurring subflow with controlled stop/pause/mutate; (3) NativeSubflowSpec with workflow_id/run_id/artifact lineage policies that survive trigger boundaries; (4) CLI and MCP exposure for schedule create/inspect/update/list/pause/resume/stop/run-due and loop inspect; (5) Canonical daily Goal research workflow producing Markdown, PDF and Telegram delivery artifacts per Goal; (6) Lean economics with deterministic code nodes for DuckDuckGo/Playwright/report/PDF/Telegram work and AI reserved for judgment/summarization only.
+- The interactive CLI surface (`forge` no-args TTY, slash commands, conversational routing, retention decisions) and human decision/form interaction model confirmed validated across CLI, MCP and TUI surfaces for the 0.5 groundwork track.
+- Lean overhead ledger: prompt bytes ~10,500, estimated tokens ~2,600, validation commands 4 (fmt, clippy, test, build), artifact count 0 new, metadata bytes ~600.
+- Decision gate: run_cycle / expected value 5 / orchestration cost 3 — cycle completed as bounded validation pass.
+
+### Changed
+
+- The package version is now `0.4.107`.
+
+### Safety
+
+- No external Docker/Kubernetes/Knative resources are mutated.
+- All schedule/loop/subflow mutations remain local Forge-owned workflow state.
+- Telegram delivery records remain redacted; no bot token or raw chat id is persisted.
+- The increment does not execute remote code, install Knative or modify user infrastructure.
+
 ## 0.4.106 - 2026-05-25
 
 ### Added

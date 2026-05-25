@@ -1,6 +1,6 @@
 [package]
 name = "forge-core"
-version = "0.4.106"
+version = "0.4.107"
 edition = "2021"
 license = "MIT"
 description = "High-performance AI-native workflow runtime for validated atomic execution graphs."
