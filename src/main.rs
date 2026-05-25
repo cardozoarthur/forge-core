@@ -32,7 +32,7 @@ use forge_core::runtime::{
 };
 use forge_core::schedule::{
     create_daily_goal_research_workflow, run_daily_goal_research_smoke, run_due_workflow,
-    update_loop_state, update_workflow_schedule,
+    update_loop_state, update_workflow_schedule, ScheduleUpdateOptions,
 };
 use forge_core::self_evolve::{run_self_evolution, SelfRunOptions};
 use forge_core::skill::install_skill;
@@ -307,6 +307,8 @@ enum ScheduleCommands {
         timezone: Option<String>,
         #[arg(long = "missed-run-policy")]
         missed_run_policy: Option<String>,
+        #[arg(long = "next-run-at")]
+        next_run_at: Option<String>,
         #[arg(long, default_value = "forge_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -1032,6 +1034,7 @@ fn run() -> Result<i32> {
                 cron,
                 timezone,
                 missed_run_policy,
+                next_run_at,
                 origin,
                 output,
             } => {
@@ -1040,10 +1043,13 @@ fn run() -> Result<i32> {
                     &store,
                     &workflow,
                     &task,
-                    cron.as_deref(),
-                    timezone.as_deref(),
-                    missed_run_policy.as_deref(),
-                    &origin,
+                    ScheduleUpdateOptions {
+                        cron: cron.as_deref(),
+                        timezone: timezone.as_deref(),
+                        missed_run_policy: missed_run_policy.as_deref(),
+                        next_run_at: next_run_at.as_deref(),
+                        origin: &origin,
+                    },
                 )?;
                 print_response(output, &report)?;
                 Ok(0)
