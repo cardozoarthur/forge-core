@@ -8,6 +8,7 @@ use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, TaskStatus, Workflow,
 };
 use crate::request::RunRecord;
+use crate::schedule::{summarize_loops, summarize_schedules, LoopSummary, ScheduleSummary};
 use crate::storage::ForgeStore;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -84,6 +85,8 @@ pub struct WorkflowRegistryRow {
     pub context_actions: RegistryContextActionSummary,
     pub context_action_refs: Vec<RegistryContextActionRef>,
     pub context_quality: RegistryContextQualitySummary,
+    pub schedule_summary: ScheduleSummary,
+    pub loop_summary: LoopSummary,
     pub quality_action: RegistryQualityAction,
     pub reusable_subflows: Vec<ReusableSubflowRef>,
     pub created_at: DateTime<Utc>,
@@ -712,6 +715,8 @@ fn registry_row(
     let execution_policy = RegistryExecutionPolicySummary::from_workflow(workflow);
     let context_quality = RegistryContextQualitySummary::from_handoff_summary(handoff_summary);
     let quality_action = RegistryQualityAction::from_summaries(handoff_summary, &context_quality);
+    let schedule_summary = summarize_schedules(&workflow.tasks);
+    let loop_summary = summarize_loops(&workflow.tasks);
 
     WorkflowRegistryRow {
         workflow_id: workflow.id.clone(),
@@ -730,6 +735,8 @@ fn registry_row(
         context_actions: action_projection.summary.clone(),
         context_action_refs: action_projection.refs.clone(),
         context_quality,
+        schedule_summary,
+        loop_summary,
         quality_action,
         reusable_subflows,
         created_at: workflow.created_at,

@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.88`
+Current version: `0.4.90`
 
 This is the first functional CLI + Skill version:
 
@@ -33,7 +33,8 @@ This is the first functional CLI + Skill version:
 - validation gates
 - simulated execution runtime
 - autonomous mixed AI/non-AI workflow planning
-- cron/wait task representation
+- native cron/wait task representation with timezone, next-run, missed-run policy, run history and scale-to-zero metadata
+- explicit loop primitives for loop-over-items, bounded repeat, retry/backoff, while/until and infinite recurring subflow semantics
 - notification payloads with final workflow cost reporting
 - artifact listing
 - workflow registry listing with lifecycle state and `running`/`non-running` filters
@@ -63,7 +64,8 @@ This is the first functional CLI + Skill version:
 - runtime workflow mutation for goals and artifacts with origin trace from `codex`, `opencode`, `forge_cli` or skills
 - async workflow substrate policy with scope guards for Forge-owned resources
 - async request handoff for skill callers: submit a goal, receive `run_id`, continue later with Forge
-- MCP tool manifest and call surface for agent workflows: list, inspect, start/resume/status, context request, validation status and bounded artifact fetch
+- MCP tool manifest and call surface for agent workflows: list, inspect, start/resume/status, schedule create/update/list, loop inspect, task handoff, context request, validation status and bounded artifact fetch
+- native daily Goal research workflow planning and smoke execution for `hackathon` reports with Markdown/PDF artifacts and redacted Telegram delivery records
 - persisted task leases so two executors cannot acquire the same workflow task concurrently
 - executor handoff packets that combine strict context readiness, lease metadata, routing cache keys, checksums and validation gates
 - cluster handoff packets that choose an eligible node, lease the task to that node and return a content-addressed sync manifest without remote execution
@@ -101,6 +103,8 @@ forge inspect <workflow-id> --verbose --output json
 forge inspect <workflow-id> --task task-008 --verbose --output json
 forge status --workflow <workflow-id> --output json
 forge workflow validate-subflow --workflow <workflow-id> --task task-011 --child-workflow <child-workflow-id> --child-task task-011 --origin codex --output json
+forge schedule create-daily-goal-research --goal hackathon --timezone America/Sao_Paulo --cron "0 8 * * *" --origin codex --output json
+forge schedule update --workflow <workflow-id> --task task-009 --cron "0 8 * * *" --timezone America/Sao_Paulo --origin codex --output json
 forge task validate-response --workflow <workflow-id> --task task-001 --response ./executor-response.json --output json
 forge context --workflow <workflow-id> --task task-001 --budget 1200 --output json
 forge run --workflow <workflow-id> --simulate --output json
@@ -240,11 +244,14 @@ forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json
 forge mcp call forge.run.resume --input '{"run_id":"<run-id>","origin":"opencode"}' --output json
 forge mcp call forge.workflow.inspect --input '{"workflow_id":"<workflow-id>","verbose":true}' --output json
 forge mcp call forge.context.request --input '{"workflow_id":"<workflow-id>","task_id":"task-001","budget":1200}' --output json
+forge mcp call forge.task.handoff --input '{"workflow_id":"<workflow-id>","task_id":"task-001","executor":"codex","budget":1200}' --output json
+forge mcp call forge.schedule.create_daily_goal_research --input '{"goals":["hackathon"],"timezone":"America/Sao_Paulo","cron":"0 8 * * *","origin":"codex"}' --output json
+forge mcp call forge.loop.inspect --input '{"workflow_id":"<workflow-id>"}' --output json
 forge mcp call forge.workflow.attach_artifact --input '{"workflow_id":"<workflow-id>","path":"./report.md","kind":"report","origin":"codex"}' --output json
 forge mcp call forge.artifact.fetch --input '{"workflow_id":"<workflow-id>","path":"artifacts/<workflow-id>/attached-report-report.md","max_bytes":4096}' --output json
 ```
 
-The MCP call surface is a stable local adapter layer over the existing Forge CLI and SQLite state. It does not introduce a second source of truth: mutations still flow through `workflow update-goal` and `workflow attach-artifact`, validation remains explicit, and artifact reads are bounded to Forge-owned artifact refs.
+The MCP call surface is a stable local adapter layer over the existing Forge CLI and SQLite state. It does not introduce a second source of truth: mutations still flow through Forge-owned workflow, schedule and artifact APIs, validation remains explicit, and artifact reads are bounded to Forge-owned artifact refs.
 The registry-level `execution_policy` summary uses schema `forge.registry_execution_policy.v1` and aggregates AI, mixed, deterministic, no-AI, model-call-required, model-call-avoided, local-code and reusable local-code route counts for both the filtered global summary and every workflow row.
 The registry also includes compact `context_handoff`, `context_actions` and `context_quality` projections for every workflow and for the filtered global summary, so operators can see ready tasks, missing-context blockers, dependency blockers, routing quality pressure and the workflow-level `quality_action` recommendation without inspecting each task individually.
 `forge plan` and `forge request start` report `reuse_candidates` when the registry already contains a compatible reusable deterministic subflow, and persist the best attachable candidate per requested task as a proposed child subflow before duplicating local Python/Node.js work.

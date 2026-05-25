@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod registry;
 pub mod request;
 pub mod runtime;
+pub mod schedule;
 pub mod self_evolve;
 pub mod skill;
 pub mod storage;

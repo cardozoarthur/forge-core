@@ -109,6 +109,342 @@ fn plan_supports_autonomous_mixed_workflow_with_cron_non_ai_step_and_email_cost_
 }
 
 #[test]
+fn plan_models_daily_goal_research_as_native_cron_loop_subflow_graph() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Create daily Goal research workflow for Goals: hackathon in America/Sao_Paulo",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tasks = json["tasks"].as_array().unwrap();
+
+    let schedule = find_task(tasks, "Schedule daily Goal research");
+    assert_eq!(schedule["executor"], "wait");
+    assert_eq!(schedule["schedule"]["schema_version"], "forge.schedule.v1");
+    assert_eq!(schedule["schedule"]["kind"], "cron");
+    assert_eq!(schedule["schedule"]["cron"], "0 8 * * *");
+    assert_eq!(schedule["schedule"]["timezone"], "America/Sao_Paulo");
+    assert_eq!(
+        schedule["schedule"]["missed_run_policy"],
+        "run_once_then_resume"
+    );
+    assert_eq!(schedule["schedule"]["scale_to_zero_when_idle"], true);
+    assert!(schedule["schedule"]["next_run_at"]
+        .as_str()
+        .unwrap()
+        .contains('T'));
+    assert!(schedule["schedule"]["run_history"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let loop_node = find_task(tasks, "Loop over configured Goals");
+    assert_eq!(loop_node["loop_control"]["schema_version"], "forge.loop.v1");
+    assert_eq!(loop_node["loop_control"]["kind"], "loop_over_items");
+    assert_eq!(
+        loop_node["loop_control"]["items"],
+        serde_json::json!(["hackathon"])
+    );
+    assert_eq!(loop_node["loop_control"]["subflow_mode"], "finite_per_item");
+    assert_eq!(
+        loop_node["loop_control"]["stop_policy"],
+        "pause_mutate_or_stop"
+    );
+
+    let search = find_task(tasks, "Search hackathon opportunities with DuckDuckGo");
+    assert_eq!(search["executor"], "command");
+    assert_eq!(search["execution_policy"]["ai_allowed"], false);
+    assert_eq!(
+        search["native_subflow"]["subflow_id"],
+        "goal_research:hackathon"
+    );
+    assert_eq!(search["native_subflow"]["mode"], "finite");
+    assert_eq!(search["native_subflow"]["triggered_by"], "loop:task-010");
+    assert_eq!(
+        search["native_subflow"]["lineage"]["workflow_id_policy"],
+        "inherit_parent_workflow_id"
+    );
+    assert_eq!(
+        search["native_subflow"]["lineage"]["artifact_lineage_policy"],
+        "attach_to_parent_run_and_goal"
+    );
+
+    let evaluation = find_task(tasks, "Evaluate hackathon Goal fit");
+    assert_eq!(evaluation["executor"], "ai");
+    assert_eq!(evaluation["execution_policy"]["ai_allowed"], true);
+
+    for title in [
+        "Generate hackathon Markdown report",
+        "Generate hackathon PDF report",
+        "Record hackathon Telegram delivery",
+    ] {
+        let task = find_task(tasks, title);
+        assert_eq!(
+            task["native_subflow"]["subflow_id"],
+            "goal_research:hackathon"
+        );
+    }
+}
+
+#[test]
+fn inspect_and_list_surface_schedule_and_loop_visibility() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Create daily Goal research workflow for Goals: hackathon in America/Sao_Paulo",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+
+    let inspected = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--verbose",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected_json: Value = serde_json::from_slice(&inspected).unwrap();
+    assert_eq!(
+        inspected_json["schedule_summary"]["schema_version"],
+        "forge.schedule.summary.v1"
+    );
+    assert_eq!(inspected_json["schedule_summary"]["scheduled_nodes"], 1);
+    assert_eq!(
+        inspected_json["schedule_summary"]["scale_to_zero_when_idle_nodes"],
+        1
+    );
+    assert_eq!(
+        inspected_json["loop_summary"]["schema_version"],
+        "forge.loop.summary.v1"
+    );
+    assert_eq!(inspected_json["loop_summary"]["loop_nodes"], 1);
+    assert_eq!(inspected_json["loop_summary"]["loop_over_items_nodes"], 1);
+    assert!(inspected_json["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("schedule cron 0 8 * * * America/Sao_Paulo"));
+    assert!(inspected_json["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("loop loop_over_items items hackathon"));
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    let row = find_workflow(&listed_json, workflow_id);
+    assert_eq!(row["schedule_summary"]["scheduled_nodes"], 1);
+    assert_eq!(row["loop_summary"]["loop_nodes"], 1);
+}
+
+#[test]
+fn mcp_creates_daily_goal_research_workflow_and_exposes_schedule_loop_tools() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let manifest = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    for name in [
+        "forge.schedule.create_daily_goal_research",
+        "forge.schedule.update",
+        "forge.schedule.list",
+        "forge.loop.inspect",
+    ] {
+        find_mcp_tool(&manifest_json, name);
+    }
+
+    let input = serde_json::json!({
+        "goals": ["hackathon"],
+        "timezone": "America/Sao_Paulo",
+        "cron": "0 8 * * *",
+        "origin": "codex"
+    })
+    .to_string();
+    let created = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.schedule.create_daily_goal_research"])
+        .arg("--input")
+        .arg(&input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    assert_eq!(created_json["status"], "ok");
+    assert_eq!(
+        created_json["result"]["status"],
+        "daily_goal_research_workflow_created"
+    );
+    assert_eq!(
+        created_json["result"]["workflow"]["tasks"][8]["schedule"]["timezone"],
+        "America/Sao_Paulo"
+    );
+    assert_eq!(
+        created_json["result"]["workflow"]["tasks"][9]["loop_control"]["items"],
+        serde_json::json!(["hackathon"])
+    );
+}
+
+#[test]
+fn run_daily_goal_research_smoke_generates_reports_and_telegram_record() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let created = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--cron",
+            "0 8 * * *",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    let workflow_id = created_json["workflow_id"].as_str().unwrap();
+
+    let run = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let run_json: Value = serde_json::from_slice(&run).unwrap();
+    assert_eq!(
+        run_json["daily_goal_research"]["status"],
+        "smoke_artifacts_generated"
+    );
+    assert_eq!(
+        run_json["daily_goal_research"]["goals"][0]["goal"],
+        "hackathon"
+    );
+    assert_eq!(
+        run_json["daily_goal_research"]["goals"][0]["telegram_delivery"]["secret_exposed"],
+        false
+    );
+
+    let artifacts = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "artifacts",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let artifacts_json: Value = serde_json::from_slice(&artifacts).unwrap();
+    let paths = artifacts_json["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|artifact| artifact["path"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(paths
+        .iter()
+        .any(|path| path.ends_with("goal-hackathon-report.md")));
+    assert!(paths
+        .iter()
+        .any(|path| path.ends_with("goal-hackathon-report.pdf")));
+    let delivery_path = paths
+        .iter()
+        .find(|path| path.ends_with("telegram-delivery-hackathon.json"))
+        .unwrap();
+    let delivery = fs::read_to_string(temp.path().join(delivery_path)).unwrap();
+    assert!(delivery.contains("configured_telegram_chat_ref"));
+    assert!(!delivery.contains("bot_token"));
+    assert!(!delivery.contains("chat_id"));
+}
+
+#[test]
 fn plan_for_n8n_research_requires_catalog_before_forge_primitive_promotion() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -4950,6 +5286,7 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
     assert!(skill.contains("forge mcp call forge.run.start"));
     assert!(skill.contains("forge.workflow.attach_artifact"));
     assert!(skill.contains("forge.context.request"));
+    assert!(skill.contains("forge.task.handoff"));
 }
 
 #[test]
@@ -4987,6 +5324,7 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
         "forge.workflow.update_goal",
         "forge.workflow.attach_artifact",
         "forge.context.request",
+        "forge.task.handoff",
         "forge.validation.status",
         "forge.artifact.fetch",
     ] {
@@ -5014,6 +5352,15 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
         .as_str()
         .unwrap()
         .contains("revision"));
+
+    let task_handoff = find_mcp_tool(&json, "forge.task.handoff");
+    assert_eq!(task_handoff["async_safe"], true);
+    assert_eq!(task_handoff["mutates_workflow"], true);
+    assert_eq!(task_handoff["output_schema"], "forge.executor_handoff.v8");
+    assert!(task_handoff["description"]
+        .as_str()
+        .unwrap()
+        .contains("Acquire a bounded executor handoff"));
 }
 
 #[test]
@@ -5243,6 +5590,74 @@ fn mcp_call_mutates_workflow_and_fetches_bounded_artifact_content() {
     );
     assert_eq!(validation_json["result"]["validation"]["status"], "blocked");
     assert_eq!(validation_json["result"]["validation"]["promotable"], false);
+}
+
+#[test]
+fn mcp_call_acquires_bounded_task_handoff_packet_for_agent_executor() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "MCP bounded executor handoff",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let task_id = planned_json["tasks"][0]["id"].as_str().unwrap();
+
+    let handoff_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "task_id": task_id,
+        "executor": "codex",
+        "budget": 1200,
+        "ttl_seconds": 600
+    })
+    .to_string();
+    let handoff = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.task.handoff"])
+        .arg("--input")
+        .arg(&handoff_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
+    assert_eq!(handoff_json["schema_version"], "forge.mcp.call.v1");
+    assert_eq!(handoff_json["status"], "ok");
+    assert_eq!(handoff_json["tool_name"], "forge.task.handoff");
+    assert_eq!(handoff_json["result"]["status"], "handoff_ready");
+    assert_eq!(handoff_json["result"]["allowed"], true);
+    assert_eq!(handoff_json["result"]["workflow_id"], workflow_id);
+    assert_eq!(handoff_json["result"]["task_id"], task_id);
+    assert_eq!(handoff_json["result"]["selected_executor"], "codex");
+    assert_eq!(
+        handoff_json["result"]["packet"]["schema_version"],
+        "forge.executor_handoff.v8"
+    );
+    assert_eq!(
+        handoff_json["result"]["packet"]["lease_id"],
+        handoff_json["result"]["lease"]["lease_id"]
+    );
+    assert_eq!(
+        handoff_json["result"]["packet"]["context_sha256"],
+        handoff_json["result"]["context"]["context_sha256"]
+    );
 }
 
 #[test]

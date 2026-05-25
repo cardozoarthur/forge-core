@@ -7,10 +7,11 @@ use crate::context::{
     ContextRoutingRepair, ContextRoutingSummary, DEFAULT_CONTEXT_BUDGET,
 };
 use crate::graph::{
-    AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, SubtaskSpec, TaskStatus,
-    ValidationRule, Workflow,
+    AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, LoopSpec, NativeSubflowSpec,
+    ScheduleSpec, SubtaskSpec, TaskStatus, ValidationRule, Workflow,
 };
 use crate::registry::{list_workflows, WorkflowRegistryRow};
+use crate::schedule::{summarize_loops, summarize_schedules, LoopSummary, ScheduleSummary};
 use crate::storage::ForgeStore;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -34,6 +35,8 @@ pub struct WorkflowInspectionReport {
     pub focus: Option<InspectionFocus>,
     pub subflow_count: usize,
     pub subflows: Vec<SubflowInspection>,
+    pub schedule_summary: ScheduleSummary,
+    pub loop_summary: LoopSummary,
     pub handoff_summary: ContextHandoffSummary,
     pub nodes: Vec<TaskInspectionNode>,
     pub diagram: String,
@@ -66,6 +69,9 @@ pub struct TaskInspectionNode {
     pub subtasks: Vec<SubtaskSpec>,
     pub validation_rules: Vec<ValidationRule>,
     pub subflow_refs: Vec<ChildSubflowRef>,
+    pub schedule: Option<ScheduleSpec>,
+    pub loop_control: Option<LoopSpec>,
+    pub native_subflow: Option<NativeSubflowSpec>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -197,6 +203,8 @@ pub fn inspect_workflow_with_focus(
     });
     let handoff_summary = summarize_handoff_tasks(handoff_tasks);
     let subflows = collect_subflows(store, workflow_id, &nodes);
+    let schedule_summary = summarize_schedules(&workflow.tasks);
+    let loop_summary = summarize_loops(&workflow.tasks);
     let diagram = render_diagram(
         &registry_row,
         &nodes,
@@ -220,6 +228,8 @@ pub fn inspect_workflow_with_focus(
         focus,
         subflow_count: subflows.len(),
         subflows,
+        schedule_summary,
+        loop_summary,
         handoff_summary,
         nodes,
         diagram,
@@ -309,6 +319,9 @@ fn task_node(
             Vec::new()
         },
         subflow_refs: task.child_subflows.clone(),
+        schedule: task.schedule.clone(),
+        loop_control: task.loop_control.clone(),
+        native_subflow: task.native_subflow.clone(),
     }
 }
 
@@ -695,14 +708,66 @@ fn render_diagram(
             node.context_route.routing_economy.total_avoided_bytes,
             node.context_route.routing_economy.reduction_bps
         );
+        let schedule = node
+            .schedule
+            .as_ref()
+            .map(|schedule| {
+                format!(
+                    " schedule {} {} {} next {} missed {} history {} scale_to_zero {}",
+                    schedule.kind,
+                    schedule.cron,
+                    schedule.timezone,
+                    schedule
+                        .next_run_at
+                        .as_ref()
+                        .map(|next_run| next_run.to_rfc3339())
+                        .unwrap_or_else(|| "runtime".to_string()),
+                    schedule.missed_run_policy,
+                    schedule.run_history.len(),
+                    schedule.scale_to_zero_when_idle
+                )
+            })
+            .unwrap_or_default();
+        let loop_control = node
+            .loop_control
+            .as_ref()
+            .map(|loop_control| {
+                format!(
+                    " loop {} items {} subflow_mode {} stop {} state {}",
+                    loop_control.kind,
+                    loop_control.items.join(","),
+                    loop_control.subflow_mode,
+                    loop_control.stop_policy,
+                    loop_control.state
+                )
+            })
+            .unwrap_or_default();
+        let native_subflow = node
+            .native_subflow
+            .as_ref()
+            .map(|subflow| {
+                format!(
+                    " native_subflow {} {} triggered_by {} lineage {}/{}/{}",
+                    subflow.subflow_id,
+                    subflow.mode,
+                    subflow.triggered_by,
+                    subflow.lineage.workflow_id_policy,
+                    subflow.lineage.run_id_policy,
+                    subflow.lineage.artifact_lineage_policy
+                )
+            })
+            .unwrap_or_default();
         lines.push(format!(
-            "{} {} [{}] {}{}{} handoff {} executor {}{}{}{}",
+            "{} {} [{}] {}{}{}{}{}{} handoff {} executor {}{}{}{}",
             node.id,
             node.title,
             node.status,
             dependency,
             persona,
             subflow_refs,
+            schedule,
+            loop_control,
+            native_subflow,
             node.handoff_status,
             node.executor,
             context_route,

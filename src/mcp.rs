@@ -1,6 +1,7 @@
 use crate::artifact::{hex_sha256, list_workflow_artifacts, ListedArtifact};
 use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{build_context_package_with_checkpoint, DEFAULT_CONTEXT_BUDGET};
+use crate::handoff::build_task_handoff;
 use crate::inspection::inspect_workflow_with_focus;
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
@@ -8,6 +9,7 @@ use crate::registry::{
 use crate::request::{
     cancel_request, list_requests, load_request_status, resume_async_request, start_async_request,
 };
+use crate::schedule::{create_daily_goal_research_workflow, update_workflow_schedule};
 use crate::storage::ForgeStore;
 use crate::validation::{validate_workflow, ValidationReport};
 use crate::workflow::{attach_workflow_artifact, update_workflow_goal};
@@ -88,6 +90,29 @@ struct WorkflowInspectInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct DailyGoalResearchInput {
+    goals: Vec<String>,
+    timezone: Option<String>,
+    cron: Option<String>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScheduleUpdateInput {
+    workflow_id: String,
+    task_id: String,
+    cron: Option<String>,
+    timezone: Option<String>,
+    missed_run_policy: Option<String>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoopInspectInput {
+    workflow_id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct RunStartInput {
     goal: String,
     origin: Option<String>,
@@ -133,6 +158,15 @@ struct ContextRequestInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct TaskHandoffInput {
+    workflow_id: String,
+    task_id: String,
+    executor: String,
+    budget: Option<usize>,
+    ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct WorkflowIdInput {
     workflow_id: String,
 }
@@ -174,6 +208,54 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &["workflow_id"]),
                 "forge.inspection.v1",
                 &["forge", "inspect", "<workflow-id>", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.schedule.create_daily_goal_research",
+                "Create Daily Goal Research Schedule",
+                "Create a native Forge scheduled/looping daily Goal research workflow with per-Goal report subflows.",
+                object_schema(&[
+                    ("goals", "array", "configured Goal names, for example hackathon"),
+                    ("timezone", "string", "IANA timezone"),
+                    ("cron", "string", "five-field cron expression"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["goals"]),
+                "forge.daily_goal_research_plan.v1",
+                &["forge", "schedule", "create-daily-goal-research", "--goal", "<goal>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.schedule.update",
+                "Update Schedule Node",
+                "Mutate a Forge-owned scheduled node with revision tracking.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("task_id", "string", "scheduled task id"),
+                    ("cron", "string", "optional five-field cron expression"),
+                    ("timezone", "string", "optional IANA timezone"),
+                    ("missed_run_policy", "string", "optional missed-run policy"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id", "task_id"]),
+                "forge.schedule_update.v1",
+                &["forge", "schedule", "update", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.schedule.list",
+                "List Scheduled Workflows",
+                "List workflows with schedule and loop summaries for async scheduled work visibility.",
+                object_schema(&[("lifecycle", "string", "all|running|non-running")], &[]),
+                "forge.registry.workflow_list.v1",
+                &["forge", "schedule", "list", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.loop.inspect",
+                "Inspect Loop Nodes",
+                "Inspect loop primitives and the workflow nodes they trigger.",
+                object_schema(&[("workflow_id", "string", "workflow id")], &["workflow_id"]),
+                "forge.inspection.v1",
+                &["forge", "schedule", "inspect", "--workflow", "<workflow-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -273,6 +355,21 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.task.handoff",
+                "Acquire Task Handoff",
+                "Acquire a bounded executor handoff packet for an authorized task executor.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("task_id", "string", "task id"),
+                    ("executor", "string", "selected executor id"),
+                    ("budget", "integer", "context byte budget"),
+                    ("ttl_seconds", "integer", "lease TTL in seconds"),
+                ], &["workflow_id", "task_id", "executor"]),
+                "forge.executor_handoff.v8",
+                &["forge", "task", "handoff", "--workflow", "<workflow-id>", "--task", "<task-id>", "--executor", "<executor>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
                 "forge.validation.status",
                 "Query Validation Status",
                 "Run the current validation gate projection without promoting unfinished work.",
@@ -315,6 +412,51 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &input.workflow_id,
                 input.verbose.unwrap_or(false),
                 input.task_id.as_deref(),
+            )?)?
+        }
+        "forge.schedule.create_daily_goal_research" => {
+            let input: DailyGoalResearchInput = parse_input(input)?;
+            let timezone = input
+                .timezone
+                .unwrap_or_else(|| "America/Sao_Paulo".to_string());
+            let cron = input.cron.unwrap_or_else(|| "0 8 * * *".to_string());
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(create_daily_goal_research_workflow(
+                store,
+                input.goals,
+                &timezone,
+                &cron,
+                &origin,
+            )?)?
+        }
+        "forge.schedule.update" => {
+            let input: ScheduleUpdateInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(update_workflow_schedule(
+                store,
+                &input.workflow_id,
+                &input.task_id,
+                input.cron.as_deref(),
+                input.timezone.as_deref(),
+                input.missed_run_policy.as_deref(),
+                &origin,
+            )?)?
+        }
+        "forge.schedule.list" => {
+            let input: WorkflowListInput = parse_input(input)?;
+            let filters =
+                WorkflowRegistryFilters::new(parse_lifecycle(input.lifecycle.as_deref())?)
+                    .with_context_action(clean_optional(input.context_action))
+                    .with_quality_action(clean_optional(input.quality_action));
+            serde_json::to_value(list_workflows_with_filters(store, filters)?)?
+        }
+        "forge.loop.inspect" => {
+            let input: LoopInspectInput = parse_input(input)?;
+            serde_json::to_value(inspect_workflow_with_focus(
+                store,
+                &input.workflow_id,
+                true,
+                None,
             )?)?
         }
         "forge.run.start" => {
@@ -369,6 +511,17 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &input.task_id,
                 input.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
                 latest_checkpoint,
+            )?)?
+        }
+        "forge.task.handoff" => {
+            let input: TaskHandoffInput = parse_input(input)?;
+            serde_json::to_value(build_task_handoff(
+                store,
+                &input.workflow_id,
+                &input.task_id,
+                &input.executor,
+                input.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
+                input.ttl_seconds.unwrap_or(900),
             )?)?
         }
         "forge.validation.status" => {

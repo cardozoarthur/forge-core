@@ -1,5 +1,5 @@
 use crate::intent::IntentSpec;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -32,8 +32,66 @@ pub enum ExecutorKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleSpec {
+    #[serde(default = "schedule_schema_version")]
+    pub schema_version: String,
+    #[serde(default = "schedule_kind_cron")]
+    pub kind: String,
     pub cron: String,
     pub timezone: String,
+    #[serde(default)]
+    pub next_run_at: Option<DateTime<Utc>>,
+    #[serde(default = "default_missed_run_policy")]
+    pub missed_run_policy: String,
+    #[serde(default)]
+    pub run_history: Vec<ScheduleRunRecord>,
+    #[serde(default = "default_scale_to_zero_when_idle")]
+    pub scale_to_zero_when_idle: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleRunRecord {
+    pub run_id: String,
+    pub scheduled_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub status: String,
+    pub missed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoopSpec {
+    #[serde(default = "loop_schema_version")]
+    pub schema_version: String,
+    pub kind: String,
+    #[serde(default)]
+    pub items: Vec<String>,
+    #[serde(default)]
+    pub max_iterations: Option<u32>,
+    #[serde(default)]
+    pub condition: Option<String>,
+    #[serde(default)]
+    pub backoff_policy: Option<String>,
+    pub subflow_mode: String,
+    pub stop_policy: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeSubflowSpec {
+    #[serde(default = "native_subflow_schema_version")]
+    pub schema_version: String,
+    pub subflow_id: String,
+    pub goal: String,
+    pub mode: String,
+    pub triggered_by: String,
+    pub lineage: SubflowLineageSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubflowLineageSpec {
+    pub workflow_id_policy: String,
+    pub run_id_policy: String,
+    pub artifact_lineage_policy: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +224,10 @@ pub struct AtomicTask {
     pub executor: ExecutorKind,
     pub human_required: bool,
     pub schedule: Option<ScheduleSpec>,
+    #[serde(default)]
+    pub loop_control: Option<LoopSpec>,
+    #[serde(default)]
+    pub native_subflow: Option<NativeSubflowSpec>,
     pub cost: CostEstimate,
     pub notification: Option<NotificationSpec>,
     #[serde(default)]
@@ -238,6 +300,30 @@ fn rule(kind: &str, expected: &str, command: Option<&str>) -> ValidationRule {
     }
 }
 
+fn schedule_schema_version() -> String {
+    "forge.schedule.v1".to_string()
+}
+
+fn schedule_kind_cron() -> String {
+    "cron".to_string()
+}
+
+fn default_missed_run_policy() -> String {
+    "run_once_then_resume".to_string()
+}
+
+fn default_scale_to_zero_when_idle() -> bool {
+    true
+}
+
+fn loop_schema_version() -> String {
+    "forge.loop.v1".to_string()
+}
+
+fn native_subflow_schema_version() -> String {
+    "forge.native_subflow.v1".to_string()
+}
+
 fn task(
     id: &str,
     title: &str,
@@ -267,6 +353,8 @@ fn task(
         executor,
         human_required: false,
         schedule: None,
+        loop_control: None,
+        native_subflow: None,
         cost: CostEstimate {
             estimated_cost_usd,
             cost_model: "static_v0_estimate".to_string(),
@@ -369,7 +457,8 @@ fn work_item(
 pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
     let local_code_policy = local_code_execution_policy(&intent.goal);
     let windows_software_policy = windows_software_execution_policy(&intent.goal);
-    let autonomous_extensions_required = requires_autonomous_extensions(&intent.goal);
+    let autonomous_extensions_required =
+        requires_autonomous_extensions(&intent.goal) && !requires_daily_goal_research(&intent.goal);
     let mut tasks = vec![
         task(
             "task-001",
@@ -532,6 +621,10 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         append_hackathon_factory_tasks(&mut tasks);
     }
 
+    if requires_daily_goal_research(&intent.goal) {
+        append_daily_goal_research_tasks(&mut tasks, intent);
+    }
+
     if !autonomous_extensions_required {
         if let Some(policy) = windows_software_policy.clone() {
             tasks.push(windows_software_task("task-009", &["task-003"], policy));
@@ -571,8 +664,14 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
             (ExecutorKind::Wait, 0.0),
         );
         wait.schedule = Some(ScheduleSpec {
+            schema_version: schedule_schema_version(),
+            kind: schedule_kind_cron(),
             cron: detect_cron(&intent.goal),
             timezone: "UTC".to_string(),
+            next_run_at: Some(Utc::now() + Duration::hours(1)),
+            missed_run_policy: default_missed_run_policy(),
+            run_history: Vec::new(),
+            scale_to_zero_when_idle: true,
         });
         tasks.push(wait);
 
@@ -910,10 +1009,270 @@ fn append_hackathon_factory_tasks(tasks: &mut Vec<AtomicTask>) {
         (ExecutorKind::Wait, 0.0),
     );
     improvement.schedule = Some(ScheduleSpec {
+        schema_version: schedule_schema_version(),
+        kind: schedule_kind_cron(),
         cron: "0 */6 * * *".to_string(),
         timezone: "America/Sao_Paulo".to_string(),
+        next_run_at: Some(Utc::now() + Duration::hours(6)),
+        missed_run_policy: default_missed_run_policy(),
+        run_history: Vec::new(),
+        scale_to_zero_when_idle: true,
     });
     tasks.push(improvement);
+}
+
+fn append_daily_goal_research_tasks(tasks: &mut Vec<AtomicTask>, intent: &IntentSpec) {
+    let goals = daily_goal_research_goals(&intent.goal);
+    let timezone = detect_timezone(&intent.goal);
+    let cron = detect_daily_goal_cron(&intent.goal);
+
+    let schedule_id = next_task_id(tasks);
+    let mut schedule = task(
+        &schedule_id,
+        "Schedule daily Goal research",
+        &["task-003"],
+        &[
+            "configured Goals",
+            "timezone",
+            "missed-run policy",
+            "durable workflow state",
+        ],
+        vec![rule(
+            "schedule",
+            "cron node persists timezone, next_run_at, missed-run policy and run history",
+            None,
+        )],
+        "Durable daily schedule state",
+        (ExecutorKind::Wait, 0.0),
+    );
+    schedule.schedule = Some(ScheduleSpec {
+        schema_version: schedule_schema_version(),
+        kind: schedule_kind_cron(),
+        cron: cron.clone(),
+        timezone: timezone.clone(),
+        next_run_at: Some(Utc::now() + Duration::days(1)),
+        missed_run_policy: default_missed_run_policy(),
+        run_history: Vec::new(),
+        scale_to_zero_when_idle: true,
+    });
+    schedule.async_policy = AsyncPolicy {
+        mode: "async".to_string(),
+        resume_strategy: "schedule_due_or_manual_resume".to_string(),
+        run_substrates: Vec::new(),
+    };
+    tasks.push(schedule);
+
+    let loop_id = next_task_id(tasks);
+    let schedule_dep = [schedule_id.as_str()];
+    let mut loop_node = task(
+        &loop_id,
+        "Loop over configured Goals",
+        &schedule_dep,
+        &[
+            "Goal configuration list",
+            "per-Goal subflow template",
+            "pause/stop/mutate controls",
+        ],
+        vec![rule(
+            "loop_control",
+            "loop node explicitly records loop-over-items semantics and controlled stop/pause/mutate behavior",
+            None,
+        )],
+        "Goal iteration plan",
+        (ExecutorKind::Command, 0.0001),
+    );
+    loop_node.loop_control = Some(LoopSpec {
+        schema_version: loop_schema_version(),
+        kind: "loop_over_items".to_string(),
+        items: goals.clone(),
+        max_iterations: Some(goals.len() as u32),
+        condition: None,
+        backoff_policy: None,
+        subflow_mode: "finite_per_item".to_string(),
+        stop_policy: "pause_mutate_or_stop".to_string(),
+        state: "waiting_for_schedule".to_string(),
+    });
+    tasks.push(loop_node);
+
+    for goal in goals {
+        append_goal_research_subflow_tasks(tasks, &goal, &loop_id);
+    }
+}
+
+fn append_goal_research_subflow_tasks(tasks: &mut Vec<AtomicTask>, goal: &str, loop_id: &str) {
+    let subflow = native_goal_research_subflow(goal, loop_id);
+    let search_id = next_task_id(tasks);
+    let loop_dep = [loop_id];
+    let mut search = task(
+        &search_id,
+        &format!("Search {goal} opportunities with DuckDuckGo"),
+        &loop_dep,
+        &[
+            "DuckDuckGo query plan",
+            "upcoming hackathon and marathon keywords",
+            "online first-phase eligibility criteria",
+        ],
+        vec![rule(
+            "search",
+            "deterministic discovery captures candidate URLs, dates and source snippets without a model call",
+            None,
+        )],
+        "DuckDuckGo discovery results",
+        (ExecutorKind::Command, 0.0002),
+    );
+    search.execution_policy = daily_goal_deterministic_policy("duckduckgo_discovery");
+    search.native_subflow = Some(subflow.clone());
+    tasks.push(search);
+
+    let inspect_id = next_task_id(tasks);
+    let search_dep = [search_id.as_str()];
+    let mut inspect = task(
+        &inspect_id,
+        &format!("Inspect {goal} pages and regulations with Playwright"),
+        &search_dep,
+        &[
+            "candidate URLs",
+            "Playwright browser inspection",
+            "regulation and eligibility pages",
+        ],
+        vec![rule(
+            "playwright_inspection",
+            "page inspection extracts regulation clarity, deadlines, cost and location evidence",
+            None,
+        )],
+        "Inspected regulation evidence",
+        (ExecutorKind::Command, 0.0004),
+    );
+    inspect.execution_policy = daily_goal_deterministic_policy("playwright_regulation_inspection");
+    inspect.native_subflow = Some(subflow.clone());
+    tasks.push(inspect);
+
+    let evaluation_id = next_task_id(tasks);
+    let inspect_dep = [inspect_id.as_str()];
+    let mut evaluation = task(
+        &evaluation_id,
+        &format!("Evaluate {goal} Goal fit"),
+        &inspect_dep,
+        &[
+            "regulation evidence",
+            "Pelotas/RS geography",
+            "Engineering Production plus ADS fit",
+            "cost and first-phase online constraints",
+            "user ambitions",
+        ],
+        vec![rule(
+            "goal_fit",
+            "judgment step scores eligibility, geography, academic fit, cost, regulation clarity and ambition alignment",
+            None,
+        )],
+        "Goal fit evaluation matrix",
+        (ExecutorKind::Ai, 0.012),
+    );
+    evaluation.native_subflow = Some(subflow.clone());
+    tasks.push(evaluation);
+
+    let markdown_id = next_task_id(tasks);
+    let evaluation_dep = [evaluation_id.as_str()];
+    let mut markdown = task(
+        &markdown_id,
+        &format!("Generate {goal} Markdown report"),
+        &evaluation_dep,
+        &[
+            "Goal fit evaluation matrix",
+            "source evidence",
+            "report template",
+        ],
+        vec![rule(
+            "markdown_artifact",
+            "Markdown report is structured, source-aware and attached to the parent workflow lineage",
+            None,
+        )],
+        "Structured Markdown Goal report",
+        (ExecutorKind::Command, 0.0002),
+    );
+    markdown.execution_policy = daily_goal_deterministic_policy("markdown_report_generation");
+    markdown.native_subflow = Some(subflow.clone());
+    tasks.push(markdown);
+
+    let pdf_id = next_task_id(tasks);
+    let markdown_dep = [markdown_id.as_str()];
+    let mut pdf = task(
+        &pdf_id,
+        &format!("Generate {goal} PDF report"),
+        &markdown_dep,
+        &["Markdown report", "PDF renderer", "artifact manifest"],
+        vec![rule(
+            "pdf_artifact",
+            "PDF report is generated from the Markdown report and attached to the same Goal lineage",
+            None,
+        )],
+        "PDF Goal report",
+        (ExecutorKind::Command, 0.0002),
+    );
+    pdf.execution_policy = daily_goal_deterministic_policy("pdf_report_generation");
+    pdf.native_subflow = Some(subflow.clone());
+    tasks.push(pdf);
+
+    let telegram_id = next_task_id(tasks);
+    let pdf_dep = [pdf_id.as_str()];
+    let mut telegram = task(
+        &telegram_id,
+        &format!("Record {goal} Telegram delivery"),
+        &pdf_dep,
+        &[
+            "PDF Goal report",
+            "Markdown Goal report",
+            "configured Telegram destination",
+        ],
+        vec![rule(
+            "telegram_delivery",
+            "Telegram delivery record references report artifacts and redacts raw secrets",
+            None,
+        )],
+        "Telegram delivery record",
+        (ExecutorKind::Notification, 0.0001),
+    );
+    telegram.notification = Some(NotificationSpec {
+        channel: "telegram".to_string(),
+        to: "configured_telegram_chat_ref".to_string(),
+        subject: format!("Daily Goal research report: {goal}"),
+        include_cost_report: false,
+    });
+    telegram.native_subflow = Some(subflow);
+    tasks.push(telegram);
+}
+
+fn native_goal_research_subflow(goal: &str, loop_id: &str) -> NativeSubflowSpec {
+    NativeSubflowSpec {
+        schema_version: native_subflow_schema_version(),
+        subflow_id: format!("goal_research:{goal}"),
+        goal: goal.to_string(),
+        mode: "finite".to_string(),
+        triggered_by: format!("loop:{loop_id}"),
+        lineage: SubflowLineageSpec {
+            workflow_id_policy: "inherit_parent_workflow_id".to_string(),
+            run_id_policy: "inherit_parent_run_id".to_string(),
+            artifact_lineage_policy: "attach_to_parent_run_and_goal".to_string(),
+        },
+    }
+}
+
+fn daily_goal_deterministic_policy(entrypoint: &str) -> ExecutionPolicySpec {
+    ExecutionPolicySpec {
+        mode: "local_code_node".to_string(),
+        ai_allowed: false,
+        deterministic: true,
+        code_runtime: Some(CodeRuntimeSpec {
+            language: "rust".to_string(),
+            entrypoint: format!("forge_daily_goal_{entrypoint}"),
+            sandbox: "forge_owned_artifacts_no_external_mutation".to_string(),
+        }),
+        reuse_hint: "reuse_compatible_code_node".to_string(),
+        selection_reason:
+            "daily Goal research uses deterministic code for stable repeated search/report/PDF/Telegram work"
+                .to_string(),
+        validation_gate: "daily_goal_deterministic_node_validation_required".to_string(),
+    }
 }
 
 fn deterministic_non_ai_task(
@@ -1171,6 +1530,44 @@ fn requires_hackathon_factory(goal: &str) -> bool {
             || lower.contains("software factory")
             || lower.contains("fábrica")
             || lower.contains("factory"))
+}
+
+fn requires_daily_goal_research(goal: &str) -> bool {
+    let lower = goal.to_lowercase();
+    (lower.contains("daily goal research")
+        || lower.contains("daily goal")
+        || lower.contains("goal research workflow"))
+        && (lower.contains("goal") || lower.contains("goals"))
+}
+
+fn daily_goal_research_goals(goal: &str) -> Vec<String> {
+    let lower = goal.to_lowercase();
+    let mut goals = Vec::new();
+    if lower.contains("hackathon") || lower.contains("maratona") {
+        goals.push("hackathon".to_string());
+    }
+
+    if goals.is_empty() {
+        goals.push("hackathon".to_string());
+    }
+    goals
+}
+
+fn detect_timezone(goal: &str) -> String {
+    goal.split_whitespace()
+        .map(|token| token.trim_matches(|ch: char| ch == ',' || ch == ';' || ch == '.'))
+        .find(|token| token.contains('/') && token.chars().any(|ch| ch == '_'))
+        .unwrap_or("UTC")
+        .to_string()
+}
+
+fn detect_daily_goal_cron(goal: &str) -> String {
+    let cron = detect_cron(goal);
+    if cron == "0 * * * *" {
+        "0 8 * * *".to_string()
+    } else {
+        cron
+    }
 }
 
 fn next_task_id(tasks: &[AtomicTask]) -> String {

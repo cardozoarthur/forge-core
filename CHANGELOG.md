@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.90 - 2026-05-25
+
+### Added
+
+- Added native `forge.schedule.v1`, `forge.loop.v1` and `forge.native_subflow.v1` graph metadata so cron nodes carry timezone, `next_run_at`, missed-run policy, run history and scale-to-zero behavior, while loop nodes carry explicit loop-over-items and controlled stop/pause/mutate semantics.
+- Added canonical daily Goal research planning for the initial `hackathon` Goal, including Forge-owned daily scheduling, a per-Goal loop node, finite research subflow lineage, deterministic DuckDuckGo/Playwright/report/PDF/Telegram nodes, and an AI-only judgment node.
+- Added `forge schedule create-daily-goal-research`, `forge schedule list`, `forge schedule inspect` and `forge schedule update`.
+- Added MCP tools `forge.schedule.create_daily_goal_research`, `forge.schedule.list`, `forge.schedule.update`, `forge.loop.inspect` and `forge.task.handoff`.
+- `forge run --simulate` now generates smoke Markdown/PDF/Telegram-delivery artifacts for native daily Goal research workflows without exposing Telegram secrets.
+- Added CLI contract coverage for cron planning, loop planning, daily Goal workflow planning, inspect/list visibility, MCP exposure and the smoke artifact path.
+
+### Changed
+
+- The package version is now `0.4.90`.
+- `forge inspect` and `forge list` now expose schedule and loop summaries alongside existing context, policy and subflow views.
+- Generated Codex/OpenCode skills now document scheduled Goal research and bounded task handoff through MCP.
+
+### Safety
+
+- The daily Goal research smoke writes only Forge-owned local artifacts under the workflow artifact directory.
+- Telegram delivery is represented as a redacted delivery record; no bot token or raw chat id is persisted or printed.
+- The increment does not install Knative, mutate Docker/Kubernetes/Knative resources, execute remote code or mutate external user resources.
+
 ## 0.4.89 - 2026-05-25
 
 ### Added
