@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.4.105 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 20: comprehensive infrastructure audit, validation gate confirmation and milestone status update.
+- All 179 CLI contract tests pass confirming: cron/schedule nodes with durable state, timezone, missed-run policies, run history and scale-to-zero; loop nodes covering loop-over-items, bounded repeat, retry/backoff, while/until and infinite recurring subflows; subflow lineage with workflow_id/run_id/artifact lineage policies preserved across trigger boundaries.
+- Daily goal research workflow validated end-to-end: CLI and MCP create scheduled/looping research graphs, `forge run --simulate` produces Markdown and PDF artifacts per Goal with Telegram delivery records without exposing secrets.
+- Interactive CLI baseline confirmed: `forge` (no args, TTY) renders anvil banner + operational dashboard with active runs, scheduled workflows, pending approvals, executor/runtime status and quick actions; `forge` (non-TTY) stays script-safe.
+- Slash command catalog validated: 21 slash commands from `/help` through `/update` with discoverable names, equivalent shell commands, workflow mutation flags and risk levels.
+- Conversational routing confirmed: simple state questions answered directly without workflow creation; complex/research/schedule requests create async workflow/run records with retention decisions (retain, archive, keep-until-approved).
+- Human decision/form interaction model validated: choice prompts, form schemas with required-field validation, timeout handling, durable decisions with audit trail, pause/resume and inspect/list/status visibility. All surfaces consistent across CLI, MCP and TUI.
+- MCP tool surface confirmed: 27 tools covering workflow list/inspect, schedule create/update/list/pause/resume/stop/run-due, loop inspect, run start/resume/status/cancel, interaction create-choice/create-form/answer/expire/list, context request, task handoff, validation status, artifact fetch and milestone status.
+- Creative artifact IR baseline confirmed: ScreenSpec, WhiteboardSpec, DocumentSpec, SlideDeckSpec, ComponentSpec, DesignToken/TokenCollection, PatchByIntent types all validated with serde round-trip, CLI attach/list/inspect, workflow integration and milestone status tracking.
+- Design tokens confirmed: DesignToken with 13 TokenType variants, SemanticAlias, TokenCollection with CLI set-tokens/get-tokens and workflow persistence.
+- Componentization confirmed: ComponentSpec with props, variants, states, slots, token dependencies and code template; ComponentVariant with props_override; ComponentState with styling; ComponentSlot with required/optional semantics.
+- Parallel DAG scheduling confirmed: concurrent wave execution with Rust threads, cancellation support, wave-level concurrency tracking, cost reporting and notification delivery preserved across parallel execution paths.
+- 0.5 milestone status reports 9 capabilities with status vocabulary (implemented, validated, groundwork, planned, blocked), promotion decision with blocked_by reasons and next actions.
+
+### Changed
+
+- The package version is now `0.4.105`.
+- The Forge 0.5 milestone promotion decision remains `fail` (expected); required capabilities `live_collaboration`, `research_artifact_baseline` and `export_demo_baseline` stay `planned`.
+- No infrastructure gaps were found in the scheduled/looping/subflow/lineage/interactive/MCP surface; all requested capabilities from the phase goal are structurally implemented and test-validated.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- No automatic executor authorization, run deletion or workflow mutation bypasses validation.
+- All changes are additive; existing workflows, schedules, loops, artifacts and checkpoints remain compatible.
+
 ## 0.4.104 - 2026-05-25
 
 ### Added
