@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.103 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 17: versioned missed-run reconciliation receipts for native scheduled workflow execution.
+- `forge schedule run-due --output json` now returns `missed_run_reconciliation` entries for stale due cron nodes, including policy, action, affected task, observed timestamp, run id, run status and whether artifacts were allowed.
+- Schedule run history records now persist `missed_run_policy` and `reconciliation_action` with backward-compatible serde defaults for older workflows.
+- `forge list` and `forge inspect` schedule summaries now expose missed-run policies and reconciliation actions so operators and agents can audit skipped or catch-up cron behavior without scraping raw workflow JSON.
+- Added CLI contract coverage proving skip-missed reconciliation is visible through run-due, list and inspect.
+
+### Changed
+
+- The package version is now `0.4.103`.
+- Missed-run reconciliation is derived from Forge-owned schedule state and run history rather than external wrapper loops.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- The change is additive for persisted workflow JSON; old run-history records deserialize with `not_reconciled` metadata until a new native run records explicit policy/action evidence.
+
 ## 0.4.102 - 2026-05-25
 
 ### Added

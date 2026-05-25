@@ -58,6 +58,10 @@ pub struct ScheduleRunRecord {
     pub finished_at: Option<DateTime<Utc>>,
     pub status: String,
     pub missed: bool,
+    #[serde(default = "default_missed_run_policy")]
+    pub missed_run_policy: String,
+    #[serde(default = "default_reconciliation_action")]
+    pub reconciliation_action: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -415,6 +419,10 @@ fn schedule_kind_cron() -> String {
 
 fn default_missed_run_policy() -> String {
     "run_once_then_resume".to_string()
+}
+
+fn default_reconciliation_action() -> String {
+    "not_reconciled".to_string()
 }
 
 fn default_scale_to_zero_when_idle() -> bool {

@@ -7,7 +7,7 @@ use crate::intent::parse_intent;
 use crate::registry::{attach_reuse_candidates_as_child_subflows, find_reuse_candidates};
 use crate::storage::ForgeStore;
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 const SCHEDULE_SUMMARY_SCHEMA_VERSION: &str = "forge.schedule.summary.v1";
 const LOOP_SUMMARY_SCHEMA_VERSION: &str = "forge.loop.summary.v1";
+const MISSED_RUN_RECONCILIATION_SCHEMA_VERSION: &str = "forge.missed_run_reconciliation.v1";
 const MISSED_RUN_GRACE_MINUTES: i64 = 5;
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -27,6 +28,8 @@ pub struct ScheduleSummary {
     pub scale_to_zero_when_idle_nodes: usize,
     pub next_run_at: Option<String>,
     pub timezones: Vec<String>,
+    pub missed_run_policies: Vec<String>,
+    pub missed_run_reconciliation_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -103,6 +106,22 @@ pub struct TelegramDeliveryRecord {
     pub simulated: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct MissedRunReconciliationReport {
+    pub schema_version: String,
+    pub task_id: String,
+    pub policy: String,
+    pub action: String,
+    pub scheduled_at: String,
+    pub observed_at: String,
+    pub next_run_at_before: String,
+    pub next_run_at_after: Option<String>,
+    pub run_id: String,
+    pub run_status: String,
+    pub missed: bool,
+    pub artifacts_allowed: bool,
+}
+
 pub fn summarize_schedules(tasks: &[AtomicTask]) -> ScheduleSummary {
     let mut summary = ScheduleSummary {
         schema_version: SCHEDULE_SUMMARY_SCHEMA_VERSION.to_string(),
@@ -124,6 +143,24 @@ pub fn summarize_schedules(tasks: &[AtomicTask]) -> ScheduleSummary {
         }
         if schedule.run_history.iter().any(|run| run.missed) {
             summary.missed_run_nodes += 1;
+        }
+        if !summary
+            .missed_run_policies
+            .contains(&schedule.missed_run_policy)
+        {
+            summary
+                .missed_run_policies
+                .push(schedule.missed_run_policy.clone());
+        }
+        for action in schedule
+            .run_history
+            .iter()
+            .filter(|run| run.missed)
+            .map(|run| run.reconciliation_action.clone())
+        {
+            if !summary.missed_run_reconciliation_actions.contains(&action) {
+                summary.missed_run_reconciliation_actions.push(action);
+            }
         }
         if schedule.scale_to_zero_when_idle {
             summary.scale_to_zero_when_idle_nodes += 1;
@@ -361,7 +398,10 @@ fn record_schedule_run_history_with_status(
             started_at
         };
         let missed = is_missed_run(scheduled_at, started_at);
+        let missed_run_policy = schedule.missed_run_policy.clone();
+        let reconciliation_action = missed_run_action(&missed_run_policy, missed, status);
         let run_id = format!("run_{}", Uuid::new_v4().to_string().replace('-', ""));
+        let next_run_at_after = finished_at + Duration::days(1);
         schedule.run_history.push(ScheduleRunRecord {
             run_id: run_id.clone(),
             scheduled_at,
@@ -369,8 +409,10 @@ fn record_schedule_run_history_with_status(
             finished_at: Some(finished_at),
             status: status.to_string(),
             missed,
+            missed_run_policy: missed_run_policy.clone(),
+            reconciliation_action: reconciliation_action.clone(),
         });
-        schedule.next_run_at = Some(finished_at + Duration::days(1));
+        schedule.next_run_at = Some(next_run_at_after);
         emissions.push(ScheduleRunEmission {
             schedule_task_id: task.id.clone(),
             run_id,
@@ -445,6 +487,7 @@ pub struct ScheduleRunDueReport {
     pub due_executed: bool,
     pub blocked_loop_task_id: Option<String>,
     pub blocked_loop_state: Option<String>,
+    pub missed_run_reconciliation: Vec<MissedRunReconciliationReport>,
     pub daily_goal_research: Option<DailyGoalResearchSmokeReport>,
     pub schedule_summary: ScheduleSummary,
 }
@@ -527,6 +570,7 @@ pub fn run_due_workflow(
             due_executed: false,
             blocked_loop_task_id: None,
             blocked_loop_state: None,
+            missed_run_reconciliation: Vec::new(),
             daily_goal_research: None,
             schedule_summary: summarize_schedules(&workflow.tasks),
         }));
@@ -548,12 +592,14 @@ pub fn run_due_workflow(
             due_executed: false,
             blocked_loop_task_id: Some(task_id),
             blocked_loop_state: Some(state),
+            missed_run_reconciliation: Vec::new(),
             daily_goal_research: None,
             schedule_summary: summarize_schedules(&workflow.tasks),
         }));
     }
 
-    if skip_due_missed_runs(&mut workflow) {
+    let skipped_reconciliation = skip_due_missed_runs(&mut workflow);
+    if !skipped_reconciliation.is_empty() {
         let workflow_id = workflow.id.clone();
         let schedule_summary = summarize_schedules(&workflow.tasks);
         store.save_workflow(&workflow)?;
@@ -563,6 +609,7 @@ pub fn run_due_workflow(
             &serde_json::json!({
                 "workflow_id": workflow_id,
                 "policy": "skip_missed",
+                "reconciliation": skipped_reconciliation,
             }),
         )?;
 
@@ -573,17 +620,24 @@ pub fn run_due_workflow(
             due_executed: false,
             blocked_loop_task_id: None,
             blocked_loop_state: None,
+            missed_run_reconciliation: skipped_reconciliation,
             daily_goal_research: None,
             schedule_summary,
         }));
     }
 
     let workflow_id = workflow.id.clone();
+    let history_markers = schedule_run_history_markers(&workflow);
     let daily_goal_research =
         run_daily_goal_research_smoke_with_schedule_mode(store, &mut workflow, true)?;
     if daily_goal_research.is_none() {
         record_schedule_run_history(&mut workflow, true);
     }
+    let missed_run_reconciliation = collect_new_missed_run_reconciliations(
+        &workflow,
+        &history_markers,
+        daily_goal_research.is_some(),
+    );
     let schedule_summary = summarize_schedules(&workflow.tasks);
     store.save_workflow(&workflow)?;
     store.record_event(
@@ -591,6 +645,7 @@ pub fn run_due_workflow(
         "due_workflow_executed",
         &serde_json::json!({
             "workflow_id": workflow_id,
+            "missed_run_reconciliation": missed_run_reconciliation,
         }),
     )?;
 
@@ -601,18 +656,20 @@ pub fn run_due_workflow(
         due_executed: true,
         blocked_loop_task_id: None,
         blocked_loop_state: None,
+        missed_run_reconciliation,
         daily_goal_research,
         schedule_summary,
     }))
 }
 
-fn skip_due_missed_runs(workflow: &mut Workflow) -> bool {
-    let mut has_skipped = false;
+fn skip_due_missed_runs(workflow: &mut Workflow) -> Vec<MissedRunReconciliationReport> {
+    let mut reconciliation = Vec::new();
     for schedule in workflow
         .tasks
         .iter_mut()
-        .filter_map(|task| task.schedule.as_mut())
+        .filter_map(|task| task.schedule.as_mut().map(|schedule| (&task.id, schedule)))
     {
+        let (task_id, schedule) = schedule;
         let Some(next_run_at) = schedule.next_run_at else {
             continue;
         };
@@ -624,18 +681,90 @@ fn skip_due_missed_runs(workflow: &mut Workflow) -> bool {
             continue;
         }
 
+        let run_id = format!("run_{}", Uuid::new_v4().to_string().replace('-', ""));
+        let next_run_at_after = now + Duration::days(1);
         schedule.run_history.push(ScheduleRunRecord {
-            run_id: format!("run_{}", Uuid::new_v4().to_string().replace('-', "")),
+            run_id: run_id.clone(),
             scheduled_at: next_run_at,
             started_at: Some(now),
             finished_at: Some(now),
             status: "skipped_missed".to_string(),
             missed: true,
+            missed_run_policy: schedule.missed_run_policy.clone(),
+            reconciliation_action: "skipped_missed".to_string(),
         });
-        schedule.next_run_at = Some(now + Duration::days(1));
-        has_skipped = true;
+        schedule.next_run_at = Some(next_run_at_after);
+        reconciliation.push(MissedRunReconciliationReport {
+            schema_version: MISSED_RUN_RECONCILIATION_SCHEMA_VERSION.to_string(),
+            task_id: task_id.clone(),
+            policy: schedule.missed_run_policy.clone(),
+            action: "skipped_missed".to_string(),
+            scheduled_at: format_utc_rfc3339(next_run_at),
+            observed_at: format_utc_rfc3339(now),
+            next_run_at_before: format_utc_rfc3339(next_run_at),
+            next_run_at_after: Some(format_utc_rfc3339(next_run_at_after)),
+            run_id,
+            run_status: "skipped_missed".to_string(),
+            missed: true,
+            artifacts_allowed: false,
+        });
     }
-    has_skipped
+    reconciliation
+}
+
+fn schedule_run_history_markers(workflow: &Workflow) -> Vec<(String, usize)> {
+    workflow
+        .tasks
+        .iter()
+        .filter_map(|task| {
+            task.schedule
+                .as_ref()
+                .map(|schedule| (task.id.clone(), schedule.run_history.len()))
+        })
+        .collect()
+}
+
+fn collect_new_missed_run_reconciliations(
+    workflow: &Workflow,
+    history_markers: &[(String, usize)],
+    artifacts_allowed: bool,
+) -> Vec<MissedRunReconciliationReport> {
+    let mut reconciliation = Vec::new();
+    for task in &workflow.tasks {
+        let Some(schedule) = task.schedule.as_ref() else {
+            continue;
+        };
+        let history_start = history_markers
+            .iter()
+            .find_map(|(task_id, len)| (task_id == &task.id).then_some(*len))
+            .unwrap_or(0);
+        for run in schedule
+            .run_history
+            .iter()
+            .skip(history_start)
+            .filter(|run| run.missed)
+        {
+            let observed_at = run
+                .started_at
+                .or(run.finished_at)
+                .unwrap_or(run.scheduled_at);
+            reconciliation.push(MissedRunReconciliationReport {
+                schema_version: MISSED_RUN_RECONCILIATION_SCHEMA_VERSION.to_string(),
+                task_id: task.id.clone(),
+                policy: run.missed_run_policy.clone(),
+                action: run.reconciliation_action.clone(),
+                scheduled_at: format_utc_rfc3339(run.scheduled_at),
+                observed_at: format_utc_rfc3339(observed_at),
+                next_run_at_before: format_utc_rfc3339(run.scheduled_at),
+                next_run_at_after: schedule.next_run_at.map(format_utc_rfc3339),
+                run_id: run.run_id.clone(),
+                run_status: run.status.clone(),
+                missed: run.missed,
+                artifacts_allowed,
+            });
+        }
+    }
+    reconciliation
 }
 
 fn is_missed_run(scheduled_at: DateTime<Utc>, started_at: DateTime<Utc>) -> bool {
@@ -644,6 +773,23 @@ fn is_missed_run(scheduled_at: DateTime<Utc>, started_at: DateTime<Utc>) -> bool
 
 fn should_skip_missed_run(policy: &str) -> bool {
     matches!(policy, "skip_missed" | "skip_and_resume")
+}
+
+fn format_utc_rfc3339(timestamp: DateTime<Utc>) -> String {
+    timestamp.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn missed_run_action(policy: &str, missed: bool, status: &str) -> String {
+    if !missed {
+        return "on_time_due_run".to_string();
+    }
+    if status == "skipped_missed" || should_skip_missed_run(policy) {
+        return "skipped_missed".to_string();
+    }
+    match policy {
+        "run_once_then_resume" => "ran_once_then_resumed".to_string(),
+        _ => "ran_missed_due".to_string(),
+    }
 }
 
 fn push_schedule_revision(workflow: &mut Workflow, origin: &str, summary: &str) -> u64 {
