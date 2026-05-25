@@ -24,7 +24,9 @@ use forge_core::registry::{
     list_workflows_with_filters, quality_action_catalog, WorkflowLifecycleFilter,
     WorkflowRegistryFilters,
 };
-use forge_core::request::{load_request_status, resume_async_request, start_async_request};
+use forge_core::request::{
+    cancel_request, list_requests, load_request_status, resume_async_request, start_async_request,
+};
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
 };
@@ -468,6 +470,20 @@ enum RequestCommands {
     Status {
         #[arg(long = "run")]
         run_id: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    List {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Cancel {
+        #[arg(long = "run")]
+        run_id: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -1115,6 +1131,22 @@ fn run() -> Result<i32> {
             RequestCommands::Status { run_id, output } => {
                 let store = ForgeStore::open(cli.store)?;
                 let report = load_request_status(&store, &run_id)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            RequestCommands::List { status, output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_requests(&store, status.as_deref())?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            RequestCommands::Cancel {
+                run_id,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = cancel_request(&store, &run_id, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
             }

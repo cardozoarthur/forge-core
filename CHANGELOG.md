@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.89 - 2026-05-25
+
+### Added
+
+- Added `forge request list --output json` with schema `forge.request_list.v1` for listing all async requests with optional `--status` filter (accepted|resumed|cancelled).
+- Added `forge request cancel --run <run-id> --origin <origin> --output json` so agents can cancel a running request with origin trace and event recording.
+- Added `forge.mcp` tools `forge.request.list` and `forge.request.cancel` exposing the new CLI surface through the MCP protocol.
+- Added CLI contract coverage for request listing by status filter and request cancellation with event recording.
+- Updated generated Codex/OpenCode skills to document the request list and cancel flow.
+
+### Changed
+
+- The package version is now `0.4.89`.
+
+### Safety
+
+- Request list is read-only metadata over Forge-owned SQLite runs table.
+- Request cancel only changes Forge-owned run status and records an event; it does not mutate external resources, execute remote code, install Knative or mutate Docker/Kubernetes/Knative resources.
+- MCP mutations still flow through Forge workflow APIs with origin trace.
+
 ## 0.4.88 - 2026-05-25
 
 ### Added

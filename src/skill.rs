@@ -36,6 +36,8 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 - Use `forge mcp tools --output json` to discover stable agent-facing tools before wiring a Codex/OpenCode workflow.
 - For async handoff, call `forge mcp call forge.run.start --input '{"goal":"<objective>","origin":"codex"}' --output json`, return `result.run_id` quickly, and let Forge remain the source of truth.
 - Poll later with `forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json`.
+- List active requests with `forge mcp call forge.request.list --input '{"status":"accepted"}' --output json`.
+- Cancel a request with `forge mcp call forge.request.cancel --input '{"run_id":"<run-id>","origin":"opencode"}' --output json`.
 - Resume a paused async handoff with `forge mcp call forge.run.resume --input '{"run_id":"<run-id>","origin":"opencode"}' --output json`.
 - Inspect or route work through `forge.workflow.inspect`, `forge.context.request`, `forge.workflow.attach_artifact`, `forge.workflow.update_goal`, `forge.validation.status` and `forge.artifact.fetch`.
 - MCP mutations must still go through Forge so revisions, artifact hashes, origins and validation gates are persisted.
@@ -64,6 +66,9 @@ forge request resume --run <run-id> --origin codex --output json
 forge mcp tools --output json
 forge mcp call forge.run.start --input '{"goal":"Improve Forge Core","origin":"codex"}' --output json
 forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json
+forge request list --output json
+forge request list --status accepted --output json
+forge request cancel --run <run-id> --origin codex --output json
 forge sync all --home "$HOME" --allow codex --allow opencode --output json
 forge executors --output json
 forge runtimes --output json
