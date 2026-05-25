@@ -135,6 +135,121 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
 }
 
 #[test]
+fn milestone_manifest_surfaces_requirements_evidence_gaps_and_promotion_decision() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "milestone",
+            "manifest",
+            "--version",
+            "0.5",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.milestone.manifest.v1");
+    assert_eq!(json["milestone"], "0.5");
+    assert!(json["release_line_boundary"]
+        .as_str()
+        .unwrap()
+        .contains("0.4.x"));
+    assert!(json["requirements"].as_array().unwrap().len() >= 9);
+    assert!(json["completed_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |capability| capability["id"] == "scheduler_loop_subflow_foundation"
+                && capability["promotion_ready"] == true
+        ));
+    assert!(json["missing_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |capability| capability["id"] == "research_artifact_baseline"
+                && capability["promotion_ready"] == false
+        ));
+    assert!(json["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|evidence| evidence["capability_id"] == "creative_artifact_ir"));
+    assert!(json["demos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|demo| demo["capability_id"] == "export_demo_baseline"));
+    assert!(json["known_gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gap| gap["capability_id"] == "live_collaboration"));
+    assert_eq!(json["promotion_decision"]["decision"], "fail");
+    assert!(json["promotion_decision"]["blocked_by"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("research_artifact_baseline")));
+}
+
+#[test]
+fn mcp_exposes_milestone_manifest_for_agent_release_gates() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.milestone.manifest"
+            && tool["output_schema"] == "forge.milestone.manifest.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == false
+    }));
+
+    let call = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.milestone.manifest"])
+        .arg("--input")
+        .arg(r#"{"version":"0.5"}"#)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&call).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(
+        json["result"]["schema_version"],
+        "forge.milestone.manifest.v1"
+    );
+    assert_eq!(json["result"]["milestone"], "0.5");
+    assert!(json["result"]["missing_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability["id"] == "research_artifact_baseline"));
+}
+
+#[test]
 fn plan_from_human_goal_creates_persistent_atomic_graph() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

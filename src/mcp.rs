@@ -8,7 +8,7 @@ use crate::interaction::{
     expire_human_interaction, list_human_interactions, CreateChoiceInteractionRequest,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
-use crate::milestone::build_milestone_status;
+use crate::milestone::{build_milestone_manifest, build_milestone_status};
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
@@ -690,6 +690,23 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.milestone.manifest",
+                "Generate Forge Milestone Manifest",
+                "Generate the Forge 0.5 promotion manifest with requirements, completed and missing capabilities, validation evidence, demos, gaps and decision.",
+                object_schema(&[("version", "string", "milestone version, currently 0.5")], &[]),
+                "forge.milestone.manifest.v1",
+                &[
+                    "forge",
+                    "milestone",
+                    "manifest",
+                    "--version",
+                    "0.5",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.creative.list",
                 "List Creative Artifacts",
                 "List creative artifacts (screens, whiteboards, documents, slide decks, components) attached to a workflow.",
@@ -1030,6 +1047,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let input: MilestoneStatusInput = parse_input(input)?;
             let version = input.version.unwrap_or_else(|| "0.5".to_string());
             serde_json::to_value(build_milestone_status(&version)?)?
+        }
+        "forge.milestone.manifest" => {
+            let input: MilestoneStatusInput = parse_input(input)?;
+            let version = input.version.unwrap_or_else(|| "0.5".to_string());
+            serde_json::to_value(build_milestone_manifest(&version)?)?
         }
         "forge.creative.list" => {
             let input: CreativeListInput = parse_input(input)?;

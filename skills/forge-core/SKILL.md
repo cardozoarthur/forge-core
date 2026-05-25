@@ -23,7 +23,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 7. Use `forge context --workflow <id> --task <task-id> --budget <bytes> --strict --output json` before giving an agent task-specific context.
 8. Run `forge validate --workflow <id> --output json` before promotion. If `rework_tasks` is not empty, return those tasks to work.
 9. Run `forge improve --workflow <id> --target-version <version> --output json` only to generate a controlled experiment and changelog. Do not auto-promote without benchmark and validation evidence.
-10. Run `forge milestone status --version 0.5 --output json` before claiming Forge 0.5 creative-runtime readiness; planned or groundwork capabilities block promotion.
+10. Run `forge milestone status --version 0.5 --output json` and `forge milestone manifest --version 0.5 --output json` before claiming Forge 0.5 creative-runtime readiness; planned or groundwork capabilities block promotion.
 
 ## MCP Agent Surface
 
@@ -35,7 +35,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 - Use `forge.schedule.update` or `forge schedule update --next-run-at <RFC3339>` for explicit due timestamp mutation, `forge.schedule.run_due` for one workflow, and `forge.schedule.scan_due` when Forge should scan all scheduled workflows, lease due nodes locally and record idle scale-to-zero decisions. Paused/stopped loop nodes must not advance. If cron work is stale, read `missed_run_reconciliation` plus list/inspect schedule summaries before deciding whether a run was skipped, caught up or executed once.
 - Use `forge.interaction.create_choice`, `forge.interaction.create_form`, `forge.interaction.answer`, `forge.interaction.expire` and `forge.interaction.list` for agent-facing human approval/form bridges. These MCP tools must be preferred over ad hoc chat decisions when a workflow is paused on a human interaction node.
 - Inspect or route work through `forge.workflow.inspect`, `forge.context.request`, `forge.task.handoff`, `forge.workflow.attach_artifact`, `forge.workflow.update_goal`, `forge.validation.status` and `forge.artifact.fetch`.
-- Inspect Forge 0.5 release readiness through `forge.milestone.status`; `groundwork`, `planned` and `blocked` capabilities prevent promotion.
+- Inspect Forge 0.5 release readiness through `forge.milestone.status` and the full release-gate manifest through `forge.milestone.manifest`; `groundwork`, `planned` and `blocked` capabilities prevent promotion.
 - MCP mutations must still go through Forge so revisions, artifact hashes, origins and validation gates are persisted.
 
 ## Safety Rules
@@ -95,7 +95,9 @@ forge run --workflow <workflow-id> --simulate --output json
 forge validate --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 forge milestone status --version 0.5 --output json
+forge milestone manifest --version 0.5 --output json
 forge mcp call forge.milestone.status --input '{"version":"0.5"}' --output json
+forge mcp call forge.milestone.manifest --input '{"version":"0.5"}' --output json
 forge improve --workflow <workflow-id> --target-version 0.3.0 --output json
 forge self run --repo /home/arthur/projects/forge-core --until 2026-05-25T10:00:00-03:00 --executor codex --executor opencode --max-cycles 1 --output json
 ```

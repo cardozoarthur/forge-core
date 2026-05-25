@@ -64,7 +64,7 @@ The current MCP manifest uses `forge.mcp.tools.v1` and exposes stable tools for
 workflow listing, graph inspection, async run start/resume/status, revisioned
 goal/artifact mutation, scheduled workflow create/update/list/run-due/scan-due,
 aggregate schedule and loop summaries, bounded context requests, validation
-status and bounded artifact fetch. `forge mcp call forge.run.start ...` returns
+status, milestone status/manifest inspection and bounded artifact fetch. `forge mcp call forge.run.start ...` returns
 the same persisted run/workflow ids as `forge request start` plus
 `forge.agent_handoff_contract.v1`, so Codex/OpenCode can return `run_id`
 quickly and poll later without duplicating workflow state outside Forge.
