@@ -695,6 +695,96 @@ fn run_daily_goal_research_smoke_generates_reports_and_telegram_record() {
 }
 
 #[test]
+fn run_daily_goal_research_smoke_reports_bounded_parallel_goal_execution() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let created = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--goal",
+            "competition",
+            "--goal",
+            "blockchain",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--cron",
+            "0 8 * * *",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    let workflow_id = created_json["workflow_id"].as_str().unwrap();
+
+    let run = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let run_json: Value = serde_json::from_slice(&run).unwrap();
+    let smoke = &run_json["daily_goal_research"];
+
+    assert_eq!(smoke["artifact_count"], 9);
+    assert_eq!(
+        smoke["goals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|goal| goal["goal"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["blockchain", "competition", "hackathon"]
+    );
+
+    let execution = &smoke["execution"];
+    assert_eq!(
+        execution["schema_version"],
+        "forge.daily_goal_research.execution.v1"
+    );
+    assert_eq!(execution["mode"], "bounded_parallel_goal_artifacts");
+    assert_eq!(execution["max_workers"], 4);
+    assert_eq!(execution["worker_count"], 3);
+    assert_eq!(execution["total_goals"], 3);
+    assert_eq!(execution["bounded"], true);
+    assert_eq!(execution["concurrency_used"], true);
+    assert_eq!(execution["deterministic_output_order"], true);
+    assert_eq!(
+        execution["goal_order"],
+        serde_json::json!(["blockchain", "competition", "hackathon"])
+    );
+    let waves = execution["waves"].as_array().unwrap();
+    assert_eq!(waves.len(), 1);
+    assert_eq!(waves[0]["level"], 1);
+    assert_eq!(waves[0]["worker_count"], 3);
+    assert_eq!(
+        waves[0]["goals"],
+        serde_json::json!(["blockchain", "competition", "hackathon"])
+    );
+}
+
+#[test]
 fn plan_for_n8n_research_requires_catalog_before_forge_primitive_promotion() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

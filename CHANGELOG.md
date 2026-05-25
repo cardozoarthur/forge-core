@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.116 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 31: bounded parallel daily Goal research smoke artifact generation.
+- `forge.daily_goal_research.execution.v1` metadata in the daily Goal smoke report, including worker cap, actual worker count, deterministic Goal order, concurrency flag and execution waves.
+- CLI contract coverage proving a multi-Goal daily research workflow produces one Markdown, one PDF and one Telegram delivery record per Goal while exposing bounded parallel execution evidence.
+- Added `docs/reports/forge-core-v0.4.116-report-2026-05-25.md` with TDD evidence, validation results, release smokes, install status and lean overhead ledger.
+
+### Changed
+
+- The package version is now `0.4.116`.
+- Daily Goal smoke artifact generation now separates parallel file generation from sequential Forge workflow-state mutation, preserving deterministic artifact lineage while using Rust threads for independent per-Goal work.
+- This remains `0.5 groundwork` for Forge-owned scheduler/runtime concurrency. It does not claim the Forge 0.5 creative runtime is complete.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- Parallel workers only write Forge-owned smoke artifacts under the configured store base directory; workflow mutation and artifact registration remain sequential.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` and `cargo build --release`.
+
 ## 0.4.115 - 2026-05-25
 
 ### Added
