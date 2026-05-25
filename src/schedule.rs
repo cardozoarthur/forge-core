@@ -362,6 +362,123 @@ fn normalize_goals(goals: Vec<String>) -> Vec<String> {
     normalized
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct LoopStateUpdateReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub origin: String,
+    pub previous_state: String,
+    pub new_state: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduleRunDueReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub goal: String,
+    pub due_executed: bool,
+}
+
+pub fn update_loop_state(
+    store: &ForgeStore,
+    workflow_id: &str,
+    task_id: &str,
+    new_state: &str,
+    origin: &str,
+) -> Result<LoopStateUpdateReport> {
+    let valid_states = ["active", "paused", "stopped"];
+    if !valid_states.contains(&new_state) {
+        anyhow::bail!("invalid loop state: {new_state}. Valid states: active, paused, stopped");
+    }
+
+    let mut workflow = store.load_workflow(workflow_id)?;
+    let previous_state = {
+        let task = workflow
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == task_id)
+            .with_context(|| format!("task not found in workflow {workflow_id}: {task_id}"))?;
+        let loop_control = task
+            .loop_control
+            .as_mut()
+            .with_context(|| format!("task {task_id} is not a loop node"))?;
+        let previous = loop_control.state.clone();
+        loop_control.state = new_state.to_string();
+        previous
+    };
+
+    let revision = push_loop_revision(
+        &mut workflow,
+        origin,
+        &format!("loop state changed from {previous_state} to {new_state} for task {task_id}"),
+    );
+    store.save_workflow(&workflow)?;
+    store.record_event(
+        workflow_id,
+        "loop_state_updated",
+        &serde_json::json!({
+            "origin": origin,
+            "task_id": task_id,
+            "previous_state": previous_state,
+            "new_state": new_state,
+            "revision": revision
+        }),
+    )?;
+
+    Ok(LoopStateUpdateReport {
+        status: "loop_state_updated".to_string(),
+        workflow_id: workflow_id.to_string(),
+        task_id: task_id.to_string(),
+        origin: origin.to_string(),
+        previous_state,
+        new_state: new_state.to_string(),
+        revision,
+    })
+}
+
+pub fn run_due_workflow(
+    store: &ForgeStore,
+    workflow_id: &str,
+) -> Result<Option<ScheduleRunDueReport>> {
+    let mut workflow = store.load_workflow(workflow_id)?;
+    let now = Utc::now();
+    let has_due = workflow.tasks.iter().any(|task| {
+        task.schedule
+            .as_ref()
+            .and_then(|schedule| schedule.next_run_at)
+            .is_some_and(|next| next <= now)
+    });
+
+    if !has_due {
+        return Ok(Some(ScheduleRunDueReport {
+            status: "no_due_cron_nodes".to_string(),
+            workflow_id: workflow_id.to_string(),
+            goal: workflow.goal.clone(),
+            due_executed: false,
+        }));
+    }
+
+    let workflow_id = workflow.id.clone();
+    record_schedule_run_history(&mut workflow);
+    store.save_workflow(&workflow)?;
+    store.record_event(
+        &workflow_id,
+        "due_workflow_executed",
+        &serde_json::json!({
+            "workflow_id": workflow_id,
+        }),
+    )?;
+
+    Ok(Some(ScheduleRunDueReport {
+        status: "due_workflow_executed".to_string(),
+        workflow_id,
+        goal: workflow.goal.clone(),
+        due_executed: true,
+    }))
+}
+
 fn push_schedule_revision(workflow: &mut Workflow, origin: &str, summary: &str) -> u64 {
     let revision = workflow
         .revisions
@@ -372,6 +489,22 @@ fn push_schedule_revision(workflow: &mut Workflow, origin: &str, summary: &str) 
         revision,
         origin: origin.to_string(),
         change_type: "schedule_update".to_string(),
+        summary: summary.to_string(),
+        created_at: Utc::now(),
+    });
+    revision
+}
+
+fn push_loop_revision(workflow: &mut Workflow, origin: &str, summary: &str) -> u64 {
+    let revision = workflow
+        .revisions
+        .last()
+        .map(|revision| revision.revision + 1)
+        .unwrap_or(1);
+    workflow.revisions.push(WorkflowRevision {
+        revision,
+        origin: origin.to_string(),
+        change_type: "loop_state_update".to_string(),
         summary: summary.to_string(),
         created_at: Utc::now(),
     });

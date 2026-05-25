@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.92 - 2026-05-25
+
+### Added
+
+- Added `forge schedule pause`, `forge schedule resume`, `forge schedule stop` CLI commands for explicit loop node state control (active, paused, stopped).
+- Added `forge schedule run-due --workflow <id>` to discover and execute scheduled workflows whose cron `next_run_at` has passed, advancing run history through Forge-owned schedule semantics.
+- Added MCP tools `forge.schedule.pause`, `forge.schedule.resume`, `forge.schedule.stop`, and `forge.schedule.run_due` so agents can control loop lifecycle and trigger due schedule execution asynchronously.
+- MCP loop state tools return `forge.loop_state_update.v1` with revision tracking and origin trace.
+- Added CLI contract tests: `schedule_pause_resume_stop_controls_loop_node_state`, `schedule_run_due_reports_no_due_when_next_run_is_in_future`, `schedule_run_due_executes_after_simulate_advances_next_run`, `mcp_schedule_pause_resume_stop_exposes_loop_state_control_tools`, `mcp_call_schedule_pause_and_resume_toggles_loop_state`, `mcp_call_schedule_run_due_returns_no_due_for_future_schedule`.
+
+### Changed
+
+- The package version is now `0.4.92`.
+
+### Safety
+
+- Loop state changes are local Forge-owned workflow revisions with origin trace.
+- `run_due_workflow` discovers only Forge-owned persisted schedules and advances run history deterministically.
+- MCP loop state and run-due mutations flow through Forge workflow APIs with revision tracking.
+- No external Docker/Kubernetes/Knative resources are mutated.
+
 ## 0.4.91 - 2026-05-25
 
 ### Added

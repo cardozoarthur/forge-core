@@ -31,7 +31,8 @@ use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
 };
 use forge_core::schedule::{
-    create_daily_goal_research_workflow, run_daily_goal_research_smoke, update_workflow_schedule,
+    create_daily_goal_research_workflow, run_daily_goal_research_smoke, run_due_workflow,
+    update_loop_state, update_workflow_schedule,
 };
 use forge_core::self_evolve::{run_self_evolution, SelfRunOptions};
 use forge_core::skill::install_skill;
@@ -308,6 +309,42 @@ enum ScheduleCommands {
         missed_run_policy: Option<String>,
         #[arg(long, default_value = "forge_cli")]
         origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Pause {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Resume {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Stop {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    RunDue {
+        #[arg(long)]
+        workflow: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -1008,6 +1045,45 @@ fn run() -> Result<i32> {
                     missed_run_policy.as_deref(),
                     &origin,
                 )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            ScheduleCommands::Pause {
+                workflow,
+                task,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = update_loop_state(&store, &workflow, &task, "paused", &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            ScheduleCommands::Resume {
+                workflow,
+                task,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = update_loop_state(&store, &workflow, &task, "active", &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            ScheduleCommands::Stop {
+                workflow,
+                task,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = update_loop_state(&store, &workflow, &task, "stopped", &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            ScheduleCommands::RunDue { workflow, output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = run_due_workflow(&store, &workflow)?;
                 print_response(output, &report)?;
                 Ok(0)
             }

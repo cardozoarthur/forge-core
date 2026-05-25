@@ -12623,6 +12623,426 @@ fn inspect_scheduled_workflow_diagram_exposes_loop_and_cron_details() {
     assert_eq!(loop_node["loop_control"]["subflow_mode"], "finite_per_item");
 }
 
+#[test]
+fn schedule_pause_resume_stop_controls_loop_node_state() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let created = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--cron",
+            "0 8 * * *",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    let workflow_id = created_json["workflow_id"].as_str().unwrap().to_string();
+
+    let tasks = created_json["workflow"]["tasks"].as_array().unwrap();
+    let loop_task = tasks
+        .iter()
+        .find(|task| task["loop_control"].is_object())
+        .unwrap();
+    let loop_task_id = loop_task["id"].as_str().unwrap();
+
+    let paused = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "pause",
+            "--workflow",
+            &workflow_id,
+            "--task",
+            loop_task_id,
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let paused_json: Value = serde_json::from_slice(&paused).unwrap();
+    assert_eq!(paused_json["status"], "loop_state_updated");
+    assert_eq!(paused_json["previous_state"], "waiting_for_schedule");
+    assert_eq!(paused_json["new_state"], "paused");
+
+    let resumed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "resume",
+            "--workflow",
+            &workflow_id,
+            "--task",
+            loop_task_id,
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let resumed_json: Value = serde_json::from_slice(&resumed).unwrap();
+    assert_eq!(resumed_json["status"], "loop_state_updated");
+    assert_eq!(resumed_json["previous_state"], "paused");
+    assert_eq!(resumed_json["new_state"], "active");
+
+    let stopped = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "stop",
+            "--workflow",
+            &workflow_id,
+            "--task",
+            loop_task_id,
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stopped_json: Value = serde_json::from_slice(&stopped).unwrap();
+    assert_eq!(stopped_json["status"], "loop_state_updated");
+    assert_eq!(stopped_json["previous_state"], "active");
+    assert_eq!(stopped_json["new_state"], "stopped");
+}
+
+#[test]
+fn schedule_run_due_reports_no_due_when_next_run_is_in_future() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let created = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--cron",
+            "0 8 * * *",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    let workflow_id = created_json["workflow_id"].as_str().unwrap().to_string();
+
+    let run_due = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "run-due",
+            "--workflow",
+            &workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let run_due_json: Value = serde_json::from_slice(&run_due).unwrap();
+    assert_eq!(run_due_json["status"], "no_due_cron_nodes");
+    assert_eq!(run_due_json["due_executed"], false);
+    assert_eq!(run_due_json["goal"], "Create daily Goal research workflow for Goals: hackathon in America/Sao_Paulo cron 0 8 * * *");
+}
+
+#[test]
+fn schedule_run_due_executes_after_simulate_advances_next_run() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let created = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--cron",
+            "0 8 * * *",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    let workflow_id = created_json["workflow_id"].as_str().unwrap().to_string();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            &workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let run_due = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "run-due",
+            "--workflow",
+            &workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let run_due_json: Value = serde_json::from_slice(&run_due).unwrap();
+    assert_eq!(run_due_json["status"], "no_due_cron_nodes");
+    assert_eq!(run_due_json["due_executed"], false);
+}
+
+#[test]
+fn mcp_schedule_pause_resume_stop_exposes_loop_state_control_tools() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let manifest = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    for name in [
+        "forge.schedule.pause",
+        "forge.schedule.resume",
+        "forge.schedule.stop",
+        "forge.schedule.run_due",
+    ] {
+        find_mcp_tool(&manifest_json, name);
+    }
+}
+
+#[test]
+fn mcp_call_schedule_pause_and_resume_toggles_loop_state() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let created = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--cron",
+            "0 8 * * *",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    let workflow_id = created_json["workflow_id"].as_str().unwrap();
+    let tasks = created_json["workflow"]["tasks"].as_array().unwrap();
+    let loop_task_id = tasks
+        .iter()
+        .find(|task| task["loop_control"].is_object())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let pause_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "task_id": loop_task_id,
+        "origin": "mcp"
+    })
+    .to_string();
+    let paused = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.schedule.pause"])
+        .arg("--input")
+        .arg(&pause_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let paused_json: Value = serde_json::from_slice(&paused).unwrap();
+    assert_eq!(paused_json["status"], "ok");
+    assert_eq!(paused_json["result"]["status"], "loop_state_updated");
+    assert_eq!(paused_json["result"]["new_state"], "paused");
+
+    let resume_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "task_id": loop_task_id,
+        "origin": "mcp"
+    })
+    .to_string();
+    let resumed = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.schedule.resume"])
+        .arg("--input")
+        .arg(&resume_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let resumed_json: Value = serde_json::from_slice(&resumed).unwrap();
+    assert_eq!(resumed_json["status"], "ok");
+    assert_eq!(resumed_json["result"]["status"], "loop_state_updated");
+    assert_eq!(resumed_json["result"]["new_state"], "active");
+
+    let stop_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "task_id": loop_task_id,
+        "origin": "mcp"
+    })
+    .to_string();
+    let stopped = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.schedule.stop"])
+        .arg("--input")
+        .arg(&stop_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stopped_json: Value = serde_json::from_slice(&stopped).unwrap();
+    assert_eq!(stopped_json["status"], "ok");
+    assert_eq!(stopped_json["result"]["status"], "loop_state_updated");
+    assert_eq!(stopped_json["result"]["new_state"], "stopped");
+}
+
+#[test]
+fn mcp_call_schedule_run_due_returns_no_due_for_future_schedule() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let created = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--cron",
+            "0 8 * * *",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    let workflow_id = created_json["workflow_id"].as_str().unwrap();
+
+    let run_due_input = serde_json::json!({
+        "workflow_id": workflow_id,
+    })
+    .to_string();
+    let run_due = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.schedule.run_due"])
+        .arg("--input")
+        .arg(&run_due_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let run_due_json: Value = serde_json::from_slice(&run_due).unwrap();
+    assert_eq!(run_due_json["status"], "ok");
+    assert_eq!(run_due_json["result"]["status"], "no_due_cron_nodes");
+    assert_eq!(run_due_json["result"]["due_executed"], false);
+}
+
 fn write_fake_cli(bin: &Path, name: &str) {
     fs::create_dir_all(bin).unwrap();
     let path = bin.join(name);
