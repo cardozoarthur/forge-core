@@ -16,6 +16,7 @@ use uuid::Uuid;
 const SCHEDULE_SUMMARY_SCHEMA_VERSION: &str = "forge.schedule.summary.v1";
 const LOOP_SUMMARY_SCHEMA_VERSION: &str = "forge.loop.summary.v1";
 const MISSED_RUN_RECONCILIATION_SCHEMA_VERSION: &str = "forge.missed_run_reconciliation.v1";
+const SCALE_TO_ZERO_DECISION_SCHEMA_VERSION: &str = "forge.scale_to_zero_decision.v1";
 const MISSED_RUN_GRACE_MINUTES: i64 = 5;
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -120,6 +121,16 @@ pub struct MissedRunReconciliationReport {
     pub run_status: String,
     pub missed: bool,
     pub artifacts_allowed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScaleToZeroDecision {
+    pub schema_version: String,
+    pub applied: bool,
+    pub reason: String,
+    pub next_wakeup_at: Option<String>,
+    pub scheduled_nodes: usize,
+    pub due_nodes: usize,
 }
 
 pub fn summarize_schedules(tasks: &[AtomicTask]) -> ScheduleSummary {
@@ -490,6 +501,7 @@ pub struct ScheduleRunDueReport {
     pub missed_run_reconciliation: Vec<MissedRunReconciliationReport>,
     pub daily_goal_research: Option<DailyGoalResearchSmokeReport>,
     pub schedule_summary: ScheduleSummary,
+    pub scale_to_zero: ScaleToZeroDecision,
 }
 
 pub fn update_loop_state(
@@ -563,6 +575,26 @@ pub fn run_due_workflow(
     });
 
     if !has_due {
+        let schedule_summary = summarize_schedules(&workflow.tasks);
+        let scale_to_zero = scale_to_zero_decision(
+            &schedule_summary,
+            can_scale_to_zero_when_idle(&schedule_summary),
+            "finite_workflow_has_no_due_scheduled_work",
+        );
+        if scale_to_zero.applied {
+            workflow.status = "scaled_to_zero".to_string();
+            store.save_workflow(&workflow)?;
+            store.record_event(
+                workflow_id,
+                "workflow_scaled_to_zero",
+                &serde_json::json!({
+                    "workflow_id": workflow_id,
+                    "reason": scale_to_zero.reason,
+                    "next_wakeup_at": scale_to_zero.next_wakeup_at,
+                }),
+            )?;
+        }
+
         return Ok(Some(ScheduleRunDueReport {
             status: "no_due_cron_nodes".to_string(),
             workflow_id: workflow_id.to_string(),
@@ -572,7 +604,8 @@ pub fn run_due_workflow(
             blocked_loop_state: None,
             missed_run_reconciliation: Vec::new(),
             daily_goal_research: None,
-            schedule_summary: summarize_schedules(&workflow.tasks),
+            schedule_summary,
+            scale_to_zero,
         }));
     }
 
@@ -585,6 +618,7 @@ pub fn run_due_workflow(
             }
         })
     }) {
+        let schedule_summary = summarize_schedules(&workflow.tasks);
         return Ok(Some(ScheduleRunDueReport {
             status: "loop_not_runnable".to_string(),
             workflow_id: workflow_id.to_string(),
@@ -594,7 +628,12 @@ pub fn run_due_workflow(
             blocked_loop_state: Some(state),
             missed_run_reconciliation: Vec::new(),
             daily_goal_research: None,
-            schedule_summary: summarize_schedules(&workflow.tasks),
+            scale_to_zero: scale_to_zero_decision(
+                &schedule_summary,
+                false,
+                "loop_node_paused_or_stopped",
+            ),
+            schedule_summary,
         }));
     }
 
@@ -622,6 +661,11 @@ pub fn run_due_workflow(
             blocked_loop_state: None,
             missed_run_reconciliation: skipped_reconciliation,
             daily_goal_research: None,
+            scale_to_zero: scale_to_zero_decision(
+                &schedule_summary,
+                false,
+                "missed_runs_reconciled_without_artifacts",
+            ),
             schedule_summary,
         }));
     }
@@ -658,8 +702,30 @@ pub fn run_due_workflow(
         blocked_loop_state: None,
         missed_run_reconciliation,
         daily_goal_research,
+        scale_to_zero: scale_to_zero_decision(&schedule_summary, false, "due_work_executed"),
         schedule_summary,
     }))
+}
+
+fn can_scale_to_zero_when_idle(summary: &ScheduleSummary) -> bool {
+    summary.scheduled_nodes > 0
+        && summary.due_nodes == 0
+        && summary.scale_to_zero_when_idle_nodes == summary.scheduled_nodes
+}
+
+fn scale_to_zero_decision(
+    summary: &ScheduleSummary,
+    applied: bool,
+    reason: &str,
+) -> ScaleToZeroDecision {
+    ScaleToZeroDecision {
+        schema_version: SCALE_TO_ZERO_DECISION_SCHEMA_VERSION.to_string(),
+        applied,
+        reason: reason.to_string(),
+        next_wakeup_at: summary.next_run_at.clone(),
+        scheduled_nodes: summary.scheduled_nodes,
+        due_nodes: summary.due_nodes,
+    }
 }
 
 fn skip_due_missed_runs(workflow: &mut Workflow) -> Vec<MissedRunReconciliationReport> {

@@ -13015,6 +13015,55 @@ fn schedule_run_due_reports_no_due_when_next_run_is_in_future() {
     assert_eq!(run_due_json["status"], "no_due_cron_nodes");
     assert_eq!(run_due_json["due_executed"], false);
     assert_eq!(run_due_json["goal"], "Create daily Goal research workflow for Goals: hackathon in America/Sao_Paulo cron 0 8 * * *");
+    assert_eq!(
+        run_due_json["scale_to_zero"]["schema_version"],
+        "forge.scale_to_zero_decision.v1"
+    );
+    assert_eq!(run_due_json["scale_to_zero"]["applied"], true);
+    assert_eq!(
+        run_due_json["scale_to_zero"]["reason"],
+        "finite_workflow_has_no_due_scheduled_work"
+    );
+    assert!(run_due_json["scale_to_zero"]["next_wakeup_at"]
+        .as_str()
+        .unwrap()
+        .contains('T'));
+    assert_eq!(run_due_json["schedule_summary"]["due_nodes"], 0);
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    let row = find_workflow(&listed_json, &workflow_id);
+    assert_eq!(row["lifecycle_state"], "scaled_to_zero");
+    assert_eq!(row["running"], false);
+
+    let inspected = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            &workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected_json: Value = serde_json::from_slice(&inspected).unwrap();
+    assert_eq!(inspected_json["lifecycle_state"], "scaled_to_zero");
 }
 
 #[test]
