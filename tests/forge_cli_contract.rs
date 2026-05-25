@@ -406,6 +406,46 @@ fn run_daily_goal_research_smoke_generates_reports_and_telegram_record() {
         false
     );
 
+    let inspected = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--verbose",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected_json: Value = serde_json::from_slice(&inspected).unwrap();
+    let schedule_node = inspected_json["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["schedule"].is_object())
+        .unwrap();
+    let run_history = schedule_node["schedule"]["run_history"].as_array().unwrap();
+    assert_eq!(run_history.len(), 1);
+    assert!(run_history[0]["run_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("run_"));
+    assert_eq!(run_history[0]["status"], "completed");
+    assert_eq!(run_history[0]["missed"], false);
+    assert!(run_history[0]["scheduled_at"]
+        .as_str()
+        .unwrap()
+        .contains('T'));
+    assert!(run_history[0]["started_at"].as_str().unwrap().contains('T'));
+    assert!(run_history[0]["finished_at"]
+        .as_str()
+        .unwrap()
+        .contains('T'));
+
     let artifacts = forge()
         .args([
             "--store",

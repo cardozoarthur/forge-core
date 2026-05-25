@@ -1,7 +1,7 @@
 use crate::artifact::hex_sha256;
 use crate::graph::{
-    ArtifactRecord, AtomicTask, LoopSpec, NativeSubflowSpec, ScheduleSpec, TaskStatus, Workflow,
-    WorkflowRevision,
+    ArtifactRecord, AtomicTask, LoopSpec, NativeSubflowSpec, ScheduleRunRecord, ScheduleSpec,
+    TaskStatus, Workflow, WorkflowRevision,
 };
 use crate::intent::parse_intent;
 use crate::registry::{attach_reuse_candidates_as_child_subflows, find_reuse_candidates};
@@ -266,6 +266,8 @@ pub fn run_daily_goal_research_smoke(
         return Ok(None);
     }
 
+    record_schedule_run_history(workflow);
+
     let mut reports = Vec::new();
     for goal in goals {
         let markdown_path = write_markdown_report(store.base_dir().as_path(), workflow, &goal)?;
@@ -291,6 +293,26 @@ pub fn run_daily_goal_research_smoke(
         artifact_count: reports.len() * 3,
         goals: reports,
     }))
+}
+
+fn record_schedule_run_history(workflow: &mut Workflow) {
+    let started_at = Utc::now();
+    let finished_at = Utc::now();
+    for schedule in workflow
+        .tasks
+        .iter_mut()
+        .filter_map(|task| task.schedule.as_mut())
+    {
+        schedule.run_history.push(ScheduleRunRecord {
+            run_id: format!("run_{}", Uuid::new_v4().to_string().replace('-', "")),
+            scheduled_at: started_at,
+            started_at: Some(started_at),
+            finished_at: Some(finished_at),
+            status: "completed".to_string(),
+            missed: false,
+        });
+        schedule.next_run_at = Some(finished_at + Duration::days(1));
+    }
 }
 
 pub fn configured_goal_items(workflow: &Workflow) -> Vec<String> {

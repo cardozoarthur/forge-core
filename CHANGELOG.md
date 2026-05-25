@@ -4,17 +4,21 @@
 
 ### Added
 
+- Daily Goal research smoke execution now appends a completed `run_...` entry to each schedule node's `run_history`, including `scheduled_at`, `started_at`, `finished_at`, status and missed-run state.
 - Added `detect_loop_kind` to the graph builder so goals mentioning any of the five loop kinds (loop_over_items, bounded_repeat, retry_backoff, while_until, infinite_recurring_subflow) produce explicit loop nodes with appropriate subflow tasks.
 - Goals parsed from `daily_goal_research_goals` now correctly extract all comma-separated Goal names from the goal text, supporting multiple configured Goals in one workflow.
-- Added CLI contract tests: `schedule_create_cli_models_daily_goal_research_with_multiple_goals`, `mcp_schedule_update_mutates_cron_and_timezone`, `plan_models_loop_kinds_from_goal_text`, and `inspect_scheduled_workflow_diagram_exposes_loop_and_cron_details`.
+- Added CLI contract tests: `schedule_create_cli_models_daily_goal_research_with_multiple_goals`, `mcp_schedule_update_mutates_cron_and_timezone`, `plan_models_loop_kinds_from_goal_text`, `inspect_scheduled_workflow_diagram_exposes_loop_and_cron_details`, and durable run-history coverage in `run_daily_goal_research_smoke_generates_reports_and_telegram_record`.
 
 ### Changed
 
+- The package version is now `0.4.91`.
+- Daily Goal research smoke execution advances `next_run_at` after recording the simulated scheduled run, preserving inspect/list visibility for the cron node after scale-to-zero.
 - `daily_goal_research_goals` now parses the `Goals:` section of the goal text to extract all configured Goal names instead of only matching the `hackathon` keyword.
 - `loop_node_task` helper creates loop control nodes for all five loop kinds with type-specific `max_iterations`, `condition`, `backoff_policy` and `subflow_mode`.
 
 ### Safety
 
+- Schedule run-history mutation is local to Forge-owned workflow state and artifact smoke execution.
 - Loop detection remains goal-driven and only activates when the goal text explicitly references loop semantics.
 - Schedule update via MCP retains revision tracking and origin trace.
 - No external Docker/Kubernetes/Knative resources are mutated.
