@@ -24,7 +24,7 @@ pub struct WorkerPool {
     cancelled: Arc<AtomicBool>,
 }
 
-type Job = Box<dyn FnOnce() -> Result<(), String> + Send>;
+pub type Job = Box<dyn FnOnce() -> Result<(), String> + Send>;
 
 impl WorkerPool {
     pub fn new(max_concurrency: usize) -> Self {

@@ -7,12 +7,13 @@ use crate::intent::parse_intent;
 use crate::lease::{acquire_task_lease, release_task_lease};
 use crate::registry::{attach_reuse_candidates_as_child_subflows, find_reuse_candidates};
 use crate::storage::ForgeStore;
-use anyhow::{anyhow, Context, Result};
+use crate::worker::{Job, WorkerPool};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
-use std::thread;
+use std::sync::Arc;
 use uuid::Uuid;
 
 const SCHEDULE_SUMMARY_SCHEMA_VERSION: &str = "forge.schedule.summary.v1";
@@ -171,6 +172,14 @@ pub struct ScheduleScanDueSummary {
     pub idle_workflows: usize,
     pub scale_to_zero_workflows: usize,
     pub skipped_workflows: usize,
+    #[serde(default)]
+    pub parallel: bool,
+    #[serde(default)]
+    pub max_workers: usize,
+    #[serde(default)]
+    pub wave_count: usize,
+    #[serde(default)]
+    pub duration_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1085,6 +1094,216 @@ pub fn scan_due_workflows(
     })
 }
 
+pub fn scan_due_workflows_parallel(
+    store: &ForgeStore,
+    executor: &str,
+    max_workers: usize,
+    ttl_seconds: u64,
+) -> Result<ScheduleScanDueReport> {
+    let max_workers = max_workers.max(1);
+    let pool = WorkerPool::new(max_workers);
+    let mut summary = ScheduleScanDueSummary::default();
+    let results = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let store_path = store.path().to_path_buf();
+
+    let all_workflows = store.load_workflows()?;
+    let mut due_candidates = Vec::new();
+
+    for workflow in &all_workflows {
+        let schedule_summary = summarize_schedules(&workflow.tasks);
+        if schedule_summary.scheduled_nodes == 0 {
+            continue;
+        }
+        summary.scanned_workflows += 1;
+        if first_due_schedule_task_id(workflow).is_some() {
+            due_candidates.push(workflow.id.clone());
+        } else {
+            summary.idle_workflows += 1;
+        }
+    }
+
+    summary.due_workflows = due_candidates.len();
+    if due_candidates.is_empty() {
+        return Ok(ScheduleScanDueReport {
+            schema_version: SCHEDULE_SCAN_DUE_SCHEMA_VERSION.to_string(),
+            status: "no_due_workflows".to_string(),
+            executor: executor.to_string(),
+            ttl_seconds,
+            summary: ScheduleScanDueSummary {
+                parallel: true,
+                max_workers,
+                ..summary
+            },
+            results: Vec::new(),
+        });
+    }
+
+    let jobs: Vec<_> = due_candidates
+        .into_iter()
+        .map(|workflow_id| {
+            let executor = executor.to_string();
+            let store_path = store_path.clone();
+            let results = Arc::clone(&results);
+            Box::new(move || {
+                match ForgeStore::open(&store_path).and_then(|worker_store| {
+                    scan_due_workflow_dispatch(&worker_store, &workflow_id, &executor, ttl_seconds)
+                }) {
+                    Ok(report) => {
+                        if let Ok(mut guard) = results.lock() {
+                            guard.push(report);
+                        }
+                        Ok(())
+                    }
+                    Err(error) => Err(format!(
+                        "failed to scan due workflow {workflow_id}: {error}"
+                    )),
+                }
+            }) as crate::worker::Job
+        })
+        .collect();
+
+    let worker_report = pool.execute(jobs);
+    summary.parallel = true;
+    summary.max_workers = max_workers;
+    summary.wave_count = worker_report.wave_count;
+    summary.duration_ms = worker_report.duration_ms;
+
+    let mut final_results: Vec<ScheduleScanWorkflowReport> = Arc::try_unwrap(results)
+        .unwrap_or_else(|_| std::sync::Mutex::new(Vec::new()))
+        .into_inner()
+        .unwrap_or_default();
+
+    final_results.sort_by(|left, right| left.workflow_id.cmp(&right.workflow_id));
+
+    let executed = final_results
+        .iter()
+        .filter(|r| r.run_due.as_ref().is_some_and(|d| d.due_executed))
+        .count();
+    let scale_to_zero = final_results
+        .iter()
+        .filter(|r| r.run_due.as_ref().is_some_and(|d| d.scale_to_zero.applied))
+        .count();
+    let lease_conflicts = final_results
+        .iter()
+        .filter(|r| r.status == "lease_conflict")
+        .count();
+    let skipped = final_results
+        .iter()
+        .filter(|r| r.status == "missed_runs_skipped" || r.status == "no_due_cron_nodes")
+        .count();
+    summary.executed_workflows = executed;
+    summary.scale_to_zero_workflows = scale_to_zero;
+    summary.lease_conflicts = lease_conflicts;
+    summary.leased_workflows = final_results
+        .len()
+        .saturating_sub(lease_conflicts + skipped);
+    summary.skipped_workflows = skipped;
+
+    Ok(ScheduleScanDueReport {
+        schema_version: SCHEDULE_SCAN_DUE_SCHEMA_VERSION.to_string(),
+        status: if executed > 0 {
+            "schedule_scan_completed_with_execution"
+        } else if scale_to_zero > 0 {
+            "schedule_scan_completed_scale_to_zero"
+        } else {
+            "schedule_scan_completed"
+        }
+        .to_string(),
+        executor: executor.to_string(),
+        ttl_seconds,
+        summary,
+        results: final_results,
+    })
+}
+
+fn scan_due_workflow_dispatch(
+    store: &ForgeStore,
+    workflow_id: &str,
+    executor: &str,
+    ttl_seconds: u64,
+) -> Result<ScheduleScanWorkflowReport> {
+    let workflow = store.load_workflow(workflow_id)?;
+    let schedule_summary = summarize_schedules(&workflow.tasks);
+
+    let due_schedule_task_id = first_due_schedule_task_id(&workflow);
+    let Some(schedule_task_id) = due_schedule_task_id else {
+        return Ok(ScheduleScanWorkflowReport {
+            workflow_id: workflow.id.clone(),
+            goal: workflow.goal.clone(),
+            status: "idle".to_string(),
+            schedule_task_id: None,
+            due_nodes: schedule_summary.due_nodes,
+            lease_status: "not_required".to_string(),
+            lease_id: None,
+            lease_released: false,
+            current_lease_id: None,
+            run_due: None,
+            reason: "no due cron nodes; recorded idle schedule state".to_string(),
+        });
+    };
+
+    let lease_report =
+        acquire_task_lease(store, workflow_id, &schedule_task_id, executor, ttl_seconds)?;
+    if !lease_report.allowed {
+        return Ok(ScheduleScanWorkflowReport {
+            workflow_id: workflow.id,
+            goal: workflow.goal,
+            status: "lease_conflict".to_string(),
+            schedule_task_id: Some(schedule_task_id),
+            due_nodes: schedule_summary.due_nodes,
+            lease_status: lease_report.status,
+            lease_id: None,
+            lease_released: false,
+            current_lease_id: lease_report.current_lease.map(|lease| lease.lease_id),
+            run_due: None,
+            reason: "scheduled task already has an active lease".to_string(),
+        });
+    }
+
+    let lease_id = lease_report
+        .lease
+        .as_ref()
+        .map(|lease| lease.lease_id.clone());
+
+    let run_due = run_due_workflow(store, workflow_id)?;
+
+    let lease_released = if let Some(ref lease_id) = lease_id {
+        release_task_lease(store, workflow_id, &schedule_task_id, lease_id, executor)?.released
+    } else {
+        false
+    };
+
+    let due_executed = run_due.as_ref().is_some_and(|r| r.due_executed);
+    let scale_to_zero = run_due.as_ref().is_some_and(|r| r.scale_to_zero.applied);
+
+    let status = if scale_to_zero {
+        "scale_to_zero".to_string()
+    } else if due_executed {
+        "executed".to_string()
+    } else {
+        run_due
+            .as_ref()
+            .map(|r| r.status.clone())
+            .unwrap_or_else(|| "no_scheduled_work".to_string())
+    };
+
+    let workflow = store.load_workflow(workflow_id)?;
+
+    Ok(ScheduleScanWorkflowReport {
+        workflow_id: workflow.id,
+        goal: workflow.goal,
+        status,
+        schedule_task_id: Some(schedule_task_id),
+        due_nodes: schedule_summary.due_nodes,
+        lease_status: lease_report.status,
+        lease_id,
+        lease_released,
+        current_lease_id: None,
+        run_due,
+        reason: "due scheduled workflow executed under bounded concurrent lease".to_string(),
+    })
+}
+
 pub fn build_schedule_worker_status(
     store: &ForgeStore,
     executor: &str,
@@ -1644,35 +1863,43 @@ fn generate_daily_goal_artifacts_bounded(
     goal_lineage: &[(String, ArtifactLineageRecord)],
     execution: &DailyGoalSmokeExecutionReport,
 ) -> Result<Vec<GeneratedDailyGoalArtifacts>> {
-    let mut generated = Vec::new();
+    let max_workers = execution.max_workers.max(1);
+    let pool = WorkerPool::new(max_workers);
+    let base_dir = base_dir.to_path_buf();
+    let workflow_id = workflow_id.to_string();
+    let results = Arc::new(std::sync::Mutex::new(Vec::new()));
 
-    for wave in &execution.waves {
-        let wave_results = thread::scope(|scope| -> Result<Vec<GeneratedDailyGoalArtifacts>> {
-            let mut handles = Vec::new();
-            for goal in &wave.goals {
-                let lineage = goal_lineage
-                    .iter()
-                    .find_map(|(candidate, lineage)| (candidate == goal).then_some(lineage))
-                    .with_context(|| format!("missing lineage for Goal {goal}"))?
-                    .clone();
-                let base_dir = base_dir.to_path_buf();
-                let workflow_id = workflow_id.to_string();
-                let goal = goal.clone();
-                handles.push(scope.spawn(move || {
-                    generate_daily_goal_artifacts(&base_dir, &workflow_id, &goal, lineage)
-                }));
-            }
+    let jobs: Vec<Job> = goal_lineage
+        .iter()
+        .map(|(goal, lineage)| {
+            let base_dir = base_dir.clone();
+            let workflow_id = workflow_id.clone();
+            let goal = goal.clone();
+            let lineage = lineage.clone();
+            let results = Arc::clone(&results);
+            Box::new(move || {
+                match generate_daily_goal_artifacts(&base_dir, &workflow_id, &goal, lineage) {
+                    Ok(artifacts) => {
+                        if let Ok(mut guard) = results.lock() {
+                            guard.push(artifacts);
+                        }
+                        Ok(())
+                    }
+                    Err(error) => Err(format!("failed to generate {goal} artifacts: {error}")),
+                }
+            }) as Job
+        })
+        .collect();
 
-            let mut results = Vec::new();
-            for handle in handles {
-                let result = handle
-                    .join()
-                    .map_err(|_| anyhow!("daily Goal artifact worker panicked"))??;
-                results.push(result);
-            }
-            Ok(results)
-        })?;
-        generated.extend(wave_results);
+    let worker_report = pool.execute(jobs);
+
+    let mut generated: Vec<GeneratedDailyGoalArtifacts> = Arc::try_unwrap(results)
+        .unwrap_or_else(|_| std::sync::Mutex::new(Vec::new()))
+        .into_inner()
+        .unwrap_or_default();
+
+    if worker_report.failed_jobs > 0 && generated.is_empty() {
+        anyhow::bail!("all daily Goal artifact workers failed; no artifacts generated");
     }
 
     generated.sort_by_key(|artifacts| {

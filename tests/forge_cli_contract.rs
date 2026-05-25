@@ -17216,3 +17216,391 @@ fn mcp_token_tools_get_set_design_tokens_on_workflows() {
             >= 2
     );
 }
+
+#[test]
+fn parallel_scan_due_dispatches_multiple_due_workflows_with_max_workers() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let goal_names = ["hackathon", "grant", "competition"];
+    let mut workflow_ids = Vec::new();
+    let mut schedule_task_ids = Vec::new();
+
+    for goal in &goal_names {
+        let created = forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "schedule",
+                "create-daily-goal-research",
+                "--goal",
+                goal,
+                "--cron",
+                "0 8 * * *",
+                "--timezone",
+                "America/Sao_Paulo",
+                "--origin",
+                "forge_cli",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let created_json: Value = serde_json::from_slice(&created).unwrap();
+        workflow_ids.push(created_json["workflow_id"].as_str().unwrap().to_string());
+        let task_id = created_json["workflow"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["schedule"].is_object())
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        schedule_task_ids.push(task_id);
+    }
+
+    for (i, workflow_id) in workflow_ids.iter().enumerate() {
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "schedule",
+                "update",
+                "--workflow",
+                workflow_id,
+                "--task",
+                &schedule_task_ids[i],
+                "--next-run-at",
+                "2000-01-01T00:00:00Z",
+                "--origin",
+                "codex",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    let scanned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "scan-due",
+            "--executor",
+            "forge-scheduler-parallel",
+            "--max-workers",
+            "3",
+            "--ttl-seconds",
+            "90",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let scanned_json: Value = serde_json::from_slice(&scanned).unwrap();
+    assert_eq!(scanned_json["schema_version"], "forge.schedule.scan_due.v1");
+    assert!(scanned_json["status"]
+        .as_str()
+        .unwrap()
+        .contains("scan_completed"));
+    assert_eq!(scanned_json["summary"]["scanned_workflows"], 3);
+    assert_eq!(scanned_json["summary"]["due_workflows"], 3);
+    assert_eq!(scanned_json["summary"]["executed_workflows"], 3);
+    assert_eq!(scanned_json["summary"]["parallel"], true);
+    assert_eq!(scanned_json["summary"]["max_workers"], 3);
+    assert!(scanned_json["summary"]["wave_count"].as_u64().unwrap() >= 1);
+    assert!(scanned_json["summary"]["duration_ms"].as_i64().unwrap_or(0) >= 0);
+    assert_eq!(
+        scanned_json["summary"]["executed_workflows"],
+        scanned_json["results"].as_array().unwrap().len()
+    );
+    for result in scanned_json["results"].as_array().unwrap() {
+        let status = result["status"].as_str().unwrap();
+        assert!(status == "executed", "unexpected status: {status}");
+        assert!(!result["lease_id"].is_null());
+        if let Some(lease_id) = result["lease_id"].as_str() {
+            assert!(lease_id.starts_with("lease_"), "lease_id: {lease_id}");
+        }
+    }
+}
+
+#[test]
+fn parallel_scan_due_with_max_workers_one_is_sequential() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let created = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--cron",
+            "0 8 * * *",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created_json: Value = serde_json::from_slice(&created).unwrap();
+    let workflow_id = created_json["workflow_id"].as_str().unwrap().to_string();
+    let task_id = created_json["workflow"]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["schedule"].is_object())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "update",
+            "--workflow",
+            &workflow_id,
+            "--task",
+            &task_id,
+            "--next-run-at",
+            "2000-01-01T00:00:00Z",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let scanned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "scan-due",
+            "--executor",
+            "forge-scheduler-single",
+            "--max-workers",
+            "1",
+            "--ttl-seconds",
+            "60",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let scanned_json: Value = serde_json::from_slice(&scanned).unwrap();
+    assert_eq!(scanned_json["schema_version"], "forge.schedule.scan_due.v1");
+    assert_eq!(scanned_json["summary"]["parallel"], false);
+    assert_eq!(scanned_json["summary"]["scanned_workflows"], 1);
+    assert_eq!(scanned_json["summary"]["due_workflows"], 1);
+    assert_eq!(scanned_json["summary"]["executed_workflows"], 1);
+}
+
+#[test]
+fn parallel_scan_due_reports_idle_workflows_without_due_nodes() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "hackathon",
+            "--cron",
+            "0 8 * * *",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let scanned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "scan-due",
+            "--executor",
+            "forge-scheduler-idle",
+            "--max-workers",
+            "3",
+            "--ttl-seconds",
+            "60",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let scanned_json: Value = serde_json::from_slice(&scanned).unwrap();
+    assert_eq!(scanned_json["schema_version"], "forge.schedule.scan_due.v1");
+    assert!(
+        scanned_json["summary"]["idle_workflows"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1
+    );
+    assert!(
+        scanned_json["summary"]["executed_workflows"]
+            .as_u64()
+            .unwrap_or(0)
+            == 0
+    );
+    assert!(
+        scanned_json["summary"]["due_workflows"]
+            .as_u64()
+            .unwrap_or(0)
+            == 0
+    );
+}
+
+#[test]
+fn worker_pool_parallel_scan_due_preserves_workflow_state_consistency() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let goal_names = ["hackathon", "grant"];
+    let mut workflow_ids = Vec::new();
+    let mut task_ids = Vec::new();
+
+    for goal in &goal_names {
+        let created = forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "schedule",
+                "create-daily-goal-research",
+                "--goal",
+                goal,
+                "--cron",
+                "0 8 * * *",
+                "--timezone",
+                "America/Sao_Paulo",
+                "--origin",
+                "forge_cli",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let created_json: Value = serde_json::from_slice(&created).unwrap();
+        workflow_ids.push(created_json["workflow_id"].as_str().unwrap().to_string());
+        task_ids.push(
+            created_json["workflow"]["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|task| task["schedule"].is_object())
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+
+    for (i, wf_id) in workflow_ids.iter().enumerate() {
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "schedule",
+                "update",
+                "--workflow",
+                wf_id,
+                "--task",
+                &task_ids[i],
+                "--next-run-at",
+                "2000-01-01T00:00:00Z",
+                "--origin",
+                "codex",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "scan-due",
+            "--executor",
+            "forge-scheduler-consistency",
+            "--max-workers",
+            "4",
+            "--ttl-seconds",
+            "120",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    for wf_id in &workflow_ids {
+        let inspect = forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "status",
+                "--workflow",
+                wf_id,
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let inspect_json: Value = serde_json::from_slice(&inspect).unwrap();
+        assert_eq!(
+            inspect_json["workflow_id"].as_str().unwrap(),
+            wf_id.as_str()
+        );
+        assert_eq!(inspect_json["status"].as_str().unwrap(), "pending");
+        assert!(
+            inspect_json["artifacts"]
+                .as_array()
+                .map(|a| a.len() >= 3)
+                .unwrap_or(false),
+            "parallel scan-due should preserve at least 3 artifacts per workflow"
+        );
+    }
+}

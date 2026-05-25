@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.121 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 36: bounded concurrent scan-due dispatch through WorkerPool with `--max-workers` CLI/MCP parameter.
+- Added `scan_due_workflows_parallel` using `WorkerPool` for wave-scheduled parallel due-workflow execution. Each worker thread opens its own SQLite connection via WAL mode, acquires task lease, runs due work, releases lease and reports results in a bounded concurrent wave.
+- Added `ScheduleScanDueSummary.parallel`, `.max_workers`, `.wave_count` and `.duration_ms` fields to report parallel execution evidence.
+- Added `ForgeStore::path()` accessor for parallel worker store connections.
+- Enabled SQLite WAL mode and 5-second busy timeout on store open for safe concurrent access.
+- Retrofitted `generate_daily_goal_artifacts_bounded` to use WorkerPool instead of raw `thread::scope`, providing structured concurrency with cancellation, backpressure and failure reporting.
+- Added 4 new integration tests proving parallel scan-due dispatches multiple due workflows, preserves workflow state consistency, reports idle workflows without due nodes and falls back to sequential when max_workers=1.
+- Added `forge.schedule.scan_due_parallel` MCP tool specification for agent-facing parallel scheduler dispatch.
+
+### Changed
+
+- The package version is now `0.4.121`.
+- `forge schedule scan-due` now accepts `--max-workers <n>` for bounded concurrent due-workflow execution (default 1 = sequential).
+- System prompt is updated to document WorkerPool-based parallel scheduler dispatch as the canonical execution path for Forge-owned schedule/loop semantics.
+- This remains `0.5 groundwork` for Forge-owned scheduler/runtime concurrency. It does not claim that the Forge 0.5 creative runtime is complete.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- Every parallel worker opens its own SQLite connection with WAL mode and acquires independent task leases. No two workers share the same lease scope.
+- WorkerPool cancellation, backpressure and wave-level scheduling prevent unbounded resource consumption.
+
 ## 0.4.120 - 2026-05-25
 
 ### Added

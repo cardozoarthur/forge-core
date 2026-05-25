@@ -42,8 +42,9 @@ use forge_core::runtime::{
 };
 use forge_core::schedule::{
     aggregate_summary, build_schedule_worker_status, create_daily_goal_research_workflow,
-    run_daily_goal_research_smoke, run_due_workflow, scan_due_workflows, update_loop_state,
-    update_workflow_schedule, ScheduleUpdateOptions,
+    run_daily_goal_research_smoke, run_due_workflow, scan_due_workflows,
+    scan_due_workflows_parallel, update_loop_state, update_workflow_schedule,
+    ScheduleUpdateOptions,
 };
 use forge_core::self_evolve::{run_self_evolution, SelfRunOptions};
 use forge_core::skill::install_skill;
@@ -379,6 +380,8 @@ enum ScheduleCommands {
     ScanDue {
         #[arg(long, default_value = "forge-scheduler")]
         executor: String,
+        #[arg(long = "max-workers", default_value_t = 1)]
+        max_workers: usize,
         #[arg(long = "ttl-seconds", default_value_t = 300)]
         ttl_seconds: u64,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -1328,11 +1331,16 @@ fn run() -> Result<i32> {
             }
             ScheduleCommands::ScanDue {
                 executor,
+                max_workers,
                 ttl_seconds,
                 output,
             } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = scan_due_workflows(&store, &executor, ttl_seconds)?;
+                let report = if max_workers > 1 {
+                    scan_due_workflows_parallel(&store, &executor, max_workers, ttl_seconds)?
+                } else {
+                    scan_due_workflows(&store, &executor, ttl_seconds)?
+                };
                 print_response(output, &report)?;
                 Ok(0)
             }
