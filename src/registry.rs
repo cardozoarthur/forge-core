@@ -1214,6 +1214,9 @@ fn derive_lifecycle_state(workflow: &Workflow, task_summary: &RegistryTaskStatus
     if task_summary.running > 0 {
         return "running".to_string();
     }
+    if workflow.status == "scaled_to_zero" {
+        return "scaled_to_zero".to_string();
+    }
     if workflow.status == "completed" {
         if task_summary.total == task_summary.completed {
             return "scaled_to_zero".to_string();

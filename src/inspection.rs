@@ -578,6 +578,9 @@ fn derive_child_lifecycle_state(workflow: &Workflow) -> String {
     {
         return "running".to_string();
     }
+    if workflow.status == "scaled_to_zero" {
+        return "scaled_to_zero".to_string();
+    }
     if workflow.status == "completed" {
         let all_completed = workflow
             .tasks

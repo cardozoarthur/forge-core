@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.106 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 21: Forge-owned scale-to-zero decision receipts for scheduled workflows with no due cron work.
+- `forge schedule run-due --output json` now returns `scale_to_zero` with schema version, applied flag, reason, next wakeup timestamp, scheduled-node count and due-node count.
+- A scheduled workflow whose cron nodes are all idle and opt in to `scale_to_zero_when_idle` is persisted with lifecycle state `scaled_to_zero`.
+- `forge list` and `forge inspect` now surface that persisted idle lifecycle state after native schedule reconciliation, instead of leaving agents to infer it from wrapper state or external loops.
+
+### Changed
+
+- The package version is now `0.4.106`.
+- This is `0.5 groundwork` for scheduled/looping runtime semantics; it does not claim the Forge 0.5 creative runtime is complete.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- The scale-to-zero decision only mutates Forge-owned workflow state and event history in the configured SQLite store.
+- Existing schedule run history, missed-run reconciliation, daily Goal smoke artifacts and MCP run-due behavior remain compatible.
+
 ## 0.4.105 - 2026-05-25
 
 ### Added
