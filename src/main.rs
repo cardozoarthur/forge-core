@@ -42,6 +42,7 @@ use forge_core::workflow::{
     attach_workflow_artifact, update_workflow_goal, validate_child_subflow_binding,
 };
 use serde::Serialize;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -51,7 +52,7 @@ struct Cli {
     store: PathBuf,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -659,9 +660,76 @@ fn main() {
     }
 }
 
+const FORGE_ASCII: &str = r#"
+              ▄▄▄▄▄▄▄
+             ███████████
+             ███████████
+              █████████
+           ▄█████████████▄
+          █████████████████
+         ███████████████████
+         ███████████████████
+         ███████████████████
+          █████████████████
+           ▀█████████████▀
+              █████████
+             ██       ██
+             ██       ██
+             ██       ██
+            ████     ████
+"#;
+
+fn show_dashboard(banner: &str) -> Result<i32> {
+    if !std::io::stdin().is_terminal() {
+        println!("Forge Core workflow runtime -- use `forge --help` for available commands");
+        return Ok(0);
+    }
+
+    println!("{banner}");
+    println!("{:^50}", "F O R G E   C O R E");
+    println!("{:^50}", "Workflow Runtime Engine");
+    println!();
+
+    let store = match ForgeStore::open(cli_store_path()) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("  No workflow store found. Start with:");
+            println!("     forge plan --goal \"<your goal>\"");
+            println!("     forge --help");
+            return Ok(0);
+        }
+    };
+
+    if let Ok(report) = list_workflows_with_filters(
+        &store,
+        WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
+    ) {
+        println!(
+            "  Workflows: {} running, {} parked",
+            report.summary.running, report.summary.non_running
+        );
+    }
+
+    println!();
+    println!("  Quick commands:");
+    println!("     forge plan --goal \"<goal>\"");
+    println!("     forge list");
+    println!("     forge inspect <id>");
+    println!("     forge --help");
+
+    Ok(0)
+}
+
+fn cli_store_path() -> PathBuf {
+    PathBuf::from(".forge/forge.sqlite")
+}
+
 fn run() -> Result<i32> {
     let cli = Cli::parse();
-    match cli.command {
+    let Some(command) = cli.command else {
+        return show_dashboard(FORGE_ASCII);
+    };
+    match command {
         Commands::Plan { goal, output } => {
             let store = ForgeStore::open(cli.store)?;
             let intent = parse_intent(&goal);
