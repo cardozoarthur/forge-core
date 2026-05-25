@@ -23,6 +23,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 7. Use `forge context --workflow <id> --task <task-id> --budget <bytes> --strict --output json` before giving an agent task-specific context.
 8. Run `forge validate --workflow <id> --output json` before promotion. If `rework_tasks` is not empty, return those tasks to work.
 9. Run `forge improve --workflow <id> --target-version <version> --output json` only to generate a controlled experiment and changelog. Do not auto-promote without benchmark and validation evidence.
+10. Run `forge milestone status --version 0.5 --output json` before claiming Forge 0.5 creative-runtime readiness; planned or groundwork capabilities block promotion.
 
 ## MCP Agent Surface
 
@@ -33,6 +34,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 - Create scheduled Goal research through `forge.schedule.create_daily_goal_research`; inspect/list/mutate schedules through `forge.schedule.list`, `forge.workflow.inspect`, `forge.loop.inspect` and `forge.schedule.update`.
 - Use `forge.schedule.update` or `forge schedule update --next-run-at <RFC3339>` for explicit due timestamp mutation, and `forge.schedule.run_due` only when Forge-owned cron work is due. Paused/stopped loop nodes must not advance.
 - Inspect or route work through `forge.workflow.inspect`, `forge.context.request`, `forge.task.handoff`, `forge.workflow.attach_artifact`, `forge.workflow.update_goal`, `forge.validation.status` and `forge.artifact.fetch`.
+- Inspect Forge 0.5 release readiness through `forge.milestone.status`; `groundwork`, `planned` and `blocked` capabilities prevent promotion.
 - MCP mutations must still go through Forge so revisions, artifact hashes, origins and validation gates are persisted.
 
 ## Safety Rules
@@ -81,6 +83,8 @@ forge context --workflow <workflow-id> --task task-001 --budget 1200 --strict --
 forge run --workflow <workflow-id> --simulate --output json
 forge validate --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
+forge milestone status --version 0.5 --output json
+forge mcp call forge.milestone.status --input '{"version":"0.5"}' --output json
 forge improve --workflow <workflow-id> --target-version 0.3.0 --output json
 forge self run --repo /home/arthur/projects/forge-core --until 2026-05-25T10:00:00-03:00 --executor codex --executor opencode --max-cycles 1 --output json
 ```

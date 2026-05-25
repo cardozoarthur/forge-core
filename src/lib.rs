@@ -14,6 +14,7 @@ pub mod interaction;
 pub mod interactive;
 pub mod lease;
 pub mod mcp;
+pub mod milestone;
 pub mod registry;
 pub mod request;
 pub mod runtime;

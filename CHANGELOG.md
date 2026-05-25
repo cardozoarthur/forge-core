@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.100 - 2026-05-25
+
+### Added
+
+- Added `forge milestone status --version 0.5 --output json` as a Forge-owned milestone boundary surface for agents and operators.
+- Added MCP tool `forge.milestone.status` so external agents can inspect Forge 0.5 capability status and promotion blockers without scraping documentation.
+- Added a conservative 0.5 promotion gate: capabilities with `groundwork`, `planned` or `blocked` status prevent promotion, while `implemented` and `validated` are the only promotion-ready states.
+- Added CLI contract tests for milestone status and MCP exposure.
+
+### Changed
+
+- The package version is now `0.4.100`.
+- `docs/forge-0.5-milestone.md` now records the milestone governance/status surface as validated 0.5 groundwork.
+
+### Safety
+
+- This is a read-only governance increment. It does not mutate workflows, executors, Docker, Kubernetes, Knative, Telegram, external CLIs or user resources.
+- The 0.5 creative runtime remains planned until its explicit release gates have implementation and demo evidence.
+
 ## 0.4.99 - 2026-05-25
 
 ### Added
