@@ -39,8 +39,9 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 - List active requests with `forge mcp call forge.request.list --input '{"status":"accepted"}' --output json`.
 - Cancel a request with `forge mcp call forge.request.cancel --input '{"run_id":"<run-id>","origin":"opencode"}' --output json`.
 - Resume a paused async handoff with `forge mcp call forge.run.resume --input '{"run_id":"<run-id>","origin":"opencode"}' --output json`.
-- Create scheduled Goal research through `forge.schedule.create_daily_goal_research`; inspect/list/summarize/mutate schedules through `forge.schedule.list`, `forge.schedule.summary`, `forge.schedule.loop_summary`, `forge.workflow.inspect`, `forge.loop.inspect` and `forge.schedule.update`.
+- Create scheduled Goal research through `forge.schedule.create_daily_goal_research`; inspect/list/summarize/mutate schedules through `forge.schedule.list`, `forge.schedule.summary`, `forge.schedule.loop_summary`, `forge.schedule.worker_status`, `forge.workflow.inspect`, `forge.loop.inspect` and `forge.schedule.update`.
 - Use `forge.schedule.update` or `forge schedule update --next-run-at <RFC3339>` for explicit due timestamp mutation, `forge.schedule.run_due` for one workflow, and `forge.schedule.scan_due` when Forge should scan all scheduled workflows, lease due nodes locally and record idle scale-to-zero decisions. Paused/stopped loop nodes must not advance.
+- Use `forge schedule worker-status` or `forge.schedule.worker_status` to inspect next wakeup, scale-to-zero, bounded worker-pool capacity, cancellation safe points and backpressure before relying on tmux/systemd sleeps.
 - Inspect or route work through `forge.workflow.inspect`, `forge.context.request`, `forge.task.handoff`, `forge.workflow.attach_artifact`, `forge.workflow.update_goal`, `forge.validation.status` and `forge.artifact.fetch`.
 - MCP mutations must still go through Forge so revisions, artifact hashes, origins and validation gates are persisted.
 
@@ -83,8 +84,10 @@ forge schedule create-daily-goal-research --goal hackathon --timezone America/Sa
 forge mcp call forge.schedule.create_daily_goal_research --input '{"goals":["hackathon"],"timezone":"America/Sao_Paulo","cron":"0 8 * * *","origin":"codex"}' --output json
 forge schedule summary --output json
 forge schedule loop-summary --output json
+forge schedule worker-status --executor forge-scheduler --max-workers 1 --ttl-seconds 300 --output json
 forge mcp call forge.schedule.summary --output json
 forge mcp call forge.schedule.loop_summary --output json
+forge mcp call forge.schedule.worker_status --input '{"executor":"mcp-scheduler","max_workers":1,"ttl_seconds":300}' --output json
 forge schedule update --workflow <workflow-id> --task task-009 --next-run-at 2026-05-26T11:00:00Z --origin codex --output json
 forge mcp call forge.schedule.update --input '{"workflow_id":"<workflow-id>","task_id":"task-009","next_run_at":"2026-05-26T11:00:00Z","origin":"codex"}' --output json
 forge schedule pause --workflow <workflow-id> --task task-010 --origin codex --output json
