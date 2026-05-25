@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.117 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 32: terminal goal validation for daily Goal research workflow as native scheduled/looping Forge graph.
+- Full-cycle validation: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` (184 passed), `cargo build --release` all pass without warnings or errors.
+- Verification that Forge creates, persists, schedules, loops, subflows and exposes the daily Goal research workflow through CLI (`forge schedule`, `forge run --simulate`), MCP tools (`forge.schedule.*`, `forge.loop.*`, `forge.run.*`) and slash commands (`/runs`, `/workers`, `/sync`).
+- All 6 required capability goals from prompt v2 cycle 32 confirmed implemented and validated:
+  1. Cron/schedule as first-class graph nodes with durable state, timezone, next_run_at, missed-run policy, run history and scale-to-zero behavior.
+  2. Loop nodes: loop-over-items, bounded repeat, retry/backoff, while/until condition loop and infinite recurring subflow with controlled stop/pause/mutate behavior.
+  3. Subflow triggering from cron/loop nodes with workflow_id/run_id/artifact lineage preservation.
+  4. CLI, MCP and skill exposure for create/list/inspect/mutate operations on scheduled and looping workflows.
+  5. Canonical daily Goal research workflow: DuckDuckGo discovery, Playwright inspection, AI evaluation, deterministic Markdown/PDF reports, Telegram delivery records.
+  6. Configurable Goals including `hackathon` with first-phase online eligibility, Pelotas/RS geography, Engineering Production + ADS fit, cost, regulation clarity and ambition alignment.
+- Lean economics preserved: deterministic code nodes for search/report/PDF/Telegram work, AI reserved for judgment/summarization only.
+
+### Changed
+
+- The package version is now `0.4.117`.
+- This release validates that the terminal goal from prompt v2 cycle 32 is satisfied without any code generation gaps.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- All daily Goal research artifact generation is bounded to Forge-owned store artifacts.
+- Schedule/loop operations only mutate Forge-owned workflow state through revision-tracked persistence.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` and `cargo build --release`.
+
 ## 0.4.116 - 2026-05-25
 
 ### Added
