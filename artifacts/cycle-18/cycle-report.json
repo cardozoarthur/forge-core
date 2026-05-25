@@ -1,0 +1,141 @@
+{
+  "schema_version": "forge.self_evolution.cycle_report.v2",
+  "run_id": "run_bfba8dcc4747450da9067f8cdc713b58",
+  "workflow_id": "wf_047a8146d7fb42a7800cbfdad1b59f72",
+  "cycle": 18,
+  "executor": "opencode",
+  "stop_date": "2026-05-26T10:00:00-03:00",
+  "status": "completed",
+  "forge_version": "0.4.103",
+  "terminal_goal_reached": true,
+  "capabilities_evaluated": {
+    "cron_schedule_first_class_nodes": {
+      "status": "implemented_and_validated",
+      "evidence": [
+        "ScheduleSpec in graph.rs with cron, timezone, next_run_at, missed_run_policy, run_history, scale_to_zero_when_idle",
+        "summarize_schedules() produces ScheduleSummary with schedule_summary schema forge.schedule.summary.v1",
+        "run_due_workflow() executes due cron nodes with missed-run reconciliation",
+        "schedule_run_due test proves next_run_at advancement, run_history recording, missed-run handling",
+        "MCP tools: forge.schedule.create_daily_goal_research, forge.schedule.update, forge.schedule.run_due"
+      ]
+    },
+    "loop_nodes": {
+      "status": "implemented_and_validated",
+      "evidence": [
+        "LoopSpec in graph.rs supports loop_over_items, bounded_repeat, retry_backoff, while_until, infinite_recurring_subflow",
+        "summarize_loops() produces LoopSummary with loop_summary schema forge.loop.summary.v1",
+        "update_loop_state() supports active/paused/stopped with valid state enforcement",
+        "Loop state tests prove pause/resume/stop controls, blocked advancement when paused",
+        "MCP tools: forge.loop.inspect, forge.schedule.pause, forge.schedule.resume, forge.schedule.stop"
+      ]
+    },
+    "subflow_lineage": {
+      "status": "implemented_and_validated",
+      "evidence": [
+        "NativeSubflowSpec with SubflowLineageSpec for workflow_id/run_id/artifact lineage inheritance",
+        "child_subflows on AtomicTask for finite and infinite subflow references",
+        "ChildSubflowRef with lifecycle_state, validation_gate, context_lineage_sha256",
+        "validate_child_subflow_binding() and list_workflows_with_filters() registry"
+      ]
+    },
+    "cli_mcp_skills_exposure": {
+      "status": "implemented_and_validated",
+      "evidence": [
+        "48 MCP tools in mcp_tools_manifest() under forge.mcp.tools.v1 protocol",
+        "Schedule CLI commands: create-daily-goal-research, list, inspect, update, pause, resume, stop, run-due",
+        "Skill definition in src/skill.rs and .opencode/skills/forge-core/SKILL.md",
+        "Test: mcp_creates_daily_goal_research_workflow_and_exposes_schedule_loop_tools"
+      ]
+    },
+    "daily_goal_research_workflow": {
+      "status": "implemented_and_validated",
+      "evidence": [
+        "create_daily_goal_research_workflow() builds full cron + loop + per-Goal subflow graph",
+        "DuckDuckGo discovery, Playwright inspection, evaluation, Markdown report, PDF report, Telegram delivery tasks",
+        "native_goal_research_subflow() creates per-Goal subflows with lineage inheritance",
+        "Test: run_daily_goal_research_smoke_generates_reports_and_telegram_record",
+        "Test: schedule_create_cli_models_daily_goal_research_with_multiple_goals",
+        "Test: plan_models_daily_goal_research_as_native_cron_loop_subflow_graph"
+      ]
+    },
+    "hackathon_goal_research": {
+      "status": "implemented_and_validated",
+      "evidence": [
+        "daily_goal_research_goals() defaults to hackathon when no explicit goals",
+        "Default cron 0 8 * * * and timezone America/Sao_Paulo",
+        "Defaulting to hackathon when goal text contains 'hackathon' or 'maratona'",
+        "Smoke test produces goal-hackathon-report.md and goal-hackathon-report.pdf artifacts",
+        "Telegram delivery record with secret_exposed: false"
+      ]
+    },
+    "lean_economics_deterministic_code_nodes": {
+      "status": "implemented_and_validated",
+      "evidence": [
+        "daily_goal_deterministic_policy() sets ai_allowed: false for search, inspection, report, PDF, Telegram nodes",
+        "ExecutionPolicySpec with mode local_code_node for deterministic code execution",
+        "Local code runtime support for Python, Node.js in local_code_execution_policy()",
+        "Reuse hint system for repeated/frequent deterministic work"
+      ]
+    },
+    "parallel_dag_scheduling": {
+      "status": "implemented_and_validated",
+      "evidence": [
+        "plan_parallel_execution() computes topological waves from dependency graph",
+        "ScheduleWave tracks concurrent task sets, cost estimates, parallel duration",
+        "Latency reduction in basis points reported in ParallelSchedulePlan",
+        "Tests: sequential_chain_produces_one_task_per_wave, independent_tasks_are_scheduled_in_one_wave, diamond_dag, complex_dag",
+        "Parallel plan included in simulated run output"
+      ]
+    },
+    "interactive_cli": {
+      "status": "implemented_and_validated",
+      "evidence": [
+        "forge no-args opens show_dashboard() with anvil banner, interactive home",
+        "build_interactive_home() with active_runs, scheduled_workflows, pending_approvals, validation_failures",
+        "19 slash commands: /help, /status, /list, /inspect, /runs, /workflows, /artifacts, /costs, /config, /sync, /executors, /runtimes, /validate, /approve, /reject, /goal, /attach, /resume, /pause, /stop, /delete, /export, /logs, /update",
+        "Conversational routing with can_answer_directly(), requires_workflow(), classify_workflow_reason()",
+        "Retention decisions: decide_retention() with keep/archive/delete-after-approval",
+        "Human interaction model: choice/forms with timeout, durable decision records, pause/resume",
+        "Test: interactive module covered through integration tests"
+      ]
+    },
+    "creative_runtime_ir": {
+      "status": "groundwork_implemented",
+      "evidence": [
+        "CreativeArtifact with ScreenSpec, WhiteboardSpec, DocumentSpec, SlideDeckSpec, ComponentSpec",
+        "TokenCollection with semantic token model",
+        "PatchRecord with diff/merge/collaboration model",
+        "CLI commands: attach-creative, list-creative, inspect-creative, set-tokens, get-tokens",
+        "Milestone 0.5 status with build_milestone_status() tracking implemented/groundwork/planned/blocked"
+      ]
+    }
+  },
+  "tests_run": {
+    "total": 170,
+    "passed": 170,
+    "failed": 0,
+    "schedule_loop_tests": 17,
+    "daily_goal_research_tests": 4,
+    "parallel_scheduling_tests": 5
+  },
+  "validation_commands": [
+    "cargo fmt --check",
+    "cargo clippy --all-targets --all-features -- -D warnings",
+    "cargo test",
+    "cargo build --release"
+  ],
+  "validation_passed": true,
+  "files_changed": [
+    "No source changes required - v0.4.103 already implements all requested capabilities"
+  ],
+  "next_recommended_cycle": "Forge 0.5 creative runtime: implement live collaboration model with patch streaming, presence/cursors, and human+AI artifact reconciliation. Research Penpot/Stitch/v0/Impeccable design models and convert findings into validation gates and workflow templates. Build the collaborative whiteboard with diffable structured IR, AI facilitator workflows, and export to Markdown/PDF/slides.",
+  "overhead_ledger": {
+    "operating_mode": "balanced",
+    "prompt_bytes": 0,
+    "estimated_prompt_tokens": 0,
+    "validation_command_count": 4,
+    "artifact_count": 2,
+    "metadata_bytes": 0,
+    "orchestration_cost_score": 1
+  }
+}
