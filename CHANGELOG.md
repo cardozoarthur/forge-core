@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.113 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 28: MCP creative artifact and design token tools for agent-facing creative runtime groundwork.
+- Added MCP tools `forge.creative.list`, `forge.creative.inspect`, `forge.creative.attach`, `forge.tokens.get` and `forge.tokens.set`, wrapping existing CLI workflow creative/token commands as agent-callable surfaces.
+- Added `build_creative_artifact()` helper producing all five kinds (screen, whiteboard, document, slide_deck, component) with full spec IR.
+- Added `make_minimal_token_collection()` for agents to set a baseline token collection with 3 color/spacing/typography tokens and a semantic alias.
+- Added CLI contract coverage proving the 5 new MCP tools are discoverable in `forge mcp tools --json`, and that agents can list/inspect/attach creative artifacts and get/set token collections through MCP.
+- Milestone capability `export_demo_baseline` promoted from `planned` to `groundwork` with cycle 28 evidence: MCP-exposed creative IR + token + component operations satisfy the "agents can discover and interact with creative artifacts" baseline.
+
+### Changed
+
+- The package version is now `0.4.113`.
+- Milestone 0.5 promotion gate now reports: validated=6, groundwork=1, planned=2 (down from planned=3).
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- All new MCP tools delegate to existing Forge-owned CLI operations with revision/origin trace.
+- Token collections and creative artifacts are persisted as Forge-owned workflow state in the configured SQLite store.
+
 ## 0.4.112 - 2026-05-25
 
 ### Added

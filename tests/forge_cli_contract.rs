@@ -70,8 +70,8 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .unwrap()
         .contains("0.5"));
     assert_eq!(json["summary"]["validated"].as_u64().unwrap(), 6);
-    assert_eq!(json["summary"]["groundwork"].as_u64().unwrap(), 0);
-    assert_eq!(json["summary"]["planned"].as_u64().unwrap(), 3);
+    assert_eq!(json["summary"]["groundwork"].as_u64().unwrap(), 1);
+    assert_eq!(json["summary"]["planned"].as_u64().unwrap(), 2);
 }
 
 #[test]
@@ -16459,6 +16459,11 @@ fn milestone_status_reports_creative_artifact_ir_capability_as_validated() {
         .iter()
         .find(|c| c.id == "componentization_ai_surfaces")
         .expect("componentization_ai_surfaces capability should exist");
+    let export_demo = report
+        .capabilities
+        .iter()
+        .find(|c| c.id == "export_demo_baseline")
+        .expect("export_demo_baseline capability should exist");
 
     assert_eq!(
         creative_ir.status, "validated",
@@ -16471,5 +16476,263 @@ fn milestone_status_reports_creative_artifact_ir_capability_as_validated() {
     assert_eq!(
         componentization.status, "validated",
         "componentization_ai_surfaces should be validated"
+    );
+    assert_eq!(
+        export_demo.status, "groundwork",
+        "export_demo_baseline should be groundwork after MCP creative/token exposure"
+    );
+}
+
+#[test]
+fn mcp_tools_manifest_includes_creative_artifact_and_token_tools() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let manifest: Value = serde_json::from_slice(&output).unwrap();
+    let tool_names: Vec<&str> = manifest["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+
+    assert!(tool_names.contains(&"forge.creative.list"));
+    assert!(tool_names.contains(&"forge.creative.inspect"));
+    assert!(tool_names.contains(&"forge.creative.attach"));
+    assert!(tool_names.contains(&"forge.tokens.get"));
+    assert!(tool_names.contains(&"forge.tokens.set"));
+}
+
+#[test]
+fn mcp_creative_tools_list_inspect_and_attach_workflow_creative_artifacts() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Test creative MCP tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    let workflow_id = plan["workflow_id"].as_str().unwrap();
+
+    let list_empty = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.creative.list",
+            "--input",
+            &format!(r#"{{"workflow_id":"{workflow_id}"}}"#),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list_report: Value = serde_json::from_slice(&list_empty).unwrap();
+    assert_eq!(list_report["result"]["status"], "creative_artifacts_listed");
+    assert_eq!(
+        list_report["result"]["artifacts"].as_array().unwrap().len(),
+        0
+    );
+
+    let attach_output = forge()
+        .args(["--store", store.to_str().unwrap(), "mcp", "call", "forge.creative.attach", "--input", &format!(r#"{{"workflow_id":"{workflow_id}","title":"Test Screen","kind":"screen","origin":"mcp_test"}}"#), "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let attach_report: Value = serde_json::from_slice(&attach_output).unwrap();
+    assert_eq!(
+        attach_report["result"]["status"],
+        "creative_artifact_attached"
+    );
+    let artifact_id = attach_report["result"]["artifact"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(attach_report["result"]["artifact"]["kind"], "Screen");
+
+    let list_after = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.creative.list",
+            "--input",
+            &format!(r#"{{"workflow_id":"{workflow_id}"}}"#),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list_report: Value = serde_json::from_slice(&list_after).unwrap();
+    assert_eq!(
+        list_report["result"]["artifacts"].as_array().unwrap().len(),
+        1
+    );
+
+    let inspect_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.creative.inspect",
+            "--input",
+            &format!(r#"{{"workflow_id":"{workflow_id}","artifact_id":"{artifact_id}"}}"#),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspect_report: Value = serde_json::from_slice(&inspect_output).unwrap();
+    assert_eq!(
+        inspect_report["result"]["status"],
+        "creative_artifact_inspected"
+    );
+    assert_eq!(inspect_report["result"]["artifact"]["id"], artifact_id);
+    assert_eq!(
+        inspect_report["result"]["artifact"]["content"]["width_px"],
+        1440
+    );
+}
+
+#[test]
+fn mcp_token_tools_get_set_design_tokens_on_workflows() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Test token MCP tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    let workflow_id = plan["workflow_id"].as_str().unwrap();
+
+    let get_empty = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.tokens.get",
+            "--input",
+            &format!(r#"{{"workflow_id":"{workflow_id}"}}"#),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let get_report: Value = serde_json::from_slice(&get_empty).unwrap();
+    assert_eq!(get_report["result"]["status"], "token_collection_loaded");
+    assert!(get_report["result"]["token_collection"].is_null());
+
+    let set_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.tokens.set",
+            "--input",
+            &format!(
+                r#"{{"workflow_id":"{workflow_id}","name":"MyTestTokens","origin":"mcp_test"}}"#
+            ),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let set_report: Value = serde_json::from_slice(&set_output).unwrap();
+    assert_eq!(set_report["result"]["status"], "token_collection_set");
+    let tokens = set_report["result"]["token_collection"]
+        .as_object()
+        .unwrap();
+    assert_eq!(tokens["name"], "MyTestTokens");
+
+    let get_after = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.tokens.get",
+            "--input",
+            &format!(r#"{{"workflow_id":"{workflow_id}"}}"#),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let get_report: Value = serde_json::from_slice(&get_after).unwrap();
+    assert_eq!(get_report["result"]["status"], "token_collection_loaded");
+    assert_eq!(
+        get_report["result"]["token_collection"]["name"],
+        "MyTestTokens"
+    );
+    assert!(
+        get_report["result"]["token_collection"]["tokens"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 2
     );
 }

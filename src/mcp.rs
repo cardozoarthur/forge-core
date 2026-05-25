@@ -7,6 +7,7 @@ use crate::interaction::{
     answer_human_interaction, create_choice_interaction, create_form_interaction,
     expire_human_interaction, list_human_interactions, CreateChoiceInteractionRequest,
 };
+use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::milestone::build_milestone_status;
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
@@ -20,7 +21,11 @@ use crate::schedule::{
 };
 use crate::storage::ForgeStore;
 use crate::validation::{validate_workflow, ValidationReport};
-use crate::workflow::{attach_workflow_artifact, update_workflow_goal};
+use crate::workflow::{
+    attach_creative_artifact, attach_workflow_artifact, get_workflow_token_collection,
+    inspect_creative_artifact, list_creative_artifacts, set_workflow_token_collection,
+    update_workflow_goal,
+};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -248,6 +253,37 @@ struct ArtifactFetchInput {
 #[derive(Debug, Deserialize)]
 struct MilestoneStatusInput {
     version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreativeListInput {
+    workflow_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreativeInspectInput {
+    workflow_id: String,
+    artifact_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreativeAttachInput {
+    workflow_id: String,
+    title: String,
+    kind: String,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokensGetInput {
+    workflow_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokensSetInput {
+    workflow_id: String,
+    name: String,
+    origin: Option<String>,
 }
 
 pub fn mcp_tools_manifest() -> McpToolsManifest {
@@ -632,6 +668,67 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ],
                 ToolFlags::new(true, false),
             ),
+            tool(
+                "forge.creative.list",
+                "List Creative Artifacts",
+                "List creative artifacts (screens, whiteboards, documents, slide decks, components) attached to a workflow.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                ], &["workflow_id"]),
+                "forge.creative.list.v1",
+                &["forge", "workflow", "list-creative", "--workflow", "<workflow-id>", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.creative.inspect",
+                "Inspect Creative Artifact",
+                "Inspect a specific creative artifact with full spec content.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("artifact_id", "string", "creative artifact id"),
+                ], &["workflow_id", "artifact_id"]),
+                "forge.creative.inspect.v1",
+                &["forge", "workflow", "inspect-creative", "--workflow", "<workflow-id>", "--artifact", "<artifact-id>", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.creative.attach",
+                "Attach Creative Artifact",
+                "Attach a new creative artifact (screen, whiteboard, document, slide_deck, component) to a workflow.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("title", "string", "artifact title"),
+                    ("kind", "string", "screen|whiteboard|document|slide_deck|component"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id", "title", "kind"]),
+                "forge.creative.attach.v1",
+                &["forge", "workflow", "attach-creative", "--workflow", "<workflow-id>", "--title", "<title>", "--kind", "<kind>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.tokens.get",
+                "Get Design Tokens",
+                "Get the design token collection (colors, typography, spacing, etc.) attached to a workflow.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                ], &["workflow_id"]),
+                "forge.tokens.get.v1",
+                &["forge", "workflow", "get-tokens", "--workflow", "<workflow-id>", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.tokens.set",
+                "Set Design Tokens",
+                "Set or replace the design token collection on a workflow with a minimal token set.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("name", "string", "token collection name"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id", "name"]),
+                "forge.tokens.set.v1",
+                &["forge", "workflow", "set-tokens", "--workflow", "<workflow-id>", "--name", "<name>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
         ],
     }
 }
@@ -899,6 +996,43 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let version = input.version.unwrap_or_else(|| "0.5".to_string());
             serde_json::to_value(build_milestone_status(&version)?)?
         }
+        "forge.creative.list" => {
+            let input: CreativeListInput = parse_input(input)?;
+            serde_json::to_value(list_creative_artifacts(store, &input.workflow_id)?)?
+        }
+        "forge.creative.inspect" => {
+            let input: CreativeInspectInput = parse_input(input)?;
+            serde_json::to_value(inspect_creative_artifact(
+                store,
+                &input.workflow_id,
+                &input.artifact_id,
+            )?)?
+        }
+        "forge.creative.attach" => {
+            let input: CreativeAttachInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            let artifact = build_creative_artifact(&input.title, &input.kind, &origin)?;
+            serde_json::to_value(attach_creative_artifact(
+                store,
+                &input.workflow_id,
+                artifact,
+                &origin,
+            )?)?
+        }
+        "forge.tokens.get" => {
+            let input: TokensGetInput = parse_input(input)?;
+            serde_json::to_value(get_workflow_token_collection(store, &input.workflow_id)?)?
+        }
+        "forge.tokens.set" => {
+            let input: TokensSetInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(set_workflow_token_collection(
+                store,
+                &input.workflow_id,
+                make_minimal_token_collection(&input.name),
+                &origin,
+            )?)?
+        }
         other => bail!("unknown MCP tool: {other}"),
     };
 
@@ -1044,4 +1178,100 @@ fn clean_optional(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn build_creative_artifact(title: &str, kind: &str, origin: &str) -> Result<CreativeArtifact> {
+    match kind {
+        "screen" => Ok(CreativeArtifact::new_screen(
+            title,
+            crate::ir::ScreenSpec {
+                schema_version: crate::ir::ir_schema_version(),
+                width_px: 1440,
+                height_px: 900,
+                background: "#ffffff".to_string(),
+                breakpoints: Vec::new(),
+                elements: Vec::new(),
+                interactions: Vec::new(),
+            },
+        )),
+        "whiteboard" => Ok(CreativeArtifact::new_whiteboard(
+            title,
+            crate::ir::WhiteboardSpec {
+                schema_version: crate::ir::ir_schema_version(),
+                width_px: 1920,
+                height_px: 1080,
+                background: "#ffffff".to_string(),
+                layers: Vec::new(),
+                sticky_notes: Vec::new(),
+                drawings: Vec::new(),
+                text_blocks: Vec::new(),
+                images: Vec::new(),
+            },
+        )),
+        "document" => Ok(CreativeArtifact::new_document(
+            title,
+            crate::ir::DocumentSpec {
+                schema_version: crate::ir::ir_schema_version(),
+                title: title.to_string(),
+                author: origin.to_string(),
+                front_matter: std::collections::BTreeMap::new(),
+                sections: Vec::new(),
+            },
+        )),
+        "slide_deck" => Ok(CreativeArtifact::new_slide_deck(
+            title,
+            crate::ir::SlideDeckSpec {
+                schema_version: crate::ir::ir_schema_version(),
+                title: title.to_string(),
+                theme: "default".to_string(),
+                slides: Vec::new(),
+            },
+        )),
+        "component" => Ok(CreativeArtifact::new_component(
+            title,
+            crate::ir::ComponentSpec {
+                schema_version: crate::ir::ir_schema_version(),
+                name: title.to_string(),
+                description: String::new(),
+                props: Vec::new(),
+                variants: Vec::new(),
+                states: Vec::new(),
+                slots: Vec::new(),
+                token_dependencies: Vec::new(),
+                code_template: None,
+            },
+        )),
+        other => bail!("unsupported creative artifact kind: {other}. Valid kinds: screen, whiteboard, document, slide_deck, component"),
+    }
+}
+
+fn make_minimal_token_collection(name: &str) -> TokenCollection {
+    TokenCollection {
+        name: name.to_string(),
+        schema_version: crate::ir::ir_schema_version(),
+        description: format!("Design tokens for {name}"),
+        tokens: vec![
+            crate::ir::DesignToken {
+                name: "color.primary".to_string(),
+                value: "#3B82F6".to_string(),
+                token_type: crate::ir::TokenType::Color,
+                description: "Primary brand color".to_string(),
+                group: "color".to_string(),
+                extensions: std::collections::BTreeMap::new(),
+            },
+            crate::ir::DesignToken {
+                name: "spacing.md".to_string(),
+                value: "16px".to_string(),
+                token_type: crate::ir::TokenType::Spacing,
+                description: "Medium spacing".to_string(),
+                group: "spacing".to_string(),
+                extensions: std::collections::BTreeMap::new(),
+            },
+        ],
+        semantic_aliases: vec![crate::ir::SemanticAlias {
+            name: format!("semantic.{name}"),
+            resolves_to: "color.primary".to_string(),
+            description: format!("Semantic alias for {name}"),
+        }],
+    }
 }
