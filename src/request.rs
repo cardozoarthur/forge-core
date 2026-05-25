@@ -253,6 +253,109 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
     })
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestListReport {
+    pub status: String,
+    pub schema_version: String,
+    pub total: usize,
+    pub runs: Vec<RequestListRow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestListRow {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub status: String,
+    pub goal: String,
+    pub origin: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestCancelReport {
+    pub status: String,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub previous_status: String,
+    pub origin: String,
+    pub cancelled_at: DateTime<Utc>,
+}
+
+pub fn list_requests(store: &ForgeStore, status_filter: Option<&str>) -> Result<RequestListReport> {
+    let records = store.load_runs()?;
+    let mut runs: Vec<RequestListRow> = records
+        .iter()
+        .filter_map(|value| serde_json::from_value::<RunRecord>(value.clone()).ok())
+        .filter(|run| {
+            if let Some(filter) = status_filter {
+                let normalized = filter.trim().to_ascii_lowercase();
+                if normalized == "accepted" {
+                    run.status == "accepted"
+                } else if normalized == "resumed" {
+                    run.status == "resumed"
+                } else if normalized == "cancelled" {
+                    run.status == "cancelled"
+                } else {
+                    true
+                }
+            } else {
+                true
+            }
+        })
+        .map(|run| RequestListRow {
+            run_id: run.run_id,
+            workflow_id: run.workflow_id,
+            status: run.status,
+            goal: run.goal,
+            origin: run.origin,
+            created_at: run.created_at,
+            updated_at: run.updated_at,
+        })
+        .collect();
+    let total = runs.len();
+    if status_filter.is_some_and(|f| f.trim().eq_ignore_ascii_case("accepted")) {
+        runs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    }
+    Ok(RequestListReport {
+        status: "loaded".to_string(),
+        schema_version: "forge.request_list.v1".to_string(),
+        total,
+        runs,
+    })
+}
+
+pub fn cancel_request(
+    store: &ForgeStore,
+    run_id: &str,
+    origin: &str,
+) -> Result<RequestCancelReport> {
+    let mut run = load_run_record(store, run_id)?;
+    let previous_status = run.status.clone();
+    run.status = "cancelled".to_string();
+    let cancelled_at = Utc::now();
+    run.updated_at = cancelled_at;
+    save_run_record(store, &run)?;
+    store.record_event(
+        &run.workflow_id,
+        "async_request_cancelled",
+        &serde_json::json!({
+            "run_id": run.run_id,
+            "origin": origin,
+            "previous_status": previous_status,
+            "cancelled_at": cancelled_at
+        }),
+    )?;
+    Ok(RequestCancelReport {
+        status: "cancelled".to_string(),
+        run_id: run.run_id,
+        workflow_id: run.workflow_id,
+        previous_status,
+        origin: origin.to_string(),
+        cancelled_at,
+    })
+}
+
 pub fn resume_async_request(
     store: &ForgeStore,
     run_id: &str,

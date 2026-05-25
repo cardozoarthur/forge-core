@@ -11515,6 +11515,365 @@ fn set_task_status_in_stored_workflow(
         .unwrap();
 }
 
+#[test]
+fn request_list_lists_all_requests_without_filter() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let first = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "First async request",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first_json: Value = serde_json::from_slice(&first).unwrap();
+    let first_run_id = first_json["run_id"].as_str().unwrap().to_string();
+
+    let second = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Second async request",
+            "--origin",
+            "opencode",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second_json: Value = serde_json::from_slice(&second).unwrap();
+    let second_run_id = second_json["run_id"].as_str().unwrap().to_string();
+
+    let list_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "list",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let list: Value = serde_json::from_slice(&list_output).unwrap();
+    assert_eq!(list["status"], "loaded");
+    assert_eq!(list["schema_version"], "forge.request_list.v1");
+    assert_eq!(list["total"], 2);
+    let run_ids: Vec<&str> = list["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|run| run["run_id"].as_str().unwrap())
+        .collect();
+    assert!(run_ids.contains(&first_run_id.as_str()));
+    assert!(run_ids.contains(&second_run_id.as_str()));
+    assert!(list["runs"][0]["workflow_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("wf_"));
+    assert_eq!(list["runs"][0]["status"], "accepted");
+}
+
+#[test]
+fn request_list_filters_by_status() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let first = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "First request for filter test",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first_json: Value = serde_json::from_slice(&first).unwrap();
+    let first_run_id = first_json["run_id"].as_str().unwrap().to_string();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "cancel",
+            "--run",
+            &first_run_id,
+            "--origin",
+            "opencode",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let second = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Second request for filter test",
+            "--origin",
+            "opencode",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second_json: Value = serde_json::from_slice(&second).unwrap();
+    let second_run_id = second_json["run_id"].as_str().unwrap().to_string();
+
+    let accepted_list = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "list",
+            "--status",
+            "accepted",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let accepted: Value = serde_json::from_slice(&accepted_list).unwrap();
+    assert_eq!(accepted["total"], 1);
+    assert_eq!(
+        accepted["runs"][0]["run_id"].as_str().unwrap(),
+        second_run_id
+    );
+    assert_eq!(accepted["runs"][0]["status"], "accepted");
+
+    let cancelled_list = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "list",
+            "--status",
+            "cancelled",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let cancelled: Value = serde_json::from_slice(&cancelled_list).unwrap();
+    assert_eq!(cancelled["total"], 1);
+    assert_eq!(
+        cancelled["runs"][0]["run_id"].as_str().unwrap(),
+        first_run_id
+    );
+    assert_eq!(cancelled["runs"][0]["status"], "cancelled");
+}
+
+#[test]
+fn request_cancel_marks_run_as_cancelled_and_records_event() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Cancel this request test",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+
+    let cancel_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "cancel",
+            "--run",
+            run_id,
+            "--origin",
+            "opencode",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let cancel: Value = serde_json::from_slice(&cancel_output).unwrap();
+    assert_eq!(cancel["status"], "cancelled");
+    assert_eq!(cancel["run_id"], run_id);
+    assert_eq!(cancel["workflow_id"], workflow_id);
+    assert_eq!(cancel["previous_status"], "accepted");
+    assert_eq!(cancel["origin"], "opencode");
+    assert!(!cancel["cancelled_at"].as_str().unwrap().is_empty());
+
+    let status_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let status: Value = serde_json::from_slice(&status_output).unwrap();
+    assert_eq!(status["status"], "cancelled");
+}
+
+#[test]
+fn request_cancel_with_mcp_tool_works_through_mcp_protocol() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Cancel through MCP test",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.request.cancel",
+            "--input",
+            &format!(r#"{{"run_id":"{}","origin":"mcp"}}"#, run_id),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn request_list_through_mcp_tool_returns_runs() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "MCP list test",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.request.list",
+            "--input",
+            r#"{"status":"accepted"}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let mcp: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp["status"], "ok");
+    assert_eq!(mcp["tool_name"], "forge.request.list");
+    assert_eq!(mcp["result"]["total"], 1);
+    assert_eq!(mcp["result"]["runs"][0]["status"], "accepted");
+}
+
 fn write_fake_cli(bin: &Path, name: &str) {
     fs::create_dir_all(bin).unwrap();
     let path = bin.join(name);

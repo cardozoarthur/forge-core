@@ -5,7 +5,9 @@ use crate::inspection::inspect_workflow_with_focus;
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
-use crate::request::{load_request_status, resume_async_request, start_async_request};
+use crate::request::{
+    cancel_request, list_requests, load_request_status, resume_async_request, start_async_request,
+};
 use crate::storage::ForgeStore;
 use crate::validation::{validate_workflow, ValidationReport};
 use crate::workflow::{attach_workflow_artifact, update_workflow_goal};
@@ -93,6 +95,17 @@ struct RunStartInput {
 
 #[derive(Debug, Deserialize)]
 struct RunIdInput {
+    run_id: String,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestListInput {
+    status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestCancelInput {
     run_id: String,
     origin: Option<String>,
 }
@@ -197,6 +210,29 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.request.list",
+                "List Async Forge Requests",
+                "List all async requests with optional status filter (accepted|resumed|cancelled).",
+                object_schema(&[
+                    ("status", "string", "optional filter: accepted|resumed|cancelled"),
+                ], &[]),
+                "forge.request_list.v1",
+                &["forge", "request", "list", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.request.cancel",
+                "Cancel Async Forge Request",
+                "Mark an async request as cancelled and record the event with origin trace.",
+                object_schema(&[
+                    ("run_id", "string", "run id"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["run_id"]),
+                "forge.request_cancel.v1",
+                &["forge", "request", "cancel", "--run", "<run-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
                 "forge.workflow.update_goal",
                 "Update Workflow Goal",
                 "Mutate the workflow goal through Forge with revision tracking and origin trace.",
@@ -294,6 +330,15 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         "forge.run.status" => {
             let input: RunIdInput = parse_input(input)?;
             serde_json::to_value(load_request_status(store, &input.run_id)?)?
+        }
+        "forge.request.list" => {
+            let input: RequestListInput = parse_input(input)?;
+            serde_json::to_value(list_requests(store, input.status.as_deref())?)?
+        }
+        "forge.request.cancel" => {
+            let input: RequestCancelInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(cancel_request(store, &input.run_id, &origin)?)?
         }
         "forge.workflow.update_goal" => {
             let input: WorkflowUpdateGoalInput = parse_input(input)?;
