@@ -12,6 +12,7 @@ pub mod inspection;
 pub mod intent;
 pub mod interaction;
 pub mod interactive;
+pub mod ir;
 pub mod lease;
 pub mod mcp;
 pub mod milestone;
