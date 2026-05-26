@@ -23,7 +23,8 @@ use forge_core::interaction::{
     CreateChoiceInteractionRequest,
 };
 use forge_core::interactive::{
-    build_interactive_home, render_interactive_home, route_interactive_input, slash_command_catalog,
+    build_interactive_home, render_interactive_home, route_interactive_input, run_interactive_repl,
+    slash_command_catalog,
 };
 use forge_core::ir::{CreativeArtifact, TokenCollection};
 use forge_core::lease::{acquire_task_lease, release_task_lease};
@@ -65,7 +66,6 @@ use forge_core::workflow::{
     CreativeCollaborationEventRequest,
 };
 use serde::Serialize;
-use std::io::IsTerminal;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -980,23 +980,10 @@ fn main() {
     }
 }
 
-fn show_dashboard(store_path: PathBuf) -> Result<i32> {
-    if !std::io::stdin().is_terminal() {
-        println!("Forge Core workflow runtime -- use `forge --help` for available commands");
-        return Ok(0);
-    }
-
-    let store = ForgeStore::open(store_path)?;
-    let report = build_interactive_home(&store)?;
-    println!("{}", render_interactive_home(&report));
-
-    Ok(0)
-}
-
 fn run() -> Result<i32> {
     let cli = Cli::parse();
     let Some(command) = cli.command else {
-        return show_dashboard(cli.store);
+        return run_interactive_repl(&cli.store);
     };
     match command {
         Commands::Plan { goal, output } => {

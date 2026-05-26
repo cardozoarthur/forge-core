@@ -15929,11 +15929,18 @@ fn no_args_non_tty_stays_script_safe_and_does_not_open_dashboard() {
 }
 
 #[test]
-fn no_args_tty_renders_interactive_home_when_pseudo_terminal_is_available() {
+fn no_args_tty_enters_repl_and_shows_dashboard_when_pseudo_terminal_is_available() {
     let script = if Path::new("/usr/bin/script").exists() {
         "/usr/bin/script"
     } else if Path::new("/bin/script").exists() {
         "/bin/script"
+    } else {
+        return;
+    };
+    let timeout = if Path::new("/usr/bin/timeout").exists() {
+        "/usr/bin/timeout"
+    } else if Path::new("/bin/timeout").exists() {
+        "/bin/timeout"
     } else {
         return;
     };
@@ -15942,12 +15949,11 @@ fn no_args_tty_renders_interactive_home_when_pseudo_terminal_is_available() {
     let binary = assert_cmd::cargo::cargo_bin("forge");
     let command = format!("{} --store {}", binary.display(), store.display());
 
-    let output = std::process::Command::new(script)
-        .args(["-q", "-c", &command, "/dev/null"])
+    let output = std::process::Command::new(timeout)
+        .args(["2", script, "-q", "-c", &command, "/dev/null"])
         .output()
         .unwrap();
 
-    assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("forge"));
     assert!(stdout.contains("Active runs"));
@@ -16007,11 +16013,23 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         "/logs",
         "/update",
         "/workers",
+        "/exit",
+        "/quit",
     ] {
         let command = find_slash_command(&json, name);
         assert_eq!(command["name"], name);
         assert_eq!(command["scriptable"], true);
-        assert!(command["equivalent_command"].as_array().unwrap().len() >= 2);
+        if name == "/exit" || name == "/quit" {
+            assert!(
+                command["equivalent_command"].as_array().unwrap().is_empty(),
+                "/exit and /quit are REPL-only and should have no equivalent forge command"
+            );
+        } else {
+            assert!(
+                command["equivalent_command"].as_array().unwrap().len() >= 2,
+                "{name} should have at least 2 equivalent commands"
+            );
+        }
     }
 
     let status = find_slash_command(&json, "/status");
