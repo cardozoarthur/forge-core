@@ -19,6 +19,10 @@ fn empty_patches() -> Vec<PatchRecord> {
     Vec::new()
 }
 
+fn default_collaboration() -> CreativeCollaborationState {
+    CreativeCollaborationState::default()
+}
+
 fn empty_extensions() -> BTreeMap<String, String> {
     BTreeMap::new()
 }
@@ -44,6 +48,8 @@ pub struct CreativeArtifact {
     pub tags: Vec<String>,
     #[serde(default = "empty_patches")]
     pub patches: Vec<PatchRecord>,
+    #[serde(default = "default_collaboration")]
+    pub collaboration: CreativeCollaborationState,
 }
 
 impl CreativeArtifact {
@@ -101,6 +107,7 @@ impl CreativeArtifact {
             task_id: None,
             tags: Vec::new(),
             patches: Vec::new(),
+            collaboration: CreativeCollaborationState::default(),
         }
     }
 
@@ -128,6 +135,134 @@ pub struct CreativeArtifactSummary {
     pub updated_at: DateTime<Utc>,
     pub tag_count: usize,
     pub patch_count: usize,
+}
+
+// -- Live collaboration --
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreativeCollaborationState {
+    #[serde(default = "creative_collaboration_schema_version")]
+    pub schema_version: String,
+    #[serde(default)]
+    pub presences: Vec<CollaborationPresence>,
+    #[serde(default)]
+    pub comments: Vec<CollaborationComment>,
+    #[serde(default)]
+    pub patch_stream: Vec<CollaborationPatchEvent>,
+    #[serde(default)]
+    pub conflicts: Vec<CollaborationConflictEvent>,
+    #[serde(default)]
+    pub rollbacks: Vec<CollaborationRollbackEvent>,
+    #[serde(default)]
+    pub audit_history: Vec<CollaborationAuditEvent>,
+}
+
+impl Default for CreativeCollaborationState {
+    fn default() -> Self {
+        Self {
+            schema_version: creative_collaboration_schema_version(),
+            presences: Vec::new(),
+            comments: Vec::new(),
+            patch_stream: Vec::new(),
+            conflicts: Vec::new(),
+            rollbacks: Vec::new(),
+            audit_history: Vec::new(),
+        }
+    }
+}
+
+impl CreativeCollaborationState {
+    pub fn summary(&self) -> CreativeCollaborationSummary {
+        CreativeCollaborationSummary {
+            schema_version: "forge.creative_collaboration.summary.v1".to_string(),
+            active_presence_count: self
+                .presences
+                .iter()
+                .filter(|presence| presence.status == "active")
+                .count(),
+            comment_count: self.comments.len(),
+            patch_event_count: self.patch_stream.len(),
+            conflict_count: self.conflicts.len(),
+            rollback_count: self.rollbacks.len(),
+            audit_event_count: self.audit_history.len(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollaborationPresence {
+    pub event_id: String,
+    pub actor: String,
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub selections: Vec<String>,
+    pub status: String,
+    pub origin: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollaborationComment {
+    pub event_id: String,
+    pub actor: String,
+    pub target: String,
+    pub body: String,
+    pub status: String,
+    pub origin: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollaborationPatchEvent {
+    pub event_id: String,
+    pub actor: String,
+    pub target: String,
+    pub instruction: String,
+    pub status: String,
+    pub origin: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollaborationConflictEvent {
+    pub event_id: String,
+    pub actor: String,
+    pub target: String,
+    pub summary: String,
+    pub resolution_status: String,
+    pub origin: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollaborationRollbackEvent {
+    pub event_id: String,
+    pub actor: String,
+    pub target_event_id: String,
+    pub reason: String,
+    pub origin: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollaborationAuditEvent {
+    pub event_id: String,
+    pub kind: String,
+    pub actor: String,
+    pub summary: String,
+    pub origin: String,
+    pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreativeCollaborationSummary {
+    pub schema_version: String,
+    pub active_presence_count: usize,
+    pub comment_count: usize,
+    pub patch_event_count: usize,
+    pub conflict_count: usize,
+    pub rollback_count: usize,
+    pub audit_event_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -997,6 +1132,10 @@ fn extract_token_ref(value: &str, token_names: &BTreeSet<String>) -> Option<Stri
         .map(str::trim)
         .filter(|token| token_names.contains(*token))
         .map(str::to_string)
+}
+
+fn creative_collaboration_schema_version() -> String {
+    "forge.creative_collaboration.v1".to_string()
 }
 
 // -- Patch-by-Intent --

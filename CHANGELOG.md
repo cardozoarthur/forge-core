@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.127 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 3: Forge-owned live collaboration baseline for 0.5 creative-runtime groundwork.
+- `CreativeArtifact` now carries durable collaboration state with presence, cursors/selections, comments, patch stream events, conflict records, rollback records and audit history.
+- Added `forge workflow collaboration-event` and `forge workflow collaboration-status` for AI and human operators to patch collaboration state without rewriting the whole creative artifact.
+- Added MCP tools `forge.creative.collaboration_event` and `forge.creative.collaboration_status` so external agents can inspect or mutate collaboration state through Forge-owned workflow semantics.
+- `forge status --workflow ... --output json` now surfaces a per-creative-artifact collaboration summary.
+- Added contract coverage for a screen artifact and a structured document artifact collaboration flow.
+
+### Changed
+
+- The package version is now `0.4.127`.
+- The Forge 0.5 milestone surface marks `live_collaboration` as `validated` based on the new presence/comment/patch/rollback/audit baseline, while still blocking full 0.5 promotion on remaining research and richer browser/live-editing evidence.
+
+### Validation
+
+- RED: `cargo test collaboration --test forge_cli_contract` failed before implementation because `workflow collaboration-event` and the MCP collaboration tools did not exist.
+- GREEN: `cargo test collaboration --test forge_cli_contract` passed after adding the collaboration IR, workflow APIs, CLI commands and MCP tools.
+- GREEN: `cargo test milestone --test forge_cli_contract` passed after updating the 0.5 milestone evidence.
+- GREEN: `cargo fmt --check` passed.
+- GREEN: `cargo clippy --all-targets --all-features -- -D warnings` passed after replacing a too-wide positional workflow API with a typed request struct.
+- GREEN: `cargo test` passed all 223 tests (27 unit, 196 integration).
+- GREEN: `cargo build --release` succeeded.
+- GREEN: CLI smoke passed for release `plan` and `skill install` commands against temporary stores/homes.
+
+### Safety
+
+- This is `0.5 groundwork` on the 0.4.x line; it does not claim full Forge 0.5 promotion.
+- Collaboration events mutate only Forge-owned SQLite workflow state and record workflow revisions/events.
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+
 ## 0.4.126 - 2026-05-25
 
 ### Added

@@ -52,9 +52,10 @@ use forge_core::storage::ForgeStore;
 use forge_core::validation::validate_workflow;
 use forge_core::workflow::{
     attach_creative_artifact, attach_workflow_artifact, get_workflow_token_collection,
-    inspect_creative_artifact, list_creative_artifacts, patch_workflow_token,
-    resolve_workflow_tokens, set_workflow_token_collection, update_workflow_goal,
-    validate_child_subflow_binding,
+    inspect_creative_artifact, inspect_creative_collaboration, list_creative_artifacts,
+    patch_workflow_token, record_creative_collaboration_event, resolve_workflow_tokens,
+    set_workflow_token_collection, update_workflow_goal, validate_child_subflow_binding,
+    CreativeCollaborationEventRequest,
 };
 use serde::Serialize;
 use std::io::IsTerminal;
@@ -553,6 +554,34 @@ enum WorkflowCommands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
+    CollaborationEvent {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        artifact: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        actor: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long, default_value = "")]
+        target: String,
+        #[arg(long = "selection")]
+        selections: Vec<String>,
+        #[arg(long)]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    CollaborationStatus {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        artifact: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
     SetTokens {
         #[arg(long)]
         workflow: String,
@@ -985,6 +1014,7 @@ fn run() -> Result<i32> {
                         "title": a.title,
                         "kind": format!("{:?}", a.kind),
                         "created_at": a.created_at,
+                        "collaboration_summary": a.collaboration.summary(),
                     })
                 })
                 .collect();
@@ -1633,6 +1663,44 @@ fn run() -> Result<i32> {
             } => {
                 let store = ForgeStore::open(cli.store)?;
                 let report = inspect_creative_artifact(&store, &workflow, &artifact)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::CollaborationEvent {
+                workflow,
+                artifact,
+                kind,
+                actor,
+                summary,
+                target,
+                selections,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = record_creative_collaboration_event(
+                    &store,
+                    CreativeCollaborationEventRequest {
+                        workflow_id: workflow,
+                        artifact_id: artifact,
+                        event_kind: kind,
+                        actor,
+                        summary,
+                        target,
+                        selections,
+                        origin,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::CollaborationStatus {
+                workflow,
+                artifact,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = inspect_creative_collaboration(&store, &workflow, &artifact)?;
                 print_response(output, &report)?;
                 Ok(0)
             }

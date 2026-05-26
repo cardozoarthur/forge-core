@@ -266,9 +266,9 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
         capability(
             "live_collaboration",
             "Live collaboration",
-            "groundwork",
-            "Human decision audit, durable interaction state, MCP human interaction bridge (create/list/answer/expire) validated in 0.4.98-0.4.104. Cycle 26 adds aggregate schedule/loop CLI commands and interactive dashboard enhancements. Cycle 28 creative MCP tools enable agent-driven creative artifact collaboration.",
-            "Need presence, cursors/selections, patch streams, comments, conflict handling and rollback demo before 0.5 promotion.",
+            "validated",
+            "0.4.98-0.4.104 validate human decision audit and MCP human interaction bridges. 0.4.127 adds Forge-owned creative collaboration state on artifacts with presence, cursors/selections, comments, patch streams, conflict records, rollbacks, audit history, CLI event/status commands, MCP collaboration tools and screen/document contract tests.",
+            "Full browser live editing transport, multi-user conflict resolution UX and richer rollback visualization remain before a final 0.5 promotion claim.",
         ),
         capability(
             "research_artifact_baseline",
@@ -340,7 +340,7 @@ fn is_demo_related(capability: &MilestoneCapability) -> bool {
 fn next_action_for_gap(capability_id: &str) -> &'static str {
     match capability_id {
         "live_collaboration" => {
-            "Build the smallest structured collaboration demo with presence, patch history and rollback."
+            "Extend the validated artifact collaboration baseline into browser transport, richer conflict UX and rendered rollback demos."
         }
         "research_artifact_baseline" => {
             "Produce the source-grounded creative-runtime research report before promotion."

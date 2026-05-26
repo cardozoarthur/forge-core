@@ -24,8 +24,9 @@ use crate::storage::ForgeStore;
 use crate::validation::{validate_workflow, ValidationReport};
 use crate::workflow::{
     attach_creative_artifact, attach_workflow_artifact, get_workflow_token_collection,
-    inspect_creative_artifact, list_creative_artifacts, patch_workflow_token,
-    resolve_workflow_tokens, set_workflow_token_collection, update_workflow_goal,
+    inspect_creative_artifact, inspect_creative_collaboration, list_creative_artifacts,
+    patch_workflow_token, record_creative_collaboration_event, resolve_workflow_tokens,
+    set_workflow_token_collection, update_workflow_goal, CreativeCollaborationEventRequest,
 };
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -281,6 +282,25 @@ struct CreativeAttachInput {
     title: String,
     kind: String,
     origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreativeCollaborationEventInput {
+    workflow_id: String,
+    artifact_id: String,
+    kind: String,
+    actor: String,
+    summary: String,
+    target: Option<String>,
+    #[serde(default)]
+    selections: Vec<String>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreativeCollaborationStatusInput {
+    workflow_id: String,
+    artifact_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -768,6 +788,36 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
+                "forge.creative.collaboration_event",
+                "Record Creative Collaboration Event",
+                "Record presence, comment, patch, conflict or rollback state on a creative artifact with workflow revision and audit history.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("artifact_id", "string", "creative artifact id"),
+                    ("kind", "string", "presence|comment|patch|conflict|rollback"),
+                    ("actor", "string", "human or AI actor id"),
+                    ("summary", "string", "event body, patch instruction or rollback reason"),
+                    ("target", "string", "cursor, selected object, path or rollback event id"),
+                    ("selections", "array", "optional selected object ids"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id", "artifact_id", "kind", "actor", "summary"]),
+                "forge.creative_collaboration.event.v1",
+                &["forge", "workflow", "collaboration-event", "--workflow", "<workflow-id>", "--artifact", "<artifact-id>", "--kind", "<kind>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.creative.collaboration_status",
+                "Inspect Creative Collaboration Status",
+                "Inspect presence, comments, patch stream, conflicts, rollbacks and audit history for a creative artifact.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("artifact_id", "string", "creative artifact id"),
+                ], &["workflow_id", "artifact_id"]),
+                "forge.creative_collaboration.status.v1",
+                &["forge", "workflow", "collaboration-status", "--workflow", "<workflow-id>", "--artifact", "<artifact-id>", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.tokens.get",
                 "Get Design Tokens",
                 "Get the design token collection (colors, typography, spacing, etc.) attached to a workflow.",
@@ -1129,6 +1179,31 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &input.workflow_id,
                 artifact,
                 &origin,
+            )?)?
+        }
+        "forge.creative.collaboration_event" => {
+            let input: CreativeCollaborationEventInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(record_creative_collaboration_event(
+                store,
+                CreativeCollaborationEventRequest {
+                    workflow_id: input.workflow_id,
+                    artifact_id: input.artifact_id,
+                    event_kind: input.kind,
+                    actor: input.actor,
+                    summary: input.summary,
+                    target: input.target.unwrap_or_default(),
+                    selections: input.selections,
+                    origin,
+                },
+            )?)?
+        }
+        "forge.creative.collaboration_status" => {
+            let input: CreativeCollaborationStatusInput = parse_input(input)?;
+            serde_json::to_value(inspect_creative_collaboration(
+                store,
+                &input.workflow_id,
+                &input.artifact_id,
             )?)?
         }
         "forge.tokens.get" => {
