@@ -1,10 +1,20 @@
 use assert_cmd::Command;
 use forge_core::artifact::hex_sha256;
+use forge_core::storage::ForgeStore;
 use rusqlite::Connection;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
+
+/// Helper: create a workflow via ForgeStore and return its id.
+fn setup_test_workflow(store: &ForgeStore) -> String {
+    use forge_core::graph;
+    use forge_core::intent;
+    let workflow = graph::create_workflow(intent::parse_intent("Test workflow for patch apply"));
+    store.save_workflow(&workflow).unwrap();
+    workflow.id
+}
 
 fn forge() -> Command {
     Command::cargo_bin("forge").expect("forge binary should build")
@@ -1370,6 +1380,220 @@ fn patch_plan_blocks_external_parent_paths_without_attaching_artifacts() {
         .clone();
     let artifacts_json: Value = serde_json::from_slice(&artifacts).unwrap();
     assert!(artifacts_json["artifacts"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn patch_apply_records_file_state_and_validation() {
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let workflow_id = setup_test_workflow(&store);
+
+    // Use empty validation commands to avoid recursive test execution.
+    let report = forge_core::patch::build_patch_apply(
+        &store,
+        &workflow_id,
+        "task-001",
+        vec!["Cargo.toml".to_string()],
+        "test",
+        None,
+        Some(&[]),
+    )
+    .unwrap();
+
+    assert_eq!(report.schema_version, "forge.patch_apply.v1");
+    assert_eq!(report.status, "patch_applied");
+    assert_eq!(report.workflow_id, workflow_id);
+    assert_eq!(report.task_id, "task-001");
+    assert!(report
+        .file_snapshots
+        .iter()
+        .any(|s| s.path == "Cargo.toml" && s.exists));
+    assert!(report.validation.passed);
+    assert!(!report.rollback_instructions.is_empty());
+    assert!(report.artifact.is_some());
+    assert!(report
+        .artifact
+        .as_ref()
+        .unwrap()
+        .path
+        .contains("attached-patch_apply-"));
+}
+
+#[test]
+fn patch_apply_and_revert_round_trip_restores_files() {
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let workflow_id = setup_test_workflow(&store);
+
+    // Read original Cargo.toml content to verify revert restores it.
+    let original_content = fs::read("Cargo.toml").unwrap();
+    let original_sha256 = hex_sha256(&original_content);
+
+    // Apply with no validation commands (fast in test context).
+    let apply_report = forge_core::patch::build_patch_apply(
+        &store,
+        &workflow_id,
+        "task-001",
+        vec!["Cargo.toml".to_string()],
+        "test",
+        None,
+        Some(&[]),
+    )
+    .unwrap();
+
+    assert_eq!(apply_report.status, "patch_applied");
+    // The artifact path is relative to base_dir – resolve it to an absolute path.
+    let apply_artifact_path = store
+        .base_dir()
+        .join(&apply_report.artifact.as_ref().unwrap().path);
+    let apply_artifact_str = apply_artifact_path.to_str().unwrap().to_string();
+
+    // Revert using the apply artifact path.
+    let revert_report = forge_core::patch::build_patch_revert(
+        &store,
+        &workflow_id,
+        "task-001",
+        &apply_artifact_str,
+        "test",
+        Some(&[]),
+    )
+    .unwrap();
+
+    assert_eq!(revert_report.schema_version, "forge.patch_revert.v1");
+    assert_eq!(revert_report.status, "patch_reverted");
+    assert_eq!(revert_report.workflow_id, workflow_id);
+    assert_eq!(revert_report.task_id, "task-001");
+    assert!(revert_report
+        .restored_snapshots
+        .iter()
+        .any(|s| s.path == "Cargo.toml" && s.exists));
+    assert!(revert_report.artifact.is_some());
+    assert!(revert_report
+        .artifact
+        .as_ref()
+        .unwrap()
+        .path
+        .contains("attached-patch_revert-"));
+
+    // Verify file content is unchanged after round trip.
+    let after_content = fs::read("Cargo.toml").unwrap();
+    let after_sha256 = hex_sha256(&after_content);
+    assert_eq!(
+        original_sha256, after_sha256,
+        "revert must restore original file content"
+    );
+}
+
+#[test]
+fn patch_apply_blocks_non_repo_paths() {
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let workflow_id = setup_test_workflow(&store);
+
+    let err = forge_core::patch::build_patch_apply(
+        &store,
+        &workflow_id,
+        "task-001",
+        vec!["/etc/passwd".to_string()],
+        "test",
+        None,
+        Some(&[]),
+    )
+    .unwrap_err();
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("all patch paths were blocked"),
+        "expected path block, got: {msg}"
+    );
+}
+
+#[test]
+fn patch_apply_requires_at_least_one_path() {
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let workflow_id = setup_test_workflow(&store);
+
+    let err = forge_core::patch::build_patch_apply(
+        &store,
+        &workflow_id,
+        "task-001",
+        vec![],
+        "test",
+        None,
+        Some(&[]),
+    )
+    .unwrap_err();
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("at least one patch path is required"),
+        "expected path required error, got: {msg}"
+    );
+}
+
+#[test]
+fn mcp_exposes_patch_apply_and_revert_tools() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tools = json["tools"].as_array().unwrap();
+
+    let apply_tool = tools.iter().find(|t| t["name"] == "forge.patch.apply");
+    assert!(
+        apply_tool.is_some(),
+        "forge.patch.apply tool must be in MCP manifest"
+    );
+    if let Some(tool) = apply_tool {
+        assert_eq!(tool["output_schema"], "forge.patch_apply.v1");
+        let required: Vec<&str> = tool["input_schema"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(required.contains(&"workflow_id"));
+        assert!(required.contains(&"task_id"));
+        assert!(required.contains(&"paths"));
+    }
+
+    let revert_tool = tools.iter().find(|t| t["name"] == "forge.patch.revert");
+    assert!(
+        revert_tool.is_some(),
+        "forge.patch.revert tool must be in MCP manifest"
+    );
+    if let Some(tool) = revert_tool {
+        assert_eq!(tool["output_schema"], "forge.patch_revert.v1");
+        let required: Vec<&str> = tool["input_schema"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(required.contains(&"workflow_id"));
+        assert!(required.contains(&"task_id"));
+        assert!(required.contains(&"apply_artifact"));
+    }
 }
 
 #[test]

@@ -37,7 +37,7 @@ use forge_core::multimodal::{
     build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
     build_multimodal_status, evaluate_multimodal_guard,
 };
-use forge_core::patch::build_patch_plan;
+use forge_core::patch::{build_patch_apply, build_patch_plan, build_patch_revert};
 use forge_core::registry::{
     attach_reuse_candidates_as_child_subflows, context_action_catalog, find_reuse_candidates,
     list_workflows_with_filters, quality_action_catalog, WorkflowLifecycleFilter,
@@ -971,6 +971,32 @@ enum PatchCommands {
         intent: String,
         #[arg(long = "path")]
         paths: Vec<String>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Apply {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long = "path")]
+        paths: Vec<String>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long = "plan-artifact")]
+        plan_artifact: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Revert {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long = "apply-artifact")]
+        apply_artifact: String,
         #[arg(long, default_value = "forge_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -2269,6 +2295,40 @@ fn run() -> Result<i32> {
             } => {
                 let store = ForgeStore::open(cli.store)?;
                 let report = build_patch_plan(&store, &workflow, &task, paths, &intent, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            PatchCommands::Apply {
+                workflow,
+                task,
+                paths,
+                origin,
+                plan_artifact,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_patch_apply(
+                    &store,
+                    &workflow,
+                    &task,
+                    paths,
+                    &origin,
+                    plan_artifact.as_deref(),
+                    None,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            PatchCommands::Revert {
+                workflow,
+                task,
+                apply_artifact,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report =
+                    build_patch_revert(&store, &workflow, &task, &apply_artifact, &origin, None)?;
                 print_response(output, &report)?;
                 Ok(0)
             }
