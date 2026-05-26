@@ -7221,6 +7221,101 @@ fn self_run_uses_latest_self_evolution_goal_instead_of_longest_goal() {
 }
 
 #[test]
+fn self_run_keeps_running_for_explicit_forge_05_continuation_goal() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let base_goal =
+        "Improve Forge Core autonomously with bounded executor cycles, validation gates, artifacts and changelog";
+    let old_terminal_goal = format!(
+        "{base_goal}. Stopping rule: when Forge has a validated lean/balanced/strict mode boundary, a measurable overhead ledger, and an automated self-evolution decision gate that can reject or stop cycles whose expected value is lower than orchestration cost, the self-evolution loop should mark the terminal goal reached."
+    );
+    let forge_05_goal = format!(
+        "{old_terminal_goal} Terminal goal correction from Codex: do not stop this self-evolution loop merely because the cron/loop/daily-goal-research phase is satisfied. The current active terminal phase is Forge 0.5 agent-integration and creative-runtime readiness. Continue until Forge has validated and reported MCP/skill/agent integration surfaces, first-class no-argument interactive Forge CLI/TUI with slash commands and direct-chat routing, creative runtime IR for design/doc/slide/video/whiteboard artifacts, design tokens, live human+AI collaboration, lean-governance evidence and a Forge 0.5 milestone manifest."
+    );
+
+    let planned_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            base_goal,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned: Value = serde_json::from_slice(&planned_output).unwrap();
+    let workflow_id = planned["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "update-goal",
+            "--workflow",
+            workflow_id,
+            "--origin",
+            "codex",
+            "--goal",
+            &forge_05_goal,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2999-01-01T00:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--mode",
+            "balanced",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "planned");
+    assert_eq!(json["decision_gate"]["decision"], "run_cycle");
+    assert_eq!(json["decision_gate"]["terminal_goal_reached"], false);
+    assert_eq!(json["decision_gate"]["stop_loop"], false);
+    assert!(
+        json["decision_gate"]["expected_value_score"]
+            .as_u64()
+            .unwrap()
+            >= json["decision_gate"]["orchestration_cost_score"]
+                .as_u64()
+                .unwrap()
+    );
+
+    let prompt_path = json["cycle_reports"][0]["prompt_path"].as_str().unwrap();
+    let prompt = fs::read_to_string(temp.path().join(prompt_path)).unwrap();
+    assert!(prompt.contains("Forge 0.5 agent-integration"));
+    assert!(prompt.contains("creative-runtime readiness"));
+}
+
+#[test]
 fn self_run_rejects_low_value_bloat_cycle_in_lean_mode() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
