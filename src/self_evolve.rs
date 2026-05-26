@@ -133,6 +133,133 @@ struct SelfEvolutionPromptPacket {
     operating_mode: String,
     decision_gate: SelfDecisionGateReport,
     validation_commands: Vec<String>,
+    /// Structured breakdown of forge 0.5 capabilities detected in the goal text,
+    /// each with a prioritised maturity target.
+    capability_analysis: Vec<ForgeCapability>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ForgeCapability {
+    name: String,
+    priority: String,
+    present_in_goal: bool,
+    description: String,
+    guidance: String,
+}
+
+fn analyze_goal_capabilities(goal: &str) -> Vec<ForgeCapability> {
+    let normalized = goal.to_ascii_lowercase();
+    // Each capability has a keyword set, priority, and human-readable guidance.
+    // Priority reflects how close we are to 0.5: "critical" means a 0.5 blocker,
+    // "high" means strongly desired this cycle, "medium" means valuable but not blocking.
+    let candidates: Vec<(&str, &str, &str, &str)> = vec![
+        (
+            "cron / schedule",
+            "critical",
+            "cron, schedule, scheduled, due_workflows, scan_due, next_run_at",
+            "Complete cron+loop+schedule for reliable periodic and continuous workflows in production.",
+        ),
+        (
+            "interactive forge CLI",
+            "critical",
+            "interactive forge cli, no-argument interactive, tui, home_screen, slash_command, conversational",
+            "Ship the full terminal interactive mode with slash commands, conversational routing, and workflow retention decisions.",
+        ),
+        (
+            "creative runtime",
+            "critical",
+            "creative runtime, whiteboard, document, slide, screen, component_manifest, design_token",
+            "Activate the creative artifact runtime for screens, whiteboards, documents/slides, and component manifests with design token resolution.",
+        ),
+        (
+            "live collaboration",
+            "high",
+            "live collaboration, presence, co-edit, human+ai, decision, audit, shared_context",
+            "Enable human+AI collaborative editing with presence tracking, decision nodes, and audit trails.",
+        ),
+        (
+            "context routing engine",
+            "high",
+            "context routing, compress, summarize, select, version, shard, context routing engine",
+            "Build the context routing engine to compress, summarize, select, version, and shard the correct context per executor.",
+        ),
+        (
+            "MCP / skill integration",
+            "high",
+            "mcp, skill, tool, agent integration, codex, opencode, executor adapter",
+            "Strengthen MCP tool integration, skill installation, and executor adapter contracts.",
+        ),
+        (
+            "scheduler / loop / subflow",
+            "high",
+            "scheduler, loop, subflow, recursive, infinite, scale_to_zero, flow composition",
+            "Complete recursive/infinite subflow support, scale-to-zero lifecycle, and flow composition/reuse.",
+        ),
+        (
+            "validation & milestone gates",
+            "medium",
+            "validation, milestone, promote, gate, block, promotable, rework",
+            "Evolve the validation framework to block promotion when constraints are breached and produce promotable milestone evidence.",
+        ),
+        (
+            "workflow listing & inspect",
+            "medium",
+            "list, inspect, workflow_registry, lifecycle, running, non-running",
+            "Build workflow inspection tools for terminal DAG/subflow visualization and a registry that can reuse compatible flows.",
+        ),
+        (
+            "telegram / notification",
+            "medium",
+            "telegram, notification, notify, webhook, alert",
+            "Add notification channels (Telegram or webhook) for workflow events and human decision prompts.",
+        ),
+        (
+            "design tokens",
+            "medium",
+            "design token, design system, semantic resolution, inheritance, patch_by_intent",
+            "Complete design token schema with semantic resolution, inheritance, and AI patch-by-intent support.",
+        ),
+        (
+            "componentization",
+            "medium",
+            "componentization, component manifest, variant, state, action, dependency",
+            "Complete componentization with variants, states, actions, and token dependency tracking.",
+        ),
+        (
+            "execution policy",
+            "medium",
+            "execution policy, deterministic, ai_allowed, no-ai, python node, node.js node",
+            "Add execution policy that can choose no-AI deterministic nodes for repeated work instead of model calls.",
+        ),
+    ];
+
+    candidates
+        .into_iter()
+        .map(|(name, priority, keywords, description)| {
+            let present = keywords.split(',').any(|kw| {
+                let kw = kw.trim();
+                normalized.contains(kw)
+            });
+            let guidance = if present {
+                format!(
+                    "Goal mentions {}. Prioritise work that advances this toward 0.5-ready state.",
+                    name
+                )
+            } else {
+                format!(
+                    "Goal does not explicitly mention {}. Include structural scaffolding if safe.",
+                    name
+                )
+            };
+            ForgeCapability {
+                name: name.to_string(),
+                priority: priority.to_string(),
+                present_in_goal: present,
+                description: description.to_string(),
+                guidance,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -555,6 +682,7 @@ impl SelfEvolutionPromptPacket {
         operating_mode: &SelfOperatingMode,
         decision_gate: &SelfDecisionGateReport,
     ) -> Self {
+        let capability_analysis = analyze_goal_capabilities(&workflow.goal);
         Self {
             version: SELF_EVOLUTION_PROMPT_PACKET_VERSION.to_string(),
             cycle,
@@ -577,6 +705,7 @@ impl SelfEvolutionPromptPacket {
                 VALIDATION_COMMANDS[2].to_string(),
                 VALIDATION_COMMANDS[3].to_string(),
             ],
+            capability_analysis,
         }
     }
 }
@@ -884,6 +1013,10 @@ Strategic goal guidance:
 - Improve long-running cognition: pause/resume, async continuation, durable execution, checkpointing, partial retry and resumable context.
 - Add execution policy that can choose no-AI deterministic nodes for repeated or frequent work, including local Python or Node.js code nodes, instead of spending model calls.
 
+Capability analysis (prioritised from goal text):
+{}
+
+
 Constraints:
 - Use the repository at `{}`.
 - Do not mutate external Docker/Kubernetes/Knative resources.
@@ -923,6 +1056,7 @@ Return a concise final report with:
         packet.decision_gate.orchestration_cost_score,
         packet.decision_gate.reason,
         packet.repo,
+        render_capability_breakdown(packet),
         packet
             .validation_commands
             .iter()
@@ -930,6 +1064,60 @@ Return a concise final report with:
             .collect::<Vec<_>>()
             .join("\n")
     )
+}
+
+fn render_capability_breakdown(packet: &SelfEvolutionPromptPacket) -> String {
+    let critical: Vec<_> = packet
+        .capability_analysis
+        .iter()
+        .filter(|c| c.priority == "critical")
+        .collect();
+    let high: Vec<_> = packet
+        .capability_analysis
+        .iter()
+        .filter(|c| c.priority == "high")
+        .collect();
+    let medium: Vec<_> = packet
+        .capability_analysis
+        .iter()
+        .filter(|c| c.priority == "medium")
+        .collect();
+
+    let mut buf = String::new();
+    if !critical.is_empty() {
+        buf.push_str("\n### Critical (0.5 blockers)\n\n");
+        for cap in &critical {
+            buf.push_str(&format!(
+                "- **{}** {} — {}\n",
+                cap.name,
+                if cap.present_in_goal { "✓" } else { "○" },
+                cap.guidance
+            ));
+        }
+    }
+    if !high.is_empty() {
+        buf.push_str("\n### High priority\n\n");
+        for cap in &high {
+            buf.push_str(&format!(
+                "- **{}** {} — {}\n",
+                cap.name,
+                if cap.present_in_goal { "✓" } else { "○" },
+                cap.guidance
+            ));
+        }
+    }
+    if !medium.is_empty() {
+        buf.push_str("\n### Medium priority\n\n");
+        for cap in &medium {
+            buf.push_str(&format!(
+                "- **{}** {} — {}\n",
+                cap.name,
+                if cap.present_in_goal { "✓" } else { "○" },
+                cap.guidance
+            ));
+        }
+    }
+    buf
 }
 
 fn write_text_artifact(base_dir: &Path, relative_path: &str, content: &str) -> Result<()> {
@@ -1482,5 +1670,131 @@ mod tests {
     fn test_self_update_command_format() {
         let cmd = self_update_command();
         assert_eq!(cmd, vec!["cargo", "install", "--path", ".", "--force"]);
+    }
+
+    #[test]
+    fn test_analyze_goal_capabilities_empty_goal() {
+        let caps = analyze_goal_capabilities("");
+        assert!(!caps.is_empty());
+        for c in &caps {
+            assert!(!c.present_in_goal);
+        }
+    }
+
+    #[test]
+    fn test_analyze_goal_capabilities_detects_critical() {
+        let goal =
+            "cron schedule interactive forge cli creative runtime whiteboard scan_due next_run_at";
+        let caps = analyze_goal_capabilities(goal);
+        let cron = caps.iter().find(|c| c.name == "cron / schedule").unwrap();
+        assert!(cron.present_in_goal);
+        assert_eq!(cron.priority, "critical");
+        let interactive = caps
+            .iter()
+            .find(|c| c.name == "interactive forge CLI")
+            .unwrap();
+        assert!(interactive.present_in_goal);
+        assert_eq!(interactive.priority, "critical");
+        let creative = caps.iter().find(|c| c.name == "creative runtime").unwrap();
+        assert!(creative.present_in_goal);
+    }
+
+    #[test]
+    fn test_analyze_goal_capabilities_detects_high() {
+        let goal = "context routing engine mcp skill integration scheduler loop subflow";
+        let caps = analyze_goal_capabilities(goal);
+        let ctx = caps
+            .iter()
+            .find(|c| c.name == "context routing engine")
+            .unwrap();
+        assert!(ctx.present_in_goal);
+        assert_eq!(ctx.priority, "high");
+        let mcp = caps
+            .iter()
+            .find(|c| c.name == "MCP / skill integration")
+            .unwrap();
+        assert!(mcp.present_in_goal);
+        let scheduler = caps
+            .iter()
+            .find(|c| c.name == "scheduler / loop / subflow")
+            .unwrap();
+        assert!(scheduler.present_in_goal);
+    }
+
+    #[test]
+    fn test_analyze_goal_capabilities_detects_medium() {
+        let goal = "design token design system list inspect milestone promote telegram notification execution policy";
+        let caps = analyze_goal_capabilities(goal);
+        let tokens = caps.iter().find(|c| c.name == "design tokens").unwrap();
+        assert!(tokens.present_in_goal);
+        assert_eq!(tokens.priority, "medium");
+        let listing = caps
+            .iter()
+            .find(|c| c.name == "workflow listing & inspect")
+            .unwrap();
+        assert!(listing.present_in_goal);
+        let telegram = caps
+            .iter()
+            .find(|c| c.name == "telegram / notification")
+            .unwrap();
+        assert!(telegram.present_in_goal);
+        let policy = caps.iter().find(|c| c.name == "execution policy").unwrap();
+        assert!(policy.present_in_goal);
+    }
+
+    #[test]
+    fn test_render_capability_breakdown_empty_is_empty() {
+        let caps: Vec<ForgeCapability> = Vec::new();
+        let packet = SelfEvolutionPromptPacket {
+            version: "v2".to_string(),
+            cycle: 1,
+            executor: "test".to_string(),
+            workflow_id: "wf-1".to_string(),
+            run_id: "run-1".to_string(),
+            workflow_goal: "".to_string(),
+            initial_workflow_goal: "".to_string(),
+            workflow_revision: 0,
+            stop_at: "2030-01-01T00:00:00Z".to_string(),
+            repo: "/tmp".to_string(),
+            operating_mode: "balanced".to_string(),
+            decision_gate: SelfDecisionGateReport::evaluate("", &SelfOperatingMode::Balanced),
+            validation_commands: vec![],
+            capability_analysis: caps,
+        };
+        let rendered = render_capability_breakdown(&packet);
+        assert!(rendered.is_empty());
+    }
+
+    #[test]
+    fn test_render_capability_breakdown_with_present_capabilities() {
+        let caps = analyze_goal_capabilities(
+            "cron schedule interactive forge cli creative runtime forge 0.5 validation",
+        );
+        let packet = SelfEvolutionPromptPacket {
+            version: "v2".to_string(),
+            cycle: 1,
+            executor: "test".to_string(),
+            workflow_id: "wf-1".to_string(),
+            run_id: "run-1".to_string(),
+            workflow_goal:
+                "cron schedule interactive forge cli creative runtime forge 0.5 validation"
+                    .to_string(),
+            initial_workflow_goal: "".to_string(),
+            workflow_revision: 0,
+            stop_at: "2030-01-01T00:00:00Z".to_string(),
+            repo: "/tmp".to_string(),
+            operating_mode: "balanced".to_string(),
+            decision_gate: SelfDecisionGateReport::evaluate("", &SelfOperatingMode::Balanced),
+            validation_commands: vec![],
+            capability_analysis: caps,
+        };
+        let rendered = render_capability_breakdown(&packet);
+        assert!(rendered.contains("Critical (0.5 blockers)"));
+        assert!(rendered.contains("cron / schedule"));
+        assert!(rendered.contains("interactive forge CLI"));
+        assert!(rendered.contains("creative runtime"));
+        assert!(rendered.contains("✓"));
+        assert!(rendered.contains("High priority"));
+        assert!(rendered.contains("validation & milestone gates"));
     }
 }

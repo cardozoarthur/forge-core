@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.143 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 20: added structured Forge 0.5 capability goal analysis to the self-evolution prompt packet.
+- Added `analyze_goal_capabilities()` that parses the persisted workflow goal and extracts 13 known Forge 0.5 capabilities (cron/schedule, interactive CLI, creative runtime, live collaboration, context routing engine, MCP/skill, scheduler/loop/subflow, validation/milestone gates, workflow listing/inspect, telegram/notification, design tokens, componentization, execution policy) each with priority (critical/high/medium), presence status, and human-readable guidance.
+- Added `render_capability_breakdown()` that formats the capability analysis as a structured markdown section in the self-evolution prompt, grouped by priority tier with presence checks.
+- The self-evolution prompt now includes a capability guidance section telling the executor which 0.5 capabilities to prioritise and whether each is explicitly mentioned in the goal text.
+- Added 7 unit tests covering `analyze_goal_capabilities` (empty goal, critical detection, high detection, medium detection) and `render_capability_breakdown` (empty vec, present capabilities).
+
+### Changed
+
+- `SelfEvolutionPromptPacket` now carries a `capability_analysis: Vec<ForgeCapability>` field populated from the workflow goal on construction.
+- The `Strategic goal guidance` section of the self-evolution prompt now includes the rendered capability breakdown before the constraints section.
+- Updated package/readme version to `0.4.143` for this 0.4.x groundwork increment.
+
+### Validation
+
+- Unit tests: 7 new `self_evolve::tests::test_analyze_goal_capabilities_*` and `test_render_capability_breakdown_*` tests all pass.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` (53 unit + 217 contract tests) and `cargo build --release`.
+
+### Safety
+
+- This change only mutates Forge-owned source, tests, changelog and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- The capability analysis is purely additive to the prompt packet and does not affect existing self-evolution decision gate or cycle logic.
+
 ## 0.4.142 - 2026-05-26
 
 ### Added
