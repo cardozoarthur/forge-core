@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.141`
+Current version: `0.4.142`
 
 This is the first functional CLI + Skill version:
 
@@ -118,6 +118,8 @@ forge validate --workflow <workflow-id> --output json
 forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 forge milestone manifest --version 0.5 --output json
+forge multimodal benchmark-template --capability image_understanding --output json
+forge multimodal demo-plan --demo local_image_recognition --output json
 ```
 
 `forge context` emits a versioned context packet (`forge.context.v30`) with a deterministic

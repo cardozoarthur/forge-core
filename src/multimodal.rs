@@ -3,6 +3,8 @@ use serde::Serialize;
 
 const STATUS_SCHEMA_VERSION: &str = "forge.multimodal.status.v1";
 const INSTALL_PLAN_SCHEMA_VERSION: &str = "forge.multimodal.install_plan.v1";
+const BENCHMARK_TEMPLATE_SCHEMA_VERSION: &str = "forge.multimodal.benchmark_template.v1";
+const DEMO_PLAN_SCHEMA_VERSION: &str = "forge.multimodal.demo_plan.v1";
 const GUARD_SCHEMA_VERSION: &str = "forge.multimodal.guard.v1";
 
 macro_rules! capability {
@@ -89,6 +91,73 @@ pub struct MultimodalInstallPlanReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct MultimodalBenchmarkTemplateReport {
+    pub schema_version: String,
+    pub status: String,
+    pub capability_id: String,
+    pub capability_title: String,
+    pub feature_flag_enabled: bool,
+    pub installs_performed: bool,
+    pub device_access_performed: bool,
+    pub requires_human_approval_before_execution: bool,
+    pub permission_scope: String,
+    pub recommended_runtime: String,
+    pub candidate_models: Vec<String>,
+    pub metrics: Vec<MultimodalBenchmarkMetric>,
+    pub fixtures: Vec<MultimodalBenchmarkFixture>,
+    pub guard_checks: Vec<String>,
+    pub evidence_manifest_fields: Vec<String>,
+    pub acceptance_thresholds: Vec<String>,
+    pub report_template: Vec<String>,
+    pub next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MultimodalBenchmarkMetric {
+    pub id: String,
+    pub description: String,
+    pub unit: String,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MultimodalBenchmarkFixture {
+    pub id: String,
+    pub description: String,
+    pub artifact_kind: String,
+    pub secret_free: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MultimodalDemoPlanReport {
+    pub schema_version: String,
+    pub status: String,
+    pub demo_id: String,
+    pub title: String,
+    pub feature_flag_enabled: bool,
+    pub installs_performed: bool,
+    pub device_access_performed: bool,
+    pub requires_human_approval_before_execution: bool,
+    pub capability_ids: Vec<String>,
+    pub stages: Vec<MultimodalDemoStage>,
+    pub validation_gates: Vec<String>,
+    pub artifacts: Vec<String>,
+    pub guardrails: Vec<String>,
+    pub rollback_steps: Vec<String>,
+    pub next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MultimodalDemoStage {
+    pub id: String,
+    pub title: String,
+    pub deterministic: bool,
+    pub requires_model: bool,
+    pub requires_device_access: bool,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct MultimodalGuardReport {
     pub schema_version: String,
     pub status: String,
@@ -153,14 +222,7 @@ pub fn build_multimodal_install_plan(
     capability_id: &str,
     enable_experimental: bool,
 ) -> Result<MultimodalInstallPlanReport> {
-    let capability = capability_inventory(enable_experimental)
-        .into_iter()
-        .find(|capability| capability.id == capability_id)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "unknown multimodal capability: {capability_id}; run forge multimodal status"
-            )
-        })?;
+    let capability = find_capability(capability_id, enable_experimental)?;
 
     Ok(MultimodalInstallPlanReport {
         schema_version: INSTALL_PLAN_SCHEMA_VERSION.to_string(),
@@ -202,6 +264,250 @@ pub fn build_multimodal_install_plan(
         ],
         next_action:
             "Ask for explicit human approval before downloading models, installing runtimes or granting device access."
+                .to_string(),
+    })
+}
+
+pub fn build_multimodal_benchmark_template(
+    capability_id: &str,
+    enable_experimental: bool,
+) -> Result<MultimodalBenchmarkTemplateReport> {
+    let capability = find_capability(capability_id, enable_experimental)?;
+    let recommended_runtime = capability
+        .runtime_candidates
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "runtime evaluation required".to_string());
+
+    Ok(MultimodalBenchmarkTemplateReport {
+        schema_version: BENCHMARK_TEMPLATE_SCHEMA_VERSION.to_string(),
+        status: "plan_only".to_string(),
+        capability_id: capability.id,
+        capability_title: capability.title,
+        feature_flag_enabled: enable_experimental,
+        installs_performed: false,
+        device_access_performed: false,
+        requires_human_approval_before_execution: true,
+        permission_scope: capability.permission_scope,
+        recommended_runtime,
+        candidate_models: capability.local_candidates,
+        metrics: benchmark_metrics(),
+        fixtures: benchmark_fixtures(),
+        guard_checks: vec![
+            "experimental_flag_checked".to_string(),
+            "runtime_guard_required".to_string(),
+            "dry_run_or_simulation_required".to_string(),
+            "permission_scope_recorded".to_string(),
+            "secret_free_fixture_required".to_string(),
+        ],
+        evidence_manifest_fields: vec![
+            "capability_id".to_string(),
+            "runtime_id".to_string(),
+            "model_id".to_string(),
+            "model_sha256".to_string(),
+            "input_artifact_sha256".to_string(),
+            "output_artifact_sha256".to_string(),
+            "license".to_string(),
+            "latency_ms_p50_p95".to_string(),
+            "ram_vram_mb".to_string(),
+            "offline_behavior".to_string(),
+            "guard_decision_id".to_string(),
+        ],
+        acceptance_thresholds: vec![
+            "quality_score >= capability-specific baseline".to_string(),
+            "latency_ms_p95 <= declared workflow budget".to_string(),
+            "disk_footprint_mb <= explicit storage budget".to_string(),
+            "no network, camera, microphone, screen or input access without guard approval"
+                .to_string(),
+        ],
+        report_template: vec![
+            "Capability and permission scope".to_string(),
+            "Runtime/model candidates and licenses".to_string(),
+            "Fixture hashes and secret-redaction proof".to_string(),
+            "Quality, latency, memory, disk and offline results".to_string(),
+            "Guard decision, rollback plan and promotion recommendation".to_string(),
+        ],
+        next_action:
+            "Use this template to collect evidence after explicit human approval; this command itself performs no install, model execution or device access."
+                .to_string(),
+    })
+}
+
+pub fn build_multimodal_demo_plan(
+    demo_id: &str,
+    enable_experimental: bool,
+) -> Result<MultimodalDemoPlanReport> {
+    let normalized = demo_id.trim().to_ascii_lowercase();
+    let (title, capability_ids, stages, artifacts) = match normalized.as_str() {
+        "local_image_recognition" => (
+            "Safe local image-recognition workflow plan",
+            vec!["image_understanding", "ocr", "object_detection"],
+            vec![
+                demo_stage(
+                    "fixture_prepare",
+                    "Prepare static image fixtures",
+                    true,
+                    false,
+                    false,
+                    "Hash secret-free sample images and expected labels before any model node runs.",
+                ),
+                demo_stage(
+                    "install_plan_review",
+                    "Review local model/runtime install plans",
+                    true,
+                    false,
+                    false,
+                    "Generate plan-only install manifests for image understanding, OCR and object detection.",
+                ),
+                demo_stage(
+                    "benchmark_template",
+                    "Prepare benchmark evidence template",
+                    true,
+                    false,
+                    false,
+                    "Bind metrics, fixtures and guard checks before a model is allowed to execute.",
+                ),
+                demo_stage(
+                    "future_guarded_execution",
+                    "Run only after explicit approval",
+                    false,
+                    true,
+                    false,
+                    "A future enabled run may execute a local model against fixtures after feature flag and runtime guard approval.",
+                ),
+            ],
+            vec![
+                "image-recognition-benchmark.md".to_string(),
+                "image-recognition-evidence.json".to_string(),
+            ],
+        ),
+        "audio_transcription_synthesis" => (
+            "Safe audio transcription and synthesis workflow plan",
+            vec!["audio_transcription", "speech_synthesis", "audio_understanding"],
+            vec![
+                demo_stage(
+                    "fixture_prepare",
+                    "Prepare static audio fixtures",
+                    true,
+                    false,
+                    false,
+                    "Use checked-in or generated fixture files rather than microphone capture.",
+                ),
+                demo_stage(
+                    "permission_contract",
+                    "Record microphone and audio-output guard contracts",
+                    true,
+                    false,
+                    false,
+                    "Prove the plan does not access live microphone or speakers without explicit runtime approval.",
+                ),
+                demo_stage(
+                    "benchmark_template",
+                    "Prepare WER, latency and license benchmarks",
+                    true,
+                    false,
+                    false,
+                    "Define evidence for transcription, synthesis and audio-understanding nodes.",
+                ),
+                demo_stage(
+                    "future_guarded_execution",
+                    "Run only after explicit approval",
+                    false,
+                    true,
+                    false,
+                    "A future enabled run may execute local audio models against static fixtures after guard approval.",
+                ),
+            ],
+            vec![
+                "audio-capability-benchmark.md".to_string(),
+                "audio-capability-evidence.json".to_string(),
+            ],
+        ),
+        "blender_avatar_preparation" => (
+            "Safe Blender/3D avatar preparation workflow plan",
+            vec![
+                "3d_generation_adaptation",
+                "blender_asset_processing",
+                "avatar_camera_emulation",
+            ],
+            vec![
+                demo_stage(
+                    "fixture_prepare",
+                    "Prepare static mesh/avatar fixtures",
+                    true,
+                    false,
+                    false,
+                    "Hash sample meshes, textures and rig metadata before Blender processing.",
+                ),
+                demo_stage(
+                    "blender_dry_run",
+                    "Plan Blender dry-run processing",
+                    true,
+                    false,
+                    false,
+                    "Generate script and validation checklist without launching Blender or touching virtual cameras.",
+                ),
+                demo_stage(
+                    "virtual_camera_guard_review",
+                    "Review virtual camera guard",
+                    true,
+                    false,
+                    false,
+                    "Require explicit approval before any v4l2loopback or camera-emulation integration.",
+                ),
+                demo_stage(
+                    "future_guarded_execution",
+                    "Run only after explicit approval",
+                    false,
+                    true,
+                    false,
+                    "A future enabled run may process local fixtures through Blender after filesystem and camera guard approval.",
+                ),
+            ],
+            vec![
+                "avatar-preparation-plan.md".to_string(),
+                "avatar-preparation-evidence.json".to_string(),
+            ],
+        ),
+        _ => {
+            bail!("unknown multimodal demo plan: {demo_id}; expected local_image_recognition, audio_transcription_synthesis or blender_avatar_preparation")
+        }
+    };
+
+    for capability_id in &capability_ids {
+        find_capability(capability_id, enable_experimental)?;
+    }
+
+    Ok(MultimodalDemoPlanReport {
+        schema_version: DEMO_PLAN_SCHEMA_VERSION.to_string(),
+        status: "plan_only".to_string(),
+        demo_id: normalized,
+        title: title.to_string(),
+        feature_flag_enabled: enable_experimental,
+        installs_performed: false,
+        device_access_performed: false,
+        requires_human_approval_before_execution: true,
+        capability_ids: capability_ids.into_iter().map(str::to_string).collect(),
+        stages,
+        validation_gates: vec![
+            "experimental_flag_disabled_by_default".to_string(),
+            "no_device_or_model_access_without_guard".to_string(),
+            "fixture_hashes_recorded".to_string(),
+            "benchmark_template_completed_before_promotion".to_string(),
+            "rollback_steps_reviewed".to_string(),
+        ],
+        artifacts,
+        guardrails: runtime_guards(),
+        rollback_steps: vec![
+            "Keep the experimental multimodal flag disabled unless a human approves this demo."
+                .to_string(),
+            "Delete generated model/runtime cache paths listed in the install manifest if a future enabled demo is rolled back."
+                .to_string(),
+            "Revoke camera, microphone, screen, input, filesystem or peripheral grants from runtime policy."
+                .to_string(),
+        ],
+        next_action:
+            "Use the demo plan as workflow design evidence; execute only after explicit human approval, runtime guard allow and benchmark fixture review."
                 .to_string(),
     })
 }
@@ -450,6 +756,17 @@ fn capability_inventory(enable_experimental: bool) -> Vec<MultimodalCapability> 
     ]
 }
 
+fn find_capability(capability_id: &str, enable_experimental: bool) -> Result<MultimodalCapability> {
+    capability_inventory(enable_experimental)
+        .into_iter()
+        .find(|capability| capability.id == capability_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown multimodal capability: {capability_id}; run forge multimodal status"
+            )
+        })
+}
+
 fn normalize_capability_alias(capability: &str) -> String {
     let lower = capability.trim().to_ascii_lowercase();
     let normalized = match lower.as_str() {
@@ -461,6 +778,111 @@ fn normalize_capability_alias(capability: &str) -> String {
         other => other,
     };
     normalized.to_string()
+}
+
+fn benchmark_metrics() -> Vec<MultimodalBenchmarkMetric> {
+    [
+        (
+            "quality_score",
+            "Task-specific quality score or accuracy proxy.",
+            "score",
+            true,
+        ),
+        (
+            "latency_ms_p50_p95",
+            "Median and p95 latency for the planned runtime node.",
+            "milliseconds",
+            true,
+        ),
+        (
+            "ram_vram_mb",
+            "Peak RAM and VRAM footprint during the run.",
+            "megabytes",
+            true,
+        ),
+        (
+            "disk_footprint_mb",
+            "Runtime, model and cache disk footprint.",
+            "megabytes",
+            true,
+        ),
+        (
+            "license_and_provenance",
+            "License, model source and artifact provenance evidence.",
+            "text",
+            true,
+        ),
+        (
+            "offline_behavior",
+            "Whether the capability can run without network access after install.",
+            "text",
+            true,
+        ),
+        (
+            "guard_denial_smoke",
+            "Proof that guarded access is denied when experimental opt-in is absent.",
+            "boolean",
+            true,
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(id, description, unit, required)| MultimodalBenchmarkMetric {
+            id: id.to_string(),
+            description: description.to_string(),
+            unit: unit.to_string(),
+            required,
+        },
+    )
+    .collect()
+}
+
+fn benchmark_fixtures() -> Vec<MultimodalBenchmarkFixture> {
+    [
+        (
+            "static_fixture_manifest",
+            "Secret-free sample files with expected labels or outputs.",
+            "json",
+        ),
+        (
+            "dry_run_guard_receipt",
+            "Runtime guard denial/allow receipt recorded before execution.",
+            "json",
+        ),
+        (
+            "benchmark_report_markdown",
+            "Human-readable benchmark and promotion report.",
+            "markdown",
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(id, description, artifact_kind)| MultimodalBenchmarkFixture {
+            id: id.to_string(),
+            description: description.to_string(),
+            artifact_kind: artifact_kind.to_string(),
+            secret_free: true,
+        },
+    )
+    .collect()
+}
+
+fn demo_stage(
+    id: &str,
+    title: &str,
+    deterministic: bool,
+    requires_model: bool,
+    requires_device_access: bool,
+    description: &str,
+) -> MultimodalDemoStage {
+    MultimodalDemoStage {
+        id: id.to_string(),
+        title: title.to_string(),
+        deterministic,
+        requires_model,
+        requires_device_access,
+        description: description.to_string(),
+    }
 }
 
 fn to_strings(values: &[&str]) -> Vec<String> {
