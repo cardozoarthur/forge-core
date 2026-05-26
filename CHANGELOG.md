@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.146 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 23: added registry-level run health summaries to `forge list` and `forge inspect` so running async/self-evolution runs remain visible even when no heartbeat is currently fresh.
+- Added `run_activity` summaries with `total`, `active`, `accepted`, `resumed`, `running`, `needs_attention`, `stale`, `missing_heartbeat`, `inactive` and `not_running` counts at both workflow-row and registry-summary levels.
+- Added `run_activity` to `WorkflowInspectionReport` and expanded the inspect DAG text line to show running, missing-heartbeat, stale and needs-attention run counts alongside `active_run_count`.
+- Added a CLI contract test proving that a `running` run without a fresh heartbeat is still surfaced in `forge list --lifecycle running` and `forge inspect` with explicit missing-heartbeat health.
+
+### Changed
+
+- `WorkflowRegistryRow.active_run_count` still means fresh active heartbeat count, but list/inspect now provide adjacent health counts so operators can distinguish no active heartbeat from no running run.
+- Updated the Forge 0.5 milestone boundary and replacement-grade CLI evidence to reference the 0.4.146 observability increment.
+- Updated package/readme version to `0.4.146` for this 0.4.x groundwork increment.
+
+### Validation
+
+- RED observed first with `cargo test list_and_inspect_surface_running_run_health_even_without_fresh_heartbeat --test forge_cli_contract`: the new `run_activity` field was missing.
+- Targeted GREEN passed for `cargo test list_and_inspect_surface_running_run_health_even_without_fresh_heartbeat --test forge_cli_contract`.
+- Regression check passed for `cargo test request_heartbeat_marks_async_run_active_and_surfaces_it_in_status_list_and_inspect --test forge_cli_contract`.
+- Full required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` and `cargo build --release`.
+
+### Safety
+
+- This change only mutates Forge-owned source, tests, changelog, milestone docs and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- The new fields are additive JSON output and preserve existing `active_run_count` heartbeat semantics.
+
 ## 0.4.145 - 2026-05-26
 
 ### Added

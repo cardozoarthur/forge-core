@@ -26,6 +26,7 @@ const REGISTRY_CONTEXT_ACTION_CATALOG_SCHEMA_VERSION: &str =
     "forge.registry_context_action_catalog.v1";
 const REGISTRY_QUALITY_ACTION_CATALOG_SCHEMA_VERSION: &str =
     "forge.registry_quality_action_catalog.v1";
+const REGISTRY_RUN_ACTIVITY_SCHEMA_VERSION: &str = "forge.registry_run_activity.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowRegistryReport {
@@ -63,6 +64,7 @@ pub struct WorkflowRegistrySummary {
     pub total: usize,
     pub running: usize,
     pub non_running: usize,
+    pub run_activity: RegistryRunActivitySummary,
     pub reusable_subflows: usize,
     pub execution_policy: RegistryExecutionPolicySummary,
     pub context_handoff: RegistryContextHandoffSummary,
@@ -77,6 +79,7 @@ pub struct WorkflowRegistryRow {
     pub run_ids: Vec<String>,
     pub run_statuses: Vec<String>,
     pub active_run_count: usize,
+    pub run_activity: RegistryRunActivitySummary,
     pub initial_request: String,
     pub current_goal: String,
     pub workflow_status: String,
@@ -106,6 +109,21 @@ pub struct RegistryTaskStatusSummary {
     pub completed: usize,
     pub blocked: usize,
     pub failed: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RegistryRunActivitySummary {
+    pub schema_version: String,
+    pub total: usize,
+    pub active: usize,
+    pub accepted: usize,
+    pub resumed: usize,
+    pub running: usize,
+    pub needs_attention: usize,
+    pub stale: usize,
+    pub missing_heartbeat: usize,
+    pub inactive: usize,
+    pub not_running: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -316,6 +334,12 @@ pub fn list_workflows_with_filters(
 
     rows.retain(|row| filters.matches(row));
     let running = rows.iter().filter(|row| row.running).count();
+    let run_activity = rows
+        .iter()
+        .fold(RegistryRunActivitySummary::empty(), |mut total, row| {
+            total.add(&row.run_activity);
+            total
+        });
     let reusable_subflows = rows.iter().map(|row| row.reusable_subflows.len()).sum();
     let execution_policy =
         rows.iter()
@@ -351,6 +375,7 @@ pub fn list_workflows_with_filters(
         total: rows.len(),
         running,
         non_running: rows.len().saturating_sub(running),
+        run_activity,
         reusable_subflows,
         execution_policy,
         context_handoff,
@@ -745,15 +770,14 @@ fn registry_row(
     let schedule_summary = summarize_schedules(&workflow.tasks);
     let loop_summary = summarize_loops(&workflow.tasks);
     let human_interaction_summary = summarize_human_interactions(&workflow.tasks);
+    let run_activity = RegistryRunActivitySummary::from_runs(runs);
 
     WorkflowRegistryRow {
         workflow_id: workflow.id.clone(),
         run_ids: runs.iter().map(|run| run.run_id.clone()).collect(),
         run_statuses: runs.iter().map(|run| run.status.clone()).collect(),
-        active_run_count: runs
-            .iter()
-            .filter(|run| build_run_activity(run).active)
-            .count(),
+        active_run_count: run_activity.active,
+        run_activity,
         initial_request: initial_request(workflow, runs),
         current_goal: workflow.goal.clone(),
         workflow_status: workflow.status.clone(),
@@ -794,6 +818,68 @@ fn add_human_interaction_summary(
     total.timed_out += other.timed_out;
     total.pending_required += other.pending_required;
     total.timed_out_required += other.timed_out_required;
+}
+
+impl RegistryRunActivitySummary {
+    fn empty() -> Self {
+        Self {
+            schema_version: REGISTRY_RUN_ACTIVITY_SCHEMA_VERSION.to_string(),
+            total: 0,
+            active: 0,
+            accepted: 0,
+            resumed: 0,
+            running: 0,
+            needs_attention: 0,
+            stale: 0,
+            missing_heartbeat: 0,
+            inactive: 0,
+            not_running: 0,
+        }
+    }
+
+    fn from_runs(runs: &[RunRecord]) -> Self {
+        let mut summary = Self::empty();
+        for run in runs {
+            summary.add_run(run);
+        }
+        summary
+    }
+
+    fn add_run(&mut self, run: &RunRecord) {
+        self.total += 1;
+        match run.status.as_str() {
+            "accepted" => self.accepted += 1,
+            "resumed" => self.resumed += 1,
+            "running" => self.running += 1,
+            "needs_attention" => self.needs_attention += 1,
+            _ => {}
+        }
+
+        let activity = build_run_activity(run);
+        if activity.active {
+            self.active += 1;
+        }
+        match activity.heartbeat_status.as_str() {
+            "stale" => self.stale += 1,
+            "missing" => self.missing_heartbeat += 1,
+            "inactive" => self.inactive += 1,
+            "not_running" => self.not_running += 1,
+            _ => {}
+        }
+    }
+
+    fn add(&mut self, other: &Self) {
+        self.total += other.total;
+        self.active += other.active;
+        self.accepted += other.accepted;
+        self.resumed += other.resumed;
+        self.running += other.running;
+        self.needs_attention += other.needs_attention;
+        self.stale += other.stale;
+        self.missing_heartbeat += other.missing_heartbeat;
+        self.inactive += other.inactive;
+        self.not_running += other.not_running;
+    }
 }
 
 impl RegistryExecutionPolicySummary {
