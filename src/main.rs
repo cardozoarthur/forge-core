@@ -52,8 +52,9 @@ use forge_core::storage::ForgeStore;
 use forge_core::validation::validate_workflow;
 use forge_core::workflow::{
     attach_creative_artifact, attach_workflow_artifact, get_workflow_token_collection,
-    inspect_creative_artifact, list_creative_artifacts, set_workflow_token_collection,
-    update_workflow_goal, validate_child_subflow_binding,
+    inspect_creative_artifact, list_creative_artifacts, patch_workflow_token,
+    resolve_workflow_tokens, set_workflow_token_collection, update_workflow_goal,
+    validate_child_subflow_binding,
 };
 use serde::Serialize;
 use std::io::IsTerminal;
@@ -568,6 +569,26 @@ enum WorkflowCommands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
+    ResolveTokens {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        mode: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    PatchToken {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        token: String,
+        #[arg(long)]
+        value: String,
+        #[arg(long)]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -967,6 +988,16 @@ fn run() -> Result<i32> {
                     })
                 })
                 .collect();
+            let token_summary = workflow.token_collection.as_ref().map(|tokens| {
+                serde_json::json!({
+                    "schema_version": "forge.tokens.workflow_summary.v1",
+                    "collection_name": tokens.name,
+                    "token_count": tokens.tokens.len(),
+                    "semantic_alias_count": tokens.semantic_aliases.len(),
+                    "mode_count": tokens.modes.len(),
+                    "resolution_schema_version": "forge.tokens.resolution.v1",
+                })
+            });
             let response = serde_json::json!({
                 "workflow_id": workflow.id,
                 "status": workflow.status,
@@ -975,6 +1006,7 @@ fn run() -> Result<i32> {
                 "artifacts": workflow.artifacts,
                 "creative_artifacts": creative_summaries,
                 "has_token_collection": workflow.token_collection.is_some(),
+                "token_summary": token_summary,
                 "revisions": workflow.revisions,
                 "human_interaction_summary": summarize_human_interactions(&workflow.tasks),
             });
@@ -1613,10 +1645,32 @@ fn run() -> Result<i32> {
                 let store = ForgeStore::open(cli.store)?;
                 let token_collection = TokenCollection {
                     schema_version: forge_core::ir::ir_schema_version(),
+                    description: format!("Design tokens for {name}"),
+                    tokens: vec![
+                        forge_core::ir::DesignToken {
+                            name: "color.primary".to_string(),
+                            value: "#3B82F6".to_string(),
+                            token_type: forge_core::ir::TokenType::Color,
+                            description: "Primary brand color".to_string(),
+                            group: "color".to_string(),
+                            extensions: std::collections::BTreeMap::new(),
+                        },
+                        forge_core::ir::DesignToken {
+                            name: "spacing.md".to_string(),
+                            value: "16px".to_string(),
+                            token_type: forge_core::ir::TokenType::Spacing,
+                            description: "Medium spacing".to_string(),
+                            group: "spacing".to_string(),
+                            extensions: std::collections::BTreeMap::new(),
+                        },
+                    ],
+                    semantic_aliases: vec![forge_core::ir::SemanticAlias {
+                        name: format!("semantic.{name}"),
+                        resolves_to: "color.primary".to_string(),
+                        description: format!("Semantic alias for {name}"),
+                    }],
                     name,
-                    description: String::new(),
-                    tokens: Vec::new(),
-                    semantic_aliases: Vec::new(),
+                    modes: Vec::new(),
                 };
                 let report =
                     set_workflow_token_collection(&store, &workflow, token_collection, &origin)?;
@@ -1626,6 +1680,28 @@ fn run() -> Result<i32> {
             WorkflowCommands::GetTokens { workflow, output } => {
                 let store = ForgeStore::open(cli.store)?;
                 let report = get_workflow_token_collection(&store, &workflow)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::ResolveTokens {
+                workflow,
+                mode,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = resolve_workflow_tokens(&store, &workflow, mode.as_deref())?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::PatchToken {
+                workflow,
+                token,
+                value,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = patch_workflow_token(&store, &workflow, &token, &value, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
             }

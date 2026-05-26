@@ -1,6 +1,9 @@
 use crate::artifact::copy_artifact;
 use crate::graph::{ArtifactRecord, TaskStatus, Workflow, WorkflowRevision};
-use crate::ir::{CreativeArtifact, TokenCollection};
+use crate::ir::{
+    preview_token_change_impact, resolve_token_collection, ConcreteChange, CreativeArtifact,
+    PatchByIntent, TokenCollection, TokenImpactPreview, TokenResolutionReport,
+};
 use crate::storage::ForgeStore;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -329,6 +332,28 @@ pub struct TokenCollectionReport {
     pub revision: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenResolutionWorkflowReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub revision: u64,
+    pub resolution: TokenResolutionReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenPatchReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub origin: String,
+    pub revision: u64,
+    pub token_name: String,
+    pub old_value: String,
+    pub new_value: String,
+    pub patch: PatchByIntent,
+    pub impact_preview: TokenImpactPreview,
+    pub creative_artifacts_rewritten: bool,
+}
+
 pub fn attach_creative_artifact(
     store: &ForgeStore,
     workflow_id: &str,
@@ -459,5 +484,100 @@ pub fn get_workflow_token_collection(
         workflow_id: workflow_id.to_string(),
         token_collection: workflow.token_collection.clone(),
         revision: workflow.revisions.last().map(|r| r.revision).unwrap_or(0),
+    })
+}
+
+pub fn resolve_workflow_tokens(
+    store: &ForgeStore,
+    workflow_id: &str,
+    mode: Option<&str>,
+) -> Result<TokenResolutionWorkflowReport> {
+    let workflow = store.load_workflow(workflow_id)?;
+    let token_collection = workflow
+        .token_collection
+        .as_ref()
+        .with_context(|| format!("token collection not set for workflow {workflow_id}"))?;
+    let resolution = resolve_token_collection(token_collection, mode, &workflow.creative_artifacts);
+
+    Ok(TokenResolutionWorkflowReport {
+        status: "token_resolution_ready".to_string(),
+        workflow_id: workflow_id.to_string(),
+        revision: workflow.revisions.last().map(|r| r.revision).unwrap_or(0),
+        resolution,
+    })
+}
+
+pub fn patch_workflow_token(
+    store: &ForgeStore,
+    workflow_id: &str,
+    token_name: &str,
+    value: &str,
+    origin: &str,
+) -> Result<TokenPatchReport> {
+    let mut workflow = store.load_workflow(workflow_id)?;
+    let creative_artifacts = workflow.creative_artifacts.clone();
+    let (collection_name, old_value, impact_preview) = {
+        let token_collection = workflow
+            .token_collection
+            .as_mut()
+            .with_context(|| format!("token collection not set for workflow {workflow_id}"))?;
+        let token = token_collection
+            .tokens
+            .iter_mut()
+            .find(|token| token.name == token_name)
+            .with_context(|| format!("token not found in workflow {workflow_id}: {token_name}"))?;
+        let old_value = token.value.clone();
+        token.value = value.to_string();
+        let impact_preview =
+            preview_token_change_impact(token_collection, &creative_artifacts, token_name);
+        (token_collection.name.clone(), old_value, impact_preview)
+    };
+    let patch = PatchByIntent {
+        id: format!("patch_{}", Uuid::new_v4().to_string().replace('-', "")),
+        instruction: format!("Set token {token_name} to {value}"),
+        target_artifact_id: format!("token_collection:{collection_name}"),
+        scope: "design_tokens".to_string(),
+        applied_at: Utc::now(),
+        applied_by: origin.to_string(),
+        changes: vec![ConcreteChange {
+            path: format!("token_collection.tokens[{token_name}].value"),
+            old_value: Some(old_value.clone()),
+            new_value: value.to_string(),
+            description:
+                "Targeted token patch; creative artifacts keep their own content and token references."
+                    .to_string(),
+        }],
+    };
+    let revision = push_revision(
+        &mut workflow.revisions,
+        origin,
+        "token_patched",
+        &format!("patched design token {token_name} without rewriting creative artifacts"),
+    );
+    store.save_workflow(&workflow)?;
+    store.record_event(
+        workflow_id,
+        "token_patched",
+        &serde_json::json!({
+            "origin": origin,
+            "token_name": token_name,
+            "old_value": old_value,
+            "new_value": value,
+            "revision": revision,
+            "creative_artifacts_rewritten": false
+        }),
+    )?;
+
+    Ok(TokenPatchReport {
+        status: "token_patched".to_string(),
+        workflow_id: workflow_id.to_string(),
+        origin: origin.to_string(),
+        revision,
+        token_name: token_name.to_string(),
+        old_value,
+        new_value: value.to_string(),
+        patch,
+        impact_preview,
+        creative_artifacts_rewritten: false,
     })
 }
