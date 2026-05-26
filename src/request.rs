@@ -214,6 +214,31 @@ pub fn save_run_record(store: &ForgeStore, run: &RunRecord) -> Result<()> {
     )
 }
 
+pub fn update_run_status(
+    store: &ForgeStore,
+    run_id: &str,
+    status: &str,
+    origin: &str,
+) -> Result<RunRecord> {
+    let mut run = load_run_record(store, run_id)?;
+    let previous_status = run.status.clone();
+    run.status = status.to_string();
+    run.updated_at = Utc::now();
+    save_run_record(store, &run)?;
+    store.record_event(
+        &run.workflow_id,
+        &format!("run_status_{status}"),
+        &serde_json::json!({
+            "run_id": run.run_id,
+            "origin": origin,
+            "previous_status": previous_status,
+            "new_status": status,
+            "updated_at": run.updated_at,
+        }),
+    )?;
+    Ok(run)
+}
+
 pub fn load_run_record(store: &ForgeStore, run_id: &str) -> Result<RunRecord> {
     Ok(serde_json::from_value(store.load_run(run_id)?)?)
 }

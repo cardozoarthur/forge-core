@@ -1,7 +1,7 @@
 use crate::artifact::{hex_sha256, write_json_artifact};
 use crate::graph::{create_workflow, Workflow};
 use crate::intent::parse_intent;
-use crate::request::{create_run_record, save_run_record};
+use crate::request::{create_run_record, save_run_record, update_run_status};
 use crate::storage::ForgeStore;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -402,7 +402,14 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         let mut public_project_update = PublicProjectUpdateReport::planned(options.push);
 
         if !options.dry_run {
-            status = execute_cycle(&options.repo, &executor, &prompt)?;
+            update_run_status(store, &run.run_id, "running", "forge_cli")?;
+            status = match execute_cycle(&options.repo, &executor, &prompt) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = update_run_status(store, &run.run_id, "failed", "forge_cli");
+                    return Err(e.context(format!("executor cycle {cycle} failed")));
+                }
+            };
             validation_report = run_validation(&options.repo, &prompt_packet)?;
             if !validation_report.validation_passed {
                 emit_validation_failure_logs(&validation_report);
@@ -471,11 +478,19 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
     }
     let overhead_ledger = SelfOverheadLedger::aggregate(&operating_mode, &cycle_reports);
 
+    let has_failures = cycle_reports.iter().any(|r| !r.validation_passed);
+    if !options.dry_run {
+        let final_status = if has_failures { "failed" } else { "completed" };
+        update_run_status(store, &run.run_id, final_status, "forge_cli")?;
+    }
+
     Ok(SelfRunReport {
         status: if options.dry_run {
             "planned".to_string()
+        } else if has_failures {
+            "failed".to_string()
         } else {
-            "started".to_string()
+            "completed".to_string()
         },
         run_id: run.run_id,
         workflow_id: workflow.id,
