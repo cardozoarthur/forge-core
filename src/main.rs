@@ -37,6 +37,7 @@ use forge_core::multimodal::{
     build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
     build_multimodal_status, evaluate_multimodal_guard,
 };
+use forge_core::patch::build_patch_plan;
 use forge_core::registry::{
     attach_reuse_candidates_as_child_subflows, context_action_catalog, find_reuse_candidates,
     list_workflows_with_filters, quality_action_catalog, WorkflowLifecycleFilter,
@@ -215,6 +216,10 @@ enum Commands {
     Multimodal {
         #[command(subcommand)]
         command: MultimodalCommands,
+    },
+    Patch {
+        #[command(subcommand)]
+        command: PatchCommands,
     },
     #[command(name = "self")]
     SelfRun {
@@ -950,6 +955,24 @@ enum MultimodalCommands {
         enable_experimental: bool,
         #[arg(long)]
         allow: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PatchCommands {
+    Plan {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        intent: String,
+        #[arg(long = "path")]
+        paths: Vec<String>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -2233,6 +2256,21 @@ fn run() -> Result<i32> {
                 let exit_code = if report.allowed { 0 } else { 1 };
                 print_response(output, &report)?;
                 Ok(exit_code)
+            }
+        },
+        Commands::Patch { command } => match command {
+            PatchCommands::Plan {
+                workflow,
+                task,
+                intent,
+                paths,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_patch_plan(&store, &workflow, &task, paths, &intent, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
             }
         },
         Commands::SelfRun { command } => match command {

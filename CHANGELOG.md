@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.150 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 27: added `forge patch plan` as a Forge-owned, plan-only file-editing contract for replacement-grade CLI groundwork.
+- Added `src/patch.rs` with `forge.patch_plan.v1`, repo-relative path permission gates, file snapshots with SHA-256 hashes, bounded context handoff instructions, diff-review commands, validation commands, rollback notes and explicit `applies_changes=false`.
+- Added MCP tool `forge.patch.plan` so Codex/OpenCode/other agents can request the same patch plan without taking over orchestration.
+- Added packaged skill guidance for `forge patch plan` and `forge.patch.plan`.
+
+### Changed
+
+- Updated `replacement_grade_cli` milestone evidence and visible 0.5 boundary to mention the patch-plan surface while keeping the capability as `groundwork`.
+- Updated package/readme version to `0.4.150` for this 0.4.x groundwork increment.
+
+### Validation
+
+- RED observed first with `cargo test --test forge_cli_contract patch_plan -- --nocapture`: the CLI rejected the missing `patch` subcommand and the packaged skill lacked patch-plan guidance.
+- Targeted GREEN passed for `cargo test --test forge_cli_contract patch_plan -- --nocapture` with 3 new patch-plan tests.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` (58 unit + 224 integration) and `cargo build --release`.
+- Release smokes passed: `./target/release/forge --version`, `./target/release/forge --store /tmp/forge-core-smoke-0.4.150.sqlite plan --goal "Create a delivery platform" --output json` and `./target/release/forge skill install --target codex --target opencode --output json --home /tmp/forge-skill-smoke-0.4.150-27`.
+- Default `cargo install --path . --force` was blocked by read-only `/home/arthur/.cargo`; validated fallback install succeeded with `CARGO_INSTALL_ROOT=/home/arthur/projects/forge-core/.forge/local-install cargo install --path . --force --locked --offline`, and `.forge/local-install/bin/forge --version` returned `forge 0.4.150`.
+
+### Safety
+
+- The new command writes only Forge-owned workflow artifacts and does not apply file changes.
+- Absolute paths, parent-directory traversal and `.git` internals are blocked before artifact attachment.
+- No Docker, Kubernetes, Knative, Telegram send, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+
 ## 0.4.149 - 2026-05-26
 
 ### Added

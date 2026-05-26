@@ -16,6 +16,7 @@ use crate::multimodal::{
     build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
     build_multimodal_status, evaluate_multimodal_guard,
 };
+use crate::patch::build_patch_plan;
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
@@ -378,6 +379,15 @@ struct TokensPatchInput {
     workflow_id: String,
     token_name: String,
     value: String,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchPlanInput {
+    workflow_id: String,
+    task_id: String,
+    intent: String,
+    paths: Vec<String>,
     origin: Option<String>,
 }
 
@@ -777,6 +787,21 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &["workflow_id", "task_id", "executor"]),
                 "forge.executor_handoff.v8",
                 &["forge", "task", "handoff", "--workflow", "<workflow-id>", "--task", "<task-id>", "--executor", "<executor>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.patch.plan",
+                "Plan File Patch",
+                "Create a Forge-owned, bounded file patch plan with snapshots, permission gates and diff review without applying changes.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("task_id", "string", "task id"),
+                    ("intent", "string", "patch intent"),
+                    ("paths", "array", "repo-relative file paths"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id", "task_id", "intent", "paths"]),
+                "forge.patch_plan.v1",
+                &["forge", "patch", "plan", "--workflow", "<workflow-id>", "--task", "<task-id>", "--intent", "<intent>", "--path", "<path>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -1381,6 +1406,17 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &input.executor,
                 input.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
                 input.ttl_seconds.unwrap_or(900),
+            )?)?
+        }
+        "forge.patch.plan" => {
+            let input: PatchPlanInput = parse_input(input)?;
+            serde_json::to_value(build_patch_plan(
+                store,
+                &input.workflow_id,
+                &input.task_id,
+                input.paths,
+                &input.intent,
+                input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
         "forge.validation.status" => {
