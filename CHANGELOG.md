@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.140 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 16: decision gate, overhead ledger and operating mode unit tests for the self-evolution module.
+- Added 20 unit tests in `src/self_evolve.rs` covering `SelfOperatingMode::parse/as_str/boundary/base_cost_score`, `SelfOverheadLedger::empty/for_cycle/aggregate`, `SelfDecisionGateReport::evaluate`, `terminal_goal_contract_satisfied`, `expected_value_score`, `bloat_score`, `estimate_tokens`, `is_self_evolution_workflow`, `SelfUpdateReport`, and `self_update_command`.
+
+### Validation
+
+- 233 total tests, all passing (+20 unit tests for self-evolution core logic).
+- All deterministic pure-Rust tests with no I/O, no mocks, no integration harness.
+
+### Safety
+
+- This change only mutates Forge-owned source, tests, changelog and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- Unit tests are read-only; no workflow or runtime state is touched.
+
 ## 0.4.139 - 2026-05-26
 
 ### Added
