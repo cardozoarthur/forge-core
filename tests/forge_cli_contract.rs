@@ -19538,3 +19538,112 @@ fn list_filters_workflow_registry_by_workflow_level_running_status() {
     let running_list_json: Value = serde_json::from_slice(&running_list).unwrap();
     assert_eq!(running_list_json["summary"]["total"], 0);
 }
+
+fn make_execution_policy_inconsistent(store: &Path, workflow_id: &str, task_title: &str) {
+    let connection = Connection::open(store).unwrap();
+    let data_json: String = connection
+        .query_row(
+            "SELECT data_json FROM workflows WHERE id = ?1",
+            [workflow_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut workflow: Value = serde_json::from_str(&data_json).unwrap();
+    let task = workflow["tasks"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|task| task["title"] == task_title)
+        .unwrap();
+    let policy = task["execution_policy"].as_object_mut().unwrap();
+    policy.insert("ai_allowed".to_string(), Value::Bool(false));
+    let patched = serde_json::to_string(&workflow).unwrap();
+    connection
+        .execute(
+            "UPDATE workflows SET data_json = ?1 WHERE id = ?2",
+            (&patched, workflow_id),
+        )
+        .unwrap();
+}
+
+#[test]
+fn validation_blocks_promotion_when_ai_executor_has_ai_disabled_in_execution_policy() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Create a delivery platform",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "run",
+            "--workflow",
+            workflow_id,
+            "--simulate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    make_execution_policy_inconsistent(&store, workflow_id, "Extract requirements");
+
+    let validation_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "validate",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+
+    let validation: Value = serde_json::from_slice(&validation_output).unwrap();
+    assert_eq!(validation["status"], "blocked");
+    assert_eq!(validation["promotable"], false);
+    assert!(validation["failed_rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| {
+            rule["task_id"] == "task-002"
+                && rule["kind"] == "execution_policy"
+                && rule["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("ai_allowed=false")
+        }));
+    assert!(validation["rework_tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|task| {
+            task["task_id"] == "task-002"
+                && task["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("execution policy")
+        }));
+}

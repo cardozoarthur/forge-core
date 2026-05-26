@@ -1,4 +1,4 @@
-use crate::graph::{ChildSubflowRef, PersonaRoutingSpec, TaskStatus, Workflow};
+use crate::graph::{ChildSubflowRef, ExecutorKind, PersonaRoutingSpec, TaskStatus, Workflow};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,6 +83,26 @@ pub fn validate_workflow(workflow: &Workflow) -> ValidationReport {
                 });
             }
         }
+        let exec_violations = execution_policy_violations(task);
+        if !exec_violations.is_empty() {
+            failed_rules.push(FailedRule {
+                task_id: task.id.clone(),
+                kind: "execution_policy".to_string(),
+                message: format!(
+                    "task {} execution policy is inconsistent: {}",
+                    task.id,
+                    exec_violations.join("; ")
+                ),
+            });
+            rework_tasks.push(ReworkTask {
+                task_id: task.id.clone(),
+                goal: task.goal.clone(),
+                reason:
+                    "execution policy is inconsistent; fix policy configuration before promotion"
+                        .to_string(),
+            });
+        }
+
         for subflow in &task.child_subflows {
             let violations = child_subflow_validation_violations(subflow);
             if !violations.is_empty() {
@@ -143,6 +163,51 @@ fn child_subflow_validation_violations(subflow: &ChildSubflowRef) -> Vec<String>
     }
     if subflow.context_lineage_sha256.len() != 64 {
         violations.push("context lineage hash must be content-addressed".to_string());
+    }
+    violations
+}
+
+fn execution_policy_violations(task: &crate::graph::AtomicTask) -> Vec<String> {
+    let mut violations = Vec::new();
+    let policy = &task.execution_policy;
+
+    if matches!(task.executor, ExecutorKind::Ai) && !policy.ai_allowed {
+        violations.push("AI executor with ai_allowed=false is contradictory".to_string());
+    }
+    if matches!(task.executor, ExecutorKind::Ai) && policy.deterministic {
+        violations.push("AI executor with deterministic=true is contradictory".to_string());
+    }
+    if policy.mode == "local_code_node" {
+        if !policy.deterministic {
+            violations.push("local_code_node mode requires deterministic=true".to_string());
+        }
+        if policy.ai_allowed {
+            violations.push("local_code_node mode requires ai_allowed=false".to_string());
+        }
+        if policy.code_runtime.is_none() {
+            violations.push("local_code_node mode requires a code_runtime spec".to_string());
+        }
+    }
+    if policy.mode == "executor_adapter" && !policy.deterministic && policy.ai_allowed {
+        if let Some(runtime) = &policy.code_runtime {
+            if !runtime.language.is_empty() {
+                violations.push(
+                    "AI-allowed executor_adapter should not specify a code_runtime".to_string(),
+                );
+            }
+        }
+    }
+    if task.execution_policy.mode == "model_executor" {
+        if policy.deterministic {
+            violations
+                .push("model_executor mode with deterministic=true is contradictory".to_string());
+        }
+        if !policy.ai_allowed {
+            violations.push("model_executor mode requires ai_allowed=true".to_string());
+        }
+        if policy.code_runtime.is_some() {
+            violations.push("model_executor mode should not specify a code_runtime".to_string());
+        }
     }
     violations
 }

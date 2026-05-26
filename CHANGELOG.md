@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.138 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 14: execution policy validation for no-AI deterministic nodes (Python/Node.js).
+- `forge validate` now checks execution policy consistency across all tasks: AI executors must have `ai_allowed=true`, `deterministic` must be false on `model_executor` mode, `local_code_node` mode requires `deterministic=true`, `ai_allowed=false` and a `code_runtime` spec.
+- Added `validation_blocks_promotion_when_ai_executor_has_ai_disabled_in_execution_policy` integration test covering the `execution_policy` validation gate.
+
+### Validation
+
+- 212 total tests, all passing (+1 for execution policy validation gate).
+- `cargo fmt --check` and `cargo clippy --all-targets --all-features -- -D warnings` are clean.
+
+### Safety
+
+- This change only mutates Forge-owned source files, tests and changelog.
+- No Docker, Kubernetes, Knative, Telegram, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- Validation is read-only: `validate_workflow` only inspects workflow state and reports results. No workflow state is mutated during validation.
+- Existing default execution policies pass all new validation rules; no regressions.
+
 ## 0.4.137 - 2026-05-26
 
 ### Added
