@@ -1,8 +1,11 @@
 use crate::artifact::copy_artifact;
 use crate::graph::{ArtifactRecord, TaskStatus, Workflow, WorkflowRevision};
 use crate::ir::{
-    preview_token_change_impact, resolve_token_collection, ConcreteChange, CreativeArtifact,
-    PatchByIntent, TokenCollection, TokenImpactPreview, TokenResolutionReport,
+    preview_token_change_impact, resolve_token_collection, CollaborationAuditEvent,
+    CollaborationComment, CollaborationConflictEvent, CollaborationPatchEvent,
+    CollaborationPresence, CollaborationRollbackEvent, ConcreteChange, CreativeArtifact,
+    CreativeCollaborationState, CreativeCollaborationSummary, PatchByIntent, PatchRecord,
+    TokenCollection, TokenImpactPreview, TokenResolutionReport,
 };
 use crate::storage::ForgeStore;
 use anyhow::{bail, Context, Result};
@@ -273,6 +276,15 @@ fn derive_child_lifecycle_state(workflow: &Workflow) -> String {
     "idle".to_string()
 }
 
+fn empty_to_none(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 fn push_revision(
     revisions: &mut Vec<WorkflowRevision>,
     origin: &str,
@@ -322,6 +334,39 @@ pub struct CreativeArtifactInspectReport {
     pub status: String,
     pub workflow_id: String,
     pub artifact: CreativeArtifact,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreativeCollaborationEventReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub artifact_id: String,
+    pub origin: String,
+    pub revision: u64,
+    pub event_id: String,
+    pub event_kind: String,
+    pub summary: CreativeCollaborationSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreativeCollaborationStatusReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub artifact_id: String,
+    pub summary: CreativeCollaborationSummary,
+    pub collaboration: CreativeCollaborationState,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreativeCollaborationEventRequest {
+    pub workflow_id: String,
+    pub artifact_id: String,
+    pub event_kind: String,
+    pub actor: String,
+    pub summary: String,
+    pub target: String,
+    pub selections: Vec<String>,
+    pub origin: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -439,6 +484,171 @@ pub fn inspect_creative_artifact(
         status: "creative_artifact_inspected".to_string(),
         workflow_id: workflow_id.to_string(),
         artifact: artifact.clone(),
+    })
+}
+
+pub fn record_creative_collaboration_event(
+    store: &ForgeStore,
+    request: CreativeCollaborationEventRequest,
+) -> Result<CreativeCollaborationEventReport> {
+    let workflow_id = request.workflow_id;
+    let artifact_id = request.artifact_id;
+    let event_kind = request.event_kind;
+    let actor = request.actor;
+    let summary = request.summary;
+    let target = request.target;
+    let selections = request.selections;
+    let origin = request.origin;
+    let mut workflow = store.load_workflow(&workflow_id)?;
+    let now = Utc::now();
+    let normalized_kind = event_kind.trim().to_ascii_lowercase();
+    let event_id = format!("collab_{}", Uuid::new_v4().to_string().replace('-', ""));
+
+    let collaboration_summary = {
+        let artifact = workflow
+            .creative_artifacts
+            .iter_mut()
+            .find(|artifact| artifact.id == artifact_id.as_str())
+            .with_context(|| format!("creative artifact not found: {artifact_id}"))?;
+
+        match normalized_kind.as_str() {
+            "presence" => {
+                artifact.collaboration.presences.push(CollaborationPresence {
+                    event_id: event_id.clone(),
+                    actor: actor.clone(),
+                    cursor: empty_to_none(&target),
+                    selections,
+                    status: "active".to_string(),
+                    origin: origin.clone(),
+                    updated_at: now,
+                });
+            }
+            "comment" => {
+                artifact.collaboration.comments.push(CollaborationComment {
+                    event_id: event_id.clone(),
+                    actor: actor.clone(),
+                    target: target.clone(),
+                    body: summary.clone(),
+                    status: "open".to_string(),
+                    origin: origin.clone(),
+                    created_at: now,
+                });
+            }
+            "patch" => {
+                artifact
+                    .collaboration
+                    .patch_stream
+                    .push(CollaborationPatchEvent {
+                        event_id: event_id.clone(),
+                        actor: actor.clone(),
+                        target: target.clone(),
+                        instruction: summary.clone(),
+                        status: "applied".to_string(),
+                        origin: origin.clone(),
+                        created_at: now,
+                    });
+                artifact.patches.push(PatchRecord {
+                    patch_id: event_id.clone(),
+                    instruction: summary.clone(),
+                    applied_at: now,
+                    change_count: 0,
+                });
+            }
+            "conflict" => {
+                artifact
+                    .collaboration
+                    .conflicts
+                    .push(CollaborationConflictEvent {
+                        event_id: event_id.clone(),
+                        actor: actor.clone(),
+                        target: target.clone(),
+                        summary: summary.clone(),
+                        resolution_status: "unresolved".to_string(),
+                        origin: origin.clone(),
+                        created_at: now,
+                    });
+            }
+            "rollback" => {
+                artifact
+                    .collaboration
+                    .rollbacks
+                    .push(CollaborationRollbackEvent {
+                        event_id: event_id.clone(),
+                        actor: actor.clone(),
+                        target_event_id: target.clone(),
+                        reason: summary.clone(),
+                        origin: origin.clone(),
+                        created_at: now,
+                    });
+            }
+            other => bail!(
+                "unknown collaboration event kind: {other}; expected one of: presence, comment, patch, conflict, rollback"
+            ),
+        }
+
+        artifact
+            .collaboration
+            .audit_history
+            .push(CollaborationAuditEvent {
+                event_id: event_id.clone(),
+                kind: normalized_kind.clone(),
+                actor: actor.clone(),
+                summary: summary.clone(),
+                origin: origin.clone(),
+                occurred_at: now,
+            });
+        artifact.collaboration.summary()
+    };
+
+    let revision = push_revision(
+        &mut workflow.revisions,
+        &origin,
+        "creative_collaboration_event",
+        &format!("recorded {normalized_kind} collaboration event {event_id} on {artifact_id}"),
+    );
+    store.save_workflow(&workflow)?;
+    store.record_event(
+        &workflow_id,
+        "creative_collaboration_event_recorded",
+        &serde_json::json!({
+            "origin": origin.clone(),
+            "artifact_id": artifact_id.clone(),
+            "event_id": event_id.clone(),
+            "event_kind": normalized_kind.clone(),
+            "revision": revision
+        }),
+    )?;
+
+    Ok(CreativeCollaborationEventReport {
+        status: "creative_collaboration_event_recorded".to_string(),
+        workflow_id,
+        artifact_id,
+        origin,
+        revision,
+        event_id,
+        event_kind: normalized_kind,
+        summary: collaboration_summary,
+    })
+}
+
+pub fn inspect_creative_collaboration(
+    store: &ForgeStore,
+    workflow_id: &str,
+    artifact_id: &str,
+) -> Result<CreativeCollaborationStatusReport> {
+    let workflow = store.load_workflow(workflow_id)?;
+    let artifact = workflow
+        .creative_artifacts
+        .iter()
+        .find(|artifact| artifact.id == artifact_id)
+        .with_context(|| format!("creative artifact not found: {artifact_id}"))?;
+
+    Ok(CreativeCollaborationStatusReport {
+        status: "creative_collaboration_status_loaded".to_string(),
+        workflow_id: workflow_id.to_string(),
+        artifact_id: artifact_id.to_string(),
+        summary: artifact.collaboration.summary(),
+        collaboration: artifact.collaboration.clone(),
     })
 }
 

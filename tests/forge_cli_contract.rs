@@ -73,8 +73,8 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .as_str()
         .unwrap()
         .contains("0.5"));
-    assert_eq!(json["summary"]["validated"].as_u64().unwrap(), 7);
-    assert_eq!(json["summary"]["groundwork"].as_u64().unwrap(), 2);
+    assert_eq!(json["summary"]["validated"].as_u64().unwrap(), 8);
+    assert_eq!(json["summary"]["groundwork"].as_u64().unwrap(), 1);
     assert_eq!(json["summary"]["planned"].as_u64().unwrap(), 0);
 }
 
@@ -131,7 +131,7 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
         .unwrap()
         .iter()
         .any(|capability| capability["id"] == "live_collaboration"
-            && capability["status"] == "groundwork"));
+            && capability["status"] == "validated"));
 }
 
 #[test]
@@ -194,7 +194,7 @@ fn milestone_manifest_surfaces_requirements_evidence_gaps_and_promotion_decision
         .as_array()
         .unwrap()
         .iter()
-        .any(|gap| gap["capability_id"] == "live_collaboration"));
+        .all(|gap| gap["capability_id"] != "live_collaboration"));
     assert_eq!(json["promotion_decision"]["decision"], "fail");
     assert!(json["promotion_decision"]["blocked_by"]
         .as_array()
@@ -17315,6 +17315,363 @@ fn workflow_patch_token_by_intent_updates_only_tokens_and_preserves_creative_art
         .clone();
     let after_json: Value = serde_json::from_slice(&after).unwrap();
     assert_eq!(after_json["artifact"], before_json["artifact"]);
+}
+
+#[test]
+fn creative_collaboration_events_are_durable_and_status_visible() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Live collaboration screen demo",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    let workflow_id = plan["workflow_id"].as_str().unwrap();
+
+    let attach_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "attach-creative",
+            "--workflow",
+            workflow_id,
+            "--title",
+            "Collaborative Screen",
+            "--kind",
+            "screen",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let attach: Value = serde_json::from_slice(&attach_output).unwrap();
+    let artifact_id = attach["artifact"]["id"].as_str().unwrap();
+
+    let presence = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "collaboration-event",
+            "--workflow",
+            workflow_id,
+            "--artifact",
+            artifact_id,
+            "--kind",
+            "presence",
+            "--actor",
+            "human:arthur",
+            "--summary",
+            "editing hero headline",
+            "--target",
+            "cursor:120,240",
+            "--selection",
+            "hero.headline",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let presence_json: Value = serde_json::from_slice(&presence).unwrap();
+    assert_eq!(
+        presence_json["status"],
+        "creative_collaboration_event_recorded"
+    );
+    assert_eq!(presence_json["summary"]["active_presence_count"], 1);
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "collaboration-event",
+            "--workflow",
+            workflow_id,
+            "--artifact",
+            artifact_id,
+            "--kind",
+            "comment",
+            "--actor",
+            "codex",
+            "--summary",
+            "Hero copy needs stronger user decision framing.",
+            "--target",
+            "hero.headline",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    let patch = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "collaboration-event",
+            "--workflow",
+            workflow_id,
+            "--artifact",
+            artifact_id,
+            "--kind",
+            "patch",
+            "--actor",
+            "codex",
+            "--summary",
+            "Patch hero headline by intent without rewriting the full screen.",
+            "--target",
+            "content.elements[hero].props.heading",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let patch_json: Value = serde_json::from_slice(&patch).unwrap();
+    let patch_id = patch_json["event_id"].as_str().unwrap();
+    assert_eq!(patch_json["summary"]["patch_event_count"], 1);
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "collaboration-event",
+            "--workflow",
+            workflow_id,
+            "--artifact",
+            artifact_id,
+            "--kind",
+            "rollback",
+            "--actor",
+            "human:arthur",
+            "--summary",
+            "Rollback weak hero headline patch after review.",
+            "--target",
+            patch_id,
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let inspect_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "inspect-creative",
+            "--workflow",
+            workflow_id,
+            "--artifact",
+            artifact_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspect: Value = serde_json::from_slice(&inspect_output).unwrap();
+    let collaboration = &inspect["artifact"]["collaboration"];
+    assert_eq!(
+        collaboration["schema_version"],
+        "forge.creative_collaboration.v1"
+    );
+    assert_eq!(collaboration["presences"][0]["actor"], "human:arthur");
+    assert_eq!(
+        collaboration["presences"][0]["selections"][0],
+        "hero.headline"
+    );
+    assert_eq!(
+        collaboration["comments"][0]["body"],
+        "Hero copy needs stronger user decision framing."
+    );
+    assert_eq!(
+        collaboration["patch_stream"][0]["instruction"],
+        "Patch hero headline by intent without rewriting the full screen."
+    );
+    assert_eq!(collaboration["rollbacks"][0]["target_event_id"], patch_id);
+    assert_eq!(collaboration["audit_history"].as_array().unwrap().len(), 4);
+    assert_eq!(inspect["artifact"]["patches"].as_array().unwrap().len(), 1);
+
+    let status_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "status",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: Value = serde_json::from_slice(&status_output).unwrap();
+    let summary = &status["creative_artifacts"][0]["collaboration_summary"];
+    assert_eq!(summary["active_presence_count"], 1);
+    assert_eq!(summary["comment_count"], 1);
+    assert_eq!(summary["patch_event_count"], 1);
+    assert_eq!(summary["rollback_count"], 1);
+    assert_eq!(summary["audit_event_count"], 4);
+}
+
+#[test]
+fn mcp_exposes_creative_collaboration_status_and_event_recording() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Live collaboration document demo",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    let workflow_id = plan["workflow_id"].as_str().unwrap();
+
+    let attach_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "attach-creative",
+            "--workflow",
+            workflow_id,
+            "--title",
+            "Collaborative Brief",
+            "--kind",
+            "document",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let attach: Value = serde_json::from_slice(&attach_output).unwrap();
+    let artifact_id = attach["artifact"]["id"].as_str().unwrap();
+
+    let manifest = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    find_mcp_tool(&manifest_json, "forge.creative.collaboration_event");
+    find_mcp_tool(&manifest_json, "forge.creative.collaboration_status");
+
+    let event_input = format!(
+        r#"{{"workflow_id":"{workflow_id}","artifact_id":"{artifact_id}","kind":"comment","actor":"opencode","summary":"Document needs a clearer approval decision.","target":"section:intro","origin":"mcp_test","selections":["section:intro"]}}"#
+    );
+    let event_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.creative.collaboration_event",
+            "--input",
+            &event_input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let event: Value = serde_json::from_slice(&event_output).unwrap();
+    assert_eq!(
+        event["result"]["status"],
+        "creative_collaboration_event_recorded"
+    );
+    assert_eq!(event["result"]["summary"]["comment_count"], 1);
+
+    let status_input =
+        format!(r#"{{"workflow_id":"{workflow_id}","artifact_id":"{artifact_id}"}}"#);
+    let status_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.creative.collaboration_status",
+            "--input",
+            &status_input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: Value = serde_json::from_slice(&status_output).unwrap();
+    assert_eq!(
+        status["result"]["status"],
+        "creative_collaboration_status_loaded"
+    );
+    assert_eq!(status["result"]["summary"]["comment_count"], 1);
+    assert_eq!(
+        status["result"]["collaboration"]["comments"][0]["body"],
+        "Document needs a clearer approval decision."
+    );
 }
 
 #[test]
