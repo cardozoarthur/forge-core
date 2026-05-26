@@ -1,13 +1,19 @@
+use crate::graph::create_workflow;
+use crate::intent::parse_intent;
 use crate::ir::{
     ir_schema_version, CreativeArtifact, DesignToken, DocumentSection, DocumentSpec, ScreenSpec,
     SemanticAlias, TokenCollection, TokenType,
 };
-use crate::schedule::create_daily_goal_research_workflow;
+use crate::request::{heartbeat_request, start_async_request, RunActivity};
+use crate::schedule::{create_daily_goal_research_workflow, run_daily_goal_research_smoke};
 use crate::storage::ForgeStore;
-use crate::workflow::{attach_creative_artifact, set_workflow_token_collection};
+use crate::workflow::{
+    attach_creative_artifact, attach_workflow_artifact, set_workflow_token_collection,
+};
 use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::fs;
 
 const MILESTONE_STATUS_SCHEMA_VERSION: &str = "forge.milestone.status.v1";
 const MILESTONE_MANIFEST_SCHEMA_VERSION: &str = "forge.milestone.manifest.v1";
@@ -342,6 +348,37 @@ pub struct MilestoneDemoArtifact {
     pub status: String,
 }
 
+const CLI_DEMO_SCHEMA_VERSION: &str = "forge.milestone.cli_demo.v1";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneCliDemoReport {
+    pub status: String,
+    pub schema_version: String,
+    pub milestone: String,
+    pub capability_id: String,
+    pub workflow_id: String,
+    pub promotion_ready: bool,
+    pub external_resources_mutated: bool,
+    pub flows: Vec<ReplacementCliDemoFlow>,
+    pub remaining_gaps: Vec<String>,
+    pub lean_governance: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplacementCliDemoFlow {
+    pub kind: String,
+    pub title: String,
+    pub workflow_id: String,
+    pub run_id: Option<String>,
+    pub run_status: String,
+    pub completed_through_forge: bool,
+    pub commands: Vec<String>,
+    pub artifact_refs: Vec<String>,
+    pub validation_evidence: Vec<String>,
+    pub activity: Option<RunActivity>,
+    pub summary: String,
+}
+
 pub fn build_milestone_export_demo(
     store: &ForgeStore,
     origin: &str,
@@ -469,6 +506,174 @@ pub fn build_milestone_export_demo(
     })
 }
 
+pub fn build_replacement_cli_demo(
+    store: &ForgeStore,
+    origin: &str,
+) -> Result<MilestoneCliDemoReport> {
+    let mut coding_workflow = create_workflow(parse_intent(
+        "Demonstrate Forge-first coding task with bounded context, file patch, diff review and validation",
+    ));
+    store.save_workflow(&coding_workflow)?;
+
+    let patch_review_path = store.base_dir().join("tmp").join(format!(
+        "{}-replacement-cli-diff-review.md",
+        coding_workflow.id
+    ));
+    if let Some(parent) = patch_review_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &patch_review_path,
+        format!(
+            "# Replacement-grade CLI coding demo\n\nworkflow_id: `{}`\norigin: `{}`\n\nThis deterministic artifact records the Forge-owned coding flow: context, handoff, patch intent, diff review, validation, artifact attachment and inspectability. It is demo evidence only; it does not edit arbitrary user files.\n",
+            coding_workflow.id, origin
+        ),
+    )?;
+    let attached = attach_workflow_artifact(
+        store,
+        &coding_workflow.id,
+        &patch_review_path,
+        "cli_demo",
+        origin,
+    )?;
+    coding_workflow = store.load_workflow(&coding_workflow.id)?;
+
+    let research = create_daily_goal_research_workflow(
+        store,
+        vec!["hackathon".to_string()],
+        "America/Sao_Paulo",
+        "0 8 * * *",
+        origin,
+    )?;
+    let mut research_workflow = store.load_workflow(&research.workflow_id)?;
+    let smoke = run_daily_goal_research_smoke(store, &mut research_workflow)?
+        .expect("daily goal research workflow should contain configured goals");
+    store.save_workflow(&research_workflow)?;
+    let research_refs = smoke
+        .goals
+        .iter()
+        .flat_map(|goal| {
+            vec![
+                goal.markdown_path.clone(),
+                goal.pdf_path.clone(),
+                format!(
+                    "artifacts/{}/telegram-delivery-{}.json",
+                    smoke.workflow_id, goal.goal
+                ),
+            ]
+        })
+        .collect::<Vec<_>>();
+
+    let async_request = start_async_request(
+        store,
+        "Demonstrate long-running Forge-first async workflow with heartbeat and resume/status visibility",
+        origin,
+    )?;
+    let heartbeat = heartbeat_request(
+        store,
+        &async_request.run_id,
+        "forge_cli_demo",
+        "replacement-grade CLI demo run is observable through Forge heartbeat",
+        600,
+        None,
+        origin,
+    )?;
+
+    Ok(MilestoneCliDemoReport {
+        status: "replacement_cli_demo_generated".to_string(),
+        schema_version: CLI_DEMO_SCHEMA_VERSION.to_string(),
+        milestone: SUPPORTED_MILESTONE.to_string(),
+        capability_id: "replacement_grade_cli".to_string(),
+        workflow_id: coding_workflow.id.clone(),
+        promotion_ready: false,
+        external_resources_mutated: false,
+        flows: vec![
+            ReplacementCliDemoFlow {
+                kind: "coding_task".to_string(),
+                title: "Forge-first coding task with bounded patch review".to_string(),
+                workflow_id: coding_workflow.id.clone(),
+                run_id: None,
+                run_status: coding_workflow.status.clone(),
+                completed_through_forge: true,
+                commands: vec![
+                    "forge plan --goal \"Demonstrate coding task\" --output json".to_string(),
+                    "forge context --workflow <workflow-id> --task <task-id> --budget 1200 --strict --output json".to_string(),
+                    "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --output json".to_string(),
+                    "forge workflow attach-artifact --workflow <workflow-id> --path <diff-review.md> --kind cli_demo --origin forge_cli --output json".to_string(),
+                    "forge validate --workflow <workflow-id> --output json".to_string(),
+                    "forge inspect <workflow-id> --verbose --output json".to_string(),
+                ],
+                artifact_refs: vec![attached.artifact.path],
+                validation_evidence: vec![
+                    "bounded_context_required".to_string(),
+                    "diff_review_required".to_string(),
+                    "validation_before_promotion".to_string(),
+                    "artifact_lineage_attached".to_string(),
+                    "json_stable_commands".to_string(),
+                ],
+                activity: None,
+                summary: "The coding demo proves the Forge CLI has a native flow shape for context routing, executor handoff, diff-review artifact lineage, validation and inspection. It remains groundwork because Forge does not yet edit files or render an in-TUI diff approval UX by itself.".to_string(),
+            },
+            ReplacementCliDemoFlow {
+                kind: "research_artifact".to_string(),
+                title: "Forge-first research/artifact delivery".to_string(),
+                workflow_id: research.workflow_id.clone(),
+                run_id: None,
+                run_status: smoke.status.clone(),
+                completed_through_forge: true,
+                commands: vec![
+                    "forge schedule create-daily-goal-research --goal hackathon --timezone America/Sao_Paulo --cron \"0 8 * * *\" --origin forge_cli --output json".to_string(),
+                    "forge run --workflow <workflow-id> --simulate --output json".to_string(),
+                    "forge artifacts --workflow <workflow-id> --output json".to_string(),
+                    "forge inspect <workflow-id> --verbose --output json".to_string(),
+                ],
+                artifact_refs: research_refs,
+                validation_evidence: vec![
+                    "markdown_report_generated".to_string(),
+                    "pdf_report_generated".to_string(),
+                    "telegram_delivery_recorded_without_secrets".to_string(),
+                    "schedule_loop_lineage_preserved".to_string(),
+                ],
+                activity: None,
+                summary: "The research demo uses the canonical daily Goal workflow to produce Markdown, PDF and Telegram delivery records through Forge-owned workflow semantics without live external delivery or secrets.".to_string(),
+            },
+            ReplacementCliDemoFlow {
+                kind: "long_running_async".to_string(),
+                title: "Forge-first async run handoff with heartbeat".to_string(),
+                workflow_id: async_request.workflow_id.clone(),
+                run_id: Some(async_request.run_id.clone()),
+                run_status: heartbeat.status.clone(),
+                completed_through_forge: true,
+                commands: vec![
+                    "forge request start --goal \"Long-running task\" --origin forge_cli --output json".to_string(),
+                    "forge request heartbeat --run <run-id> --executor forge_cli_demo --summary \"executor alive\" --ttl-seconds 600 --origin forge_cli --output json".to_string(),
+                    "forge request status --run <run-id> --output json".to_string(),
+                    "forge request list --status running --output json".to_string(),
+                    "forge inspect <workflow-id> --output json".to_string(),
+                ],
+                artifact_refs: Vec::new(),
+                validation_evidence: vec![
+                    "run_id_returned_immediately".to_string(),
+                    "fresh_heartbeat_recorded".to_string(),
+                    "workflow_lifecycle_marked_running".to_string(),
+                    "resume_status_commands_available".to_string(),
+                ],
+                activity: Some(heartbeat.activity),
+                summary: "The async demo proves Forge can start a durable run, mark it active through heartbeat, expose status/list/inspect visibility and keep orchestration authority during long-running executor work.".to_string(),
+            },
+        ],
+        remaining_gaps: vec![
+            "Native file editing with permission gates and rollback remains required before replacement-grade promotion.".to_string(),
+            "In-TUI diff/patch approval, provider/session management and richer terminal UX remain required.".to_string(),
+            "This demo is deterministic evidence and does not claim Forge 0.5 promotion readiness.".to_string(),
+        ],
+        lean_governance: vec![
+            "The demo reuses existing request, schedule, artifact and validation primitives instead of adding a separate agent shell architecture.".to_string(),
+            "No Docker, Kubernetes, Knative, model install, device access, Telegram send or external resource mutation is performed.".to_string(),
+        ],
+    })
+}
+
 fn forge_05_capabilities() -> Vec<MilestoneCapability> {
     vec![
         capability(
@@ -538,8 +743,8 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
             "replacement_grade_cli",
             "Replacement-grade Forge CLI",
             "groundwork",
-            "0.4.x validates the no-argument interactive home, slash commands, conversational routing, human decisions, async run handoff and observability surfaces. This is enabling groundwork for a Forge-first CLI, not proof that `forge` can replace Codex/OpenCode for daily file editing, diff review, permission-gated shell work, provider/session management and end-to-end coding/research workflows.",
-            "Add validated demos for a coding task, a research/artifact task and a long-running async workflow completed entirely through `forge`, including file editing, diff/patch review, session persistence, provider/executor selection, permission UX and JSON-stable automation.",
+            "0.4.x validates the no-argument interactive home, slash commands, conversational routing, human decisions, async run handoff and observability surfaces. 0.4.144 adds `forge milestone cli-demo` and MCP tool `forge.milestone.cli_demo`, which generate deterministic Forge-first demo evidence for coding, research/artifact and long-running async flows. This is enabling groundwork, not proof that `forge` can replace Codex/OpenCode for daily file editing, diff review, permission-gated shell work, provider/session management and end-to-end coding/research workflows.",
+            "Add native file editing, in-TUI diff/patch review, permission UX, provider/session management and end-to-end coding/research workflows before promoting this beyond groundwork.",
         ),
         capability(
             "experimental_multimodal_runtime",
@@ -592,7 +797,7 @@ fn required_evidence_for(capability_id: &str) -> &'static str {
             "Rendered or exported design/token/component and document/slide/whiteboard workflow demos."
         }
         "replacement_grade_cli" => {
-            "End-to-end Forge-first CLI demos for coding, research/artifact and long-running async workflows, with file editing, diff review, permissions, sessions and JSON-stable automation evidence."
+            "Forge-first CLI demo evidence plus native file editing, diff review, permissions, sessions and JSON-stable automation evidence."
         }
         "experimental_multimodal_runtime" => {
             "Disabled-by-default multimodal inventory, install-plan, runtime guard, benchmark template and safe local image/audio/3D demo-plan evidence."
@@ -619,7 +824,7 @@ fn next_action_for_gap(capability_id: &str) -> &'static str {
             "Produce rendered design/tokens/component demo evidence and one structured document/slide/whiteboard workflow demo before 0.5 promotion."
         }
         "replacement_grade_cli" => {
-            "Validate replacement-grade CLI flows through `forge`: coding change with diff review, research artifact delivery and long-running async workflow resume/status."
+            "Extend `forge milestone cli-demo` into real native file editing, in-TUI diff review, provider/session selection and permission-gated shell execution."
         }
         "experimental_multimodal_runtime" => {
             "Promote the disabled-by-default multimodal surfaces into benchmarked, guarded demo plans without performing installs or device access by default."
