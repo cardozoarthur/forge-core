@@ -534,6 +534,20 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
             "0.4.130 adds `forge milestone export-demo` as a structured export/demo surface that creates a scheduled daily research workflow with a screen creative artifact, a document creative artifact and a design token collection, proving design/tokens/component export lineage. The demo workflow can be inspected, its creative artifacts listed/inspected and its design tokens resolved/promoted. Daily Goal smoke produces Markdown/PDF artifacts and Telegram delivery records through Forge-owned workflow semantics across all cycles.",
             "Full rendered previews and richer browser-based editing demos remain for a later 0.5 milestone iteration.",
         ),
+        capability(
+            "replacement_grade_cli",
+            "Replacement-grade Forge CLI",
+            "groundwork",
+            "0.4.x validates the no-argument interactive home, slash commands, conversational routing, human decisions, async run handoff and observability surfaces. This is enabling groundwork for a Forge-first CLI, not proof that `forge` can replace Codex/OpenCode for daily file editing, diff review, permission-gated shell work, provider/session management and end-to-end coding/research workflows.",
+            "Add validated demos for a coding task, a research/artifact task and a long-running async workflow completed entirely through `forge`, including file editing, diff/patch review, session persistence, provider/executor selection, permission UX and JSON-stable automation.",
+        ),
+        capability(
+            "experimental_multimodal_runtime",
+            "Experimental multimodal runtime",
+            "groundwork",
+            "0.4.140 adds disabled-by-default multimodal inventory, plan-only install manifests and runtime guards for camera, microphone, screen, input, peripherals, model and filesystem access. These surfaces prove the safety boundary, but they do not install models, access devices or validate real image/audio/video/3D workflows.",
+            "Add benchmark/report templates with evidence, explicit feature-flag configuration, guarded demo plans for local image recognition, audio transcription/synthesis and Blender/3D avatar preparation, plus tests proving no device/model access occurs without opt-in.",
+        ),
     ]
 }
 
@@ -577,6 +591,12 @@ fn required_evidence_for(capability_id: &str) -> &'static str {
         "export_demo_baseline" => {
             "Rendered or exported design/token/component and document/slide/whiteboard workflow demos."
         }
+        "replacement_grade_cli" => {
+            "End-to-end Forge-first CLI demos for coding, research/artifact and long-running async workflows, with file editing, diff review, permissions, sessions and JSON-stable automation evidence."
+        }
+        "experimental_multimodal_runtime" => {
+            "Disabled-by-default multimodal inventory, install-plan, runtime guard, benchmark template and safe local image/audio/3D demo-plan evidence."
+        }
         _ => "Implementation, validation and demo evidence sufficient for 0.5 promotion.",
     }
 }
@@ -597,6 +617,12 @@ fn next_action_for_gap(capability_id: &str) -> &'static str {
         }
         "export_demo_baseline" => {
             "Produce rendered design/tokens/component demo evidence and one structured document/slide/whiteboard workflow demo before 0.5 promotion."
+        }
+        "replacement_grade_cli" => {
+            "Validate replacement-grade CLI flows through `forge`: coding change with diff review, research artifact delivery and long-running async workflow resume/status."
+        }
+        "experimental_multimodal_runtime" => {
+            "Promote the disabled-by-default multimodal surfaces into benchmarked, guarded demo plans without performing installs or device access by default."
         }
         _ => "Implement the missing capability with tests, artifacts and milestone evidence.",
     }

@@ -45,9 +45,11 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
             "blocked"
         ])
     );
-    assert_eq!(json["promotion_decision"]["decision"], "promote");
-    assert_eq!(json["promotion_decision"]["promotable"], true);
+    assert_eq!(json["promotion_decision"]["decision"], "fail");
+    assert_eq!(json["promotion_decision"]["promotable"], false);
     let blocked_by = json["promotion_decision"]["blocked_by"].as_array().unwrap();
+    assert!(blocked_by.contains(&serde_json::json!("replacement_grade_cli")));
+    assert!(blocked_by.contains(&serde_json::json!("experimental_multimodal_runtime")));
     assert!(
         !blocked_by.contains(&serde_json::json!("creative_artifact_ir")),
         "creative_artifact_ir is now validated and should not block"
@@ -73,8 +75,29 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .as_str()
         .unwrap()
         .contains("0.5"));
+
+    let replacement_cli = capabilities
+        .iter()
+        .find(|capability| capability["id"] == "replacement_grade_cli")
+        .unwrap();
+    assert_eq!(replacement_cli["status"], "groundwork");
+    assert!(replacement_cli["gap_before_promotion"]
+        .as_str()
+        .unwrap()
+        .contains("file editing"));
+
+    let multimodal = capabilities
+        .iter()
+        .find(|capability| capability["id"] == "experimental_multimodal_runtime")
+        .unwrap();
+    assert_eq!(multimodal["status"], "groundwork");
+    assert!(multimodal["gap_before_promotion"]
+        .as_str()
+        .unwrap()
+        .contains("benchmark"));
+
     assert_eq!(json["summary"]["validated"].as_u64().unwrap(), 9);
-    assert_eq!(json["summary"]["groundwork"].as_u64().unwrap(), 0);
+    assert_eq!(json["summary"]["groundwork"].as_u64().unwrap(), 2);
     assert_eq!(json["summary"]["planned"].as_u64().unwrap(), 0);
 }
 
@@ -118,7 +141,11 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
         "forge.milestone.status.v1"
     );
     assert_eq!(json["result"]["milestone"], "0.5");
-    assert_eq!(json["result"]["promotion_decision"]["decision"], "promote");
+    assert_eq!(json["result"]["promotion_decision"]["decision"], "fail");
+    assert!(json["result"]["promotion_decision"]["blocked_by"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("replacement_grade_cli")));
     assert!(json["result"]["capabilities"]
         .as_array()
         .unwrap()
@@ -138,6 +165,14 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
         .iter()
         .any(|capability| capability["id"] == "live_collaboration"
             && capability["status"] == "validated"));
+    assert!(json["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |capability| capability["id"] == "experimental_multimodal_runtime"
+                && capability["status"] == "groundwork"
+        ));
 }
 
 #[test]
@@ -169,7 +204,7 @@ fn milestone_manifest_surfaces_requirements_evidence_gaps_and_promotion_decision
         .as_str()
         .unwrap()
         .contains("0.4.x"));
-    assert!(json["requirements"].as_array().unwrap().len() >= 9);
+    assert!(json["requirements"].as_array().unwrap().len() >= 11);
     assert!(json["completed_capabilities"]
         .as_array()
         .unwrap()
@@ -207,14 +242,28 @@ fn milestone_manifest_surfaces_requirements_evidence_gaps_and_promotion_decision
         .unwrap()
         .iter()
         .all(|gap| gap["capability_id"] != "live_collaboration"));
-    assert_eq!(json["promotion_decision"]["decision"], "promote");
-    assert_eq!(json["promotion_decision"]["promotable"], true);
+    assert!(json["missing_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability["id"] == "replacement_grade_cli"
+            && capability["promotion_ready"] == false));
+    assert!(json["missing_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |capability| capability["id"] == "experimental_multimodal_runtime"
+                && capability["promotion_ready"] == false
+        ));
+    assert_eq!(json["promotion_decision"]["decision"], "fail");
+    assert_eq!(json["promotion_decision"]["promotable"], false);
     assert!(
         json["promotion_decision"]["blocked_by"]
             .as_array()
             .unwrap()
-            .is_empty(),
-        "all 9 capabilities are now validated; promotion should be blocked_by empty"
+            .contains(&serde_json::json!("replacement_grade_cli")),
+        "replacement-grade CLI is new 0.5 scope and must block promotion until it has demo evidence"
     );
 }
 
@@ -233,6 +282,14 @@ fn milestone_boundary_document_matches_validated_export_demo_runtime_state() {
     assert!(
         docs.contains("promotion decision"),
         "the milestone boundary should explain that promotion is a gated runtime decision"
+    );
+    assert!(
+        docs.contains("| Replacement-grade Forge CLI | groundwork |"),
+        "the visible 0.5 milestone boundary must include the new replacement-grade CLI scope"
+    );
+    assert!(
+        docs.contains("| Experimental multimodal runtime | groundwork |"),
+        "the visible 0.5 milestone boundary must include the new disabled-by-default multimodal scope"
     );
 }
 
@@ -494,7 +551,14 @@ fn mcp_exposes_milestone_manifest_for_agent_release_gates() {
     assert!(json["result"]["missing_capabilities"]
         .as_array()
         .unwrap()
-        .is_empty());
+        .iter()
+        .any(|capability| capability["id"] == "replacement_grade_cli"));
+    assert!(json["result"]["missing_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability["id"] == "experimental_multimodal_runtime"));
+    assert_eq!(json["result"]["promotion_decision"]["decision"], "fail");
 }
 
 #[test]
