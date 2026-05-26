@@ -42,8 +42,8 @@ use forge_core::registry::{
     WorkflowRegistryFilters,
 };
 use forge_core::request::{
-    cancel_request, heartbeat_request, list_requests, load_request_status, resume_async_request,
-    start_async_request,
+    cancel_request, heartbeat_request, list_requests, load_request_status, recover_stale_request,
+    resume_async_request, start_async_request,
 };
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
@@ -752,6 +752,14 @@ enum RequestCommands {
         ttl_seconds: u64,
         #[arg(long)]
         pid: Option<u32>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    RecoverStale {
+        #[arg(long = "run")]
+        run_id: String,
         #[arg(long, default_value = "forge_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -1976,6 +1984,16 @@ fn run() -> Result<i32> {
                     pid,
                     &origin,
                 )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            RequestCommands::RecoverStale {
+                run_id,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = recover_stale_request(&store, &run_id, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
             }

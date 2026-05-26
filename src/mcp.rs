@@ -19,8 +19,8 @@ use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
 use crate::request::{
-    cancel_request, heartbeat_request, list_requests, load_request_status, resume_async_request,
-    start_async_request,
+    cancel_request, heartbeat_request, list_requests, load_request_status, recover_stale_request,
+    resume_async_request, start_async_request,
 };
 use crate::schedule::{
     aggregate_summary, build_schedule_worker_status, create_daily_goal_research_workflow,
@@ -587,6 +587,18 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &["run_id"]),
                 "forge.request_heartbeat.v1",
                 &["forge", "request", "heartbeat", "--run", "<run-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.run.recover_stale",
+                "Recover Stale Async Run",
+                "Transition a stale running async handoff to needs_attention so humans or executors can resume, cancel or inspect without losing lineage.",
+                object_schema(&[
+                    ("run_id", "string", "run id"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["run_id"]),
+                "forge.request_stale_recovery.v1",
+                &["forge", "request", "recover-stale", "--run", "<run-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -1179,6 +1191,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.pid,
                 &origin,
             )?)?
+        }
+        "forge.run.recover_stale" => {
+            let input: RunIdInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(recover_stale_request(store, &input.run_id, &origin)?)?
         }
         "forge.run.status" => {
             let input: RunIdInput = parse_input(input)?;

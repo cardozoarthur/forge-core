@@ -12995,6 +12995,33 @@ fn set_workflow_status_in_stored_workflow(store: &Path, workflow_id: &str, statu
         .unwrap();
 }
 
+fn force_run_heartbeat_expired(store: &Path, run_id: &str) {
+    let connection = Connection::open(store).unwrap();
+    let data_json: String = connection
+        .query_row(
+            "SELECT data_json FROM runs WHERE id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut run: Value = serde_json::from_str(&data_json).unwrap();
+    run.as_object_mut().unwrap().insert(
+        "heartbeat_expires_at".to_string(),
+        Value::String("2000-01-01T00:00:00Z".to_string()),
+    );
+    run.as_object_mut().unwrap().insert(
+        "last_heartbeat_at".to_string(),
+        Value::String("1999-12-31T23:59:59Z".to_string()),
+    );
+    let patched = serde_json::to_string(&run).unwrap();
+    connection
+        .execute(
+            "UPDATE runs SET data_json = ?1 WHERE id = ?2",
+            (&patched, run_id),
+        )
+        .unwrap();
+}
+
 fn set_task_status_in_stored_workflow(
     store: &Path,
     workflow_id: &str,
@@ -13519,6 +13546,193 @@ fn mcp_run_heartbeat_tool_keeps_agent_handoff_observable() {
     assert_eq!(heartbeat_json["result"]["status"], "running");
     assert_eq!(heartbeat_json["result"]["activity"]["active"], true);
     assert_eq!(heartbeat_json["result"]["activity"]["executor"], "opencode");
+}
+
+#[test]
+fn stale_request_heartbeat_surfaces_recovery_and_transitions_to_needs_attention() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Stale self-evolution executor handoff",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "heartbeat",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--summary",
+            "executor stopped refreshing heartbeat",
+            "--ttl-seconds",
+            "300",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    force_run_heartbeat_expired(&store, run_id);
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status_json["status"], "running");
+    assert_eq!(status_json["activity"]["active"], false);
+    assert_eq!(status_json["activity"]["heartbeat_status"], "stale");
+    assert_eq!(
+        status_json["activity"]["recovery"]["action"],
+        "mark_needs_attention"
+    );
+    assert_eq!(
+        status_json["activity"]["recovery"]["target_status"],
+        "needs_attention"
+    );
+    assert_eq!(
+        status_json["activity"]["recovery"]["command"],
+        serde_json::json!(["forge", "request", "recover-stale", "--run", run_id])
+    );
+
+    let stale = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "list",
+            "--status",
+            "stale",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stale_json: Value = serde_json::from_slice(&stale).unwrap();
+    assert_eq!(stale_json["total"], 1);
+    assert_eq!(stale_json["runs"][0]["run_id"], run_id);
+    assert_eq!(
+        stale_json["runs"][0]["activity"]["heartbeat_status"],
+        "stale"
+    );
+
+    let recovered = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "recover-stale",
+            "--run",
+            run_id,
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recovered_json: Value = serde_json::from_slice(&recovered).unwrap();
+    assert_eq!(recovered_json["status"], "needs_attention");
+    assert_eq!(recovered_json["previous_status"], "running");
+    assert_eq!(recovered_json["workflow_id"], workflow_id);
+    assert_eq!(
+        recovered_json["activity"]["heartbeat_status"],
+        "needs_attention"
+    );
+    assert_eq!(
+        recovered_json["recovery"]["reason"],
+        "Heartbeat is stale; Forge moved the run to needs_attention so a human or executor can resume, cancel or inspect without losing lineage."
+    );
+
+    let needs_attention = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "list",
+            "--status",
+            "needs_attention",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let needs_attention_json: Value = serde_json::from_slice(&needs_attention).unwrap();
+    assert_eq!(needs_attention_json["total"], 1);
+    assert_eq!(needs_attention_json["runs"][0]["run_id"], run_id);
+    assert_eq!(needs_attention_json["runs"][0]["status"], "needs_attention");
+}
+
+#[test]
+fn mcp_exposes_stale_request_recovery_tool_for_agent_observability() {
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.run.recover_stale"
+            && tool["output_schema"] == "forge.request_stale_recovery.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == true
+    }));
+
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge request recover-stale"),
+        "the packaged skill must teach executors how to transition stale handoffs"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.run.recover_stale"),
+        "the packaged skill must expose the MCP stale recovery tool"
+    );
 }
 
 #[test]

@@ -30,6 +30,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 - Use `forge mcp tools --output json` to discover stable agent-facing tools before wiring a Codex/OpenCode workflow.
 - For async handoff, call `forge mcp call forge.run.start --input '{"goal":"<objective>","origin":"codex"}' --output json`, return `result.run_id` quickly, and let Forge remain the source of truth.
 - While an executor is alive, refresh observability with `forge request heartbeat --run <run-id> --executor codex --summary "<short progress>" --ttl-seconds 300 --origin codex --output json` or `forge.run.heartbeat`; this keeps `forge request status`, `forge request list` and `forge inspect` honest about active self-runs.
+- If a heartbeat becomes stale, use `forge request recover-stale --run <run-id> --origin codex --output json` or `forge.run.recover_stale` to move the run to `needs_attention` without losing workflow/run lineage.
 - Poll later with `forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json`.
 - Resume a paused async handoff with `forge mcp call forge.run.resume --input '{"run_id":"<run-id>","origin":"opencode"}' --output json`.
 - Create scheduled Goal research through `forge.schedule.create_daily_goal_research`; inspect/list/summarize/mutate schedules through `forge.schedule.list`, `forge.schedule.summary`, `forge.schedule.loop_summary`, `forge.workflow.inspect`, `forge.loop.inspect` and `forge.schedule.update`.
@@ -63,10 +64,14 @@ forge request start --goal "Improve Forge Core" --origin codex --output json
 forge request heartbeat --run <run-id> --executor codex --summary "executor applying bounded patch" --ttl-seconds 300 --origin codex --output json
 forge request status --run <run-id> --output json
 forge request resume --run <run-id> --origin codex --output json
+forge request list --status stale --output json
+forge request recover-stale --run <run-id> --origin codex --output json
 forge mcp tools --output json
 forge mcp call forge.run.start --input '{"goal":"Improve Forge Core","origin":"codex"}' --output json
 forge mcp call forge.run.heartbeat --input '{"run_id":"<run-id>","executor":"codex","summary":"executor alive","ttl_seconds":300,"origin":"codex"}' --output json
+forge mcp call forge.run.recover_stale --input '{"run_id":"<run-id>","origin":"codex"}' --output json
 forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json
+forge request list --status needs_attention --output json
 forge sync all --home "$HOME" --allow codex --allow opencode --output json
 forge executors --output json
 forge runtimes --output json
