@@ -662,8 +662,9 @@ fn render_diagram(
             .collect::<Vec<_>>()
             .join(",");
         lines.push(format!(
-            "runs: {runs} active: {} running: {} missing_heartbeat: {} stale: {} needs_attention: {}",
+            "runs: {runs} active: {} process_alive: {} running: {} missing_heartbeat: {} stale: {} needs_attention: {}",
             row.run_activity.active,
+            row.run_activity.process_alive,
             row.run_activity.running,
             row.run_activity.missing_heartbeat,
             row.run_activity.stale,

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.148 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 25: added process-liveness-aware run activity for async/self-evolution handoffs. If a running request has an expired heartbeat but its recorded `executor_pid` is still alive, `forge request status` reports `heartbeat_status: "process_alive"`, keeps `activity.active = true`, and does not recommend stale recovery.
+- Added `process_status` and `process_alive` to `forge.run_activity.v1`.
+- Added `process_alive` counts to registry `run_activity` summaries and the `forge inspect` DAG text line so `forge list` and `forge inspect` distinguish a live executor process from truly stale or missing-heartbeat runs.
+- Added CLI contract coverage for a live executor PID keeping an expired heartbeat active, excluding it from `forge request list --status stale`, and surfacing it through list/inspect.
+
+### Changed
+
+- `active_run_count` now follows `RunActivity.active`, which can be true for either a fresh heartbeat or a recorded live executor process. This preserves Forge-owned observability for long executor cycles that outlive a heartbeat TTL.
+- Updated packaged Forge skill guidance to include `--pid <executor-pid>` in heartbeat examples.
+- Updated package/readme/milestone version to `0.4.148` for this 0.4.x groundwork increment.
+
+### Validation
+
+- RED observed first with `cargo test --test forge_cli_contract live_executor_pid_keeps_expired_heartbeat_active_without_stale_recovery -- --exact`: the expired heartbeat was still inactive/stale.
+- Targeted GREEN passed for `cargo test --test forge_cli_contract live_executor_pid_keeps_expired_heartbeat_active_without_stale_recovery -- --exact`.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` (58 unit + 221 integration) and `cargo build --release`.
+- Release smokes passed: `./target/release/forge --version`, `./target/release/forge plan --goal "Create a delivery platform" --output json` and `./target/release/forge skill install --target codex --target opencode --output json --home /tmp/forge-skill-smoke-0.4.148-<timestamp>`.
+- Default `cargo install --path . --force` was blocked by read-only `/home/arthur/.cargo`; validated fallback install succeeded with `CARGO_INSTALL_ROOT=/home/arthur/projects/forge-core/.forge/local-install cargo install --path . --force --locked --offline`, and `.forge/local-install/bin/forge --version` returned `forge 0.4.148`.
+
+### Safety
+
+- This change only mutates Forge-owned source, tests, skill guidance, changelog, milestone docs and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- Process liveness is read-only and uses the stored executor PID as supporting evidence; it does not signal, kill, attach to or mutate any process.
+
 ## 0.4.147 - 2026-05-26
 
 ### Added
