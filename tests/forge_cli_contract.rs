@@ -17802,6 +17802,123 @@ fn interactive_retention_requires_approval_before_deleting_artifact_workflow() {
 }
 
 #[test]
+fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+
+    for (name, output_schema, mutates_workflow) in [
+        ("forge.interactive.home", "forge.interactive.home.v1", false),
+        (
+            "forge.interactive.slash_commands",
+            "forge.interactive.slash_commands.v1",
+            false,
+        ),
+        (
+            "forge.interactive.route",
+            "forge.interactive.route.v1",
+            true,
+        ),
+    ] {
+        let tool = find_mcp_tool(&manifest_json, name);
+        assert_eq!(tool["output_schema"], output_schema);
+        assert_eq!(tool["async_safe"], true);
+        assert_eq!(tool["mutates_workflow"], mutates_workflow);
+    }
+
+    let home = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.home"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home_json: Value = serde_json::from_slice(&home).unwrap();
+    assert_eq!(home_json["status"], "ok");
+    assert_eq!(
+        home_json["result"]["schema_version"],
+        "forge.interactive.home.v1"
+    );
+    assert!(home_json["result"]["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/status")));
+
+    let slash = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.slash_commands"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let slash_json: Value = serde_json::from_slice(&slash).unwrap();
+    assert_eq!(
+        slash_json["result"]["schema_version"],
+        "forge.interactive.slash_commands.v1"
+    );
+    assert!(slash_json["result"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command["name"] == "/patch apply" && command["mutates_workflow"] == true));
+
+    let route_input = serde_json::json!({
+        "input": "What is the current Forge status?",
+        "origin": "mcp_test"
+    })
+    .to_string();
+    let routed = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.route"])
+        .arg("--input")
+        .arg(&route_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let routed_json: Value = serde_json::from_slice(&routed).unwrap();
+    assert_eq!(
+        routed_json["result"]["schema_version"],
+        "forge.interactive.route.v1"
+    );
+    assert_eq!(routed_json["result"]["routing_decision"], "direct_answer");
+    assert_eq!(routed_json["result"]["workflow_created"], false);
+}
+
+#[test]
+fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.home"),
+        "the packaged Forge skill should expose interactive home state through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.route"),
+        "the packaged Forge skill should teach agents to route conversational input through Forge"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge mcp call forge.interactive.route"),
+        "the packaged Forge skill should include a callable interactive route example"
+    );
+}
+
+#[test]
 fn human_interaction_choice_gate_pauses_run_and_surfaces_pending_state() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
