@@ -274,7 +274,7 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
             "research_artifact_baseline",
             "Research artifact baseline",
             "groundwork",
-            "Cycle 34 adds the bounded concurrent WorkerPool (forge.worker_pool.v1) as reusable research-and-execution infrastructure. The WorkerPool provides configurable concurrency, cancellation, backpressure reporting, and wave-level scheduling — directly usable for batched research, parallel page inspection, artifact generation, and executor handoff preparation. CLI contract tests and unit tests prove wave scheduling, backpressure detection, failure handling, and schema stability. Research topics (Penpot, Stitch, v0, AGUI protocols, Remotion, OBS) are documented in the milestone document and scheduler/loop/subflow validation reports.",
+            "Cycle 4 adds the bounded concurrent WorkerPool (forge.worker_pool.v1) as reusable research-and-execution infrastructure. The WorkerPool provides configurable concurrency, cancellation, backpressure reporting, and wave-level scheduling — directly usable for batched research, parallel page inspection, artifact generation, and executor handoff preparation. CLI contract tests and unit tests prove wave scheduling, backpressure detection, failure handling, and schema stability. Research topics (Penpot, Stitch, v0, AGUI protocols, Remotion, OBS) are documented in the scheduler/loop/subflow validation reports and milestone document.",
             "Need source-grounded comparison report with actionable Forge validation gates and workflow templates before 0.5 promotion.",
         ),
         capability(
