@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 pub fn ir_schema_version() -> String {
@@ -521,6 +521,8 @@ pub struct TokenCollection {
     pub tokens: Vec<DesignToken>,
     #[serde(default)]
     pub semantic_aliases: Vec<SemanticAlias>,
+    #[serde(default)]
+    pub modes: Vec<TokenMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -529,6 +531,472 @@ pub struct SemanticAlias {
     pub resolves_to: String,
     #[serde(default)]
     pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenMode {
+    pub name: String,
+    #[serde(default)]
+    pub overrides: Vec<TokenOverride>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenOverride {
+    pub token_name: String,
+    pub value: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenResolutionReport {
+    pub schema_version: String,
+    pub collection_name: String,
+    pub mode: Option<String>,
+    pub resolved_tokens: Vec<ResolvedToken>,
+    pub unresolved_aliases: Vec<UnresolvedTokenAlias>,
+    pub impact_preview: TokenImpactPreview,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolvedToken {
+    pub name: String,
+    pub value: String,
+    pub token_type: String,
+    pub source: String,
+    pub resolves_to: Option<String>,
+    pub applied_overrides: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UnresolvedTokenAlias {
+    pub name: String,
+    pub resolves_to: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenImpactPreview {
+    pub schema_version: String,
+    pub affected_token_count: usize,
+    pub affected_artifact_count: usize,
+    pub references: Vec<TokenReference>,
+    pub possible_regressions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenReference {
+    pub artifact_id: String,
+    pub artifact_title: String,
+    pub artifact_kind: String,
+    pub path: String,
+    pub token_name: String,
+    pub reference_kind: String,
+}
+
+pub fn resolve_token_collection(
+    collection: &TokenCollection,
+    mode: Option<&str>,
+    artifacts: &[CreativeArtifact],
+) -> TokenResolutionReport {
+    let mode = mode
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let token_map = collection
+        .tokens
+        .iter()
+        .map(|token| (token.name.as_str(), token))
+        .collect::<BTreeMap<_, _>>();
+    let alias_map = collection
+        .semantic_aliases
+        .iter()
+        .map(|alias| (alias.name.as_str(), alias))
+        .collect::<BTreeMap<_, _>>();
+    let selected_mode = mode
+        .as_deref()
+        .and_then(|mode_name| collection.modes.iter().find(|mode| mode.name == mode_name));
+    let overrides = selected_mode
+        .map(|mode| {
+            mode.overrides
+                .iter()
+                .map(|item| (item.token_name.as_str(), item))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let mut resolved_tokens = collection
+        .tokens
+        .iter()
+        .map(|token| {
+            let (value, applied_overrides) =
+                token_value_with_override(token, &overrides, mode.as_deref());
+            ResolvedToken {
+                name: token.name.clone(),
+                value,
+                token_type: token.token_type.as_str().to_string(),
+                source: "raw_token".to_string(),
+                resolves_to: Some(token.name.clone()),
+                applied_overrides,
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut unresolved_aliases = Vec::new();
+
+    for alias in &collection.semantic_aliases {
+        let mut seen = BTreeSet::new();
+        match resolve_token_name(
+            &alias.resolves_to,
+            &token_map,
+            &alias_map,
+            &overrides,
+            mode.as_deref(),
+            &mut seen,
+        ) {
+            Ok(resolved) => resolved_tokens.push(ResolvedToken {
+                name: alias.name.clone(),
+                value: resolved.value,
+                token_type: resolved.token_type,
+                source: "semantic_alias".to_string(),
+                resolves_to: Some(resolved.raw_name),
+                applied_overrides: resolved.applied_overrides,
+            }),
+            Err(reason) => unresolved_aliases.push(UnresolvedTokenAlias {
+                name: alias.name.clone(),
+                resolves_to: alias.resolves_to.clone(),
+                reason,
+            }),
+        }
+    }
+
+    resolved_tokens.sort_by(|left, right| left.name.cmp(&right.name));
+    let known_names = known_token_names(collection);
+    let impact_preview = preview_token_impact(artifacts, &known_names);
+
+    TokenResolutionReport {
+        schema_version: "forge.tokens.resolution.v1".to_string(),
+        collection_name: collection.name.clone(),
+        mode,
+        resolved_tokens,
+        unresolved_aliases,
+        impact_preview,
+    }
+}
+
+pub fn preview_token_change_impact(
+    collection: &TokenCollection,
+    artifacts: &[CreativeArtifact],
+    token_name: &str,
+) -> TokenImpactPreview {
+    let mut names = BTreeSet::from([token_name.to_string()]);
+    let token_map = collection
+        .tokens
+        .iter()
+        .map(|token| (token.name.as_str(), token))
+        .collect::<BTreeMap<_, _>>();
+    let alias_map = collection
+        .semantic_aliases
+        .iter()
+        .map(|alias| (alias.name.as_str(), alias))
+        .collect::<BTreeMap<_, _>>();
+
+    for alias in &collection.semantic_aliases {
+        let mut seen = BTreeSet::new();
+        if let Ok(resolved) = resolve_token_name(
+            &alias.resolves_to,
+            &token_map,
+            &alias_map,
+            &BTreeMap::new(),
+            None,
+            &mut seen,
+        ) {
+            if resolved.raw_name == token_name {
+                names.insert(alias.name.clone());
+            }
+        }
+    }
+
+    preview_token_impact(artifacts, &names)
+}
+
+fn known_token_names(collection: &TokenCollection) -> BTreeSet<String> {
+    collection
+        .tokens
+        .iter()
+        .map(|token| token.name.clone())
+        .chain(
+            collection
+                .semantic_aliases
+                .iter()
+                .map(|alias| alias.name.clone()),
+        )
+        .collect()
+}
+
+struct ResolvedTokenValue {
+    raw_name: String,
+    value: String,
+    token_type: String,
+    applied_overrides: Vec<String>,
+}
+
+fn resolve_token_name(
+    name: &str,
+    token_map: &BTreeMap<&str, &DesignToken>,
+    alias_map: &BTreeMap<&str, &SemanticAlias>,
+    overrides: &BTreeMap<&str, &TokenOverride>,
+    mode: Option<&str>,
+    seen: &mut BTreeSet<String>,
+) -> std::result::Result<ResolvedTokenValue, String> {
+    if let Some(token) = token_map.get(name) {
+        let (value, applied_overrides) = token_value_with_override(token, overrides, mode);
+        return Ok(ResolvedTokenValue {
+            raw_name: token.name.clone(),
+            value,
+            token_type: token.token_type.as_str().to_string(),
+            applied_overrides,
+        });
+    }
+
+    let Some(alias) = alias_map.get(name) else {
+        return Err(format!("token or alias not found: {name}"));
+    };
+    if !seen.insert(alias.name.clone()) {
+        return Err(format!("semantic alias cycle detected at {}", alias.name));
+    }
+    resolve_token_name(
+        &alias.resolves_to,
+        token_map,
+        alias_map,
+        overrides,
+        mode,
+        seen,
+    )
+}
+
+fn token_value_with_override(
+    token: &DesignToken,
+    overrides: &BTreeMap<&str, &TokenOverride>,
+    mode: Option<&str>,
+) -> (String, Vec<String>) {
+    overrides
+        .get(token.name.as_str())
+        .map(|override_value| {
+            (
+                override_value.value.clone(),
+                mode.map(|name| vec![format!("mode:{name}")])
+                    .unwrap_or_default(),
+            )
+        })
+        .unwrap_or_else(|| (token.value.clone(), Vec::new()))
+}
+
+fn preview_token_impact(
+    artifacts: &[CreativeArtifact],
+    token_names: &BTreeSet<String>,
+) -> TokenImpactPreview {
+    let mut references = Vec::new();
+    for artifact in artifacts {
+        collect_artifact_token_references(artifact, token_names, &mut references);
+    }
+    references.sort_by(|left, right| {
+        left.artifact_id
+            .cmp(&right.artifact_id)
+            .then(left.path.cmp(&right.path))
+            .then(left.token_name.cmp(&right.token_name))
+    });
+    let affected_tokens = references
+        .iter()
+        .map(|reference| reference.token_name.clone())
+        .collect::<BTreeSet<_>>();
+    let affected_artifacts = references
+        .iter()
+        .map(|reference| reference.artifact_id.clone())
+        .collect::<BTreeSet<_>>();
+    let possible_regressions = if references.is_empty() {
+        Vec::new()
+    } else {
+        vec![
+            "Run design quality, accessibility and export-fidelity gates before applying broad token changes.".to_string(),
+        ]
+    };
+
+    TokenImpactPreview {
+        schema_version: "forge.tokens.impact_preview.v1".to_string(),
+        affected_token_count: affected_tokens.len(),
+        affected_artifact_count: affected_artifacts.len(),
+        references,
+        possible_regressions,
+    }
+}
+
+fn collect_artifact_token_references(
+    artifact: &CreativeArtifact,
+    token_names: &BTreeSet<String>,
+    references: &mut Vec<TokenReference>,
+) {
+    match &artifact.content {
+        CreativeContent::Screen(screen) => {
+            push_if_token(
+                artifact,
+                "content.background",
+                &screen.background,
+                "screen_background",
+                token_names,
+                references,
+            );
+            for (index, element) in screen.elements.iter().enumerate() {
+                for (key, value) in &element.props {
+                    push_if_token(
+                        artifact,
+                        &format!("content.elements[{index}].props.{key}"),
+                        value,
+                        "screen_element_prop",
+                        token_names,
+                        references,
+                    );
+                }
+            }
+        }
+        CreativeContent::Whiteboard(board) => {
+            push_if_token(
+                artifact,
+                "content.background",
+                &board.background,
+                "whiteboard_background",
+                token_names,
+                references,
+            );
+            for (index, note) in board.sticky_notes.iter().enumerate() {
+                push_if_token(
+                    artifact,
+                    &format!("content.sticky_notes[{index}].color"),
+                    &note.color,
+                    "sticky_note_color",
+                    token_names,
+                    references,
+                );
+            }
+            for (index, drawing) in board.drawings.iter().enumerate() {
+                push_if_token(
+                    artifact,
+                    &format!("content.drawings[{index}].stroke_color"),
+                    &drawing.stroke_color,
+                    "drawing_stroke",
+                    token_names,
+                    references,
+                );
+            }
+        }
+        CreativeContent::Document(document) => {
+            for (key, value) in &document.front_matter {
+                push_if_token(
+                    artifact,
+                    &format!("content.front_matter.{key}"),
+                    value,
+                    "document_front_matter",
+                    token_names,
+                    references,
+                );
+            }
+        }
+        CreativeContent::SlideDeck(deck) => {
+            for (slide_index, slide) in deck.slides.iter().enumerate() {
+                for (content_index, content) in slide.content.iter().enumerate() {
+                    for (key, value) in &content.styling {
+                        push_if_token(
+                            artifact,
+                            &format!(
+                                "content.slides[{slide_index}].content[{content_index}].styling.{key}"
+                            ),
+                            value,
+                            "slide_styling",
+                            token_names,
+                            references,
+                        );
+                    }
+                }
+            }
+        }
+        CreativeContent::Component(component) => {
+            for (index, token_name) in component.token_dependencies.iter().enumerate() {
+                push_reference(
+                    artifact,
+                    &format!("content.token_dependencies[{index}]"),
+                    token_name,
+                    "component_dependency",
+                    token_names,
+                    references,
+                );
+            }
+            for (state_index, state) in component.states.iter().enumerate() {
+                for (key, value) in &state.styling {
+                    push_if_token(
+                        artifact,
+                        &format!("content.states[{state_index}].styling.{key}"),
+                        value,
+                        "component_state_style",
+                        token_names,
+                        references,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn push_if_token(
+    artifact: &CreativeArtifact,
+    path: &str,
+    value: &str,
+    reference_kind: &str,
+    token_names: &BTreeSet<String>,
+    references: &mut Vec<TokenReference>,
+) {
+    if let Some(token_name) = extract_token_ref(value, token_names) {
+        push_reference(
+            artifact,
+            path,
+            &token_name,
+            reference_kind,
+            token_names,
+            references,
+        );
+    }
+}
+
+fn push_reference(
+    artifact: &CreativeArtifact,
+    path: &str,
+    token_name: &str,
+    reference_kind: &str,
+    token_names: &BTreeSet<String>,
+    references: &mut Vec<TokenReference>,
+) {
+    if !token_names.contains(token_name) {
+        return;
+    }
+    references.push(TokenReference {
+        artifact_id: artifact.id.clone(),
+        artifact_title: artifact.title.clone(),
+        artifact_kind: format!("{:?}", artifact.kind),
+        path: path.to_string(),
+        token_name: token_name.to_string(),
+        reference_kind: reference_kind.to_string(),
+    });
+}
+
+fn extract_token_ref(value: &str, token_names: &BTreeSet<String>) -> Option<String> {
+    let trimmed = value.trim();
+    if token_names.contains(trimmed) {
+        return Some(trimmed.to_string());
+    }
+    trimmed
+        .strip_prefix("{token:")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .map(str::trim)
+        .filter(|token| token_names.contains(*token))
+        .map(str::to_string)
 }
 
 // -- Patch-by-Intent --

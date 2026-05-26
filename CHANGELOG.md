@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.125 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 39: first Forge-owned design-token resolution engine for the Forge 0.5 creative runtime groundwork.
+- `TokenCollection` now supports mode overrides through `TokenMode` and `TokenOverride`, while preserving backwards-compatible serde defaults for existing workflow state.
+- Added `resolve_token_collection` with raw token resolution, semantic alias resolution, optional mode override precedence and impact preview references across screens, whiteboards, documents, slide decks and component manifests.
+- Added `forge workflow resolve-tokens` and `forge workflow patch-token` so AI executors can request bounded token diffs instead of rewriting whole creative artifacts.
+- Added MCP tools `forge.tokens.resolve` and `forge.tokens.patch` for agent-facing token resolution and patch-by-intent operations.
+- `forge status --workflow ... --output json` now exposes a `forge.tokens.workflow_summary.v1` token summary with token, semantic alias and mode counts.
+
+### Changed
+
+- The package version is now `0.4.125`.
+- `forge workflow set-tokens` now creates the same minimal token baseline as the MCP token setter: `color.primary`, `spacing.md` and a semantic alias for the collection name.
+- The Forge 0.5 milestone surface now narrows the token/componentization gaps: token resolution and token patch diffs are validated groundwork, while rendered previews, token inheritance across collections and richer human edit demos remain before 0.5 promotion.
+
+### Validation
+
+- RED: `cargo test token --test forge_cli_contract` failed before implementation because `resolve_token_collection`, `TokenMode`, `TokenOverride` and token patch commands/tools did not exist.
+- GREEN: `cargo test token --test forge_cli_contract` passed after implementation.
+- RED/GREEN: `cargo test status_surfaces_creative_artifacts_and_token_presence --test forge_cli_contract` failed on missing `token_summary`, then passed after exposing the workflow token summary.
+
+### Safety
+
+- This is `0.5 groundwork`; it does not claim Forge 0.5 promotion or the full creative runtime.
+- Token patches mutate only Forge-owned SQLite workflow state, record a workflow revision and report `creative_artifacts_rewritten=false`.
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+
 ## 0.4.124 - 2026-05-25
 
 ### Fixed

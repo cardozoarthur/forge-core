@@ -16605,10 +16605,7 @@ fn token_collection_can_be_set_and_retrieved() {
     let get: Value = serde_json::from_slice(&get_output).unwrap();
     assert_eq!(get["status"], "token_collection_loaded");
     assert_eq!(get["token_collection"]["name"], "Brand Tokens");
-    assert_eq!(
-        get["token_collection"]["tokens"].as_array().unwrap().len(),
-        0
-    );
+    assert!(get["token_collection"]["tokens"].as_array().unwrap().len() >= 2);
 }
 
 #[test]
@@ -16732,6 +16729,17 @@ fn status_surfaces_creative_artifacts_and_token_presence() {
         .clone();
     let status3: Value = serde_json::from_slice(&status_output3).unwrap();
     assert!(status3["has_token_collection"].as_bool().unwrap());
+    assert_eq!(
+        status3["token_summary"]["schema_version"],
+        "forge.tokens.workflow_summary.v1"
+    );
+    assert_eq!(status3["token_summary"]["collection_name"], "Theme");
+    assert_eq!(status3["token_summary"]["token_count"], 2);
+    assert_eq!(status3["token_summary"]["semantic_alias_count"], 1);
+    assert_eq!(
+        status3["token_summary"]["resolution_schema_version"],
+        "forge.tokens.resolution.v1"
+    );
 }
 
 #[test]
@@ -17000,6 +17008,7 @@ fn design_token_serialization_round_trips_all_types() {
             resolves_to: "color.primary".to_string(),
             description: "Semantic brand color".to_string(),
         }],
+        modes: Vec::new(),
     };
 
     let json = serde_json::to_value(&collection).unwrap();
@@ -17012,6 +17021,411 @@ fn design_token_serialization_round_trips_all_types() {
     assert_eq!(restored.tokens[2].token_type, TokenType::FontFamily);
     assert_eq!(restored.tokens[1].extensions.get("scaling").unwrap(), "1.5");
     assert_eq!(restored.semantic_aliases[0].resolves_to, "color.primary");
+}
+
+#[test]
+fn design_token_resolution_handles_aliases_modes_and_artifact_impact() {
+    use forge_core::ir::{
+        resolve_token_collection, ComponentSpec, CreativeArtifact, CreativeContent, DesignToken,
+        ScreenElement, ScreenSpec, SemanticAlias, TokenCollection, TokenMode, TokenOverride,
+        TokenType,
+    };
+    use std::collections::BTreeMap;
+
+    let collection = TokenCollection {
+        schema_version: forge_core::ir::ir_schema_version(),
+        name: "Product Tokens".to_string(),
+        description: "Mode-aware token test".to_string(),
+        tokens: vec![
+            DesignToken {
+                name: "color.brand.primary".to_string(),
+                value: "#2563EB".to_string(),
+                token_type: TokenType::Color,
+                description: String::new(),
+                group: "color".to_string(),
+                extensions: BTreeMap::new(),
+            },
+            DesignToken {
+                name: "spacing.md".to_string(),
+                value: "16px".to_string(),
+                token_type: TokenType::Spacing,
+                description: String::new(),
+                group: "spacing".to_string(),
+                extensions: BTreeMap::new(),
+            },
+        ],
+        semantic_aliases: vec![SemanticAlias {
+            name: "button.background.default".to_string(),
+            resolves_to: "color.brand.primary".to_string(),
+            description: String::new(),
+        }],
+        modes: vec![TokenMode {
+            name: "dark".to_string(),
+            overrides: vec![TokenOverride {
+                token_name: "color.brand.primary".to_string(),
+                value: "#60A5FA".to_string(),
+                reason: "dark mode contrast".to_string(),
+            }],
+        }],
+    };
+    let component = CreativeArtifact::new_component(
+        "Action Button",
+        ComponentSpec {
+            schema_version: forge_core::ir::ir_schema_version(),
+            name: "Button".to_string(),
+            description: String::new(),
+            props: Vec::new(),
+            variants: Vec::new(),
+            states: Vec::new(),
+            slots: Vec::new(),
+            token_dependencies: vec![
+                "button.background.default".to_string(),
+                "spacing.md".to_string(),
+            ],
+            code_template: None,
+        },
+    );
+    let screen = CreativeArtifact::new_screen(
+        "Home",
+        ScreenSpec {
+            schema_version: forge_core::ir::ir_schema_version(),
+            width_px: 1440,
+            height_px: 900,
+            background: "{token:color.brand.primary}".to_string(),
+            breakpoints: Vec::new(),
+            elements: vec![ScreenElement {
+                id: "cta".to_string(),
+                component_ref: "Button".to_string(),
+                x: 100.0,
+                y: 100.0,
+                width: 160.0,
+                height: 48.0,
+                props: BTreeMap::from([
+                    (
+                        "background".to_string(),
+                        "{token:button.background.default}".to_string(),
+                    ),
+                    ("label".to_string(), "Apply now".to_string()),
+                ]),
+                visible: true,
+                locked: false,
+                layer: 1,
+            }],
+            interactions: Vec::new(),
+        },
+    );
+    assert!(matches!(screen.content, CreativeContent::Screen(_)));
+
+    let report = resolve_token_collection(&collection, Some("dark"), &[component, screen]);
+
+    assert_eq!(report.schema_version, "forge.tokens.resolution.v1");
+    assert_eq!(report.mode.as_deref(), Some("dark"));
+    assert_eq!(report.unresolved_aliases.len(), 0);
+    let alias = report
+        .resolved_tokens
+        .iter()
+        .find(|token| token.name == "button.background.default")
+        .unwrap();
+    assert_eq!(alias.value, "#60A5FA");
+    assert_eq!(alias.resolves_to.as_deref(), Some("color.brand.primary"));
+    assert_eq!(alias.applied_overrides, vec!["mode:dark"]);
+    assert_eq!(report.impact_preview.affected_artifact_count, 2);
+    assert!(report
+        .impact_preview
+        .references
+        .iter()
+        .any(
+            |reference| reference.reference_kind == "component_dependency"
+                && reference.token_name == "button.background.default"
+        ));
+    assert!(report
+        .impact_preview
+        .references
+        .iter()
+        .any(|reference| reference.path == "content.elements[0].props.background"));
+}
+
+#[test]
+fn workflow_patch_token_by_intent_updates_only_tokens_and_preserves_creative_artifacts() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Token patch demo",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    let workflow_id = plan["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "set-tokens",
+            "--workflow",
+            workflow_id,
+            "--name",
+            "Brand",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    let attached = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "attach-creative",
+            "--workflow",
+            workflow_id,
+            "--title",
+            "Hero Screen",
+            "--kind",
+            "screen",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let attach_json: Value = serde_json::from_slice(&attached).unwrap();
+    let artifact_id = attach_json["artifact"]["id"].as_str().unwrap();
+    let before = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "inspect-creative",
+            "--workflow",
+            workflow_id,
+            "--artifact",
+            artifact_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let before_json: Value = serde_json::from_slice(&before).unwrap();
+
+    let patched = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "patch-token",
+            "--workflow",
+            workflow_id,
+            "--token",
+            "color.primary",
+            "--value",
+            "#111827",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let patch_json: Value = serde_json::from_slice(&patched).unwrap();
+    assert_eq!(patch_json["status"], "token_patched");
+    assert_eq!(patch_json["token_name"], "color.primary");
+    assert_eq!(patch_json["old_value"], "#3B82F6");
+    assert_eq!(patch_json["new_value"], "#111827");
+    assert_eq!(patch_json["creative_artifacts_rewritten"], false);
+    assert_eq!(
+        patch_json["patch"]["changes"][0]["path"],
+        "token_collection.tokens[color.primary].value"
+    );
+    assert_eq!(
+        patch_json["impact_preview"]["schema_version"],
+        "forge.tokens.impact_preview.v1"
+    );
+
+    let resolved = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "resolve-tokens",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let resolved_json: Value = serde_json::from_slice(&resolved).unwrap();
+    assert_eq!(resolved_json["status"], "token_resolution_ready");
+    assert!(resolved_json["resolution"]["resolved_tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|token| token["name"] == "color.primary" && token["value"] == "#111827"));
+    assert!(resolved_json["resolution"]["resolved_tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|token| token["name"] == "semantic.Brand" && token["value"] == "#111827"));
+
+    let after = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "inspect-creative",
+            "--workflow",
+            workflow_id,
+            "--artifact",
+            artifact_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let after_json: Value = serde_json::from_slice(&after).unwrap();
+    assert_eq!(after_json["artifact"], before_json["artifact"]);
+}
+
+#[test]
+fn mcp_tools_manifest_and_calls_expose_token_resolution_and_patch() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "MCP token patch demo",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    let workflow_id = plan["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "set-tokens",
+            "--workflow",
+            workflow_id,
+            "--name",
+            "AgentTokens",
+            "--origin",
+            "forge_cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let manifest = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    for name in ["forge.tokens.resolve", "forge.tokens.patch"] {
+        find_mcp_tool(&manifest_json, name);
+    }
+
+    let patch_input = format!(
+        r##"{{"workflow_id":"{workflow_id}","token_name":"color.primary","value":"#0F172A","origin":"mcp_test"}}"##
+    );
+    let patched = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.tokens.patch",
+            "--input",
+            &patch_input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let patched_json: Value = serde_json::from_slice(&patched).unwrap();
+    assert_eq!(patched_json["result"]["status"], "token_patched");
+    assert_eq!(patched_json["result"]["new_value"], "#0F172A");
+
+    let resolve_input = format!(r#"{{"workflow_id":"{workflow_id}"}}"#);
+    let resolved = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.tokens.resolve",
+            "--input",
+            &resolve_input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let resolved_json: Value = serde_json::from_slice(&resolved).unwrap();
+    assert_eq!(resolved_json["result"]["status"], "token_resolution_ready");
+    assert!(resolved_json["result"]["resolution"]["resolved_tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|token| token["name"] == "color.primary" && token["value"] == "#0F172A"));
 }
 
 #[test]

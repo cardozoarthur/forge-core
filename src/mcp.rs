@@ -24,8 +24,8 @@ use crate::storage::ForgeStore;
 use crate::validation::{validate_workflow, ValidationReport};
 use crate::workflow::{
     attach_creative_artifact, attach_workflow_artifact, get_workflow_token_collection,
-    inspect_creative_artifact, list_creative_artifacts, set_workflow_token_collection,
-    update_workflow_goal,
+    inspect_creative_artifact, list_creative_artifacts, patch_workflow_token,
+    resolve_workflow_tokens, set_workflow_token_collection, update_workflow_goal,
 };
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -286,12 +286,21 @@ struct CreativeAttachInput {
 #[derive(Debug, Deserialize)]
 struct TokensGetInput {
     workflow_id: String,
+    mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TokensSetInput {
     workflow_id: String,
     name: String,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokensPatchInput {
+    workflow_id: String,
+    token_name: String,
+    value: String,
     origin: Option<String>,
 }
 
@@ -770,6 +779,18 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.tokens.resolve",
+                "Resolve Design Tokens",
+                "Resolve raw tokens, semantic aliases and optional mode overrides, then return impact references across creative artifacts.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("mode", "string", "optional token mode, for example dark"),
+                ], &["workflow_id"]),
+                "forge.tokens.resolve.v1",
+                &["forge", "workflow", "resolve-tokens", "--workflow", "<workflow-id>", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.tokens.set",
                 "Set Design Tokens",
                 "Set or replace the design token collection on a workflow with a minimal token set.",
@@ -780,6 +801,20 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &["workflow_id", "name"]),
                 "forge.tokens.set.v1",
                 &["forge", "workflow", "set-tokens", "--workflow", "<workflow-id>", "--name", "<name>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.tokens.patch",
+                "Patch Design Token",
+                "Apply a targeted patch-by-intent to a single design token while preserving creative artifact content and token references.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("token_name", "string", "token name to patch"),
+                    ("value", "string", "new token value"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id", "token_name", "value"]),
+                "forge.tokens.patch.v1",
+                &["forge", "workflow", "patch-token", "--workflow", "<workflow-id>", "--token", "<token-name>", "--value", "<value>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
         ],
@@ -1100,6 +1135,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let input: TokensGetInput = parse_input(input)?;
             serde_json::to_value(get_workflow_token_collection(store, &input.workflow_id)?)?
         }
+        "forge.tokens.resolve" => {
+            let input: TokensGetInput = parse_input(input)?;
+            serde_json::to_value(resolve_workflow_tokens(
+                store,
+                &input.workflow_id,
+                input.mode.as_deref(),
+            )?)?
+        }
         "forge.tokens.set" => {
             let input: TokensSetInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
@@ -1107,6 +1150,17 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 store,
                 &input.workflow_id,
                 make_minimal_token_collection(&input.name),
+                &origin,
+            )?)?
+        }
+        "forge.tokens.patch" => {
+            let input: TokensPatchInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(patch_workflow_token(
+                store,
+                &input.workflow_id,
+                &input.token_name,
+                &input.value,
                 &origin,
             )?)?
         }
@@ -1350,5 +1404,6 @@ fn make_minimal_token_collection(name: &str) -> TokenCollection {
             resolves_to: "color.primary".to_string(),
             description: format!("Semantic alias for {name}"),
         }],
+        modes: Vec::new(),
     }
 }
