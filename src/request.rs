@@ -10,7 +10,7 @@ use crate::registry::{
 };
 use crate::storage::ForgeStore;
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use uuid::Uuid;
@@ -26,6 +26,18 @@ pub struct RunRecord {
     pub async_run: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_executor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat_expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat_ttl_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,6 +70,7 @@ pub struct RequestStatusReport {
     pub checkpoint_count: usize,
     pub latest_checkpoint: Option<TaskCheckpoint>,
     pub task_summary: TaskStatusSummary,
+    pub activity: RunActivity,
     pub handoff_summary: ContextHandoffSummary,
     pub latest_validation_evidence: Option<ValidationEvidenceSummary>,
     pub created_at: DateTime<Utc>,
@@ -72,6 +85,31 @@ pub struct RequestResumeReport {
     pub origin: String,
     pub resumed_at: DateTime<Utc>,
     pub request_status: RequestStatusReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestHeartbeatReport {
+    pub status: String,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub previous_status: String,
+    pub origin: String,
+    pub activity: RunActivity,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunActivity {
+    pub schema_version: String,
+    pub active: bool,
+    pub heartbeat_status: String,
+    pub executor: Option<String>,
+    pub pid: Option<u32>,
+    pub summary: Option<String>,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub heartbeat_expires_at: Option<DateTime<Utc>>,
+    pub heartbeat_ttl_seconds: Option<u64>,
+    pub seconds_until_stale: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,6 +240,12 @@ pub fn create_run_record(workflow: &Workflow, origin: &str, status: &str) -> Run
         async_run: true,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        active_executor: None,
+        executor_pid: None,
+        progress_summary: None,
+        last_heartbeat_at: None,
+        heartbeat_expires_at: None,
+        heartbeat_ttl_seconds: None,
     }
 }
 
@@ -239,6 +283,95 @@ pub fn update_run_status(
     Ok(run)
 }
 
+pub fn heartbeat_request(
+    store: &ForgeStore,
+    run_id: &str,
+    executor: &str,
+    summary: &str,
+    ttl_seconds: u64,
+    pid: Option<u32>,
+    origin: &str,
+) -> Result<RequestHeartbeatReport> {
+    let mut run = load_run_record(store, run_id)?;
+    let previous_status = run.status.clone();
+    let heartbeat_at = Utc::now();
+    let ttl_seconds = ttl_seconds.max(1);
+    let expires_at = heartbeat_at + Duration::seconds(ttl_seconds.min(i64::MAX as u64) as i64);
+    run.status = "running".to_string();
+    run.active_executor = Some(executor.to_string());
+    run.executor_pid = pid;
+    run.progress_summary = Some(summary.to_string());
+    run.last_heartbeat_at = Some(heartbeat_at);
+    run.heartbeat_expires_at = Some(expires_at);
+    run.heartbeat_ttl_seconds = Some(ttl_seconds);
+    run.updated_at = heartbeat_at;
+    save_run_record(store, &run)?;
+    if let Ok(mut workflow) = store.load_workflow(&run.workflow_id) {
+        workflow.status = "running".to_string();
+        store.save_workflow(&workflow)?;
+    }
+    let activity = build_run_activity_at(&run, heartbeat_at);
+    store.record_event(
+        &run.workflow_id,
+        "async_request_heartbeat",
+        &serde_json::json!({
+            "run_id": run.run_id,
+            "origin": origin,
+            "previous_status": previous_status,
+            "new_status": run.status,
+            "executor": executor,
+            "pid": pid,
+            "summary": summary,
+            "last_heartbeat_at": heartbeat_at,
+            "heartbeat_expires_at": expires_at,
+            "heartbeat_ttl_seconds": ttl_seconds,
+        }),
+    )?;
+    Ok(RequestHeartbeatReport {
+        status: run.status,
+        run_id: run.run_id,
+        workflow_id: run.workflow_id,
+        previous_status,
+        origin: origin.to_string(),
+        activity,
+        updated_at: heartbeat_at,
+    })
+}
+
+pub fn build_run_activity(run: &RunRecord) -> RunActivity {
+    build_run_activity_at(run, Utc::now())
+}
+
+fn build_run_activity_at(run: &RunRecord, now: DateTime<Utc>) -> RunActivity {
+    let seconds_until_stale = run
+        .heartbeat_expires_at
+        .map(|expires_at| (expires_at - now).num_seconds());
+    let heartbeat_status = if run.status == "running" {
+        match run.heartbeat_expires_at {
+            Some(expires_at) if expires_at > now => "fresh",
+            Some(_) => "stale",
+            None => "missing",
+        }
+    } else if run.last_heartbeat_at.is_some() {
+        "inactive"
+    } else {
+        "not_running"
+    };
+    let active = run.status == "running" && heartbeat_status == "fresh";
+    RunActivity {
+        schema_version: "forge.run_activity.v1".to_string(),
+        active,
+        heartbeat_status: heartbeat_status.to_string(),
+        executor: run.active_executor.clone(),
+        pid: run.executor_pid,
+        summary: run.progress_summary.clone(),
+        last_heartbeat_at: run.last_heartbeat_at,
+        heartbeat_expires_at: run.heartbeat_expires_at,
+        heartbeat_ttl_seconds: run.heartbeat_ttl_seconds,
+        seconds_until_stale,
+    }
+}
+
 pub fn load_run_record(store: &ForgeStore, run_id: &str) -> Result<RunRecord> {
     Ok(serde_json::from_value(store.load_run(run_id)?)?)
 }
@@ -257,6 +390,7 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
         .last()
         .map(|revision| revision.revision)
         .unwrap_or(0);
+    let activity = build_run_activity(&run);
     Ok(RequestStatusReport {
         status: run.status,
         run_id: run.run_id,
@@ -271,6 +405,7 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
         checkpoint_count: checkpoints.len(),
         latest_checkpoint,
         task_summary,
+        activity,
         handoff_summary,
         latest_validation_evidence,
         created_at: run.created_at,
@@ -293,6 +428,7 @@ pub struct RequestListRow {
     pub status: String,
     pub goal: String,
     pub origin: String,
+    pub activity: RunActivity,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -315,20 +451,24 @@ pub fn list_requests(store: &ForgeStore, status_filter: Option<&str>) -> Result<
         .filter(|run| {
             if let Some(filter) = status_filter {
                 let normalized = filter.trim().to_ascii_lowercase();
-                if normalized == "accepted" {
-                    run.status == "accepted"
-                } else if normalized == "resumed" {
-                    run.status == "resumed"
-                } else if normalized == "cancelled" {
-                    run.status == "cancelled"
-                } else {
-                    true
-                }
+                matches!(
+                    normalized.as_str(),
+                    "accepted"
+                        | "resumed"
+                        | "running"
+                        | "completed"
+                        | "failed"
+                        | "cancelled"
+                        | "planned"
+                )
+                .then_some(run.status == normalized)
+                .unwrap_or(true)
             } else {
                 true
             }
         })
         .map(|run| RequestListRow {
+            activity: build_run_activity(&run),
             run_id: run.run_id,
             workflow_id: run.workflow_id,
             status: run.status,
@@ -339,7 +479,12 @@ pub fn list_requests(store: &ForgeStore, status_filter: Option<&str>) -> Result<
         })
         .collect();
     let total = runs.len();
-    if status_filter.is_some_and(|f| f.trim().eq_ignore_ascii_case("accepted")) {
+    if status_filter.is_some_and(|f| {
+        matches!(
+            f.trim().to_ascii_lowercase().as_str(),
+            "accepted" | "running" | "resumed"
+        )
+    }) {
         runs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     }
     Ok(RequestListReport {

@@ -13300,6 +13300,228 @@ fn request_cancel_marks_run_as_cancelled_and_records_event() {
 }
 
 #[test]
+fn request_heartbeat_marks_async_run_active_and_surfaces_it_in_status_list_and_inspect() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Self-evolution executor heartbeat visibility",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+
+    let heartbeat = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "heartbeat",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--summary",
+            "cycle 11 executor is applying a bounded patch",
+            "--ttl-seconds",
+            "600",
+            "--pid",
+            "4242",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let heartbeat_json: Value = serde_json::from_slice(&heartbeat).unwrap();
+    assert_eq!(heartbeat_json["status"], "running");
+    assert_eq!(heartbeat_json["previous_status"], "accepted");
+    assert_eq!(heartbeat_json["activity"]["active"], true);
+    assert_eq!(heartbeat_json["activity"]["heartbeat_status"], "fresh");
+    assert_eq!(heartbeat_json["activity"]["executor"], "codex");
+    assert_eq!(
+        heartbeat_json["activity"]["summary"],
+        "cycle 11 executor is applying a bounded patch"
+    );
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status_json["status"], "running");
+    assert_eq!(status_json["activity"]["active"], true);
+    assert_eq!(status_json["activity"]["heartbeat_status"], "fresh");
+    assert_eq!(
+        status_json["activity"]["summary"],
+        "cycle 11 executor is applying a bounded patch"
+    );
+
+    let running_requests = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "list",
+            "--status",
+            "running",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let running_json: Value = serde_json::from_slice(&running_requests).unwrap();
+    assert_eq!(running_json["total"], 1);
+    assert_eq!(running_json["runs"][0]["run_id"], run_id);
+    assert_eq!(running_json["runs"][0]["activity"]["active"], true);
+    assert_eq!(running_json["runs"][0]["activity"]["executor"], "codex");
+
+    let inspected = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected_json: Value = serde_json::from_slice(&inspected).unwrap();
+    assert_eq!(inspected_json["lifecycle_state"], "running");
+    assert_eq!(inspected_json["active_run_count"], 1);
+    assert_eq!(
+        inspected_json["run_statuses"],
+        serde_json::json!(["running"])
+    );
+    assert!(inspected_json["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("runs:"));
+}
+
+#[test]
+fn mcp_run_heartbeat_tool_keeps_agent_handoff_observable() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.run.heartbeat"
+            && tool["output_schema"] == "forge.request_heartbeat.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == true
+    }));
+
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge request heartbeat"),
+        "the packaged skill must teach executors to keep active runs observable"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.run.heartbeat"),
+        "the packaged skill must expose the MCP heartbeat tool"
+    );
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "MCP heartbeat test",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let input = serde_json::json!({
+        "run_id": run_id,
+        "executor": "opencode",
+        "summary": "agent heartbeat through MCP",
+        "ttl_seconds": 600,
+        "origin": "mcp"
+    })
+    .to_string();
+
+    let heartbeat = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.run.heartbeat",
+            "--input",
+            &input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let heartbeat_json: Value = serde_json::from_slice(&heartbeat).unwrap();
+    assert_eq!(heartbeat_json["status"], "ok");
+    assert_eq!(heartbeat_json["result"]["status"], "running");
+    assert_eq!(heartbeat_json["result"]["activity"]["active"], true);
+    assert_eq!(heartbeat_json["result"]["activity"]["executor"], "opencode");
+}
+
+#[test]
 fn request_cancel_with_mcp_tool_works_through_mcp_protocol() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

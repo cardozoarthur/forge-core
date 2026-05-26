@@ -8,7 +8,7 @@ use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, TaskStatus, Workflow,
 };
 use crate::interaction::{summarize_human_interactions, HumanInteractionSummary};
-use crate::request::RunRecord;
+use crate::request::{build_run_activity, RunRecord};
 use crate::schedule::{summarize_loops, summarize_schedules, LoopSummary, ScheduleSummary};
 use crate::storage::ForgeStore;
 use anyhow::Result;
@@ -76,6 +76,7 @@ pub struct WorkflowRegistryRow {
     pub workflow_id: String,
     pub run_ids: Vec<String>,
     pub run_statuses: Vec<String>,
+    pub active_run_count: usize,
     pub initial_request: String,
     pub current_goal: String,
     pub workflow_status: String,
@@ -749,6 +750,10 @@ fn registry_row(
         workflow_id: workflow.id.clone(),
         run_ids: runs.iter().map(|run| run.run_id.clone()).collect(),
         run_statuses: runs.iter().map(|run| run.status.clone()).collect(),
+        active_run_count: runs
+            .iter()
+            .filter(|run| build_run_activity(run).active)
+            .count(),
         initial_request: initial_request(workflow, runs),
         current_goal: workflow.goal.clone(),
         workflow_status: workflow.status.clone(),
