@@ -25,6 +25,9 @@ const SUBFLOW_RECURSION_POLICY: &str = "stop_on_repeated_workflow_task_path";
 pub struct WorkflowInspectionReport {
     pub status: String,
     pub workflow_id: String,
+    pub run_ids: Vec<String>,
+    pub run_statuses: Vec<String>,
+    pub active_run_count: usize,
     pub initial_request: String,
     pub current_goal: String,
     pub lifecycle_state: String,
@@ -221,6 +224,9 @@ pub fn inspect_workflow_with_focus(
     Ok(WorkflowInspectionReport {
         status: "inspected".to_string(),
         workflow_id: workflow.id,
+        run_ids: registry_row.run_ids.clone(),
+        run_statuses: registry_row.run_statuses.clone(),
+        active_run_count: registry_row.active_run_count,
         initial_request: registry_row.initial_request,
         current_goal: workflow.goal,
         lifecycle_state: registry_row.lifecycle_state,
@@ -619,6 +625,18 @@ fn render_diagram(
             "focus task: {} {} nodes: {}/{}",
             focus.task_id, focus.title, focus.node_count, workflow_task_count
         ));
+    }
+    if row.run_ids.is_empty() {
+        lines.push("runs: none".to_string());
+    } else {
+        let runs = row
+            .run_ids
+            .iter()
+            .zip(row.run_statuses.iter())
+            .map(|(run_id, status)| format!("{run_id}:{status}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        lines.push(format!("runs: {runs} active: {}", row.active_run_count));
     }
 
     for node in nodes {

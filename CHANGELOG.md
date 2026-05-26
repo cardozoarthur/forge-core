@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.135 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 11: active async-run heartbeat observability for external Codex/OpenCode-style executors.
+- Added `forge request heartbeat --run <run-id> --executor <id> --summary <text> --ttl-seconds <n> --origin <origin> --output json`, which marks a run and its workflow as `running`, records heartbeat TTL metadata and persists a traceable `async_request_heartbeat` event.
+- Added `activity` to `forge request status` and `forge request list` rows using schema `forge.run_activity.v1`, including active/stale state, executor id, optional PID, summary, heartbeat timestamps and seconds until stale.
+- Added `forge.run.heartbeat` to the MCP tool manifest so agent callers can refresh active handoff state without taking over Forge orchestration.
+- `forge inspect` now surfaces `run_ids`, `run_statuses`, `active_run_count` and a compact `runs:` line in the terminal DAG diagram, so active self-runs are visible from workflow inspection.
+- The packaged Forge skill now tells executors to send heartbeat updates while they are alive.
+
+### Validation
+
+- Added `request_heartbeat_marks_async_run_active_and_surfaces_it_in_status_list_and_inspect`, proving CLI heartbeat updates status/list/inspect visibility.
+- Added `mcp_run_heartbeat_tool_keeps_agent_handoff_observable`, proving MCP and skill exposure for the same agent-facing contract.
+
+### Safety
+
+- This change only mutates Forge-owned source, tests, skill text, changelog and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- Heartbeat summaries are caller-provided operational text and should remain short and secret-free; Forge records them as workflow events for auditability.
+
 ## 0.4.134 - 2026-05-26
 
 ### Added

@@ -19,7 +19,8 @@ use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
 use crate::request::{
-    cancel_request, list_requests, load_request_status, resume_async_request, start_async_request,
+    cancel_request, heartbeat_request, list_requests, load_request_status, resume_async_request,
+    start_async_request,
 };
 use crate::schedule::{
     aggregate_summary, build_schedule_worker_status, create_daily_goal_research_workflow,
@@ -169,6 +170,16 @@ struct RunStartInput {
 #[derive(Debug, Deserialize)]
 struct RunIdInput {
     run_id: String,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunHeartbeatInput {
+    run_id: String,
+    executor: Option<String>,
+    summary: Option<String>,
+    ttl_seconds: Option<u64>,
+    pid: Option<u32>,
     origin: Option<String>,
 }
 
@@ -560,6 +571,22 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &["run_id"]),
                 "forge.request_resume.v1",
                 &["forge", "request", "resume", "--run", "<run-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.run.heartbeat",
+                "Heartbeat Async Forge Run",
+                "Mark an async run as running, refresh its executor heartbeat TTL and keep active handoffs visible in request status, list and inspect.",
+                object_schema(&[
+                    ("run_id", "string", "run id"),
+                    ("executor", "string", "codex|opencode|skill|mcp|custom executor id"),
+                    ("summary", "string", "short progress summary without secrets"),
+                    ("ttl_seconds", "integer", "heartbeat freshness TTL"),
+                    ("pid", "integer", "optional executor process id"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["run_id"]),
+                "forge.request_heartbeat.v1",
+                &["forge", "request", "heartbeat", "--run", "<run-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -1139,6 +1166,19 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let input: RunIdInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(resume_async_request(store, &input.run_id, &origin)?)?
+        }
+        "forge.run.heartbeat" => {
+            let input: RunHeartbeatInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(heartbeat_request(
+                store,
+                &input.run_id,
+                input.executor.as_deref().unwrap_or("mcp"),
+                input.summary.as_deref().unwrap_or("executor heartbeat"),
+                input.ttl_seconds.unwrap_or(300),
+                input.pid,
+                &origin,
+            )?)?
         }
         "forge.run.status" => {
             let input: RunIdInput = parse_input(input)?;

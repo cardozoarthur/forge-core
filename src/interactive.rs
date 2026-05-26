@@ -110,7 +110,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
     let active_runs = requests
         .runs
         .iter()
-        .filter(|run| matches!(run.status.as_str(), "accepted" | "resumed"))
+        .filter(|run| run.activity.active || matches!(run.status.as_str(), "accepted" | "resumed"))
         .count();
     let scheduled_workflows = workflows
         .workflows
