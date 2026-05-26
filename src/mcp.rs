@@ -10,7 +10,7 @@ use crate::interaction::{
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::milestone::{
     build_milestone_export_demo, build_milestone_manifest, build_milestone_research,
-    build_milestone_status,
+    build_milestone_status, build_replacement_cli_demo,
 };
 use crate::multimodal::{
     build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
@@ -281,6 +281,11 @@ struct ArtifactFetchInput {
 #[derive(Debug, Deserialize)]
 struct MilestoneStatusInput {
     version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MilestoneCliDemoInput {
+    origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -865,6 +870,23 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
+                "forge.milestone.cli_demo",
+                "Generate Replacement CLI Demo",
+                "Generate deterministic Forge-first replacement-grade CLI demo evidence for coding, research/artifact and long-running async workflows without mutating external resources.",
+                object_schema(&[("origin", "string", "codex|opencode|skill|mcp")], &[]),
+                "forge.milestone.cli_demo.v1",
+                &[
+                    "forge",
+                    "milestone",
+                    "cli-demo",
+                    "--origin",
+                    "mcp",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(false, true),
+            ),
+            tool(
                 "forge.multimodal.status",
                 "Inspect Experimental Multimodal Status",
                 "List Forge-owned experimental multimodal capabilities, missing model/runtime gaps, disabled-by-default feature flag state and runtime guard requirements without accessing devices or installing models.",
@@ -1398,6 +1420,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.milestone.export_demo" => {
             serde_json::to_value(build_milestone_export_demo(store, "mcp")?)?
+        }
+        "forge.milestone.cli_demo" => {
+            let input: MilestoneCliDemoInput = parse_input(input)?;
+            serde_json::to_value(build_replacement_cli_demo(
+                store,
+                input.origin.as_deref().unwrap_or("mcp"),
+            )?)?
         }
         "forge.multimodal.status" => {
             let input: MultimodalStatusInput = parse_input(input)?;

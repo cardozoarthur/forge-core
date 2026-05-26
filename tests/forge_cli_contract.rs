@@ -81,6 +81,10 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .find(|capability| capability["id"] == "replacement_grade_cli")
         .unwrap();
     assert_eq!(replacement_cli["status"], "groundwork");
+    assert!(replacement_cli["evidence"]
+        .as_str()
+        .unwrap()
+        .contains("forge milestone cli-demo"));
     assert!(replacement_cli["gap_before_promotion"]
         .as_str()
         .unwrap()
@@ -298,6 +302,14 @@ fn milestone_boundary_document_matches_validated_export_demo_runtime_state() {
     assert!(
         docs.contains("forge multimodal demo-plan"),
         "the visible 0.5 milestone boundary should point to guarded demo-plan evidence"
+    );
+    assert!(
+        docs.contains("forge milestone cli-demo"),
+        "the visible 0.5 milestone boundary should point to replacement-grade CLI demo evidence"
+    );
+    assert!(
+        docs.contains("forge.milestone.cli_demo"),
+        "the visible 0.5 milestone boundary should expose the MCP CLI demo surface"
     );
 }
 
@@ -928,6 +940,167 @@ fn mcp_exposes_milestone_export_demo_tool() {
         "forge.milestone.export_demo.v1"
     );
     assert_eq!(json["result"]["status"], "export_demo_generated");
+}
+
+#[test]
+fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "milestone",
+            "cli-demo",
+            "--origin",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.milestone.cli_demo.v1");
+    assert_eq!(json["status"], "replacement_cli_demo_generated");
+    assert_eq!(json["milestone"], "0.5");
+    assert_eq!(json["capability_id"], "replacement_grade_cli");
+    assert_eq!(json["promotion_ready"], false);
+    assert_eq!(json["external_resources_mutated"], false);
+    assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
+
+    let flows = json["flows"].as_array().unwrap();
+    assert_eq!(flows.len(), 3);
+    for kind in ["coding_task", "research_artifact", "long_running_async"] {
+        let flow = flows.iter().find(|flow| flow["kind"] == kind).unwrap();
+        assert_eq!(flow["completed_through_forge"], true);
+        assert!(flow["commands"].as_array().unwrap().len() >= 3);
+        assert!(flow["validation_evidence"].as_array().unwrap().len() >= 2);
+    }
+
+    let coding = flows
+        .iter()
+        .find(|flow| flow["kind"] == "coding_task")
+        .unwrap();
+    assert!(coding["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("diff_review_required")));
+    assert!(coding["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --output json"
+        )));
+
+    let research = flows
+        .iter()
+        .find(|flow| flow["kind"] == "research_artifact")
+        .unwrap();
+    assert!(research["artifact_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|path| path.as_str().unwrap().ends_with("goal-hackathon-report.md")));
+    assert!(research["artifact_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|path| path
+            .as_str()
+            .unwrap()
+            .ends_with("goal-hackathon-report.pdf")));
+    assert!(research["artifact_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|path| path
+            .as_str()
+            .unwrap()
+            .ends_with("telegram-delivery-hackathon.json")));
+
+    let async_flow = flows
+        .iter()
+        .find(|flow| flow["kind"] == "long_running_async")
+        .unwrap();
+    let run_id = async_flow["run_id"].as_str().unwrap();
+    assert!(run_id.starts_with("run_"));
+    assert_eq!(async_flow["run_status"], "running");
+    assert_eq!(async_flow["activity"]["heartbeat_status"], "fresh");
+
+    let run_status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&run_status).unwrap();
+    assert_eq!(status_json["status"], "running");
+    assert_eq!(status_json["activity"]["active"], true);
+}
+
+#[test]
+fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge milestone cli-demo"),
+        "the packaged Forge skill should teach agents how to generate replacement CLI demo evidence"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.milestone.cli_demo"),
+        "the packaged Forge skill should expose the MCP replacement CLI demo tool"
+    );
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.milestone.cli_demo"
+            && tool["output_schema"] == "forge.milestone.cli_demo.v1"
+            && tool["async_safe"] == false
+            && tool["mutates_workflow"] == true
+    }));
+
+    let call = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.milestone.cli_demo"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&call).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(
+        json["result"]["schema_version"],
+        "forge.milestone.cli_demo.v1"
+    );
+    assert_eq!(json["result"]["capability_id"], "replacement_grade_cli");
+    assert_eq!(json["result"]["promotion_ready"], false);
 }
 
 #[test]

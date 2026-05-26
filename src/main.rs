@@ -31,7 +31,7 @@ use forge_core::lease::{acquire_task_lease, release_task_lease};
 use forge_core::mcp::{call_mcp_tool, mcp_tools_manifest};
 use forge_core::milestone::{
     build_milestone_export_demo, build_milestone_manifest, build_milestone_research,
-    build_milestone_status,
+    build_milestone_status, build_replacement_cli_demo,
 };
 use forge_core::multimodal::{
     build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
@@ -895,6 +895,13 @@ enum MilestoneCommands {
     },
     #[command(name = "export-demo")]
     ExportDemo {
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    #[command(name = "cli-demo")]
+    CliDemo {
         #[arg(long, default_value = "forge_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -2168,6 +2175,12 @@ fn run() -> Result<i32> {
             MilestoneCommands::ExportDemo { origin, output } => {
                 let store = ForgeStore::open(cli.store)?;
                 let report = build_milestone_export_demo(&store, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MilestoneCommands::CliDemo { origin, output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_replacement_cli_demo(&store, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
             }

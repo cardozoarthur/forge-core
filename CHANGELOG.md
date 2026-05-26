@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.144 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 21: added deterministic replacement-grade Forge CLI demo evidence as `0.5 groundwork`.
+- Added `forge milestone cli-demo --origin <origin> --output json`, returning `forge.milestone.cli_demo.v1` with three Forge-first flows:
+  - coding task flow with bounded context, executor handoff, diff-review artifact lineage, validation and inspect commands;
+  - research/artifact flow using the canonical `hackathon` daily Goal workflow to produce Markdown, PDF and Telegram delivery records without exposing secrets;
+  - long-running async flow using `forge request start`, heartbeat, status/list/inspect visibility and a fresh run activity record.
+- Added MCP tool `forge.milestone.cli_demo` so agents can request the same replacement CLI demo evidence without taking over orchestration.
+- Updated the packaged Forge skill and visible 0.5 milestone boundary to point to the CLI demo surface while keeping `replacement_grade_cli` as `groundwork`.
+- Updated package/readme version to `0.4.144` for this 0.4.x groundwork increment.
+
+### Validation
+
+- RED observed first with `cargo test --test forge_cli_contract milestone_cli_demo_generates_replacement_grade_cli_flow_evidence -- --exact`: the CLI rejected the missing `cli-demo` subcommand.
+- RED observed for agent/docs guidance with `cargo test --test forge_cli_contract mcp_exposes_replacement_cli_demo_tool_and_skill_guidance -- --exact` and `cargo test --test forge_cli_contract milestone_boundary_document_matches_validated_export_demo_runtime_state -- --exact`.
+- RED observed for milestone metadata with `cargo test --test forge_cli_contract milestone_status_surfaces_05_boundary_and_promotion_gate -- --exact`: the replacement-grade CLI evidence did not mention `forge milestone cli-demo`.
+- Targeted GREEN passed for the new CLI/MCP/docs/status contracts and `cargo test --test forge_cli_contract milestone -- --nocapture`.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` and `cargo build --release`.
+- Release smokes passed: `./target/release/forge plan --goal "Create a delivery platform" --output json`, `./target/release/forge skill install --target codex --target opencode --output json --home /tmp/forge-skill-smoke-0.4.144-2`, `./target/release/forge milestone cli-demo --origin codex --output json` and `./target/release/forge mcp tools --output json`.
+
+### Safety
+
+- This change only mutates Forge-owned source, tests, changelog, skill guidance, milestone docs and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- The new demo is deterministic evidence and explicitly keeps Forge 0.5 promotion blocked until native file editing, in-TUI diff/patch review, provider/session management and permission UX are validated.
+- Default `cargo install --path . --force` was attempted and blocked by read-only `/home/arthur/.cargo`; validated fallback install succeeded inside `.forge/local-install` and reports `forge 0.4.144`.
+
 ## 0.4.143 - 2026-05-26
 
 ### Added
