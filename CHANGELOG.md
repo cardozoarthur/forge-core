@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.134 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 10: lifecycle observability for active self-evolution runs. `forge list --lifecycle running` now surfaces self-evolution workflows that are currently executing, instead of showing only idle/planned state.
+- In `src/self_evolve.rs`: `run_self_evolution` now persists workflow status as "running" before each cycle executes and as "completed"/"failed" after each cycle completes, matching the existing run-record lifecycle.
+- In `src/registry.rs`: `derive_lifecycle_state` now recognizes `workflow.status == "running"` as a lifecycle state, covering self-evolution workflows where no individual tasks are running but the workflow-level execution is active.
+
+### Validation
+
+- Added `list_filters_workflow_registry_by_workflow_level_running_status` contract test proving that a workflow with `workflow.status == "running"` surfaces correctly in `forge list --lifecycle running` with lifecycle_state "running" and running=true, and transitions back to non-running lifecycle when status changes to "completed".
+
+### Safety
+
+- Only mutates Forge-owned source, tests, and CHANGELOG.
+- No Docker, Kubernetes, Knative, Telegram, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- Existing lifecycle filters (`--lifecycle running`, `--lifecycle non-running`, `--lifecycle all`) continue to work identically for task-level running workflows; the new code path only adds coverage for the self-evolution workflow-level running state.
+
 ## 0.4.133 - 2026-05-26
 
 ### Added
