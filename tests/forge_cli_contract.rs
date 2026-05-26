@@ -219,6 +219,36 @@ fn milestone_manifest_surfaces_requirements_evidence_gaps_and_promotion_decision
 }
 
 #[test]
+fn milestone_boundary_document_matches_validated_export_demo_runtime_state() {
+    let docs = fs::read_to_string("docs/forge-0.5-milestone.md").unwrap();
+
+    assert!(
+        docs.contains("| Export/demo baseline | validated |"),
+        "the visible 0.5 milestone boundary must match the runtime manifest after export-demo validation"
+    );
+    assert!(
+        docs.contains("forge milestone export-demo"),
+        "the milestone boundary should expose the native export-demo command as validation evidence"
+    );
+    assert!(
+        docs.contains("promotion decision"),
+        "the milestone boundary should explain that promotion is a gated runtime decision"
+    );
+}
+
+#[test]
+fn packaged_skill_mentions_export_demo_agent_surface() {
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge milestone export-demo"),
+        "the packaged Forge skill should teach agents how to generate export/demo evidence"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.milestone.export_demo"),
+        "the packaged Forge skill should expose the MCP export-demo tool to agent callers"
+    );
+}
+
+#[test]
 fn mcp_exposes_milestone_manifest_for_agent_release_gates() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

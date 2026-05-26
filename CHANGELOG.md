@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.131 - 2026-05-26
+
+### Changed
+
+- Self-evolution cycle 7: milestone boundary consistency guard for Forge 0.5 export/demo readiness.
+- Updated `docs/forge-0.5-milestone.md` so the visible milestone boundary matches the runtime manifest: `export_demo_baseline` is now `validated`, references `forge milestone export-demo` and explains the gated promotion decision.
+- Updated the packaged Forge skill surfaces so Codex/OpenCode agents can discover `forge milestone export-demo` and MCP tool `forge.milestone.export_demo` instead of scraping changelog/report prose.
+- Updated the README current version.
+
+### Validation
+
+- Added CLI contract coverage that fails if the milestone document falls behind the runtime export/demo state.
+- Added CLI contract coverage that fails if the packaged skill omits the export-demo CLI/MCP surface.
+
+### Safety
+
+- This change only mutates Forge-owned source, documentation and tests.
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- Passing the Forge 0.5 promotion gate still does not automatically bump the package line to `0.5`; release promotion remains an explicit human-controlled operation.
+
 ## 0.4.130 - 2026-05-26
 
 ### Added
