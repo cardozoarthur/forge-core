@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.133 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 9: opened the experimental multimodal capability track as Forge-owned runtime groundwork, disabled by default.
+- Added `forge multimodal status` to list image, OCR, detection, segmentation, image/video generation, audio, realtime vision, screen understanding, computer-use, peripheral, avatar/camera, 3D and Blender-assisted capabilities without installing models or touching devices.
+- Added `forge multimodal install-plan --capability <id>` for plan-only model/runtime install manifests with candidate models, runtime options, benchmark fields, storage policy and rollback steps.
+- Added `forge multimodal guard --capability <scope> --action <action>` to deny camera, microphone, screen, input, peripheral and related access unless the experimental flag and explicit allow are both present.
+- Added MCP tools `forge.multimodal.status`, `forge.multimodal.install_plan` and `forge.multimodal.guard` so external agents can inspect and plan multimodal capability nodes without taking over orchestration.
+
+### Validation
+
+- Added CLI/MCP contract tests proving multimodal status is disabled by default, install planning performs no installs, runtime guards require explicit opt-in, and the packaged Forge skill exposes the new agent surface.
+
+### Safety
+
+- This change only mutates Forge-owned source, documentation and tests.
+- No Docker, Kubernetes, Knative, Telegram, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- Multimodal runtime access remains experimental and disabled by default; this is 0.5+ groundwork, not a completed device-control runtime.
+
 ## 0.4.132 - 2026-05-25
 
 ### Changed

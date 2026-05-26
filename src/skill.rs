@@ -45,6 +45,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 - Use `forge schedule worker-status` or `forge.schedule.worker_status` to inspect next wakeup, scale-to-zero, bounded worker-pool capacity, cancellation safe points and backpressure before relying on tmux/systemd sleeps.
 - Inspect or route work through `forge.workflow.inspect`, `forge.context.request`, `forge.task.handoff`, `forge.workflow.attach_artifact`, `forge.workflow.update_goal`, `forge.validation.status` and `forge.artifact.fetch`.
 - Inspect Forge 0.5 release readiness through `forge.milestone.status`, the full release-gate manifest through `forge.milestone.manifest`, and the export/demo baseline through `forge.milestone.export_demo`; `groundwork`, `planned` and `blocked` capabilities prevent promotion.
+- Inspect the experimental multimodal track through `forge.multimodal.status`; generate plan-only model/runtime install manifests through `forge.multimodal.install_plan`; evaluate camera, microphone, screen, input and peripheral access through `forge.multimodal.guard` before any device or automation action.
 - MCP mutations must still go through Forge so revisions, artifact hashes, origins and validation gates are persisted.
 
 ## Safety Rules
@@ -107,6 +108,12 @@ forge artifacts --workflow <workflow-id> --output json
 forge milestone status --version 0.5 --output json
 forge milestone manifest --version 0.5 --output json
 forge milestone export-demo --origin codex --output json
+forge multimodal status --output json
+forge multimodal install-plan --capability audio_transcription --output json
+forge multimodal guard --capability camera --action access --output json
+forge mcp call forge.multimodal.status --output json
+forge mcp call forge.multimodal.install_plan --input '{"capability_id":"audio_transcription"}' --output json
+forge mcp call forge.multimodal.guard --input '{"capability":"camera","action":"access","enable_experimental":false,"allow":false}' --output json
 forge mcp call forge.milestone.status --input '{"version":"0.5"}' --output json
 forge mcp call forge.milestone.manifest --input '{"version":"0.5"}' --output json
 forge mcp call forge.milestone.export_demo --output json

@@ -12,6 +12,9 @@ use crate::milestone::{
     build_milestone_export_demo, build_milestone_manifest, build_milestone_research,
     build_milestone_status,
 };
+use crate::multimodal::{
+    build_multimodal_install_plan, build_multimodal_status, evaluate_multimodal_guard,
+};
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
@@ -266,6 +269,26 @@ struct ArtifactFetchInput {
 #[derive(Debug, Deserialize)]
 struct MilestoneStatusInput {
     version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultimodalStatusInput {
+    enable_experimental: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultimodalInstallPlanInput {
+    capability: Option<String>,
+    capability_id: Option<String>,
+    enable_experimental: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultimodalGuardInput {
+    capability: String,
+    action: String,
+    enable_experimental: Option<bool>,
+    allow: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -788,6 +811,67 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
+                "forge.multimodal.status",
+                "Inspect Experimental Multimodal Status",
+                "List Forge-owned experimental multimodal capabilities, missing model/runtime gaps, disabled-by-default feature flag state and runtime guard requirements without accessing devices or installing models.",
+                object_schema(&[
+                    ("enable_experimental", "boolean", "optional explicit experimental flag for planning output only"),
+                ], &[]),
+                "forge.multimodal.status.v1",
+                &[
+                    "forge",
+                    "multimodal",
+                    "status",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.multimodal.install_plan",
+                "Generate Multimodal Install Plan",
+                "Generate a plan-only install and benchmark manifest for one multimodal capability. This tool never downloads models or mutates local devices.",
+                object_schema(&[
+                    ("capability_id", "string", "capability id from forge.multimodal.status"),
+                    ("enable_experimental", "boolean", "optional explicit experimental flag for planning output only"),
+                ], &["capability_id"]),
+                "forge.multimodal.install_plan.v1",
+                &[
+                    "forge",
+                    "multimodal",
+                    "install-plan",
+                    "--capability",
+                    "<capability-id>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.multimodal.guard",
+                "Evaluate Multimodal Runtime Guard",
+                "Evaluate whether a camera, microphone, screen, input, peripheral, model or filesystem multimodal action is allowed under Forge's experimental opt-in policy.",
+                object_schema(&[
+                    ("capability", "string", "capability id or permission scope"),
+                    ("action", "string", "requested action such as access, capture, transcribe or automate"),
+                    ("enable_experimental", "boolean", "experimental feature flag"),
+                    ("allow", "boolean", "explicit human/runtime allow for this action"),
+                ], &["capability", "action"]),
+                "forge.multimodal.guard.v1",
+                &[
+                    "forge",
+                    "multimodal",
+                    "guard",
+                    "--capability",
+                    "<capability-or-scope>",
+                    "--action",
+                    "<action>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.creative.list",
                 "List Creative Artifacts",
                 "List creative artifacts (screens, whiteboards, documents, slide decks, components) attached to a workflow.",
@@ -1202,6 +1286,32 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.milestone.export_demo" => {
             serde_json::to_value(build_milestone_export_demo(store, "mcp")?)?
+        }
+        "forge.multimodal.status" => {
+            let input: MultimodalStatusInput = parse_input(input)?;
+            serde_json::to_value(build_multimodal_status(
+                input.enable_experimental.unwrap_or(false),
+            ))?
+        }
+        "forge.multimodal.install_plan" => {
+            let input: MultimodalInstallPlanInput = parse_input(input)?;
+            let capability = input
+                .capability_id
+                .or(input.capability)
+                .ok_or_else(|| anyhow::anyhow!("capability_id is required"))?;
+            serde_json::to_value(build_multimodal_install_plan(
+                &capability,
+                input.enable_experimental.unwrap_or(false),
+            )?)?
+        }
+        "forge.multimodal.guard" => {
+            let input: MultimodalGuardInput = parse_input(input)?;
+            serde_json::to_value(evaluate_multimodal_guard(
+                &input.capability,
+                &input.action,
+                input.enable_experimental.unwrap_or(false),
+                input.allow.unwrap_or(false),
+            )?)?
         }
         "forge.creative.list" => {
             let input: CreativeListInput = parse_input(input)?;
