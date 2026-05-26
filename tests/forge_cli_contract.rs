@@ -17349,6 +17349,7 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     assert!(text.contains("Quick actions"));
     assert!(text.contains("/status"));
     assert!(text.contains("/workflows"));
+    assert!(text.contains("/context"));
 }
 
 #[test]
@@ -17564,6 +17565,8 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         "/logs",
         "/update",
         "/workers",
+        "/context",
+        "/handoff",
         "/exit",
         "/quit",
     ] {
@@ -17590,6 +17593,22 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         .as_array()
         .unwrap()
         .contains(&Value::String("status".to_string())));
+
+    let context = find_slash_command(&json, "/context");
+    assert_eq!(context["risk_level"], "low");
+    assert_eq!(context["mutates_workflow"], false);
+    assert!(context["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("context".to_string())));
+
+    let handoff = find_slash_command(&json, "/handoff");
+    assert_eq!(handoff["risk_level"], "medium");
+    assert_eq!(handoff["mutates_workflow"], true);
+    assert!(handoff["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("handoff".to_string())));
 }
 
 #[test]

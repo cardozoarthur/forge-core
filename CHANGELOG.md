@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.153 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 31: added interactive `/context` and `/handoff` slash commands so the TUI can expose the Context Routing Engine and executor handoff path without requiring operators to leave `forge`.
+- `/context` runs the existing `forge context` path and summarizes context readiness, handoff status, route key, byte budget, routing quality and next action.
+- `/handoff` prompts for explicit approval before calling `forge task handoff`, preserving the task lease permission boundary while surfacing lease status and context route evidence.
+- Added `/context` and `/handoff` to the interactive home quick actions and slash-command catalog.
+
+### Changed
+
+- Updated replacement-grade CLI milestone evidence to mention 0.4.153 interactive context/handoff routing.
+- Updated package/readme version to `0.4.153` for this 0.4.x groundwork increment.
+
+### Validation
+
+- RED observed first with `cargo test --test forge_cli_contract interactive_slash_command_catalog_is_discoverable_and_scriptable -- --exact`: `/context` was missing from the slash-command catalog.
+- Targeted GREEN passed for `cargo test --test forge_cli_contract interactive_slash_command_catalog_is_discoverable_and_scriptable -- --exact` and `cargo test slash_context_and_handoff_commands_are_recognized`.
+
+### Safety
+
+- `/context` is read-only and delegates to existing bounded context package generation.
+- `/handoff` requires explicit human confirmation before acquiring a task lease.
+- No Docker, Kubernetes, Knative, Telegram send, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- The change remains 0.5 groundwork; Forge still needs richer in-TUI diff/patch review, provider/session management and complete end-to-end coding/research workflows before claiming replacement-grade CLI readiness.
+
 ## 0.4.152 - 2026-05-26
 
 ### Added

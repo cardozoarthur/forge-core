@@ -232,6 +232,8 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 "/validate".to_string(),
                 "/logs".to_string(),
                 "/workers".to_string(),
+                "/context".to_string(),
+                "/handoff".to_string(),
             ],
         },
         slash_commands: slash_commands(),
@@ -862,6 +864,40 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/context",
+            "Context",
+            "Build a bounded, versioned task context package before executor handoff. Use: /context --workflow <id> --task <id> --budget 1200 --strict",
+            &[
+                "forge",
+                "context",
+                "--workflow",
+                "<workflow-id>",
+                "--task",
+                "<task-id>",
+                "--strict",
+            ],
+            false,
+            "low",
+        ),
+        slash(
+            "/handoff",
+            "Handoff",
+            "Acquire a task lease and prepare an executor handoff packet after explicit approval. Use: /handoff --workflow <id> --task <id> --executor codex",
+            &[
+                "forge",
+                "task",
+                "handoff",
+                "--workflow",
+                "<workflow-id>",
+                "--task",
+                "<task-id>",
+                "--executor",
+                "<executor>",
+            ],
+            true,
+            "medium",
+        ),
+        slash(
             "/patch",
             "Patch",
             "File editing workflow: /patch plan --workflow <id> --task <id> --intent \"...\" --path <path>. Subcommands: plan, apply, revert.",
@@ -981,6 +1017,14 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
 
             if trimmed.starts_with("/patch ") {
                 dispatch_patch_command(&store, trimmed, store_path)?;
+                continue;
+            }
+            if trimmed == "/context" || trimmed.starts_with("/context ") {
+                dispatch_context_command(trimmed, store_path)?;
+                continue;
+            }
+            if trimmed == "/handoff" || trimmed.starts_with("/handoff ") {
+                dispatch_handoff_command(trimmed, store_path)?;
                 continue;
             }
 
@@ -1182,6 +1226,162 @@ fn dispatch_patch_command(
     }
 
     Ok(())
+}
+
+fn dispatch_context_command(input: &str, store_path: &std::path::Path) -> Result<()> {
+    let rest = input.trim().strip_prefix("/context").unwrap_or("").trim();
+    if rest.is_empty() {
+        println!("  Usage: /context --workflow <id> --task <id> --budget 1200 --strict");
+        return Ok(());
+    }
+
+    println!("  Context: building bounded task-local package...");
+    let store_str = store_path.to_string_lossy();
+    let args = cli_args_without_output(rest);
+    let output = Command::new(
+        std::env::args()
+            .next()
+            .unwrap_or_else(|| "forge".to_string()),
+    )
+    .args(["--store", &store_str, "context"])
+    .args(args.iter().map(String::as_str))
+    .arg("--output")
+    .arg("json")
+    .output()?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Ok(context) = serde_json::from_str::<serde_json::Value>(&stdout) {
+            println!(
+                "  Status: context_ready={}",
+                context["context_ready"].as_bool().unwrap_or(false)
+            );
+            println!(
+                "  Handoff: {}",
+                context["handoff_status"].as_str().unwrap_or("unknown")
+            );
+            println!(
+                "  Route key: {}",
+                context["routing_fingerprint"]["cache_key"]
+                    .as_str()
+                    .unwrap_or("unknown")
+            );
+            println!(
+                "  Bytes: {} / budget {}",
+                context["context_bytes"].as_u64().unwrap_or(0),
+                context["effective_budget"].as_u64().unwrap_or(0)
+            );
+            println!(
+                "  Quality: {}",
+                context["routing_quality"]["status"]
+                    .as_str()
+                    .unwrap_or("unknown")
+            );
+            println!(
+                "  Next action: {}",
+                context["next_action"]["action"]
+                    .as_str()
+                    .unwrap_or("inspect_context")
+            );
+        } else {
+            println!("  Context package generated.");
+        }
+    } else {
+        print_command_failure("context", &output);
+    }
+
+    Ok(())
+}
+
+fn dispatch_handoff_command(input: &str, store_path: &std::path::Path) -> Result<()> {
+    let rest = input.trim().strip_prefix("/handoff").unwrap_or("").trim();
+    if rest.is_empty() {
+        println!("  Usage: /handoff --workflow <id> --task <id> --executor codex --budget 1200");
+        return Ok(());
+    }
+
+    println!("  Handoff: this may acquire a task lease for the selected executor.");
+    print!("  Approve handoff lease acquisition? (y/N): ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut confirm = String::new();
+    std::io::stdin().read_line(&mut confirm)?;
+    let confirmed =
+        confirm.trim().eq_ignore_ascii_case("y") || confirm.trim().eq_ignore_ascii_case("yes");
+    if !confirmed {
+        println!("  Handoff cancelled by user.");
+        return Ok(());
+    }
+
+    let store_str = store_path.to_string_lossy();
+    let args = cli_args_without_output(rest);
+    let output = Command::new(
+        std::env::args()
+            .next()
+            .unwrap_or_else(|| "forge".to_string()),
+    )
+    .args(["--store", &store_str, "task", "handoff"])
+    .args(args.iter().map(String::as_str))
+    .arg("--output")
+    .arg("json")
+    .output()?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Ok(handoff) = serde_json::from_str::<serde_json::Value>(&stdout) {
+            println!("  Status: {}", handoff["status"].as_str().unwrap_or("ok"));
+            println!(
+                "  Allowed: {}",
+                handoff["allowed"].as_bool().unwrap_or(false)
+            );
+            println!(
+                "  Lease status: {}",
+                handoff["packet"]["lease_status"]
+                    .as_str()
+                    .unwrap_or("unknown")
+            );
+            println!(
+                "  Route key: {}",
+                handoff["packet"]["context_routing_cache_key"]
+                    .as_str()
+                    .unwrap_or("unknown")
+            );
+        } else {
+            println!("  Handoff packet generated.");
+        }
+    } else {
+        print_command_failure("handoff", &output);
+    }
+
+    Ok(())
+}
+
+fn cli_args_without_output(input: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut iter = input.split_whitespace();
+    while let Some(arg) = iter.next() {
+        if arg == "--output" {
+            let _ = iter.next();
+            continue;
+        }
+        if let Some((name, _value)) = arg.split_once('=') {
+            if name == "--output" {
+                continue;
+            }
+        }
+        args.push(arg.to_string());
+    }
+    args
+}
+
+fn print_command_failure(label: &str, output: &std::process::Output) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let message = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    println!("  {label} failed: {message}");
 }
 
 #[cfg(test)]
@@ -1450,5 +1650,25 @@ mod tests {
         // First token is always the base command in the current parser
         assert_eq!(route.name, "/patch");
         assert!(route.recognized);
+    }
+
+    #[test]
+    fn slash_context_and_handoff_commands_are_recognized() {
+        let context = route_slash_command("/context --workflow wf_1 --task task-001");
+        let route = context.slash_command.unwrap();
+        assert_eq!(route.name, "/context");
+        assert!(route.recognized);
+        assert!(!route.mutates_workflow);
+        assert_eq!(route.risk_level, "low");
+        assert!(route.equivalent_command.contains(&"context".to_string()));
+
+        let handoff =
+            route_slash_command("/handoff --workflow wf_1 --task task-001 --executor codex");
+        let route = handoff.slash_command.unwrap();
+        assert_eq!(route.name, "/handoff");
+        assert!(route.recognized);
+        assert!(route.mutates_workflow);
+        assert_eq!(route.risk_level, "medium");
+        assert!(route.equivalent_command.contains(&"handoff".to_string()));
     }
 }
