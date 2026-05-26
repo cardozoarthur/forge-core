@@ -1,32 +1,30 @@
 # Changelog
 
-## 0.4.151 - 2026-05-26
+## 0.4.152 - 2026-05-26
 
 ### Added
 
-- Self-evolution cycle 29: added guarded patch revert proposals as replacement-grade CLI groundwork.
-- `forge.patch_revert.v1` now records `restore_executed=false`, `requires_human_approval=true`, `external_resources_mutated=false`, an explicit approval command and safety notes instead of silently running a destructive restore.
-- Packaged Forge skill guidance now exposes `forge patch apply`, `forge patch revert`, `forge.patch.apply` and `forge.patch.revert` so Codex/OpenCode agents can record apply artifacts and guarded rollback proposals through Forge-owned workflow lineage.
+- Self-evolution cycle 30: added in-TUI `/patch plan`, `/patch apply` and `/patch revert` slash commands to the interactive REPL for replacement-grade CLI groundwork.
+- `/patch plan` executes `forge patch plan` in-process and displays permission gate, file snapshots, diff review commands and validation commands.
+- `/patch apply` prompts for explicit human approval before executing `forge patch apply`, then displays apply result and artifact reference.
+- `/patch revert` prompts for explicit human approval before recording a guarded revert proposal via `forge patch revert`.
+- Two-token slash command routing support so `/patch plan`, `/patch apply`, `/patch revert` are recognized as distinct slash commands alongside the base `/patch` command.
+- 6 new unit tests in interactive module proving `/patch`, `/patch plan`, `/patch apply`, `/patch revert` recognition, subcommand routing and unknown subcommand handling.
 
 ### Changed
 
-- `forge patch revert` now produces `patch_revert_proposed` by default. It writes a Forge-owned rollback proposal artifact and does not run `git checkout` automatically.
-- Patch apply rollback guidance now points to a guarded rollback proposal rather than direct file restoration.
-- Updated replacement-grade CLI milestone evidence and visible 0.5 boundary to mention apply artifacts plus guarded revert proposals while keeping the capability as `groundwork`.
-- Updated package/readme version to `0.4.151` for this 0.4.x groundwork increment.
+- Updated replacement-grade CLI milestone evidence to mention 0.4.152 in-TUI patch slash commands with human approval prompts.
+- Updated replacement-grade CLI next action to reflect deeper TUI diff rendering and multi-file review.
 
 ### Validation
 
-- RED observed first with `cargo test --test forge_cli_contract patch_revert_records_proposal_without_restoring_files_automatically -- --exact`: the report lacked `restore_executed`, `requires_human_approval` and `approval_command`.
-- RED observed for skill guidance with `cargo test --test forge_cli_contract mcp_exposes_patch_apply_and_revert_tools -- --exact`: the packaged skill did not mention apply/revert patch surfaces.
-- Targeted GREEN passed for `cargo test --test forge_cli_contract patch_ -- --nocapture` with 9 patch-related tests.
-- Required validation passed during the cycle: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` (58 unit + 229 integration + 0 doctests) and `cargo build --release`.
-- Release smokes passed: `./target/release/forge --version`, `./target/release/forge --store /tmp/forge-core-smoke-0.4.151.sqlite plan --goal "Create a delivery platform" --output json` and `./target/release/forge skill install --target codex --target opencode --output json --home /tmp/forge-skill-smoke-0.4.151-cycle29`.
-- Default `cargo install --path . --force` was blocked by read-only `/home/arthur/.cargo`; validated fallback install succeeded with `CARGO_INSTALL_ROOT=/home/arthur/projects/forge-core/.forge/local-install cargo install --path . --force --locked --offline`, and `.forge/local-install/bin/forge --version` returned `forge 0.4.151`.
+- 29 interactive module tests pass (22 unit + 7 integration).
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` and `cargo build --release`.
 
 ### Safety
 
-- The revert command now records rollback intent and approval instructions without mutating source files.
+- `/patch apply` and `/patch revert` require explicit human confirmation ("y/yes") before executing any file mutation.
+- Patch commands shell out to the forge CLI binary, preserving the existing permission gate and snapshot contracts.
 - No Docker, Kubernetes, Knative, Telegram send, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
 - The change remains 0.5 groundwork; Forge still needs in-TUI diff review and explicit approved restore execution before claiming replacement-grade file editing.
 
