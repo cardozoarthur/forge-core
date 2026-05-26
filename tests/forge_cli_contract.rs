@@ -12972,6 +12972,29 @@ fn append_child_subflow_to_stored_workflow(
         .unwrap();
 }
 
+fn set_workflow_status_in_stored_workflow(store: &Path, workflow_id: &str, status: &str) {
+    let connection = Connection::open(store).unwrap();
+    let data_json: String = connection
+        .query_row(
+            "SELECT data_json FROM workflows WHERE id = ?1",
+            [workflow_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut workflow: Value = serde_json::from_str(&data_json).unwrap();
+    workflow
+        .as_object_mut()
+        .unwrap()
+        .insert("status".to_string(), Value::String(status.to_string()));
+    let patched = serde_json::to_string(&workflow).unwrap();
+    connection
+        .execute(
+            "UPDATE workflows SET data_json = ?1 WHERE id = ?2",
+            (&patched, workflow_id),
+        )
+        .unwrap();
+}
+
 fn set_task_status_in_stored_workflow(
     store: &Path,
     workflow_id: &str,
@@ -18901,4 +18924,163 @@ fn worker_pool_parallel_scan_due_preserves_workflow_state_consistency() {
             "parallel scan-due should preserve at least 3 artifacts per workflow"
         );
     }
+}
+
+#[test]
+fn list_filters_workflow_registry_by_workflow_level_running_status() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Workflow-level running lifecycle visibility test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+
+    let all_list = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let all_list_json: Value = serde_json::from_slice(&all_list).unwrap();
+    assert_eq!(all_list_json["summary"]["total"], 1);
+    assert_eq!(all_list_json["summary"]["running"], 0);
+
+    let running_list = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--lifecycle",
+            "running",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let running_list_json: Value = serde_json::from_slice(&running_list).unwrap();
+    assert_eq!(running_list_json["summary"]["total"], 0);
+
+    set_workflow_status_in_stored_workflow(&store, workflow_id, "running");
+
+    let running_list = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--lifecycle",
+            "running",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let running_list_json: Value = serde_json::from_slice(&running_list).unwrap();
+    assert_eq!(running_list_json["summary"]["total"], 1);
+    assert_eq!(running_list_json["summary"]["running"], 1);
+    assert_eq!(running_list_json["summary"]["non_running"], 0);
+    assert_eq!(
+        running_list_json["workflows"][0]["workflow_id"],
+        workflow_id
+    );
+    assert_eq!(
+        running_list_json["workflows"][0]["lifecycle_state"],
+        "running"
+    );
+    assert_eq!(
+        running_list_json["workflows"][0]["workflow_status"],
+        "running"
+    );
+    assert!(running_list_json["workflows"][0]["running"]
+        .as_bool()
+        .unwrap());
+
+    let non_running_list = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--lifecycle",
+            "non-running",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let non_running_list_json: Value = serde_json::from_slice(&non_running_list).unwrap();
+    assert_eq!(non_running_list_json["summary"]["total"], 0);
+
+    set_workflow_status_in_stored_workflow(&store, workflow_id, "completed");
+
+    let non_running_list = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--lifecycle",
+            "non-running",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let non_running_list_json: Value = serde_json::from_slice(&non_running_list).unwrap();
+    assert_eq!(non_running_list_json["summary"]["total"], 1);
+    assert_ne!(
+        non_running_list_json["workflows"][0]["lifecycle_state"],
+        "running"
+    );
+    assert!(!non_running_list_json["workflows"][0]["running"]
+        .as_bool()
+        .unwrap());
+
+    let running_list = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--lifecycle",
+            "running",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let running_list_json: Value = serde_json::from_slice(&running_list).unwrap();
+    assert_eq!(running_list_json["summary"]["total"], 0);
 }

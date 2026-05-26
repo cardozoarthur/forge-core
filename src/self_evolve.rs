@@ -403,10 +403,18 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
 
         if !options.dry_run {
             update_run_status(store, &run.run_id, "running", "forge_cli")?;
+            if let Ok(mut wf) = store.load_workflow(&workflow.id) {
+                wf.status = "running".to_string();
+                let _ = store.save_workflow(&wf);
+            }
             status = match execute_cycle(&options.repo, &executor, &prompt) {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = update_run_status(store, &run.run_id, "failed", "forge_cli");
+                    if let Ok(mut wf) = store.load_workflow(&workflow.id) {
+                        wf.status = "failed".to_string();
+                        let _ = store.save_workflow(&wf);
+                    }
                     return Err(e.context(format!("executor cycle {cycle} failed")));
                 }
             };
@@ -415,6 +423,15 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
                 emit_validation_failure_logs(&validation_report);
             }
             let validation_passed = validation_report.validation_passed;
+            let cycle_workflow_status = if validation_passed {
+                "completed"
+            } else {
+                "failed"
+            };
+            if let Ok(mut wf) = store.load_workflow(&workflow.id) {
+                wf.status = cycle_workflow_status.to_string();
+                let _ = store.save_workflow(&wf);
+            }
             if validation_passed {
                 self_update = run_self_update(&options.repo)?;
                 if has_changes(&options.repo)? {
@@ -482,6 +499,10 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
     if !options.dry_run {
         let final_status = if has_failures { "failed" } else { "completed" };
         update_run_status(store, &run.run_id, final_status, "forge_cli")?;
+        if let Ok(mut wf) = store.load_workflow(&workflow.id) {
+            wf.status = final_status.to_string();
+            let _ = store.save_workflow(&wf);
+        }
     }
 
     Ok(SelfRunReport {
