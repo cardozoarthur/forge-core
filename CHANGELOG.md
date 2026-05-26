@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.137 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 13: stale async-run recovery for external Codex/OpenCode-style executor handoffs.
+- `forge request status --run <run-id> --output json` now includes an activity recovery recommendation. A stale heartbeat recommends `mark_needs_attention` with the exact `forge request recover-stale --run <run-id>` command.
+- Added `forge request list --status stale --output json` to list running requests whose heartbeat TTL has expired, and `forge request list --status needs_attention --output json` for recovered handoffs that need operator or executor action.
+- Added `forge request recover-stale --run <run-id> --origin <origin> --output json`, which transitions a stale `running` request and its workflow to `needs_attention`, records `async_request_needs_attention`, and preserves executor heartbeat metadata for lineage.
+- Added MCP tool `forge.run.recover_stale` and updated the packaged Forge skill plus public skill copy so agents can recover stale handoffs through Forge-owned semantics.
+
+### Validation
+
+- Added `stale_request_heartbeat_surfaces_recovery_and_transitions_to_needs_attention`, proving stale list visibility, recovery recommendation, explicit transition to `needs_attention`, and preserved workflow/run lineage.
+- Added `mcp_exposes_stale_request_recovery_tool_for_agent_observability`, proving MCP and skill exposure for the same recovery contract.
+
+### Safety
+
+- This change only mutates Forge-owned source, tests, skill text, changelog and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- Recovery is explicit and bounded: Forge only changes its own run/workflow state from stale `running` to `needs_attention`; resuming, cancelling or further execution remains a separate operator/executor action.
+
 ## 0.4.136 - 2026-05-26
 
 ### Added

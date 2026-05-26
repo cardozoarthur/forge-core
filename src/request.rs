@@ -99,6 +99,20 @@ pub struct RequestHeartbeatReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct RequestStaleRecoveryReport {
+    pub status: String,
+    pub schema_version: String,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub previous_status: String,
+    pub previous_workflow_status: String,
+    pub origin: String,
+    pub activity: RunActivity,
+    pub recovery: RunRecoveryRecommendation,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RunActivity {
     pub schema_version: String,
     pub active: bool,
@@ -110,6 +124,18 @@ pub struct RunActivity {
     pub heartbeat_expires_at: Option<DateTime<Utc>>,
     pub heartbeat_ttl_seconds: Option<u64>,
     pub seconds_until_stale: Option<i64>,
+    pub recovery: RunRecoveryRecommendation,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunRecoveryRecommendation {
+    pub schema_version: String,
+    pub action: String,
+    pub target_status: String,
+    pub reason: String,
+    pub confidence: f32,
+    pub requires_human_approval: bool,
+    pub command: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -346,7 +372,9 @@ fn build_run_activity_at(run: &RunRecord, now: DateTime<Utc>) -> RunActivity {
     let seconds_until_stale = run
         .heartbeat_expires_at
         .map(|expires_at| (expires_at - now).num_seconds());
-    let heartbeat_status = if run.status == "running" {
+    let heartbeat_status = if run.status == "needs_attention" {
+        "needs_attention"
+    } else if run.status == "running" {
         match run.heartbeat_expires_at {
             Some(expires_at) if expires_at > now => "fresh",
             Some(_) => "stale",
@@ -358,6 +386,7 @@ fn build_run_activity_at(run: &RunRecord, now: DateTime<Utc>) -> RunActivity {
         "not_running"
     };
     let active = run.status == "running" && heartbeat_status == "fresh";
+    let recovery = recovery_recommendation(run, heartbeat_status);
     RunActivity {
         schema_version: "forge.run_activity.v1".to_string(),
         active,
@@ -369,6 +398,51 @@ fn build_run_activity_at(run: &RunRecord, now: DateTime<Utc>) -> RunActivity {
         heartbeat_expires_at: run.heartbeat_expires_at,
         heartbeat_ttl_seconds: run.heartbeat_ttl_seconds,
         seconds_until_stale,
+        recovery,
+    }
+}
+
+fn recovery_recommendation(run: &RunRecord, heartbeat_status: &str) -> RunRecoveryRecommendation {
+    match heartbeat_status {
+        "stale" => RunRecoveryRecommendation {
+            schema_version: "forge.run_recovery_recommendation.v1".to_string(),
+            action: "mark_needs_attention".to_string(),
+            target_status: "needs_attention".to_string(),
+            reason: "Heartbeat is stale; Forge should stop presenting this run as active and require resume, cancel or inspect before more executor work.".to_string(),
+            confidence: 0.91,
+            requires_human_approval: false,
+            command: vec![
+                "forge".to_string(),
+                "request".to_string(),
+                "recover-stale".to_string(),
+                "--run".to_string(),
+                run.run_id.clone(),
+            ],
+        },
+        "needs_attention" => RunRecoveryRecommendation {
+            schema_version: "forge.run_recovery_recommendation.v1".to_string(),
+            action: "resume_cancel_or_inspect".to_string(),
+            target_status: "needs_attention".to_string(),
+            reason: "Run already needs attention; preserve lineage while a human or executor chooses resume, cancel or inspect.".to_string(),
+            confidence: 0.88,
+            requires_human_approval: false,
+            command: vec![
+                "forge".to_string(),
+                "request".to_string(),
+                "status".to_string(),
+                "--run".to_string(),
+                run.run_id.clone(),
+            ],
+        },
+        _ => RunRecoveryRecommendation {
+            schema_version: "forge.run_recovery_recommendation.v1".to_string(),
+            action: "none".to_string(),
+            target_status: run.status.clone(),
+            reason: "No stale heartbeat recovery is required for the current run state.".to_string(),
+            confidence: 1.0,
+            requires_human_approval: false,
+            command: Vec::new(),
+        },
     }
 }
 
@@ -451,11 +525,15 @@ pub fn list_requests(store: &ForgeStore, status_filter: Option<&str>) -> Result<
         .filter(|run| {
             if let Some(filter) = status_filter {
                 let normalized = filter.trim().to_ascii_lowercase();
+                if normalized == "stale" {
+                    return build_run_activity(run).heartbeat_status == "stale";
+                }
                 matches!(
                     normalized.as_str(),
                     "accepted"
                         | "resumed"
                         | "running"
+                        | "needs_attention"
                         | "completed"
                         | "failed"
                         | "cancelled"
@@ -553,6 +631,77 @@ pub fn resume_async_request(
         origin: origin.to_string(),
         resumed_at,
         request_status,
+    })
+}
+
+pub fn recover_stale_request(
+    store: &ForgeStore,
+    run_id: &str,
+    origin: &str,
+) -> Result<RequestStaleRecoveryReport> {
+    let mut run = load_run_record(store, run_id)?;
+    let before_activity = build_run_activity(&run);
+    if run.status != "running" || before_activity.heartbeat_status != "stale" {
+        anyhow::bail!(
+            "run {run_id} is not a stale running request; heartbeat_status={} status={}",
+            before_activity.heartbeat_status,
+            run.status
+        );
+    }
+
+    let previous_status = run.status.clone();
+    let updated_at = Utc::now();
+    run.status = "needs_attention".to_string();
+    run.updated_at = updated_at;
+    save_run_record(store, &run)?;
+
+    let mut workflow = store.load_workflow(&run.workflow_id)?;
+    let previous_workflow_status = workflow.status.clone();
+    workflow.status = "needs_attention".to_string();
+    store.save_workflow(&workflow)?;
+
+    let activity = build_run_activity_at(&run, updated_at);
+    let recovery = RunRecoveryRecommendation {
+        schema_version: "forge.run_recovery_recommendation.v1".to_string(),
+        action: "resume_cancel_or_inspect".to_string(),
+        target_status: "needs_attention".to_string(),
+        reason: "Heartbeat is stale; Forge moved the run to needs_attention so a human or executor can resume, cancel or inspect without losing lineage.".to_string(),
+        confidence: 0.93,
+        requires_human_approval: false,
+        command: vec![
+            "forge".to_string(),
+            "request".to_string(),
+            "status".to_string(),
+            "--run".to_string(),
+            run.run_id.clone(),
+        ],
+    };
+    store.record_event(
+        &run.workflow_id,
+        "async_request_needs_attention",
+        &serde_json::json!({
+            "run_id": run.run_id,
+            "origin": origin,
+            "previous_status": previous_status,
+            "new_status": run.status,
+            "previous_workflow_status": previous_workflow_status,
+            "new_workflow_status": workflow.status,
+            "heartbeat_status": before_activity.heartbeat_status,
+            "updated_at": updated_at,
+        }),
+    )?;
+
+    Ok(RequestStaleRecoveryReport {
+        status: run.status,
+        schema_version: "forge.request_stale_recovery.v1".to_string(),
+        run_id: run.run_id,
+        workflow_id: run.workflow_id,
+        previous_status,
+        previous_workflow_status,
+        origin: origin.to_string(),
+        activity,
+        recovery,
+        updated_at,
     })
 }
 
