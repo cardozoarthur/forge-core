@@ -11,7 +11,7 @@ use crate::graph::{
     NativeSubflowSpec, ScheduleSpec, SubtaskSpec, TaskStatus, ValidationRule, Workflow,
 };
 use crate::interaction::{summarize_human_interactions, HumanInteractionSummary};
-use crate::registry::{list_workflows, WorkflowRegistryRow};
+use crate::registry::{list_workflows, RegistryRunActivitySummary, WorkflowRegistryRow};
 use crate::schedule::{summarize_loops, summarize_schedules, LoopSummary, ScheduleSummary};
 use crate::storage::ForgeStore;
 use anyhow::{bail, Context, Result};
@@ -28,6 +28,7 @@ pub struct WorkflowInspectionReport {
     pub run_ids: Vec<String>,
     pub run_statuses: Vec<String>,
     pub active_run_count: usize,
+    pub run_activity: RegistryRunActivitySummary,
     pub initial_request: String,
     pub current_goal: String,
     pub lifecycle_state: String,
@@ -238,6 +239,7 @@ pub fn inspect_workflow_with_focus(
         run_ids: registry_row.run_ids.clone(),
         run_statuses: registry_row.run_statuses.clone(),
         active_run_count: registry_row.active_run_count,
+        run_activity: registry_row.run_activity.clone(),
         initial_request: registry_row.initial_request,
         current_goal: workflow.goal,
         lifecycle_state: registry_row.lifecycle_state,
@@ -659,7 +661,14 @@ fn render_diagram(
             .map(|(run_id, status)| format!("{run_id}:{status}"))
             .collect::<Vec<_>>()
             .join(",");
-        lines.push(format!("runs: {runs} active: {}", row.active_run_count));
+        lines.push(format!(
+            "runs: {runs} active: {} running: {} missing_heartbeat: {} stale: {} needs_attention: {}",
+            row.run_activity.active,
+            row.run_activity.running,
+            row.run_activity.missing_heartbeat,
+            row.run_activity.stale,
+            row.run_activity.needs_attention
+        ));
     }
 
     for node in nodes {

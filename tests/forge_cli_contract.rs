@@ -13453,6 +13453,28 @@ fn set_workflow_status_in_stored_workflow(store: &Path, workflow_id: &str, statu
         .unwrap();
 }
 
+fn set_run_status_in_stored_run(store: &Path, run_id: &str, status: &str) {
+    let connection = Connection::open(store).unwrap();
+    let data_json: String = connection
+        .query_row(
+            "SELECT data_json FROM runs WHERE id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut run: Value = serde_json::from_str(&data_json).unwrap();
+    run.as_object_mut()
+        .unwrap()
+        .insert("status".to_string(), Value::String(status.to_string()));
+    let patched = serde_json::to_string(&run).unwrap();
+    connection
+        .execute(
+            "UPDATE runs SET data_json = ?1 WHERE id = ?2",
+            (&patched, run_id),
+        )
+        .unwrap();
+}
+
 fn force_run_heartbeat_expired(store: &Path, run_id: &str) {
     let connection = Connection::open(store).unwrap();
     let data_json: String = connection
@@ -13922,6 +13944,90 @@ fn request_heartbeat_marks_async_run_active_and_surfaces_it_in_status_list_and_i
         .as_str()
         .unwrap()
         .contains("runs:"));
+}
+
+#[test]
+fn list_and_inspect_surface_running_run_health_even_without_fresh_heartbeat() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Self-evolution run health visibility without heartbeat",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+    set_run_status_in_stored_run(&store, run_id, "running");
+    set_workflow_status_in_stored_workflow(&store, workflow_id, "running");
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--lifecycle",
+            "running",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    assert_eq!(listed_json["summary"]["running"], 1);
+    assert_eq!(listed_json["summary"]["run_activity"]["running"], 1);
+    assert_eq!(
+        listed_json["summary"]["run_activity"]["missing_heartbeat"],
+        1
+    );
+    assert_eq!(listed_json["summary"]["run_activity"]["active"], 0);
+    let row = &listed_json["workflows"][0];
+    assert_eq!(row["workflow_id"], workflow_id);
+    assert_eq!(row["active_run_count"], 0);
+    assert_eq!(row["run_activity"]["running"], 1);
+    assert_eq!(row["run_activity"]["missing_heartbeat"], 1);
+
+    let inspected = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected_json: Value = serde_json::from_slice(&inspected).unwrap();
+    assert_eq!(inspected_json["lifecycle_state"], "running");
+    assert_eq!(inspected_json["active_run_count"], 0);
+    assert_eq!(inspected_json["run_activity"]["running"], 1);
+    assert_eq!(inspected_json["run_activity"]["missing_heartbeat"], 1);
+    assert!(inspected_json["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("running: 1 missing_heartbeat: 1"));
 }
 
 #[test]
