@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.123 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 38: full validation confirmation for Forge-owned cron/schedule/loop/subflow primitives and interactive CLI baseline.
+- All 190 CLI contract tests pass covering cron node planning, loop node planning (all five kinds), daily Goal workflow planning, MCP exposure, inspect/list visibility with schedule and loop summaries, and verified that all seven required capability goals from the phase goal are structurally implemented and test-validated.
+- Lean overhead ledger: prompt bytes ~50,400, estimated tokens ~12,600, validation commands 4 (fmt, clippy, test, build), artifact count 0 new, metadata bytes ~600.
+- Decision gate: `run_cycle` / expected value `5` / orchestration cost `3` — cycle completed as bounded validation pass confirming the terminal goal is satisfied without code generation gaps.
+
+### Changed
+
+- The package version is now `0.4.123`.
+- This is `0.5 groundwork` for scheduled/looping runtime semantics and interactive CLI foundations. It does not claim the Forge 0.5 creative runtime is complete.
+
+### Safety
+
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- All schedule/loop/subflow mutations remain local Forge-owned workflow state.
+- Telegram delivery records remain redacted; no bot token or raw chat id is persisted.
+- The increment does not execute remote code, install Knative or modify user infrastructure.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` (15 unit + 190 CLI contract) and `cargo build --release`.
+
 ## 0.4.122 - 2026-05-25
 
 ### Added
