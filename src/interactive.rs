@@ -33,6 +33,7 @@ pub struct InteractiveBanner {
 #[derive(Debug, Clone, Serialize)]
 pub struct InteractiveDashboard {
     pub active_runs: usize,
+    pub active_run_ids: Vec<String>,
     pub runs_needing_attention: usize,
     pub scheduled_workflows: usize,
     pub looping_workflows: usize,
@@ -110,11 +111,17 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
     let executors = load_executors(store)?;
     let runtimes = load_runtimes(store)?;
 
-    let active_runs = requests
+    let active_runs_list: Vec<&crate::request::RequestListRow> = requests
         .runs
         .iter()
         .filter(|run| run.activity.active || matches!(run.status.as_str(), "accepted" | "resumed"))
-        .count();
+        .collect();
+    let active_run_ids: Vec<String> = active_runs_list
+        .iter()
+        .take(5)
+        .map(|run| run.run_id.clone())
+        .collect();
+    let active_runs = active_runs_list.len();
     let attention_runs = requests
         .runs
         .iter()
@@ -190,6 +197,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
         },
         dashboard: InteractiveDashboard {
             active_runs,
+            active_run_ids,
             runs_needing_attention,
             scheduled_workflows,
             looping_workflows,
@@ -294,9 +302,15 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     } else {
         d.attention_actions.join(" | ")
     };
+    let run_ids_line = if d.active_run_ids.is_empty() {
+        String::new()
+    } else {
+        format!("Active run IDs: {}\n", d.active_run_ids.join(", "))
+    };
     format!(
         "{mark}\n{name}\n\n\
          Active runs: {active_runs}\n\
+         {run_ids_line}\
          Runs needing attention: {runs_needing_attention}\n\
          Scheduled workflows: {scheduled_workflows}\n\
          Looping workflows: {looping_workflows}\n\
@@ -315,6 +329,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         mark = report.banner.mark,
         name = report.banner.name,
         active_runs = d.active_runs,
+        run_ids_line = run_ids_line,
         runs_needing_attention = d.runs_needing_attention,
         scheduled_workflows = d.scheduled_workflows,
         looping_workflows = d.looping_workflows,
@@ -884,7 +899,7 @@ fn slash(
 }
 
 fn anvil_mark() -> &'static str {
-    "    ▄███████████████▄\n  ▄██▓▓▓▓▓▓▓▓▓▓▓▓▓▓██▄\n ▄█▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█▄\n ██▓▓▓▓▓  ████  ▓▓▓▓▓▓██\n ██▓▓▓▓▓▓▓████▓▓▓▓▓▓▓▓██\n  ▀█▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█▀\n   ▀██████████████████▀\n       ██        ██\n       ██        ██\n       ██        ██"
+    "    ▄███████████████▄\n  ▄██▓▓▓▓▓▓▓▓▓▓▓▓▓▓██▄\n ▄█▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█▄\n ██▓▓▓▓▓▓▓   ████   ▓▓▓▓▓▓▓██\n ██▓▓▓▓▓▓▓▓████████▓▓▓▓▓▓▓▓██\n ▀█▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█▀\n  ▀██▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓██▀\n    ▀████████████████████▀\n      ██  ████████  ██\n      ██    ████    ██\n      ██    ████    ██"
 }
 
 pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {

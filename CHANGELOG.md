@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.149 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 26: refined pixel-terminal anvil mark with improved horn/body/leg proportions and wider waist for a more forged-iron visual identity in the interactive home TUI.
+- Added `active_run_ids` to `InteractiveDashboard` so the interactive home surfaces up to 5 active run IDs directly in the dashboard view when runs are live.
+- `render_interactive_home` now emits a dynamic "Active run IDs:" line between the active-run count and needs-attention section when active runs exist, making the TUI feel more alive and operational.
+
+### Changed
+
+- Updated `anvil_mark()` to use a wider, more proportional anvil with a clearer horn, centered waist gap, broader base platform and better spaced legs, reinforcing Forge Core's forge/wrought-iron visual identity.
+- Updated `build_interactive_home` to collect up to 5 active run IDs into the new `InteractiveDashboard.active_run_ids` field.
+- Updated package/readme/milestone version to `0.4.149` for this 0.4.x groundwork increment.
+
+### Validation
+
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` (58 unit + 221 integration) and `cargo build --release`.
+- Baseline 221 tests all green before changes; same 221 tests green after changes.
+
+### Safety
+
+- This change only mutates Forge-owned source (`src/interactive.rs` build/render, `Cargo.toml` version, changelog).
+- No Docker, Kubernetes, Knative, Telegram send, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- Run ID collection is read-only and bounded to 5 entries; no run mutation occurs.
+
 ## 0.4.148 - 2026-05-26
 
 ### Added

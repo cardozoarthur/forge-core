@@ -1,0 +1,33 @@
+{
+  "schema": "forge.self_evolution.cycle_summary.v1",
+  "cycle": 26,
+  "version": "0.4.149",
+  "date": "2026-05-26",
+  "run_id": "run_35ef1be524e640b98b117d39b2d37998",
+  "workflow_id": "wf_19f0b1b0a91a4e8698a234932d9fa9e3",
+  "goal": "Refine pixel-terminal anvil visual identity and make interactive TUI feel alive with operational run data",
+  "changes": [
+    "Refined anvil_mark() with wider, more proportional forged-iron anvil (improved horn, waist, base platform, leg spacing)",
+    "Added active_run_ids field to InteractiveDashboard (up to 5 run IDs) sourced from active request rows",
+    "render_interactive_home now emits dynamic 'Active run IDs:' line when runs are live"
+  ],
+  "files_changed": [
+    "src/interactive.rs",
+    "Cargo.toml",
+    "CHANGELOG.md"
+  ],
+  "validation": {
+    "cargo_fmt_check": "passed",
+    "cargo_clippy_deny_warnings": "passed",
+    "cargo_test": "221 passed, 0 failed",
+    "cargo_build_release": "passed",
+    "release_smoke_forge_version": "forge 0.4.149",
+    "release_smoke_forge_plan": "passed",
+    "release_smoke_interactive_home": "passed"
+  },
+  "evidence": {
+    "interactive_cli_baseline": "existing interactive home, slash commands, conversational routing confirmed operational",
+    "tui_operational_data": "active run IDs now visible in dashboard, TUI feels more alive",
+    "anvil_visual_identity": "refined pixel-terminal hybrid anvil with improved proportions"
+  }
+}
