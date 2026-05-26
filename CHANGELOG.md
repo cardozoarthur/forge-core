@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.142 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 19: added Forge-owned experimental multimodal benchmark/demo planning surfaces as `0.5 groundwork`.
+- Added `forge multimodal benchmark-template --capability <id> --output json`, returning `forge.multimodal.benchmark_template.v1` with metrics, fixtures, guard checks, evidence manifest fields, thresholds and report sections without installing models or touching devices.
+- Added `forge multimodal demo-plan --demo <id> --output json` for `local_image_recognition`, `audio_transcription_synthesis` and `blender_avatar_preparation`, returning guarded plan-only workflows with stages, artifacts, validation gates and rollback steps.
+- Added MCP tools `forge.multimodal.benchmark_template` and `forge.multimodal.demo_plan` so agents can request benchmark and demo planning without taking over orchestration.
+- Updated the packaged Forge skill and visible 0.5 milestone boundary to point agents at the new multimodal benchmark/demo surfaces.
+- Updated package/readme version to `0.4.142` for this 0.4.x groundwork increment.
+
+### Validation
+
+- RED observed first with `cargo test --test forge_cli_contract multimodal_benchmark_template_is_plan_only_and_does_not_touch_devices -- --exact`: the CLI rejected the missing `benchmark-template` subcommand.
+- RED observed for docs/skill guidance with `cargo test --test forge_cli_contract packaged_skill_mentions_multimodal_benchmark_and_demo_plan_surfaces -- --exact` and `cargo test --test forge_cli_contract milestone_boundary_document_matches_validated_export_demo_runtime_state -- --exact`.
+- Targeted GREEN passed with `cargo test --test forge_cli_contract multimodal_`: nine multimodal contract tests passed.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` and `cargo build --release`.
+- Release smokes passed: `./target/release/forge plan --goal "Create a delivery platform" --output json`, `./target/release/forge skill install --target codex --target opencode --output json --home /tmp/forge-skill-smoke-0.4.142-5260426`, `./target/release/forge multimodal benchmark-template --capability image_understanding --output json` and `./target/release/forge multimodal demo-plan --demo blender_avatar_preparation --output json`.
+
+### Safety
+
+- This change only mutates Forge-owned source, tests, changelog, skill guidance, milestone docs and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- The multimodal capability remains disabled by default; new commands are plan-only and report `installs_performed=false` and `device_access_performed=false`.
+- Default `cargo install --path . --force` was blocked by read-only `/home/arthur/.cargo`; validated install succeeded inside the Forge-local prefix with `CARGO_INSTALL_ROOT=/home/arthur/projects/forge-core/.forge/local-install cargo install --path . --force --locked --offline`.
+
 ## 0.4.141 - 2026-05-26
 
 ### Changed

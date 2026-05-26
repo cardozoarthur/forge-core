@@ -291,6 +291,14 @@ fn milestone_boundary_document_matches_validated_export_demo_runtime_state() {
         docs.contains("| Experimental multimodal runtime | groundwork |"),
         "the visible 0.5 milestone boundary must include the new disabled-by-default multimodal scope"
     );
+    assert!(
+        docs.contains("forge multimodal benchmark-template"),
+        "the visible 0.5 milestone boundary should point to benchmark-template evidence"
+    );
+    assert!(
+        docs.contains("forge multimodal demo-plan"),
+        "the visible 0.5 milestone boundary should point to guarded demo-plan evidence"
+    );
 }
 
 #[test]
@@ -318,6 +326,26 @@ fn packaged_skill_mentions_experimental_multimodal_agent_surface() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge multimodal guard"),
         "the packaged Forge skill should teach agents to route camera/screen/input access through runtime guards"
+    );
+}
+
+#[test]
+fn packaged_skill_mentions_multimodal_benchmark_and_demo_plan_surfaces() {
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge multimodal benchmark-template"),
+        "the packaged Forge skill should teach agents how to generate multimodal benchmark templates"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.multimodal.benchmark_template"),
+        "the packaged Forge skill should expose the MCP benchmark-template tool to agent callers"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge multimodal demo-plan"),
+        "the packaged Forge skill should teach agents how to generate guarded multimodal demo plans"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.multimodal.demo_plan"),
+        "the packaged Forge skill should expose the MCP demo-plan tool to agent callers"
     );
 }
 
@@ -496,6 +524,199 @@ fn mcp_can_call_multimodal_status_without_enabling_runtime_access() {
     );
     assert_eq!(json["result"]["feature_flag"]["enabled"], false);
     assert_eq!(json["result"]["installs_performed"], false);
+}
+
+#[test]
+fn multimodal_benchmark_template_is_plan_only_and_does_not_touch_devices() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "multimodal",
+            "benchmark-template",
+            "--capability",
+            "image_understanding",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.multimodal.benchmark_template.v1"
+    );
+    assert_eq!(json["status"], "plan_only");
+    assert_eq!(json["capability_id"], "image_understanding");
+    assert_eq!(json["feature_flag_enabled"], false);
+    assert_eq!(json["installs_performed"], false);
+    assert_eq!(json["device_access_performed"], false);
+    assert_eq!(json["requires_human_approval_before_execution"], true);
+    assert!(json["metrics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|metric| { metric["id"] == "latency_ms_p50_p95" && metric["required"] == true }));
+    assert!(json["evidence_manifest_fields"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("input_artifact_sha256")));
+    assert!(json["guard_checks"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("runtime_guard_required")));
+}
+
+#[test]
+fn multimodal_demo_plan_covers_safe_local_image_audio_and_blender_tracks() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "multimodal",
+            "demo-plan",
+            "--demo",
+            "local_image_recognition",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.multimodal.demo_plan.v1");
+    assert_eq!(json["status"], "plan_only");
+    assert_eq!(json["demo_id"], "local_image_recognition");
+    assert_eq!(json["feature_flag_enabled"], false);
+    assert_eq!(json["installs_performed"], false);
+    assert_eq!(json["device_access_performed"], false);
+    assert!(json["capability_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("image_understanding")));
+    assert!(json["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|stage| { stage["id"] == "fixture_prepare" && stage["deterministic"] == true }));
+    assert!(json["validation_gates"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "no_device_or_model_access_without_guard"
+        )));
+
+    for demo in [
+        "local_image_recognition",
+        "audio_transcription_synthesis",
+        "blender_avatar_preparation",
+    ] {
+        let demo_output = forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "multimodal",
+                "demo-plan",
+                "--demo",
+                demo,
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let demo_json: Value = serde_json::from_slice(&demo_output).unwrap();
+        assert_eq!(demo_json["status"], "plan_only");
+        assert_eq!(demo_json["device_access_performed"], false);
+        assert!(demo_json["rollback_steps"].as_array().unwrap().len() >= 2);
+    }
+}
+
+#[test]
+fn mcp_exposes_multimodal_benchmark_template_and_demo_plan() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.multimodal.benchmark_template"
+            && tool["output_schema"] == "forge.multimodal.benchmark_template.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == false
+    }));
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.multimodal.demo_plan"
+            && tool["output_schema"] == "forge.multimodal.demo_plan.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == false
+    }));
+
+    let benchmark = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.multimodal.benchmark_template"])
+        .arg("--input")
+        .arg(r#"{"capability_id":"audio_transcription"}"#)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let benchmark_json: Value = serde_json::from_slice(&benchmark).unwrap();
+    assert_eq!(benchmark_json["status"], "ok");
+    assert_eq!(
+        benchmark_json["result"]["schema_version"],
+        "forge.multimodal.benchmark_template.v1"
+    );
+    assert_eq!(benchmark_json["result"]["device_access_performed"], false);
+
+    let demo = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.multimodal.demo_plan"])
+        .arg("--input")
+        .arg(r#"{"demo_id":"blender_avatar_preparation"}"#)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let demo_json: Value = serde_json::from_slice(&demo).unwrap();
+    assert_eq!(demo_json["status"], "ok");
+    assert_eq!(
+        demo_json["result"]["schema_version"],
+        "forge.multimodal.demo_plan.v1"
+    );
+    assert_eq!(demo_json["result"]["installs_performed"], false);
+    assert_eq!(demo_json["result"]["device_access_performed"], false);
+    assert!(demo_json["result"]["capability_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("blender_asset_processing")));
 }
 
 #[test]

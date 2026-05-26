@@ -545,8 +545,8 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
             "experimental_multimodal_runtime",
             "Experimental multimodal runtime",
             "groundwork",
-            "0.4.140 adds disabled-by-default multimodal inventory, plan-only install manifests and runtime guards for camera, microphone, screen, input, peripherals, model and filesystem access. These surfaces prove the safety boundary, but they do not install models, access devices or validate real image/audio/video/3D workflows.",
-            "Add benchmark/report templates with evidence, explicit feature-flag configuration, guarded demo plans for local image recognition, audio transcription/synthesis and Blender/3D avatar preparation, plus tests proving no device/model access occurs without opt-in.",
+            "0.4.140 adds disabled-by-default multimodal inventory, plan-only install manifests and runtime guards for camera, microphone, screen, input, peripherals, model and filesystem access. 0.4.142 adds plan-only benchmark/report templates and guarded demo plans for local image recognition, audio transcription/synthesis and Blender/avatar preparation through CLI and MCP without installing models or accessing devices. These surfaces prove the safety boundary, but they do not validate real image/audio/video/3D execution yet.",
+            "Add explicit feature-flag configuration, benchmark result artifacts from approved fixture-only runs and tests proving no camera/microphone/screen/input/filesystem access occurs without opt-in.",
         ),
     ]
 }

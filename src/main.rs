@@ -34,7 +34,8 @@ use forge_core::milestone::{
     build_milestone_status,
 };
 use forge_core::multimodal::{
-    build_multimodal_install_plan, build_multimodal_status, evaluate_multimodal_guard,
+    build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
+    build_multimodal_status, evaluate_multimodal_guard,
 };
 use forge_core::registry::{
     attach_reuse_candidates_as_child_subflows, context_action_catalog, find_reuse_candidates,
@@ -912,6 +913,22 @@ enum MultimodalCommands {
     InstallPlan {
         #[arg(long)]
         capability: String,
+        #[arg(long = "enable-experimental")]
+        enable_experimental: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    BenchmarkTemplate {
+        #[arg(long)]
+        capability: String,
+        #[arg(long = "enable-experimental")]
+        enable_experimental: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    DemoPlan {
+        #[arg(long)]
+        demo: String,
         #[arg(long = "enable-experimental")]
         enable_experimental: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -2170,6 +2187,24 @@ fn run() -> Result<i32> {
                 output,
             } => {
                 let report = build_multimodal_install_plan(&capability, enable_experimental)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MultimodalCommands::BenchmarkTemplate {
+                capability,
+                enable_experimental,
+                output,
+            } => {
+                let report = build_multimodal_benchmark_template(&capability, enable_experimental)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MultimodalCommands::DemoPlan {
+                demo,
+                enable_experimental,
+                output,
+            } => {
+                let report = build_multimodal_demo_plan(&demo, enable_experimental)?;
                 print_response(output, &report)?;
                 Ok(0)
             }

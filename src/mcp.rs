@@ -13,7 +13,8 @@ use crate::milestone::{
     build_milestone_status,
 };
 use crate::multimodal::{
-    build_multimodal_install_plan, build_multimodal_status, evaluate_multimodal_guard,
+    build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
+    build_multimodal_status, evaluate_multimodal_guard,
 };
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
@@ -291,6 +292,20 @@ struct MultimodalStatusInput {
 struct MultimodalInstallPlanInput {
     capability: Option<String>,
     capability_id: Option<String>,
+    enable_experimental: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultimodalBenchmarkTemplateInput {
+    capability: Option<String>,
+    capability_id: Option<String>,
+    enable_experimental: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultimodalDemoPlanInput {
+    demo: Option<String>,
+    demo_id: Option<String>,
     enable_experimental: Option<bool>,
 }
 
@@ -887,6 +902,46 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.multimodal.benchmark_template",
+                "Generate Multimodal Benchmark Template",
+                "Generate a plan-only benchmark/report template for one multimodal capability. This tool performs no installs, model execution, device access or automation.",
+                object_schema(&[
+                    ("capability_id", "string", "capability id from forge.multimodal.status"),
+                    ("enable_experimental", "boolean", "optional explicit experimental flag for planning output only"),
+                ], &["capability_id"]),
+                "forge.multimodal.benchmark_template.v1",
+                &[
+                    "forge",
+                    "multimodal",
+                    "benchmark-template",
+                    "--capability",
+                    "<capability-id>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.multimodal.demo_plan",
+                "Generate Multimodal Demo Plan",
+                "Generate a guarded demo plan for local image recognition, audio transcription/synthesis or Blender/avatar preparation. This tool performs no installs, model execution, device access or automation.",
+                object_schema(&[
+                    ("demo_id", "string", "local_image_recognition|audio_transcription_synthesis|blender_avatar_preparation"),
+                    ("enable_experimental", "boolean", "optional explicit experimental flag for planning output only"),
+                ], &["demo_id"]),
+                "forge.multimodal.demo_plan.v1",
+                &[
+                    "forge",
+                    "multimodal",
+                    "demo-plan",
+                    "--demo",
+                    "<demo-id>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.multimodal.guard",
                 "Evaluate Multimodal Runtime Guard",
                 "Evaluate whether a camera, microphone, screen, input, peripheral, model or filesystem multimodal action is allowed under Forge's experimental opt-in policy.",
@@ -1358,6 +1413,28 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 .ok_or_else(|| anyhow::anyhow!("capability_id is required"))?;
             serde_json::to_value(build_multimodal_install_plan(
                 &capability,
+                input.enable_experimental.unwrap_or(false),
+            )?)?
+        }
+        "forge.multimodal.benchmark_template" => {
+            let input: MultimodalBenchmarkTemplateInput = parse_input(input)?;
+            let capability = input
+                .capability_id
+                .or(input.capability)
+                .ok_or_else(|| anyhow::anyhow!("capability_id is required"))?;
+            serde_json::to_value(build_multimodal_benchmark_template(
+                &capability,
+                input.enable_experimental.unwrap_or(false),
+            )?)?
+        }
+        "forge.multimodal.demo_plan" => {
+            let input: MultimodalDemoPlanInput = parse_input(input)?;
+            let demo = input
+                .demo_id
+                .or(input.demo)
+                .ok_or_else(|| anyhow::anyhow!("demo_id is required"))?;
+            serde_json::to_value(build_multimodal_demo_plan(
+                &demo,
                 input.enable_experimental.unwrap_or(false),
             )?)?
         }
