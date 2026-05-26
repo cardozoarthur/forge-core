@@ -9,6 +9,7 @@ use crate::storage::ForgeStore;
 use anyhow::Result;
 use serde::Serialize;
 use std::env;
+use std::io::IsTerminal;
 
 const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
 const SLASH_COMMANDS_SCHEMA_VERSION: &str = "forge.interactive.slash_commands.v1";
@@ -722,6 +723,22 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             false,
             "low",
         ),
+        slash(
+            "/exit",
+            "Exit",
+            "Exit the interactive REPL.",
+            &[],
+            false,
+            "low",
+        ),
+        slash(
+            "/quit",
+            "Quit",
+            "Exit the interactive REPL.",
+            &[],
+            false,
+            "low",
+        ),
     ]
 }
 
@@ -748,7 +765,90 @@ fn slash(
 }
 
 fn anvil_mark() -> &'static str {
-    "      _________\n  ___/         \\___\n |_______________|\n       |  |\n       |__|"
+    "    ▄███████████████▄\n  ▄██▓▓▓▓▓▓▓▓▓▓▓▓▓▓██▄\n ▄█▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█▄\n ██▓▓▓▓▓  ████  ▓▓▓▓▓▓██\n ██▓▓▓▓▓▓▓████▓▓▓▓▓▓▓▓██\n  ▀█▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█▀\n   ▀██████████████████▀\n       ██        ██\n       ██        ██\n       ██        ██"
+}
+
+pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
+    if !std::io::stdin().is_terminal() {
+        println!("Forge Core workflow runtime -- use `forge --help` for available commands");
+        return Ok(0);
+    }
+
+    let store = ForgeStore::open(store_path)?;
+    let report = build_interactive_home(&store)?;
+    println!("{}", render_interactive_home(&report));
+
+    loop {
+        print!("forge> ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+
+        let mut line = String::new();
+        let bytes = std::io::stdin().read_line(&mut line)?;
+        if bytes == 0 {
+            println!();
+            break;
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if matches!(trimmed, "/exit" | "/quit") {
+            println!("goodbye");
+            break;
+        }
+
+        if trimmed.starts_with('/') {
+            let result = route_slash_command(trimmed);
+            let route = result.slash_command.unwrap_or(SlashCommandRoute {
+                name: trimmed.to_string(),
+                recognized: false,
+                equivalent_command: Vec::new(),
+                mutates_workflow: false,
+                risk_level: "unknown".to_string(),
+            });
+            if route.recognized {
+                println!(
+                    "  {name}: {explanation}",
+                    name = route.name,
+                    explanation = result.routing_explanation
+                );
+                if !route.equivalent_command.is_empty() {
+                    println!("  Equivalent: {}", route.equivalent_command.join(" "));
+                }
+            } else {
+                println!(
+                    "  Unknown command: {name}. Type /help for available commands.",
+                    name = route.name
+                );
+            }
+            continue;
+        }
+
+        let route_result = route_interactive_input(&store, trimmed, "forge_repl")?;
+        println!(
+            "  Routing: {decision}",
+            decision = route_result.routing_decision
+        );
+        if let Some(answer) = &route_result.answer {
+            println!("  {answer}");
+        }
+        if route_result.workflow_created {
+            if let Some(run_id) = &route_result.run_id {
+                println!("  Run ID: {run_id}");
+            }
+            if let Some(wf_id) = &route_result.workflow_id {
+                println!("  Workflow ID: {wf_id}");
+            }
+            println!(
+                "  Retention: {action}",
+                action = route_result.retention_decision.action
+            );
+        }
+    }
+
+    Ok(0)
 }
 
 #[cfg(test)]

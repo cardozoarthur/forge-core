@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.136 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 12: interactive CLI/TUI REPL loop and anvil visual identity.
+- `forge` with no arguments in a TTY now enters a persistent interactive REPL loop (previously printed dashboard and exited). The REPL supports slash commands (`/help`, `/list`, `/status`, `/exit`, etc.), conversational routing via `route_interactive_input`, and direct free-text input. Non-TTY piped usage remains script-safe with the original informational message.
+- Added `/exit` and `/quit` slash commands for clean REPL exit.
+- Added public `run_interactive_repl(store_path)` function in the `interactive` module, enabling library consumers to embed the Forge REPL.
+- Upgraded anvil mark from simple ASCII (`___/ \___`) to a stylized pixel-terminal hybrid using Unicode block characters (`▄█████▓▓▓▓▓███▄`), communicating authority and readiness.
+- The `forge interactive home` and `forge interactive route` subcommands are unchanged and continue to work for scripting/MCP integration.
+
+### Validation
+
+- `no_args_tty_enters_repl_and_shows_dashboard_when_pseudo_terminal_is_available` proves the no-arg TTY path enters the REPL and renders the dashboard.
+- `interactive_slash_command_catalog_is_discoverable_and_scriptable` proves `/exit` and `/quit` are registered.
+- All 209 existing tests continue to pass.
+
+### Safety
+
+- This change only mutates Forge-owned source, tests, changelog and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- The REPL only activates when `std::io::stdin().is_terminal()` is true; piped/scripted usage falls through to the existing safe informational message.
+- All new code is deterministic Rust with no TUI framework dependencies.
+
 ## 0.4.135 - 2026-05-26
 
 ### Added
