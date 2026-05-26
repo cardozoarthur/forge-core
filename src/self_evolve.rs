@@ -1143,3 +1143,327 @@ fn git_push_command() -> Vec<String> {
         .map(|part| part.to_string())
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::Workflow;
+    use chrono::Utc;
+
+    #[test]
+    fn test_operating_mode_parse_valid() {
+        assert!(matches!(
+            SelfOperatingMode::parse("").unwrap(),
+            SelfOperatingMode::Balanced
+        ));
+        assert!(matches!(
+            SelfOperatingMode::parse("balanced").unwrap(),
+            SelfOperatingMode::Balanced
+        ));
+        assert!(matches!(
+            SelfOperatingMode::parse("Balanced").unwrap(),
+            SelfOperatingMode::Balanced
+        ));
+        assert!(matches!(
+            SelfOperatingMode::parse("lean").unwrap(),
+            SelfOperatingMode::Lean
+        ));
+        assert!(matches!(
+            SelfOperatingMode::parse("strict").unwrap(),
+            SelfOperatingMode::Strict
+        ));
+    }
+
+    #[test]
+    fn test_operating_mode_parse_invalid() {
+        assert!(SelfOperatingMode::parse("invalid").is_err());
+        assert!(SelfOperatingMode::parse("ultra").is_err());
+    }
+
+    #[test]
+    fn test_operating_mode_as_str() {
+        assert_eq!(SelfOperatingMode::Lean.as_str(), "lean");
+        assert_eq!(SelfOperatingMode::Balanced.as_str(), "balanced");
+        assert_eq!(SelfOperatingMode::Strict.as_str(), "strict");
+    }
+
+    #[test]
+    fn test_operating_mode_boundary() {
+        assert!(SelfOperatingMode::Lean
+            .boundary()
+            .contains("minimal governance"));
+        assert!(SelfOperatingMode::Balanced
+            .boundary()
+            .contains("default bounded governance"));
+        assert!(SelfOperatingMode::Strict
+            .boundary()
+            .contains("high auditability"));
+    }
+
+    #[test]
+    fn test_operating_mode_base_cost_score() {
+        assert_eq!(SelfOperatingMode::Lean.base_cost_score(), 2);
+        assert_eq!(SelfOperatingMode::Balanced.base_cost_score(), 3);
+        assert_eq!(SelfOperatingMode::Strict.base_cost_score(), 5);
+    }
+
+    #[test]
+    fn test_overhead_ledger_empty() {
+        let ledger = SelfOverheadLedger::empty(&SelfOperatingMode::Balanced);
+        assert_eq!(
+            ledger.schema_version,
+            "forge.self_evolution.overhead_ledger.v1"
+        );
+        assert_eq!(ledger.operating_mode, "balanced");
+        assert_eq!(ledger.cycle_count, 0);
+        assert_eq!(ledger.prompt_bytes, 0);
+        assert_eq!(ledger.estimated_prompt_tokens, 0);
+        assert_eq!(ledger.validation_command_count, 0);
+        assert_eq!(ledger.artifact_count, 0);
+        assert_eq!(ledger.metadata_bytes, 0);
+        assert_eq!(ledger.orchestration_cost_score, 3);
+    }
+
+    #[test]
+    fn test_overhead_ledger_for_cycle() {
+        let ledger = SelfOverheadLedger::for_cycle(&SelfOperatingMode::Lean, 1024, 4, 3, 512);
+        assert_eq!(ledger.operating_mode, "lean");
+        assert_eq!(ledger.prompt_bytes, 1024);
+        assert_eq!(ledger.estimated_prompt_tokens, 256);
+        assert_eq!(ledger.validation_command_count, 4);
+        assert_eq!(ledger.artifact_count, 3);
+        assert_eq!(ledger.metadata_bytes, 512);
+        assert_eq!(ledger.orchestration_cost_score, 5);
+    }
+
+    #[test]
+    fn test_overhead_ledger_aggregate() {
+        let r1 = SelfCycleReport {
+            cycle: 1,
+            executor: "test".to_string(),
+            status: "completed".to_string(),
+            prompt_path: "p1.md".to_string(),
+            prompt_packet_version: "v1".to_string(),
+            prompt_sha256: "a".to_string(),
+            validation_report_path: "v1.json".to_string(),
+            validation_report_sha256: "b".to_string(),
+            report_path: "r1.json".to_string(),
+            validation_passed: true,
+            overhead_ledger: SelfOverheadLedger::for_cycle(
+                &SelfOperatingMode::Balanced,
+                500,
+                2,
+                1,
+                100,
+            ),
+            decision_gate: SelfDecisionGateReport {
+                schema_version: String::new(),
+                operating_mode: "balanced".to_string(),
+                mode_boundary: String::new(),
+                decision: "run_cycle".to_string(),
+                stop_loop: false,
+                terminal_goal_reached: false,
+                expected_value_score: 10,
+                orchestration_cost_score: 5,
+                reason: String::new(),
+            },
+            self_update: SelfUpdateReport::completed(),
+            committed: false,
+            commit: None,
+            public_project_update: PublicProjectUpdateReport::skipped(false, "test"),
+        };
+        let r2 = SelfCycleReport {
+            cycle: 2,
+            executor: "test".to_string(),
+            status: "completed".to_string(),
+            prompt_path: "p2.md".to_string(),
+            prompt_packet_version: "v1".to_string(),
+            prompt_sha256: "c".to_string(),
+            validation_report_path: "v2.json".to_string(),
+            validation_report_sha256: "d".to_string(),
+            report_path: "r2.json".to_string(),
+            validation_passed: true,
+            overhead_ledger: SelfOverheadLedger::for_cycle(
+                &SelfOperatingMode::Balanced,
+                700,
+                2,
+                2,
+                200,
+            ),
+            decision_gate: SelfDecisionGateReport {
+                schema_version: String::new(),
+                operating_mode: "balanced".to_string(),
+                mode_boundary: String::new(),
+                decision: "run_cycle".to_string(),
+                stop_loop: false,
+                terminal_goal_reached: false,
+                expected_value_score: 10,
+                orchestration_cost_score: 5,
+                reason: String::new(),
+            },
+            self_update: SelfUpdateReport::completed(),
+            committed: true,
+            commit: Some("abc123".to_string()),
+            public_project_update: PublicProjectUpdateReport::skipped(false, "test"),
+        };
+        let aggregated = SelfOverheadLedger::aggregate(&SelfOperatingMode::Balanced, &[r1, r2]);
+        assert_eq!(aggregated.cycle_count, 2);
+        assert_eq!(aggregated.prompt_bytes, 1200);
+        assert_eq!(aggregated.estimated_prompt_tokens, 125 + 175);
+        assert_eq!(aggregated.validation_command_count, 4);
+        assert_eq!(aggregated.artifact_count, 3);
+        assert_eq!(aggregated.metadata_bytes, 300);
+    }
+
+    #[test]
+    fn test_estimate_tokens() {
+        assert_eq!(estimate_tokens(0), 0);
+        assert_eq!(estimate_tokens(1), 1);
+        assert_eq!(estimate_tokens(4), 1);
+        assert_eq!(estimate_tokens(5), 2);
+        assert_eq!(estimate_tokens(100), 25);
+    }
+
+    #[test]
+    fn test_is_self_evolution_workflow() {
+        let wf_evolution = Workflow {
+            id: "wf_test".to_string(),
+            goal: BASE_SELF_EVOLUTION_GOAL.to_string(),
+            initial_goal: None,
+            status: "running".to_string(),
+            created_at: Utc::now(),
+            intent: crate::intent::IntentSpec {
+                goal: BASE_SELF_EVOLUTION_GOAL.to_string(),
+                constraints: vec![],
+                deliverables: vec![],
+                risks: vec![],
+                unknowns: vec![],
+            },
+            tasks: vec![],
+            artifacts: vec![],
+            creative_artifacts: vec![],
+            token_collection: None,
+            revisions: vec![],
+        };
+        assert!(is_self_evolution_workflow(&wf_evolution));
+
+        let wf_other = Workflow {
+            id: "wf_other".to_string(),
+            goal: "Build a web app".to_string(),
+            initial_goal: None,
+            status: "pending".to_string(),
+            created_at: Utc::now(),
+            intent: crate::intent::IntentSpec {
+                goal: "Build a web app".to_string(),
+                constraints: vec![],
+                deliverables: vec![],
+                risks: vec![],
+                unknowns: vec![],
+            },
+            tasks: vec![],
+            artifacts: vec![],
+            creative_artifacts: vec![],
+            token_collection: None,
+            revisions: vec![],
+        };
+        assert!(!is_self_evolution_workflow(&wf_other));
+    }
+
+    #[test]
+    fn test_terminal_goal_contract_satisfied_true() {
+        let goal = "validated lean/balanced/strict mode boundary and measurable overhead ledger and automated self-evolution decision gate and expected value is lower than orchestration cost";
+        assert!(terminal_goal_contract_satisfied(goal));
+    }
+
+    #[test]
+    fn test_terminal_goal_explicit_continuation_prevents_satisfied() {
+        assert!(!terminal_goal_contract_satisfied(
+            "do not stop and validated lean/balanced/strict mode boundary"
+        ));
+        assert!(!terminal_goal_contract_satisfied(
+            "continue until forge 0.5 and measurable overhead ledger"
+        ));
+        assert!(!terminal_goal_contract_satisfied(
+            "forge 0.5 creative runtime"
+        ));
+        assert!(!terminal_goal_contract_satisfied(
+            "first-class no-argument interactive forge cli"
+        ));
+        assert!(!terminal_goal_contract_satisfied(
+            "live human+ai collaboration"
+        ));
+        assert!(!terminal_goal_contract_satisfied(
+            "version-boundary milestone"
+        ));
+    }
+
+    #[test]
+    fn test_terminal_goal_not_satisfied_for_unrelated_goal() {
+        assert!(!terminal_goal_contract_satisfied("improve test coverage"));
+        assert!(!terminal_goal_contract_satisfied(""));
+    }
+
+    #[test]
+    fn test_expected_value_score_has_minimum() {
+        assert!(expected_value_score("") >= 4);
+        assert!(expected_value_score("unrelated text without value terms") >= 4);
+    }
+
+    #[test]
+    fn test_expected_value_score_scales_with_terms() {
+        let basic = expected_value_score("validation throughput");
+        assert!(basic >= 4);
+        let strategic =
+            expected_value_score("forge 0.5 mcp skill creative runtime interactive forge cli");
+        assert!(strategic > basic);
+    }
+
+    #[test]
+    fn test_bloat_score_counts_matching_terms() {
+        assert_eq!(bloat_score("governance metadata receipt"), 3);
+        assert_eq!(bloat_score("schema hash manifest projection"), 4);
+        assert_eq!(bloat_score("no bloat here"), 0);
+        assert_eq!(bloat_score(""), 0);
+    }
+
+    #[test]
+    fn test_decision_gate_evaluate_terminal_reached() {
+        let mode = SelfOperatingMode::Balanced;
+        let goal = "validated lean/balanced/strict mode boundary and measurable overhead ledger and automated self-evolution decision gate and expected value is lower than orchestration cost";
+        let gate = SelfDecisionGateReport::evaluate(goal, &mode);
+        assert!(gate.stop_loop);
+        assert!(gate.terminal_goal_reached);
+        assert_eq!(gate.decision, "stop_terminal_goal_reached");
+    }
+
+    #[test]
+    fn test_decision_gate_evaluate_run_cycle() {
+        let mode = SelfOperatingMode::Lean;
+        let goal = "forge 0.5 creative runtime with validation and artifact delivery";
+        let gate = SelfDecisionGateReport::evaluate(goal, &mode);
+        assert!(!gate.stop_loop);
+        assert!(!gate.terminal_goal_reached);
+        assert_eq!(gate.decision, "run_cycle");
+        assert!(gate.expected_value_score >= gate.orchestration_cost_score);
+    }
+
+    #[test]
+    fn test_self_update_report() {
+        let planned = SelfUpdateReport::planned();
+        assert_eq!(planned.status, "planned");
+        assert!(planned.reason.is_none());
+
+        let completed = SelfUpdateReport::completed();
+        assert_eq!(completed.status, "completed");
+
+        let skipped = SelfUpdateReport::skipped("validation failed");
+        assert_eq!(skipped.status, "skipped");
+        assert_eq!(skipped.reason.unwrap(), "validation failed");
+    }
+
+    #[test]
+    fn test_self_update_command_format() {
+        let cmd = self_update_command();
+        assert_eq!(cmd, vec!["cargo", "install", "--path", ".", "--force"]);
+    }
+}
