@@ -299,10 +299,15 @@ pub struct PatchRevertReport {
     pub workflow_id: String,
     pub task_id: String,
     pub origin: String,
+    pub restore_executed: bool,
+    pub requires_human_approval: bool,
+    pub external_resources_mutated: bool,
+    pub approval_command: Option<String>,
     pub apply_artifact: PatchApplyArtifactRef,
     pub restored_snapshots: Vec<PatchFileSnapshot>,
     pub validation: PatchValidationSummary,
     pub artifact: Option<PatchApplyArtifactRef>,
+    pub safety_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -421,9 +426,9 @@ pub fn build_patch_apply(
         validation: validation.clone(),
         artifact: None,
         rollback_instructions: vec![
-            "Use `forge patch revert` with this apply artifact to restore pre-apply file state."
+            "Use `forge patch revert` with this apply artifact to create a guarded rollback proposal."
                 .to_string(),
-            "Alternatively, run `git checkout -- <path>` on each modified file to discard changes."
+            "A human must approve any destructive file restore outside this record-only apply step."
                 .to_string(),
             "Pre-apply file metadata (SHA-256, size) is recorded in the associated patch plan if available."
                 .to_string(),
@@ -447,18 +452,18 @@ const DEFAULT_REVERT_VALIDATION_COMMANDS: [&str; 2] = [
     "cargo clippy --all-targets --all-features -- -D warnings",
 ];
 
-/// Revert a previously applied patch: restore files to their pre-apply state
-/// via git checkout, run validation, and record the revert artifact.
+/// Record a guarded rollback proposal for a previously applied patch.
 ///
-/// `validation_commands` controls which shell commands to run for validation.
-/// Pass `None` to use the default set (fmt + clippy).
+/// This does not restore files by itself. Forge records the apply artifact,
+/// affected paths, approval command and safety notes so a human approval node
+/// or future TUI diff review can decide whether to run a destructive restore.
 pub fn build_patch_revert(
     store: &ForgeStore,
     workflow_id: &str,
     task_id: &str,
     apply_artifact_path: &str,
     origin: &str,
-    validation_commands: Option<&[String]>,
+    _validation_commands: Option<&[String]>,
 ) -> Result<PatchRevertReport> {
     let apply_bytes = fs::read(apply_artifact_path)
         .with_context(|| format!("failed to read apply artifact: {apply_artifact_path}"))?;
@@ -489,51 +494,34 @@ pub fn build_patch_revert(
         bail!("task {task_id} not found in workflow {workflow_id}");
     }
 
-    // Restore files via git checkout.
-    for path in &paths {
-        let status = Command::new("git")
-            .args(["checkout", "--", path])
-            .output()
-            .with_context(|| format!("failed to run git checkout for {path}"))?;
-        if !status.status.success() {
-            let stderr = String::from_utf8_lossy(&status.stderr);
-            bail!("git checkout failed for {path}: {stderr}");
-        }
-    }
-
-    // Snapshot restored state.
-    let restored_snapshots = paths
-        .iter()
-        .map(|path| snapshot_file(path))
-        .collect::<Result<Vec<_>>>()?;
-
-    // Run validation.
-    let validation = if let Some(commands) = validation_commands {
-        run_patch_validation(commands)?
-    } else {
-        let defaults: Vec<String> = DEFAULT_REVERT_VALIDATION_COMMANDS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        run_patch_validation(&defaults)?
-    };
-
-    let status = if validation.passed {
-        "patch_reverted"
-    } else {
-        "patch_reverted_with_failures"
+    let approval_command = format!("git checkout -- {}", paths.join(" "));
+    let validation = PatchValidationSummary {
+        passed: false,
+        commands: Vec::new(),
     };
 
     let report = PatchRevertReport {
         schema_version: PATCH_REVERT_SCHEMA_VERSION.to_string(),
-        status: status.to_string(),
+        status: "patch_revert_proposed".to_string(),
         workflow_id: workflow_id.to_string(),
         task_id: task_id.to_string(),
         origin: origin.to_string(),
+        restore_executed: false,
+        requires_human_approval: true,
+        external_resources_mutated: false,
+        approval_command: Some(approval_command),
         apply_artifact: apply_artifact_ref,
-        restored_snapshots,
-        validation: validation.clone(),
+        restored_snapshots: Vec::new(),
+        validation,
         artifact: None,
+        safety_notes: vec![
+            "Forge did not execute git checkout or restore files automatically.".to_string(),
+            "Human approval is required before destructive rollback commands are run.".to_string(),
+            format!(
+                "If approved, run validation after restore: {}",
+                DEFAULT_REVERT_VALIDATION_COMMANDS.join(" && ")
+            ),
+        ],
     };
 
     let payload = serde_json::to_value(&report)?;
