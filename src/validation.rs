@@ -1,5 +1,8 @@
-use crate::graph::{ChildSubflowRef, ExecutorKind, PersonaRoutingSpec, TaskStatus, Workflow};
+use crate::graph::{
+    AtomicTask, ChildSubflowRef, ExecutorKind, PersonaRoutingSpec, TaskStatus, Workflow,
+};
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FailedRule {
@@ -100,6 +103,33 @@ pub fn validate_workflow(workflow: &Workflow) -> ValidationReport {
                 reason:
                     "execution policy is inconsistent; fix policy configuration before promotion"
                         .to_string(),
+            });
+        }
+
+        if task.version == 0 {
+            failed_rules.push(FailedRule {
+                task_id: task.id.clone(),
+                kind: "version_boundary".to_string(),
+                message: format!("task {} version is 0; must be >= 1", task.id),
+            });
+            rework_tasks.push(ReworkTask {
+                task_id: task.id.clone(),
+                goal: task.goal.clone(),
+                reason: "task version is below minimum boundary; reset to >= 1".to_string(),
+            });
+        }
+
+        if let Some(violation) = dependency_version_boundary_violation(task, &workflow.tasks) {
+            let reason = violation.clone();
+            failed_rules.push(FailedRule {
+                task_id: task.id.clone(),
+                kind: "version_boundary".to_string(),
+                message: violation,
+            });
+            rework_tasks.push(ReworkTask {
+                task_id: task.id.clone(),
+                goal: task.goal.clone(),
+                reason,
             });
         }
 
@@ -252,4 +282,178 @@ fn persona_routing_violations(persona: &PersonaRoutingSpec) -> Vec<String> {
         violations.push("source models must include paperclip_soul_voice_tone_persona".to_string());
     }
     violations
+}
+
+fn dependency_version_boundary_violation(
+    task: &AtomicTask,
+    all_tasks: &[AtomicTask],
+) -> Option<String> {
+    for dep_id in &task.dependencies {
+        if let Some(dep) = all_tasks.iter().find(|t| &t.id == dep_id) {
+            if dep.version > task.version {
+                return Some(format!(
+                    "task {} version {} is lower than dependency {} version {}",
+                    task.id, task.version, dep.id, dep.version
+                ));
+            }
+        }
+    }
+    None
+}
+
+pub fn version_boundary(workflow: &Workflow) -> BTreeMap<String, u64> {
+    workflow
+        .tasks
+        .iter()
+        .map(|task| (task.id.clone(), task.version))
+        .collect()
+}
+
+pub fn version_boundary_changed(
+    previous: &BTreeMap<String, u64>,
+    current: &BTreeMap<String, u64>,
+) -> Vec<String> {
+    let mut changes = Vec::new();
+    for (task_id, current_version) in current {
+        if let Some(prev_version) = previous.get(task_id) {
+            if *prev_version != *current_version {
+                changes.push(format!(
+                    "task {task_id} version changed from {prev_version} to {current_version}"
+                ));
+            }
+        } else {
+            changes.push(format!(
+                "task {task_id} is new at version {current_version}"
+            ));
+        }
+    }
+    for task_id in previous.keys() {
+        if !current.contains_key(task_id) {
+            changes.push(format!("task {task_id} was removed"));
+        }
+    }
+    changes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::*;
+    use crate::intent;
+
+    fn test_workflow() -> Workflow {
+        let intent = intent::parse_intent("Test workflow");
+        create_workflow(intent)
+    }
+
+    #[test]
+    fn version_boundary_returns_task_id_version_map() {
+        let wf = test_workflow();
+        let boundary = version_boundary(&wf);
+        assert_eq!(boundary.len(), wf.tasks.len());
+        for task in &wf.tasks {
+            assert_eq!(boundary.get(&task.id), Some(&1u64));
+        }
+    }
+
+    #[test]
+    fn version_boundary_changed_detects_new_versions() {
+        let wf = test_workflow();
+        let old = version_boundary(&wf);
+        let mut updated = wf;
+        if let Some(task) = updated.tasks.first_mut() {
+            task.version = 2;
+        }
+        let current = version_boundary(&updated);
+        let changes = version_boundary_changed(&old, &current);
+        assert!(!changes.is_empty());
+        assert!(changes[0].contains("version changed from 1 to 2"));
+    }
+
+    #[test]
+    fn version_boundary_changed_detects_new_tasks() {
+        let mut wf = test_workflow();
+        let old = version_boundary(&wf);
+        let new_id = "task-extra";
+        wf.tasks.push(AtomicTask {
+            id: new_id.to_string(),
+            title: "extra".to_string(),
+            goal: "extra goal".to_string(),
+            dependencies: vec![],
+            context_requirements: vec![],
+            validation_rules: vec![],
+            expected_output: "output".to_string(),
+            executor: ExecutorKind::Command,
+            human_required: false,
+            schedule: None,
+            loop_control: None,
+            native_subflow: None,
+            cost: CostEstimate {
+                estimated_cost_usd: 0.0,
+                cost_model: "test".to_string(),
+            },
+            notification: None,
+            persona: None,
+            work_item: WorkItemSpec {
+                item_type: "execution_story".to_string(),
+                backlog_state: "ready".to_string(),
+                priority: "p1".to_string(),
+                owner_role: "forge_runtime".to_string(),
+                parent_id: None,
+                subtasks: vec![],
+                impediments: vec![],
+                acceptance_criteria: vec![],
+                goal_validation: GoalValidationSpec {
+                    goal: "test".to_string(),
+                    evidence_required: vec![],
+                    definitively_ready: false,
+                    rework_policy: "default".to_string(),
+                },
+            },
+            async_policy: AsyncPolicy::default(),
+            execution_policy: ExecutionPolicySpec::default(),
+            child_subflows: vec![],
+            human_interaction: None,
+            status: TaskStatus::Pending,
+            version: 1,
+        });
+        let current = version_boundary(&wf);
+        let changes = version_boundary_changed(&old, &current);
+        assert!(changes.iter().any(|c| c.contains("is new at version 1")));
+    }
+
+    #[test]
+    fn validate_workflow_fails_on_zero_version() {
+        let mut wf = test_workflow();
+        if let Some(task) = wf.tasks.first_mut() {
+            task.version = 0;
+        }
+        let report = validate_workflow(&wf);
+        assert!(!report.promotable);
+        assert!(report
+            .failed_rules
+            .iter()
+            .any(|r| r.kind == "version_boundary"));
+    }
+
+    #[test]
+    fn validate_workflow_fails_on_dependency_version_mismatch() {
+        let intent = intent::parse_intent("Test workflow");
+        let mut wf = create_workflow(intent);
+        let first_id = wf.tasks[0].id.clone();
+        let second_id = wf.tasks[1].id.clone();
+        if let Some(task) = wf.tasks.iter_mut().find(|t| t.id == first_id) {
+            task.version = 2;
+        }
+        if let Some(task) = wf.tasks.iter_mut().find(|t| t.id == second_id) {
+            task.dependencies.push(first_id.clone());
+            task.version = 1;
+        }
+        let report = validate_workflow(&wf);
+        assert!(!report.promotable);
+        assert!(report
+            .failed_rules
+            .iter()
+            .any(|r| r.kind == "version_boundary"));
+    }
 }

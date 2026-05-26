@@ -259,6 +259,7 @@ mod tests {
                 child_subflows: vec![],
                 human_interaction: None,
                 status: TaskStatus::Pending,
+                version: 1,
             });
         }
 
