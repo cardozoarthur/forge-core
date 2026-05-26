@@ -298,6 +298,10 @@ pub struct HumanDecisionRecord {
     pub audit_event: String,
 }
 
+fn default_node_version() -> u64 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtomicTask {
     pub id: String,
@@ -328,6 +332,8 @@ pub struct AtomicTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub human_interaction: Option<HumanInteractionSpec>,
     pub status: TaskStatus,
+    #[serde(default = "default_node_version")]
+    pub version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -496,6 +502,7 @@ fn task(
         child_subflows: Vec::new(),
         human_interaction: None,
         status: TaskStatus::Pending,
+        version: 1,
     }
 }
 

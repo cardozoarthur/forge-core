@@ -694,7 +694,7 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
             "scheduler_loop_subflow_foundation",
             "Scheduler/loop/subflow foundation",
             "validated",
-            "0.4.92-0.4.100 validate cron nodes, loop state, due execution, missed-run policy, daily Goal research smoke artifacts and concurrent DAG execution with parallel wave scheduling.",
+            "0.4.92-0.4.100 validate cron nodes, loop state, due execution, missed-run policy, daily Goal research smoke artifacts and concurrent DAG execution with parallel wave scheduling. Cycle 32 adds node version boundaries: each AtomicTask carries a version field (default 1), `validation::version_boundary`/`version_boundary_changed` for comparison, and validation gates that reject zero-version or dependency-version-mismatch tasks with 5 passing tests.",
             "Production executor adapters for live research/page inspection remain planned.",
         ),
         capability(
