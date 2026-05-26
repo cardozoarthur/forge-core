@@ -53,8 +53,8 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         "creative_artifact_ir is now validated and should not block"
     );
     assert!(
-        !blocked_by.contains(&serde_json::json!("export_demo_baseline")),
-        "export_demo_baseline is now validated and should not block"
+        blocked_by.contains(&serde_json::json!("export_demo_baseline")),
+        "export_demo_baseline should block until rendered demo evidence exists"
     );
 
     let capabilities = json["capabilities"].as_array().unwrap();
@@ -176,9 +176,15 @@ fn milestone_manifest_surfaces_requirements_evidence_gaps_and_promotion_decision
         .as_array()
         .unwrap()
         .iter()
+        .any(|capability| capability["id"] == "export_demo_baseline"
+            && capability["promotion_ready"] == false));
+    assert!(json["completed_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(
             |capability| capability["id"] == "research_artifact_baseline"
-                && capability["promotion_ready"] == false
+                && capability["promotion_ready"] == true
         ));
     assert!(json["validation_evidence"]
         .as_array()
@@ -199,7 +205,7 @@ fn milestone_manifest_surfaces_requirements_evidence_gaps_and_promotion_decision
     assert!(json["promotion_decision"]["blocked_by"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::json!("research_artifact_baseline")));
+        .contains(&serde_json::json!("export_demo_baseline")));
 }
 
 #[test]
@@ -242,11 +248,75 @@ fn mcp_exposes_milestone_manifest_for_agent_release_gates() {
         "forge.milestone.manifest.v1"
     );
     assert_eq!(json["result"]["milestone"], "0.5");
-    assert!(json["result"]["missing_capabilities"]
+    assert!(json["result"]["completed_capabilities"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability["id"] == "research_artifact_baseline"));
+    assert!(json["result"]["missing_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability["id"] == "export_demo_baseline"));
+}
+
+#[test]
+fn milestone_research_baseline_is_source_grounded_and_agent_visible() {
+    use forge_core::milestone::build_milestone_research;
+
+    let report = build_milestone_research("0.5").unwrap();
+    assert_eq!(report.schema_version, "forge.milestone.research.v1");
+    assert_eq!(report.status, "validated");
+    assert!(report.sources.len() >= 8);
+    assert!(report
+        .sources
+        .iter()
+        .any(|source| source.label.contains("Penpot")));
+    assert!(report
+        .validation_gates
+        .iter()
+        .any(|gate| gate.id == "creative_ir_round_trip_fidelity"));
+    assert!(report
+        .workflow_templates
+        .iter()
+        .any(|template| template.id == "ai_first_whiteboard_brainstorm"));
+
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "milestone",
+            "research",
+            "--version",
+            "0.5",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.milestone.research.v1");
+    assert_eq!(json["status"], "validated");
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.milestone.research"
+            && tool["output_schema"] == "forge.milestone.research.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == false
+    }));
 }
 
 #[test]
@@ -17824,8 +17894,8 @@ fn milestone_status_reports_creative_artifact_ir_capability_as_validated() {
         "componentization_ai_surfaces should be validated"
     );
     assert_eq!(
-        export_demo.status, "validated",
-        "export_demo_baseline should be validated after MCP creative/token exposure (cycle 28) and worker-status surface (cycle 29)"
+        export_demo.status, "groundwork",
+        "export_demo_baseline should stay groundwork until rendered design and structured document/slide/whiteboard demos exist"
     );
 }
 
