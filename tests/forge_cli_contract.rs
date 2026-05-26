@@ -249,6 +249,199 @@ fn packaged_skill_mentions_export_demo_agent_surface() {
 }
 
 #[test]
+fn packaged_skill_mentions_experimental_multimodal_agent_surface() {
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge multimodal status"),
+        "the packaged Forge skill should teach agents how to inspect experimental multimodal status"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.multimodal.status"),
+        "the packaged Forge skill should expose the MCP multimodal status tool to agent callers"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge multimodal guard"),
+        "the packaged Forge skill should teach agents to route camera/screen/input access through runtime guards"
+    );
+}
+
+#[test]
+fn multimodal_status_is_experimental_disabled_by_default() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "multimodal",
+            "status",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.multimodal.status.v1");
+    assert_eq!(json["status"], "experimental_disabled");
+    assert_eq!(json["feature_flag"]["enabled"], false);
+    assert_eq!(json["installs_performed"], false);
+    assert!(json["capabilities"].as_array().unwrap().iter().any(|cap| {
+        cap["id"] == "screen_understanding"
+            && cap["permission_scope"] == "screen"
+            && cap["state"] == "missing"
+    }));
+    assert!(json["capabilities"].as_array().unwrap().iter().any(|cap| {
+        cap["id"] == "blender_asset_processing" && cap["permission_scope"] == "filesystem"
+    }));
+    assert!(json["runtime_guards"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("kill_switch")));
+}
+
+#[test]
+fn multimodal_install_plan_is_plan_only_and_mcp_visible() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "multimodal",
+            "install-plan",
+            "--capability",
+            "audio_transcription",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.multimodal.install_plan.v1");
+    assert_eq!(json["status"], "plan_only");
+    assert_eq!(json["capability_id"], "audio_transcription");
+    assert_eq!(json["installs_performed"], false);
+    assert_eq!(json["requires_human_approval"], true);
+    assert!(json["rollback_steps"].as_array().unwrap().len() >= 2);
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.multimodal.status"
+            && tool["output_schema"] == "forge.multimodal.status.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == false
+    }));
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.multimodal.install_plan"
+            && tool["output_schema"] == "forge.multimodal.install_plan.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == false
+    }));
+}
+
+#[test]
+fn multimodal_runtime_guard_requires_feature_flag_and_explicit_allow() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let denied = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "multimodal",
+            "guard",
+            "--capability",
+            "camera",
+            "--action",
+            "access",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let denied_json: Value = serde_json::from_slice(&denied).unwrap();
+    assert_eq!(denied_json["schema_version"], "forge.multimodal.guard.v1");
+    assert_eq!(denied_json["allowed"], false);
+    assert_eq!(denied_json["feature_flag_enabled"], false);
+    assert_eq!(denied_json["requires_human_approval"], true);
+    assert_eq!(denied_json["audit_required"], true);
+
+    let allowed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "multimodal",
+            "guard",
+            "--capability",
+            "camera",
+            "--action",
+            "access",
+            "--enable-experimental",
+            "--allow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let allowed_json: Value = serde_json::from_slice(&allowed).unwrap();
+    assert_eq!(allowed_json["allowed"], true);
+    assert_eq!(allowed_json["feature_flag_enabled"], true);
+    assert_eq!(allowed_json["explicit_allow"], true);
+    assert!(allowed_json["guardrails"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("dry_run_or_simulation_first")));
+}
+
+#[test]
+fn mcp_can_call_multimodal_status_without_enabling_runtime_access() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.multimodal.status"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(
+        json["result"]["schema_version"],
+        "forge.multimodal.status.v1"
+    );
+    assert_eq!(json["result"]["feature_flag"]["enabled"], false);
+    assert_eq!(json["result"]["installs_performed"], false);
+}
+
+#[test]
 fn mcp_exposes_milestone_manifest_for_agent_release_gates() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

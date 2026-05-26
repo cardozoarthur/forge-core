@@ -32,6 +32,9 @@ use forge_core::milestone::{
     build_milestone_export_demo, build_milestone_manifest, build_milestone_research,
     build_milestone_status,
 };
+use forge_core::multimodal::{
+    build_multimodal_install_plan, build_multimodal_status, evaluate_multimodal_guard,
+};
 use forge_core::registry::{
     attach_reuse_candidates_as_child_subflows, context_action_catalog, find_reuse_candidates,
     list_workflows_with_filters, quality_action_catalog, WorkflowLifecycleFilter,
@@ -206,6 +209,10 @@ enum Commands {
     Milestone {
         #[command(subcommand)]
         command: MilestoneCommands,
+    },
+    Multimodal {
+        #[command(subcommand)]
+        command: MultimodalCommands,
     },
     #[command(name = "self")]
     SelfRun {
@@ -864,6 +871,36 @@ enum MilestoneCommands {
     ExportDemo {
         #[arg(long, default_value = "forge_cli")]
         origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MultimodalCommands {
+    Status {
+        #[arg(long = "enable-experimental")]
+        enable_experimental: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    InstallPlan {
+        #[arg(long)]
+        capability: String,
+        #[arg(long = "enable-experimental")]
+        enable_experimental: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Guard {
+        #[arg(long)]
+        capability: String,
+        #[arg(long)]
+        action: String,
+        #[arg(long = "enable-experimental")]
+        enable_experimental: bool,
+        #[arg(long)]
+        allow: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -2072,6 +2109,38 @@ fn run() -> Result<i32> {
                 let report = build_milestone_export_demo(&store, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
+            }
+        },
+        Commands::Multimodal { command } => match command {
+            MultimodalCommands::Status {
+                enable_experimental,
+                output,
+            } => {
+                let report = build_multimodal_status(enable_experimental);
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MultimodalCommands::InstallPlan {
+                capability,
+                enable_experimental,
+                output,
+            } => {
+                let report = build_multimodal_install_plan(&capability, enable_experimental)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MultimodalCommands::Guard {
+                capability,
+                action,
+                enable_experimental,
+                allow,
+                output,
+            } => {
+                let report =
+                    evaluate_multimodal_guard(&capability, &action, enable_experimental, allow)?;
+                let exit_code = if report.allowed { 0 } else { 1 };
+                print_response(output, &report)?;
+                Ok(exit_code)
             }
         },
         Commands::SelfRun { command } => match command {
