@@ -33,6 +33,7 @@ pub struct InteractiveBanner {
 #[derive(Debug, Clone, Serialize)]
 pub struct InteractiveDashboard {
     pub active_runs: usize,
+    pub runs_needing_attention: usize,
     pub scheduled_workflows: usize,
     pub looping_workflows: usize,
     pub paused_idle_workflows: usize,
@@ -44,6 +45,7 @@ pub struct InteractiveDashboard {
     pub repository_context: String,
     pub estimated_costs: String,
     pub scheduler_worker_status: String,
+    pub attention_actions: Vec<String>,
     pub useful_next_commands: Vec<String>,
     pub quick_actions: Vec<String>,
 }
@@ -113,6 +115,13 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
         .iter()
         .filter(|run| run.activity.active || matches!(run.status.as_str(), "accepted" | "resumed"))
         .count();
+    let attention_runs = requests
+        .runs
+        .iter()
+        .filter(|run| run.status == "needs_attention" || run.activity.heartbeat_status == "stale")
+        .collect::<Vec<_>>();
+    let runs_needing_attention = attention_runs.len();
+    let attention_actions = build_attention_actions(&attention_runs);
     let scheduled_workflows = workflows
         .workflows
         .iter()
@@ -181,6 +190,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
         },
         dashboard: InteractiveDashboard {
             active_runs,
+            runs_needing_attention,
             scheduled_workflows,
             looping_workflows,
             paused_idle_workflows: workflows.summary.non_running,
@@ -195,6 +205,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             estimated_costs: "available per workflow via /costs or forge run --simulate"
                 .to_string(),
             scheduler_worker_status,
+            attention_actions,
             useful_next_commands: vec![
                 "forge list".to_string(),
                 "forge inspect <workflow-id>".to_string(),
@@ -277,9 +288,15 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     let d = &report.dashboard;
     let quick_actions = d.quick_actions.join(" ");
     let next_commands = d.useful_next_commands.join(" | ");
+    let attention_actions = if d.attention_actions.is_empty() {
+        "none".to_string()
+    } else {
+        d.attention_actions.join(" | ")
+    };
     format!(
         "{mark}\n{name}\n\n\
          Active runs: {active_runs}\n\
+         Runs needing attention: {runs_needing_attention}\n\
          Scheduled workflows: {scheduled_workflows}\n\
          Looping workflows: {looping_workflows}\n\
          Paused/idle workflows: {paused_idle_workflows}\n\
@@ -291,11 +308,13 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Scheduler worker status: {scheduler_worker_status}\n\
          Repository context: {repository_context}\n\
          Estimated costs: {estimated_costs}\n\
+         Attention actions: {attention_actions}\n\
          Quick actions: {quick_actions}\n\
          Useful next commands: {next_commands}\n",
         mark = report.banner.mark,
         name = report.banner.name,
         active_runs = d.active_runs,
+        runs_needing_attention = d.runs_needing_attention,
         scheduled_workflows = d.scheduled_workflows,
         looping_workflows = d.looping_workflows,
         paused_idle_workflows = d.paused_idle_workflows,
@@ -307,9 +326,31 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         scheduler_worker_status = d.scheduler_worker_status,
         repository_context = d.repository_context,
         estimated_costs = d.estimated_costs,
+        attention_actions = attention_actions,
         quick_actions = quick_actions,
         next_commands = next_commands,
     )
+}
+
+fn build_attention_actions(attention_runs: &[&crate::request::RequestListRow]) -> Vec<String> {
+    if attention_runs.is_empty() {
+        return Vec::new();
+    }
+
+    let mut actions = vec![
+        "forge request list --status needs_attention".to_string(),
+        "forge request list --status stale".to_string(),
+    ];
+    for run in attention_runs.iter().take(3) {
+        actions.push(format!("forge request status --run {}", run.run_id));
+        if run.activity.heartbeat_status == "stale" {
+            actions.push(format!("forge request recover-stale --run {}", run.run_id));
+        } else if run.status == "needs_attention" {
+            actions.push(format!("forge request resume --run {}", run.run_id));
+            actions.push(format!("forge request cancel --run {}", run.run_id));
+        }
+    }
+    actions
 }
 
 fn route_slash_command(trimmed: &str) -> InteractiveRouteReport {
