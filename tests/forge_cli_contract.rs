@@ -1421,7 +1421,7 @@ fn patch_apply_records_file_state_and_validation() {
 }
 
 #[test]
-fn patch_apply_and_revert_round_trip_restores_files() {
+fn patch_revert_records_proposal_without_restoring_files_automatically() {
     let temp = tempdir().unwrap();
     let store_path = temp.path().join("forge.sqlite");
     let store = ForgeStore::open(&store_path).unwrap();
@@ -1450,7 +1450,8 @@ fn patch_apply_and_revert_round_trip_restores_files() {
         .join(&apply_report.artifact.as_ref().unwrap().path);
     let apply_artifact_str = apply_artifact_path.to_str().unwrap().to_string();
 
-    // Revert using the apply artifact path.
+    // Revert records a guarded rollback proposal by default; Forge must not
+    // run a destructive git checkout without an explicit human approval path.
     let revert_report = forge_core::patch::build_patch_revert(
         &store,
         &workflow_id,
@@ -1462,13 +1463,18 @@ fn patch_apply_and_revert_round_trip_restores_files() {
     .unwrap();
 
     assert_eq!(revert_report.schema_version, "forge.patch_revert.v1");
-    assert_eq!(revert_report.status, "patch_reverted");
+    assert_eq!(revert_report.status, "patch_revert_proposed");
     assert_eq!(revert_report.workflow_id, workflow_id);
     assert_eq!(revert_report.task_id, "task-001");
+    assert!(!revert_report.restore_executed);
+    assert!(revert_report.requires_human_approval);
     assert!(revert_report
-        .restored_snapshots
-        .iter()
-        .any(|s| s.path == "Cargo.toml" && s.exists));
+        .approval_command
+        .as_ref()
+        .unwrap()
+        .contains("git checkout -- Cargo.toml"));
+    assert!(revert_report.restored_snapshots.is_empty());
+    assert!(revert_report.validation.commands.is_empty());
     assert!(revert_report.artifact.is_some());
     assert!(revert_report
         .artifact
@@ -1540,6 +1546,23 @@ fn patch_apply_requires_at_least_one_path() {
 fn mcp_exposes_patch_apply_and_revert_tools() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge patch apply"),
+        "the packaged Forge skill should teach agents to record bounded patch apply artifacts"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge patch revert"),
+        "the packaged Forge skill should teach agents to request guarded patch revert proposals"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.patch.apply"),
+        "the packaged Forge skill should expose the MCP patch apply tool"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.patch.revert"),
+        "the packaged Forge skill should expose the MCP patch revert tool"
+    );
 
     let output = forge()
         .args([

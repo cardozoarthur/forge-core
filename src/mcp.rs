@@ -839,7 +839,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.patch.revert",
                 "Revert File Patch",
-                "Revert a previously applied file patch: restore files via git checkout, run validation, and record the revert artifact.",
+                "Record a guarded revert proposal for a previously applied file patch without restoring files automatically.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                     ("task_id", "string", "task id"),
