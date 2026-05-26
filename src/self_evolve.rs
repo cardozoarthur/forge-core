@@ -31,7 +31,11 @@ pub struct SelfRunOptions {
     pub max_cycles: u32,
     pub sleep_seconds: u64,
     pub executors: Vec<String>,
+    pub goal: Option<String>,
+    pub validation_commands: Vec<String>,
     pub mode: String,
+    pub skip_self_update: bool,
+    pub self_update_command: Option<String>,
     pub dry_run: bool,
     pub push: bool,
 }
@@ -449,7 +453,11 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         options.executors.clone()
     };
 
-    let self_evolution_goal = load_persisted_self_evolution_goal(store)?
+    let persisted_self_evolution_goal = load_persisted_self_evolution_goal(store)?;
+    let self_evolution_goal = options
+        .goal
+        .clone()
+        .or(persisted_self_evolution_goal)
         .unwrap_or_else(|| BASE_SELF_EVOLUTION_GOAL.to_string());
     let workflow = create_workflow(parse_intent(&self_evolution_goal));
     let run = create_run_record(&workflow, "forge_cli", "planned");
@@ -523,7 +531,8 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
 
         let mut status = "planned".to_string();
         let mut validation_report = SelfValidationEvidenceReport::planned(&prompt_packet);
-        let mut self_update = SelfUpdateReport::planned();
+        let mut self_update =
+            SelfUpdateReport::planned_for(effective_self_update_command(&options));
         let mut committed = false;
         let mut commit = None;
         let mut public_project_update = PublicProjectUpdateReport::planned(options.push);
@@ -577,7 +586,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
                 let _ = store.save_workflow(&wf);
             }
             if validation_passed {
-                self_update = run_self_update(&options.repo)?;
+                self_update = run_self_update(&options.repo, &options)?;
                 if has_changes(&options.repo)? {
                     commit = commit_changes(&options.repo, cycle)?;
                     committed = commit.is_some();
@@ -594,7 +603,10 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
                         PublicProjectUpdateReport::skipped(options.push, "no changes to publish");
                 }
             } else {
-                self_update = SelfUpdateReport::skipped("validation failed");
+                self_update = SelfUpdateReport::skipped_for(
+                    effective_self_update_command(&options),
+                    "validation failed",
+                );
                 public_project_update =
                     PublicProjectUpdateReport::skipped(options.push, "validation failed");
             }
@@ -699,12 +711,7 @@ impl SelfEvolutionPromptPacket {
             repo: options.repo.display().to_string(),
             operating_mode: operating_mode.as_str().to_string(),
             decision_gate: decision_gate.clone(),
-            validation_commands: vec![
-                VALIDATION_COMMANDS[0].to_string(),
-                VALIDATION_COMMANDS[1].to_string(),
-                VALIDATION_COMMANDS[2].to_string(),
-                VALIDATION_COMMANDS[3].to_string(),
-            ],
+            validation_commands: effective_validation_commands(options),
             capability_analysis,
         }
     }
@@ -760,26 +767,41 @@ impl SelfValidationCommandEvidence {
 }
 
 impl SelfUpdateReport {
+    #[cfg(test)]
     fn planned() -> Self {
+        Self::planned_for(self_update_command())
+    }
+
+    fn planned_for(command: Vec<String>) -> Self {
         Self {
             status: "planned".to_string(),
-            command: self_update_command(),
+            command,
             reason: None,
         }
     }
 
+    #[cfg(test)]
     fn completed() -> Self {
+        Self::completed_for(self_update_command())
+    }
+
+    fn completed_for(command: Vec<String>) -> Self {
         Self {
             status: "completed".to_string(),
-            command: self_update_command(),
+            command,
             reason: None,
         }
     }
 
+    #[cfg(test)]
     fn skipped(reason: &str) -> Self {
+        Self::skipped_for(self_update_command(), reason)
+    }
+
+    fn skipped_for(command: Vec<String>, reason: &str) -> Self {
         Self {
             status: "skipped".to_string(),
-            command: self_update_command(),
+            command,
             reason: Some(reason.to_string()),
         }
     }
@@ -964,8 +986,22 @@ fn bloat_score(goal: &str) -> u32 {
 }
 
 fn render_prompt(packet: &SelfEvolutionPromptPacket) -> String {
+    let is_forge_core_goal = packet
+        .workflow_goal
+        .to_ascii_lowercase()
+        .contains("forge core");
+    let strategic_guidance = if is_forge_core_goal {
+        "- Improve Forge Core itself in a small, validated, production-quality increment.\n- The persisted Forge workflow goal above is runtime state. If a human updates that goal with `forge workflow update-goal`, future self-evolution cycles must honor it before generic guidance.\n- Prefer structural improvements over cosmetic changes.\n- Good candidates: async run records, task leases, executor adapter contracts, prompt packet versioning, runtime mutation propagation, changelog/report quality, validation gates.\n- Strategic runtime goals now include workflow listing, terminal inspection, recursive subflows, infinite subflows, scale-to-zero lifecycle state and flow composition/reuse.\n- Prefer increments that move toward `forge list` for running and non-running workflows, `forge inspect` for terminal DAG/subflow visualization, and a workflow registry that can reuse compatible existing flows as child subflows before creating new work.\n- Prioritize the Context Routing Engine: compress, summarize, select, version and shard the minimum correct context for each executor to reduce irrelevant context, redundant reasoning and cost.\n- Add Personality/Soul Routing for human-facing artifacts: inspect how Codex handles developer/personality instructions and how Paperclip models soul, voice, tone or persona, then allow specific workflow moments to switch persona mode explicitly, scoped to the node, auditable in lineage and validation-gated.\n- Preserve deterministic + AI hybrid graph semantics: AI tasks, deterministic code tasks, waits, cron, approvals, validation, rollback and deployment should coexist in the same graph.\n- Improve long-running cognition: pause/resume, async continuation, durable execution, checkpointing, partial retry and resumable context.\n- Add execution policy that can choose no-AI deterministic nodes for repeated or frequent work, including local Python or Node.js code nodes, instead of spending model calls."
+    } else {
+        "- Improve the target repository named in this prompt, not Forge Core itself.\n- Treat the persisted workflow goal above as authoritative over generic Forge guidance.\n- Keep changes scoped to the target repository and current project objective.\n- Prefer small, validated increments with clear artifact evidence.\n- If the goal asks for a migration, preserve the current working baseline and add parity tests before replacing behavior.\n- Keep workflow state portable when possible by writing resumable project manifests under a versionable `.forge/project-state/` folder while leaving local databases, logs and executor scratch files ignored."
+    };
+    let scope_rule = if is_forge_core_goal {
+        "- Keep changes scoped to Forge Core.\n- After validation passes, update the local Forge installation with `cargo install --path . --force`."
+    } else {
+        "- Keep changes scoped to the target repository.\n- Do not run Forge Core self-update unless explicitly configured for this project."
+    };
     format!(
-        r#"# Improve Forge Core
+        r#"# Forge Self-Run Cycle
 
 Prompt packet version: `{}`
 
@@ -1001,17 +1037,7 @@ Automated self-evolution decision gate:
 - Reason: {}
 
 Strategic goal guidance:
-- Improve Forge Core itself in a small, validated, production-quality increment.
-- The persisted Forge workflow goal above is runtime state. If a human updates that goal with `forge workflow update-goal`, future self-evolution cycles must honor it before generic guidance.
-- Prefer structural improvements over cosmetic changes.
-- Good candidates: async run records, task leases, executor adapter contracts, prompt packet versioning, runtime mutation propagation, changelog/report quality, validation gates.
-- Strategic runtime goals now include workflow listing, terminal inspection, recursive subflows, infinite subflows, scale-to-zero lifecycle state and flow composition/reuse.
-- Prefer increments that move toward `forge list` for running and non-running workflows, `forge inspect` for terminal DAG/subflow visualization, and a workflow registry that can reuse compatible existing flows as child subflows before creating new work.
-- Prioritize the Context Routing Engine: compress, summarize, select, version and shard the minimum correct context for each executor to reduce irrelevant context, redundant reasoning and cost.
-- Add Personality/Soul Routing for human-facing artifacts: inspect how Codex handles developer/personality instructions and how Paperclip models soul, voice, tone or persona, then allow specific workflow moments to switch persona mode explicitly, scoped to the node, auditable in lineage and validation-gated.
-- Preserve deterministic + AI hybrid graph semantics: AI tasks, deterministic code tasks, waits, cron, approvals, validation, rollback and deployment should coexist in the same graph.
-- Improve long-running cognition: pause/resume, async continuation, durable execution, checkpointing, partial retry and resumable context.
-- Add execution policy that can choose no-AI deterministic nodes for repeated or frequent work, including local Python or Node.js code nodes, instead of spending model calls.
+{}
 
 Capability analysis (prioritised from goal text):
 {}
@@ -1021,13 +1047,12 @@ Constraints:
 - Use the repository at `{}`.
 - Do not mutate external Docker/Kubernetes/Knative resources.
 - Do not install Knative or modify user infrastructure.
-- Keep changes scoped to Forge Core.
+{}
 - Use tests first when adding behavior.
 - Run the required validation commands listed in this prompt packet.
 - If validation fails, fix or report the blocker without pretending the cycle completed.
 - Generate or update a strong changelog/report artifact when the version behavior changes.
 - Codex/OpenCode should treat Forge as the source of truth: update goals/artifacts through Forge CLI if runtime state changes.
-- After validation passes, update the local Forge installation with `cargo install --path . --force`.
 - Publish validated commits through the GitHub CLI contract: `gh auth token`, `git remote get-url origin`, then `git push`.
 
 Required validation commands:
@@ -1055,8 +1080,10 @@ Return a concise final report with:
         packet.decision_gate.expected_value_score,
         packet.decision_gate.orchestration_cost_score,
         packet.decision_gate.reason,
-        packet.repo,
+        strategic_guidance,
         render_capability_breakdown(packet),
+        packet.repo,
+        scope_rule,
         packet
             .validation_commands
             .iter()
@@ -1259,10 +1286,18 @@ fn emit_validation_failure_logs(report: &SelfValidationEvidenceReport) {
     }
 }
 
-fn run_self_update(repo: &Path) -> Result<SelfUpdateReport> {
-    run_program(repo, "cargo", &["install", "--path", ".", "--force"])
-        .context("failed to update local Forge installation")?;
-    Ok(SelfUpdateReport::completed())
+fn run_self_update(repo: &Path, options: &SelfRunOptions) -> Result<SelfUpdateReport> {
+    let command = effective_self_update_command(options);
+    if options.skip_self_update {
+        return Ok(SelfUpdateReport::skipped_for(
+            command,
+            "self update disabled",
+        ));
+    }
+
+    let (program, args) = split_command(&command)?;
+    run_program(repo, program, &args).context("failed to run self-update command")?;
+    Ok(SelfUpdateReport::completed_for(command))
 }
 
 fn publish_public_project_with_gh(repo: &Path) -> Result<PublicProjectUpdateReport> {
@@ -1319,6 +1354,39 @@ fn run_program(repo: &Path, program: &str, args: &[&str]) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn effective_validation_commands(options: &SelfRunOptions) -> Vec<String> {
+    if options.validation_commands.is_empty() {
+        VALIDATION_COMMANDS
+            .iter()
+            .map(|command| command.to_string())
+            .collect()
+    } else {
+        options.validation_commands.clone()
+    }
+}
+
+fn effective_self_update_command(options: &SelfRunOptions) -> Vec<String> {
+    options
+        .self_update_command
+        .as_deref()
+        .map(shell_words)
+        .unwrap_or_else(self_update_command)
+}
+
+fn split_command(command: &[String]) -> Result<(&str, Vec<&str>)> {
+    let Some((program, args)) = command.split_first() else {
+        bail!("self-update command cannot be empty");
+    };
+    Ok((program.as_str(), args.iter().map(String::as_str).collect()))
+}
+
+fn shell_words(command: &str) -> Vec<String> {
+    command
+        .split_whitespace()
+        .map(|part| part.to_string())
+        .collect()
 }
 
 fn self_update_command() -> Vec<String> {

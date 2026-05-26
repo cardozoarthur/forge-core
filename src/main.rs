@@ -1017,8 +1017,16 @@ enum SelfCommands {
         sleep_seconds: u64,
         #[arg(long = "executor")]
         executors: Vec<String>,
+        #[arg(long)]
+        goal: Option<String>,
+        #[arg(long = "validation-command")]
+        validation_commands: Vec<String>,
         #[arg(long, default_value = "balanced")]
         mode: String,
+        #[arg(long)]
+        skip_self_update: bool,
+        #[arg(long = "self-update-command")]
+        self_update_command: Option<String>,
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
@@ -2340,7 +2348,11 @@ fn run() -> Result<i32> {
                 max_cycles,
                 sleep_seconds,
                 executors,
+                goal,
+                validation_commands,
                 mode,
+                skip_self_update,
+                self_update_command,
                 dry_run,
                 push,
                 output,
@@ -2354,7 +2366,11 @@ fn run() -> Result<i32> {
                         max_cycles,
                         sleep_seconds,
                         executors,
+                        goal,
+                        validation_commands,
                         mode,
+                        skip_self_update,
+                        self_update_command,
                         dry_run,
                         push,
                     },
