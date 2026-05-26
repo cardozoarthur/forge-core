@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.141 - 2026-05-26
+
+### Changed
+
+- Self-evolution cycle 17: tightened the Forge 0.5 milestone promotion gate after new replacement-grade CLI and experimental multimodal runtime scope entered the terminal phase.
+- `forge milestone status --version 0.5 --output json` and MCP tool `forge.milestone.status` now list `replacement_grade_cli` and `experimental_multimodal_runtime` as `groundwork` capabilities, making the 0.5 promotion decision fail until those scopes have validated demo/benchmark evidence.
+- `forge milestone manifest --version 0.5 --output json` now exposes those two capabilities in `missing_capabilities`, `known_gaps` and `promotion_decision.blocked_by`.
+- Updated `docs/forge-0.5-milestone.md` so the visible roadmap no longer claims all 0.5 requirements are promotable.
+- Updated package/readme version to `0.4.141` for this 0.4.x groundwork increment.
+
+### Validation
+
+- RED observed first with `cargo test --test forge_cli_contract milestone`: five milestone contract tests failed because runtime status still reported `promote` and the document lacked the new scopes.
+- GREEN targeted validation passed with `cargo test --test forge_cli_contract milestone`: nine milestone contract tests passed.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` and `cargo build --release`.
+- Release smokes passed: `./target/release/forge plan --goal "Create a delivery platform" --output json` and `./target/release/forge skill install --target codex --target opencode --output json --home /tmp/forge-skill-smoke-0.4.141`.
+
+### Safety
+
+- This change only mutates Forge-owned source, tests, changelog, milestone docs and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- The multimodal capability remains disabled by default and this cycle performs no installs or device access.
+
 ## 0.4.140 - 2026-05-26
 
 ### Added
