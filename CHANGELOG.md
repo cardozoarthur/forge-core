@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.124 - 2026-05-25
+
+### Fixed
+
+- Hotfix for the self-evolution decision gate: explicit Forge 0.5 continuation goals now keep the loop running instead of being rejected as low-value orchestration or stopped by the older terminal-goal contract.
+- The terminal-goal detector now treats phrases such as `do not stop`, `continue until`, `Forge 0.5`, `creative runtime`, interactive Forge CLI, live human+AI collaboration and version-boundary work as active continuation goals.
+- The expected-value scorer now recognizes agent-integration and creative-runtime terms including MCP, skills, interactive CLI/TUI, slash commands, direct-chat routing, human decisions/forms, live collaboration, whiteboards, design systems/tokens, componentization, creative artifacts, milestone manifests and Telegram reporting.
+
+### Validation
+
+- `cargo fmt --check`
+- `cargo test self_run_keeps_running_for_explicit_forge_05_continuation_goal --test forge_cli_contract`
+- `cargo test self_run_stops_when_terminal_final_goal_contract_is_satisfied --test forge_cli_contract`
+- `cargo test self_run_rejects_low_value_bloat_cycle_in_lean_mode --test forge_cli_contract`
+
+### Safety
+
+- The low-value bloat rejection path remains covered and unchanged for lean-mode goals that explicitly do not improve useful throughput, cost, validation, retries, deterministic execution or artifact delivery.
+- The older terminal stopping rule remains valid when no explicit human continuation goal is present.
+
 ## 0.4.123 - 2026-05-25
 
 ### Added

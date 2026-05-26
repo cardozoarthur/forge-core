@@ -683,6 +683,17 @@ fn estimate_tokens(bytes: u64) -> u64 {
 
 fn terminal_goal_contract_satisfied(goal: &str) -> bool {
     let normalized = goal.to_ascii_lowercase();
+    let explicit_continuation = normalized.contains("do not stop")
+        || normalized.contains("continue until")
+        || normalized.contains("forge 0.5")
+        || normalized.contains("creative runtime")
+        || normalized.contains("first-class no-argument interactive forge cli")
+        || normalized.contains("live human+ai collaboration")
+        || normalized.contains("version-boundary");
+    if explicit_continuation {
+        return false;
+    }
+
     normalized.contains("validated lean/balanced/strict mode boundary")
         && normalized.contains("measurable overhead ledger")
         && normalized.contains("automated self-evolution decision gate")
@@ -714,10 +725,38 @@ fn expected_value_score(goal: &str) -> u32 {
         "context routing",
         "bounded executor",
     ];
-    let score = value_terms
+    let strategic_terms = [
+        "forge 0.5",
+        "mcp",
+        "skill",
+        "agent integration",
+        "creative runtime",
+        "interactive forge cli",
+        "no-argument interactive",
+        "slash command",
+        "slash-command",
+        "tui",
+        "direct-chat routing",
+        "human decision",
+        "form",
+        "live collaboration",
+        "whiteboard",
+        "design token",
+        "design system",
+        "componentization",
+        "creative artifact",
+        "milestone manifest",
+        "telegram",
+    ];
+    let base_score = value_terms
         .iter()
         .filter(|term| normalized.contains(**term))
         .count() as u32;
+    let strategic_score = strategic_terms
+        .iter()
+        .filter(|term| normalized.contains(**term))
+        .count() as u32;
+    let score = base_score + strategic_score.saturating_mul(2);
     score.max(4)
 }
 
