@@ -21,7 +21,7 @@ The intended architecture is hybrid:
 
 ## Status
 
-Current version: `0.4.148`
+Current version: `0.4.150`
 
 This is the first functional CLI + Skill version:
 
@@ -65,6 +65,7 @@ This is the first functional CLI + Skill version:
 - async workflow substrate policy with scope guards for Forge-owned resources
 - async request handoff for skill callers: submit a goal, receive `run_id`, continue later with Forge
 - process-liveness-aware run activity so a recorded live executor PID keeps long-running Forge handoffs active even after heartbeat TTL expiry
+- Forge-owned patch planning for agent file edits, with bounded context contract, repo-relative path permission gates, file snapshots, diff-review commands, validation commands and workflow artifact lineage without applying changes
 - MCP tool manifest and call surface for agent workflows: list, inspect, start/resume/status, schedule create/update/list/summary, loop inspect/summary, task handoff, context request, validation status and bounded artifact fetch
 - 0.5 milestone status and promotion manifest surfaces for release-gate inspection
 - native daily Goal research workflow planning and smoke execution for `hackathon` reports with Markdown/PDF artifacts and redacted Telegram delivery records

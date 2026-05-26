@@ -1104,6 +1104,275 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
 }
 
 #[test]
+fn patch_plan_creates_bounded_diff_review_artifact_without_mutating_files() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let before = fs::read("Cargo.toml").unwrap();
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Demonstrate a Forge-owned file patch flow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "patch",
+            "plan",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--intent",
+            "Prepare a tiny version metadata patch with human diff review",
+            "--path",
+            "Cargo.toml",
+            "--origin",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let after = fs::read("Cargo.toml").unwrap();
+    assert_eq!(before, after, "patch planning must not edit files");
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.patch_plan.v1");
+    assert_eq!(json["status"], "patch_plan_ready");
+    assert_eq!(json["workflow_id"], workflow_id);
+    assert_eq!(json["task_id"], "task-001");
+    assert_eq!(json["applies_changes"], false);
+    assert_eq!(json["external_resources_mutated"], false);
+    assert_eq!(json["requires_human_approval"], true);
+    assert!(json["permission_gate"]["allowed_paths"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("Cargo.toml")));
+    assert!(json["permission_gate"]["blocked_paths"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(json["context_contract"]["command"]
+        .as_str()
+        .unwrap()
+        .contains("forge context --workflow"));
+    assert!(json["diff_review"]["required_before_apply"]
+        .as_bool()
+        .unwrap());
+    assert!(json["diff_review"]["review_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("git diff -- Cargo.toml")));
+    assert!(json["file_snapshots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|snapshot| snapshot["path"] == "Cargo.toml"
+            && snapshot["exists"] == true
+            && snapshot["sha256"].as_str().unwrap().len() == 64));
+    assert!(json["artifact"]["path"]
+        .as_str()
+        .unwrap()
+        .contains("attached-patch_plan-"));
+
+    let artifacts = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "artifacts",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let artifacts_json: Value = serde_json::from_slice(&artifacts).unwrap();
+    assert!(artifacts_json["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|artifact| artifact["path"]
+            .as_str()
+            .unwrap()
+            .contains("attached-patch_plan-")));
+}
+
+#[test]
+fn mcp_exposes_patch_plan_and_skill_guidance_for_agent_file_editing() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge patch plan"),
+        "the packaged Forge skill should teach agents to request bounded patch plans"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.patch.plan"),
+        "the packaged Forge skill should expose the MCP patch plan tool"
+    );
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Demonstrate an MCP patch plan",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.patch.plan"
+            && tool["output_schema"] == "forge.patch_plan.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == true
+    }));
+
+    let input = format!(
+        r#"{{"workflow_id":"{workflow_id}","task_id":"task-001","intent":"Prepare patch through MCP","paths":["Cargo.toml"],"origin":"test"}}"#
+    );
+    let call = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.patch.plan"])
+        .arg("--input")
+        .arg(input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&call).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["result"]["schema_version"], "forge.patch_plan.v1");
+    assert_eq!(json["result"]["status"], "patch_plan_ready");
+    assert_eq!(json["result"]["external_resources_mutated"], false);
+    assert_eq!(json["result"]["permission_gate"]["risk_level"], "medium");
+}
+
+#[test]
+fn patch_plan_blocks_external_parent_paths_without_attaching_artifacts() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Demonstrate blocked patch planning",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "patch",
+            "plan",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--intent",
+            "Try to patch outside the repository",
+            "--path",
+            "../outside.txt",
+            "--origin",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "patch_plan_blocked");
+    assert_eq!(json["applies_changes"], false);
+    assert_eq!(json["external_resources_mutated"], false);
+    assert!(json["permission_gate"]["allowed_paths"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(json["permission_gate"]["blocked_paths"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("../outside.txt")));
+    assert!(json["artifact"].is_null());
+
+    let artifacts = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "artifacts",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let artifacts_json: Value = serde_json::from_slice(&artifacts).unwrap();
+    assert!(artifacts_json["artifacts"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn plan_from_human_goal_creates_persistent_atomic_graph() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
