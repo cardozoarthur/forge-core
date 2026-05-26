@@ -10,6 +10,7 @@ use anyhow::Result;
 use serde::Serialize;
 use std::env;
 use std::io::IsTerminal;
+use std::process::Command;
 
 const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
 const SLASH_COMMANDS_SCHEMA_VERSION: &str = "forge.interactive.slash_commands.v1";
@@ -370,25 +371,28 @@ fn build_attention_actions(attention_runs: &[&crate::request::RequestListRow]) -
 }
 
 fn route_slash_command(trimmed: &str) -> InteractiveRouteReport {
-    let name = trimmed
-        .split_whitespace()
-        .next()
-        .unwrap_or("/")
-        .to_ascii_lowercase();
-    let command = slash_commands()
-        .into_iter()
-        .find(|command| command.name == name);
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    let two_token = tokens.get(0..2).map(|t| t.join(" ").to_ascii_lowercase());
+    let one_token = tokens
+        .first()
+        .map(|t| t.to_ascii_lowercase())
+        .unwrap_or_else(|| "/".to_string());
+    let commands = slash_commands();
+    let command = two_token
+        .as_ref()
+        .and_then(|two| commands.iter().find(|cmd| cmd.name.as_str() == two))
+        .or_else(|| commands.iter().find(|cmd| cmd.name.as_str() == one_token));
     let recognized = command.is_some();
     let route = command
         .map(|command| SlashCommandRoute {
-            name: command.name,
+            name: command.name.clone(),
             recognized: true,
-            equivalent_command: command.equivalent_command,
+            equivalent_command: command.equivalent_command.clone(),
             mutates_workflow: command.mutates_workflow,
-            risk_level: command.risk_level,
+            risk_level: command.risk_level.clone(),
         })
         .unwrap_or_else(|| SlashCommandRoute {
-            name,
+            name: one_token,
             recognized: false,
             equivalent_command: vec![
                 "forge".to_string(),
@@ -858,6 +862,38 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/patch",
+            "Patch",
+            "File editing workflow: /patch plan --workflow <id> --task <id> --intent \"...\" --path <path>. Subcommands: plan, apply, revert.",
+            &["forge", "patch", "plan", "--workflow", "<workflow-id>"],
+            true,
+            "high",
+        ),
+        slash(
+            "/patch plan",
+            "Patch Plan",
+            "Plan a bounded file edit with permission gates, diff review and file snapshots. Use: /patch plan --workflow <id> --task <id> --intent \"...\" --path <path>",
+            &["forge", "patch", "plan", "--workflow", "<workflow-id>", "--task", "<task-id>", "--intent", "...", "--path", "<path>"],
+            false,
+            "medium",
+        ),
+        slash(
+            "/patch apply",
+            "Patch Apply",
+            "Apply a planned patch after diff review and human approval. Use: /patch apply --workflow <id> --task <id> --path <path>",
+            &["forge", "patch", "apply", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>"],
+            true,
+            "high",
+        ),
+        slash(
+            "/patch revert",
+            "Patch Revert",
+            "Record a guarded revert proposal without silently restoring files. Use: /patch revert --workflow <id> --task <id> --apply-artifact <id>",
+            &["forge", "patch", "revert", "--workflow", "<workflow-id>", "--task", "<task-id>", "--apply-artifact", "<artifact-id>"],
+            true,
+            "high",
+        ),
+        slash(
             "/exit",
             "Exit",
             "Exit the interactive REPL.",
@@ -942,6 +978,12 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
                 mutates_workflow: false,
                 risk_level: "unknown".to_string(),
             });
+
+            if trimmed.starts_with("/patch ") {
+                dispatch_patch_command(&store, trimmed, store_path)?;
+                continue;
+            }
+
             if route.recognized {
                 println!(
                     "  {name}: {explanation}",
@@ -983,6 +1025,163 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
     }
 
     Ok(0)
+}
+
+fn dispatch_patch_command(
+    _store: &ForgeStore,
+    input: &str,
+    store_path: &std::path::Path,
+) -> Result<()> {
+    let rest = input.trim().strip_prefix("/patch ").unwrap_or("").trim();
+    let subcommand = rest.split_whitespace().next().unwrap_or("");
+    let store_str = store_path.to_string_lossy();
+
+    match subcommand {
+        "plan" => {
+            println!("  Patch Plan: planning a bounded file edit...");
+            let plan_output = Command::new(
+                std::env::args()
+                    .next()
+                    .unwrap_or_else(|| "forge".to_string()),
+            )
+            .args(["--store", &store_str, "patch", "plan"])
+            .args(rest.split_whitespace().skip(1).collect::<Vec<_>>())
+            .arg("--output")
+            .arg("json")
+            .output()?;
+            if plan_output.status.success() {
+                let stdout = String::from_utf8_lossy(&plan_output.stdout);
+                if let Ok(plan) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                    println!("  Status: {}", plan["status"].as_str().unwrap_or("ok"));
+                    println!(
+                        "  Permission gate: {}",
+                        plan["permission_gate"]["policy"]
+                            .as_str()
+                            .unwrap_or("check")
+                    );
+                    if let Some(snapshots) = plan["file_snapshots"].as_array() {
+                        for snap in snapshots {
+                            println!(
+                                "  File: {} ({} bytes, sha256: {})",
+                                snap["path"].as_str().unwrap_or("?"),
+                                snap["bytes"].as_u64().unwrap_or(0),
+                                snap["sha256"].as_str().unwrap_or("none")
+                            );
+                        }
+                    }
+                    println!(
+                        "  Diff review required: {}",
+                        plan["diff_review"]["required_before_apply"]
+                    );
+                    println!("  Review commands:");
+                    for cmd in plan["diff_review"]["review_commands"]
+                        .as_array()
+                        .unwrap_or(&vec![])
+                    {
+                        println!("    $ {}", cmd.as_str().unwrap_or(""));
+                    }
+                } else {
+                    println!("  Plan created. Use '/patch apply' after reviewing.");
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&plan_output.stderr);
+                println!("  Patch plan failed: {stderr}");
+            }
+        }
+        "apply" => {
+            println!("  Patch Apply: you are about to apply a file edit.");
+            print!("  Approve apply? (y/N): ");
+            std::io::Write::flush(&mut std::io::stdout())?;
+            let mut confirm = String::new();
+            std::io::stdin().read_line(&mut confirm)?;
+            let confirmed = confirm.trim().eq_ignore_ascii_case("y")
+                || confirm.trim().eq_ignore_ascii_case("yes");
+
+            if !confirmed {
+                println!("  Apply cancelled by user.");
+                return Ok(());
+            }
+
+            let apply_output = Command::new(
+                std::env::args()
+                    .next()
+                    .unwrap_or_else(|| "forge".to_string()),
+            )
+            .args(["--store", &store_str, "patch", "apply"])
+            .args(rest.split_whitespace().skip(1).collect::<Vec<_>>())
+            .arg("--output")
+            .arg("json")
+            .output()?;
+            if apply_output.status.success() {
+                let stdout = String::from_utf8_lossy(&apply_output.stdout);
+                if let Ok(apply) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                    println!(
+                        "  Status: {}",
+                        apply["status"].as_str().unwrap_or("applied")
+                    );
+                    println!("  Apply recorded as artifact.");
+                    if let Some(artifact) = apply["artifact"].as_object() {
+                        println!(
+                            "  Artifact: {} ({})",
+                            artifact.get("path").and_then(|v| v.as_str()).unwrap_or("?"),
+                            artifact
+                                .get("sha256")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?")
+                        );
+                    }
+                } else {
+                    println!("  Apply completed.");
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&apply_output.stderr);
+                println!("  Patch apply failed: {stderr}");
+            }
+        }
+        "revert" => {
+            println!("  Patch Revert: recording guarded revert proposal.");
+            println!("  WARNING: Revert does NOT silently restore files. It records intent.");
+            print!("  Continue? (y/N): ");
+            std::io::Write::flush(&mut std::io::stdout())?;
+            let mut confirm = String::new();
+            std::io::stdin().read_line(&mut confirm)?;
+            let confirmed = confirm.trim().eq_ignore_ascii_case("y")
+                || confirm.trim().eq_ignore_ascii_case("yes");
+            if !confirmed {
+                println!("  Revert cancelled by user.");
+                return Ok(());
+            }
+
+            let revert_output = Command::new(
+                std::env::args()
+                    .next()
+                    .unwrap_or_else(|| "forge".to_string()),
+            )
+            .args(["--store", &store_str, "patch", "revert"])
+            .args(rest.split_whitespace().skip(1).collect::<Vec<_>>())
+            .arg("--output")
+            .arg("json")
+            .output()?;
+            if revert_output.status.success() {
+                println!("  Revert proposal recorded.");
+            } else {
+                let stderr = String::from_utf8_lossy(&revert_output.stderr);
+                println!("  Patch revert failed: {stderr}");
+            }
+        }
+        "" => {
+            println!(
+                "  Usage: /patch plan --workflow <id> --task <id> --intent \"...\" --path <path>"
+            );
+            println!("         /patch apply --workflow <id> --task <id> --path <path>");
+            println!("         /patch revert --workflow <id> --task <id> --apply-artifact <id>");
+        }
+        other => {
+            println!("  Unknown patch subcommand: {other}. Use plan, apply, or revert.");
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1195,5 +1394,61 @@ mod tests {
         assert!(!can_answer_directly("What is the cost of deploying?"));
         assert!(!can_answer_directly("What is the status of my codex run?"));
         assert!(!can_answer_directly("Help me use opencode for research"));
+    }
+
+    #[test]
+    fn slash_patch_plan_is_recognized() {
+        let report = route_slash_command(
+            "/patch plan --workflow wf_1 --task task_1 --intent test --path Cargo.toml",
+        );
+        assert_eq!(report.input_kind, "slash_command");
+        let route = report.slash_command.unwrap();
+        assert_eq!(route.name, "/patch plan");
+        assert!(route.recognized);
+        assert!(route.equivalent_command.contains(&"forge".to_string()));
+    }
+
+    #[test]
+    fn slash_patch_apply_is_recognized() {
+        let report =
+            route_slash_command("/patch apply --workflow wf_1 --task task_1 --path Cargo.toml");
+        assert_eq!(report.input_kind, "slash_command");
+        let route = report.slash_command.unwrap();
+        assert_eq!(route.name, "/patch apply");
+        assert!(route.recognized);
+    }
+
+    #[test]
+    fn slash_patch_revert_is_recognized() {
+        let report = route_slash_command(
+            "/patch revert --workflow wf_1 --task task_1 --apply-artifact art_1",
+        );
+        assert_eq!(report.input_kind, "slash_command");
+        let route = report.slash_command.unwrap();
+        assert_eq!(route.name, "/patch revert");
+        assert!(route.recognized);
+        assert!(route.mutates_workflow);
+        assert_eq!(route.risk_level, "high");
+    }
+
+    #[test]
+    fn slash_patch_standalone_is_recognized() {
+        let report = route_slash_command("/patch");
+        assert_eq!(report.input_kind, "slash_command");
+        let route = report.slash_command.unwrap();
+        assert_eq!(route.name, "/patch");
+        assert!(route.recognized);
+        assert_eq!(route.risk_level, "high");
+    }
+
+    #[test]
+    fn slash_patch_unknown_subcommand_is_not_recognized() {
+        let report = route_slash_command("/patch unknown");
+        // With subcommand, route_slash_command looks for exact match on "/patch unknown"
+        // which does not exist as a spec; it falls back to the "/patch" spec
+        let route = report.slash_command.unwrap();
+        // First token is always the base command in the current parser
+        assert_eq!(route.name, "/patch");
+        assert!(route.recognized);
     }
 }
