@@ -9,7 +9,8 @@ use crate::interaction::{
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::milestone::{
-    build_milestone_manifest, build_milestone_research, build_milestone_status,
+    build_milestone_export_demo, build_milestone_manifest, build_milestone_research,
+    build_milestone_status,
 };
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
@@ -770,6 +771,23 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.milestone.export_demo",
+                "Generate Milestone Export Demo",
+                "Generate a self-contained export/demo workflow with screen and document creative artifacts, design token collection, and full lineage evidence for the Forge 0.5 export/demo baseline.",
+                object_schema(&[], &[]),
+                "forge.milestone.export_demo.v1",
+                &[
+                    "forge",
+                    "milestone",
+                    "export-demo",
+                    "--origin",
+                    "mcp",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(false, true),
+            ),
+            tool(
                 "forge.creative.list",
                 "List Creative Artifacts",
                 "List creative artifacts (screens, whiteboards, documents, slide decks, components) attached to a workflow.",
@@ -1181,6 +1199,9 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let input: MilestoneStatusInput = parse_input(input)?;
             let version = input.version.unwrap_or_else(|| "0.5".to_string());
             serde_json::to_value(build_milestone_research(&version)?)?
+        }
+        "forge.milestone.export_demo" => {
+            serde_json::to_value(build_milestone_export_demo(store, "mcp")?)?
         }
         "forge.creative.list" => {
             let input: CreativeListInput = parse_input(input)?;

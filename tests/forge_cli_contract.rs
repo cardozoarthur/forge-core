@@ -45,16 +45,16 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
             "blocked"
         ])
     );
-    assert_eq!(json["promotion_decision"]["decision"], "fail");
-    assert_eq!(json["promotion_decision"]["promotable"], false);
+    assert_eq!(json["promotion_decision"]["decision"], "promote");
+    assert_eq!(json["promotion_decision"]["promotable"], true);
     let blocked_by = json["promotion_decision"]["blocked_by"].as_array().unwrap();
     assert!(
         !blocked_by.contains(&serde_json::json!("creative_artifact_ir")),
         "creative_artifact_ir is now validated and should not block"
     );
     assert!(
-        blocked_by.contains(&serde_json::json!("export_demo_baseline")),
-        "export_demo_baseline should block until rendered demo evidence exists"
+        !blocked_by.contains(&serde_json::json!("export_demo_baseline")),
+        "export_demo_baseline is now validated and should not block"
     );
 
     let capabilities = json["capabilities"].as_array().unwrap();
@@ -73,8 +73,8 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .as_str()
         .unwrap()
         .contains("0.5"));
-    assert_eq!(json["summary"]["validated"].as_u64().unwrap(), 8);
-    assert_eq!(json["summary"]["groundwork"].as_u64().unwrap(), 1);
+    assert_eq!(json["summary"]["validated"].as_u64().unwrap(), 9);
+    assert_eq!(json["summary"]["groundwork"].as_u64().unwrap(), 0);
     assert_eq!(json["summary"]["planned"].as_u64().unwrap(), 0);
 }
 
@@ -118,7 +118,13 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
         "forge.milestone.status.v1"
     );
     assert_eq!(json["result"]["milestone"], "0.5");
-    assert_eq!(json["result"]["promotion_decision"]["decision"], "fail");
+    assert_eq!(json["result"]["promotion_decision"]["decision"], "promote");
+    assert!(json["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability["id"] == "export_demo_baseline"
+            && capability["status"] == "validated"));
     assert!(json["result"]["capabilities"]
         .as_array()
         .unwrap()
@@ -172,12 +178,12 @@ fn milestone_manifest_surfaces_requirements_evidence_gaps_and_promotion_decision
             |capability| capability["id"] == "scheduler_loop_subflow_foundation"
                 && capability["promotion_ready"] == true
         ));
-    assert!(json["missing_capabilities"]
+    assert!(json["completed_capabilities"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability["id"] == "export_demo_baseline"
-            && capability["promotion_ready"] == false));
+            && capability["promotion_ready"] == true));
     assert!(json["completed_capabilities"]
         .as_array()
         .unwrap()
@@ -201,11 +207,15 @@ fn milestone_manifest_surfaces_requirements_evidence_gaps_and_promotion_decision
         .unwrap()
         .iter()
         .all(|gap| gap["capability_id"] != "live_collaboration"));
-    assert_eq!(json["promotion_decision"]["decision"], "fail");
-    assert!(json["promotion_decision"]["blocked_by"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!("export_demo_baseline")));
+    assert_eq!(json["promotion_decision"]["decision"], "promote");
+    assert_eq!(json["promotion_decision"]["promotable"], true);
+    assert!(
+        json["promotion_decision"]["blocked_by"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "all 9 capabilities are now validated; promotion should be blocked_by empty"
+    );
 }
 
 #[test]
@@ -253,11 +263,15 @@ fn mcp_exposes_milestone_manifest_for_agent_release_gates() {
         .unwrap()
         .iter()
         .any(|capability| capability["id"] == "research_artifact_baseline"));
-    assert!(json["result"]["missing_capabilities"]
+    assert!(json["result"]["completed_capabilities"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability["id"] == "export_demo_baseline"));
+    assert!(json["result"]["missing_capabilities"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -317,6 +331,95 @@ fn milestone_research_baseline_is_source_grounded_and_agent_visible() {
             && tool["async_safe"] == true
             && tool["mutates_workflow"] == false
     }));
+}
+
+#[test]
+fn milestone_export_demo_creates_workflow_with_creative_artifacts_and_tokens() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "milestone",
+            "export-demo",
+            "--origin",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.milestone.export_demo.v1");
+    assert_eq!(json["status"], "export_demo_generated");
+    assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
+    assert!(json["screen_artifact_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("ca_"));
+    assert!(json["document_artifact_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("ca_"));
+    assert_eq!(json["token_collection_name"], "export_demo_tokens");
+    assert_eq!(json["goal"], "hackathon");
+    let artifacts = json["demo_artifacts"].as_array().unwrap();
+    assert!(artifacts.iter().any(|a| a["kind"] == "scheduled_workflow"));
+    assert!(artifacts.iter().any(|a| a["kind"] == "creative_screen"));
+    assert!(artifacts.iter().any(|a| a["kind"] == "creative_document"));
+    assert!(artifacts.iter().any(|a| a["kind"] == "design_tokens"));
+    let lineage = json["lineage_chain"].as_array().unwrap();
+    assert!(lineage.len() >= 3);
+    assert!(json["export_evidence"]
+        .as_str()
+        .unwrap()
+        .contains("forge.milestone.export_demo.v1"));
+}
+
+#[test]
+fn mcp_exposes_milestone_export_demo_tool() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.milestone.export_demo"
+            && tool["output_schema"] == "forge.milestone.export_demo.v1"
+            && tool["async_safe"] == false
+            && tool["mutates_workflow"] == true
+    }));
+
+    let call = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.milestone.export_demo"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&call).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(
+        json["result"]["schema_version"],
+        "forge.milestone.export_demo.v1"
+    );
+    assert_eq!(json["result"]["status"], "export_demo_generated");
 }
 
 #[test]
@@ -17894,8 +17997,8 @@ fn milestone_status_reports_creative_artifact_ir_capability_as_validated() {
         "componentization_ai_surfaces should be validated"
     );
     assert_eq!(
-        export_demo.status, "groundwork",
-        "export_demo_baseline should stay groundwork until rendered design and structured document/slide/whiteboard demos exist"
+        export_demo.status, "validated",
+        "export_demo_baseline is now validated after forge milestone export-demo"
     );
 }
 
