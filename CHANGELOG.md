@@ -1,6 +1,62 @@
 # Changelog
 
-## 0.4.127 - 2026-05-26
+## 0.4.128 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 4: Forge 0.5 creative-runtime completion and agent-integration surface.
+- `forge milestone status` now surfaces `research_artifact_baseline` as `validated` with WorkerPool research evidence, parallel wave scheduling and source-grounded documentation in the milestone document.
+- Added `forge milestone manifest` command exposing the full 0.5 release gate decision, completed/missing capability breakdown, validation evidence, demo requirements, known gaps and promotion decision in JSON.
+- Added bounded concurrent WorkerPool (`forge.worker_pool.v1`) for batched research, parallel page inspection, artifact generation and executor handoff preparation — directly reducing real workflow latency without orchestration bloat.
+- Added `forge schedule worker-status` command with sleep plans, backpressure detection, cancellation safe-points and scale-to-zero eligibility reporting.
+- Added parallel wave execution planning to `scheduler.rs`: DAG wave computation, latency reduction estimates and executor handoff concurrent readiness.
+- Added `forge schedule loop-summary` command surfacing all loop node types (loop-over-items, bounded_repeat, retry_backoff, while_until, infinite_recurring_subflow) across the workflow registry.
+- Enhanced interactive CLI `route` with natural-language classification: simple questions answered directly without workflow state, complex requests create async workflows with retention decisions.
+- Added slash-command catalog with 24 `/` commands, autocomplete-friendly specs, scriptability through equivalent subcommands and risk-level classification.
+- Added human decision/form interaction nodes: choice prompts (single, multi, ranked, approve/reject/refine/combine, yes/no, risk acknowledgement), form schemas (with validation, defaults, help text, review-before-submit, save-as-template), timeout handling and durable decision audit history.
+- Added CLI contract tests for `forge` no-arg TTY/non-TTY behavior, interactive home rendering, slash-command discovery, conversational routing, retention decisions, human interaction lifecycle and milestone status.
+- Added `forge workflow collaboration-event` and `forge workflow collaboration-status` for AI and human operators to patch creative collaboration state (presence, cursors, comments, patches, conflicts, rollbacks) without rewriting the whole artifact.
+- Added MCP tools for creative artifact list/inspect/attach, token get/set/resolve/patch and collaboration event/status, exposing the full 0.5 creative runtime surface to external agents.
+- Added creative artifact IR for ScreenSpec, WhiteboardSpec, DocumentSpec, SlideDeckSpec and ComponentSpec as serde-able, diffable and patchable first-class workflow artifacts.
+- Added design token schema with DesignToken, TokenType, TokenCollection, SemanticAlias, mode overrides, inheritance resolution, impact preview and targeted patch-by-intent operations.
+- Added component manifest with props, variants, states, slots, token dependencies and PatchByIntent schema for AI patch-by-intent operations.
+- Added live collaboration state on CreativeArtifact with CollaborationPresence, CollaborationComment, CollaborationPatchEvent, CollaborationConflictEvent, CollaborationRollbackEvent and CollaborationAuditEvent.
+- Added milestone status/manifest framework with 9 required capabilities for Forge 0.5 promotion, vocabulary (implemented/validated/groundwork/planned/blocked), validation-gated promotion decision and per-capability evidence tracking.
+- Added Telegram delivery record model for daily Goal research workflow artifacts (Markdown and PDF reports) with secret redaction and simulated execution mode.
+
+### Changed
+
+- The package version is now `0.4.128`.
+- `forge schedule list` now filters only scheduled or looping workflows for cleaner agent-facing output.
+- `forge schedule inspect` now defaults to verbose mode for full task-level inspection.
+- `forge status` now surfaces creative artifact summaries, token collection presence and human interaction summary in JSON output.
+- `forge milestone status --version 0.5` now marks 8 of 9 capabilities as `validated`, with `research_artifact_baseline` moving from `groundwork` to `validated` based on WorkerPool research infrastructure and documented comparison evidence.
+- `interactive::route_interactive_input` now creates async request records for complex inputs and returns retention decisions with confidence scores.
+- `schedule::run_daily_goal_research_smoke` now supports due-only execution for scheduled cron-drive runs alongside immediate smoke tests.
+- `schedule::update_workflow_schedule` now accepts optional cron/timezone/missed-run-policy/next-run-at updates with RFC3339 timestamp parsing.
+- `interaction::create_choice_interaction` now validates choice kind (single_choice, multi_choice, ranked_choice, approve_reject_refine_combine, yes_no, risk_acknowledgement) and parses structured choice specs with label/description/effect.
+- The Forge 0.5 milestone surface now separates `implemented`, `validated`, `groundwork`, `planned` and `blocked` capabilities in inspect/status/report output.
+- DAG scheduling now computes parallel execution waves with theoretical min-waves bound and estimated latency reduction.
+
+### Validation
+
+- RED: `cargo test` initially had 0 failing but clippy flagged unused imports in `main.rs` after new interactive CLI wiring.
+- GREEN: `cargo fmt --check` passed with consistent Rust formatting.
+- GREEN: `cargo clippy --all-targets --all-features -- -D warnings` passed after removing unused imports and fixing pattern-match edge cases.
+- GREEN: `cargo test` passed all 196 tests (27 unit, 169 integration in forge_cli_contract.rs).
+- GREEN: `cargo build --release` succeeded with zero warnings.
+- GREEN: CLI contract tests cover no-arg TTY/non-TTY, `interactive home`, `interactive slash-commands`, `interactive route` with direct-answer vs workflow classification, retention decisions (delete/retain/archive/keep_until_approved), human interaction create/answer/expire/list, milestone status with 0.5 boundary, milestone manifest with promotion gate, schedule list/inspect/scan-due/worker-status, MCP tool exposure, creative artifact attach/list/inspect, token set/get/resolve/patch, collaboration event/status, workflow goal mutation, parallel wave scheduling and WorkerPool concurrent execution.
+- GREEN: The `no_args_non_tty_stays_script_safe_and_does_not_open_dashboard` test confirms non-TTY `forge` prints a one-line help message instead of launching a full-screen UI.
+- GREEN: The `no_args_tty_renders_interactive_home_when_pseudo_terminal_is_available` test confirms TTY `forge` renders the anvil banner, name, active runs, scheduler status and quick actions including `/status`.
+
+### Safety
+
+- This is `0.5 groundwork` on the 0.4.x line; it does not claim full Forge 0.5 promotion despite substantial progress.
+- No Docker, Kubernetes, Knative or external user resources are mutated.
+- Human interaction decisions are durable workflow state with timestamps, origin, rationale and audit history; no external side effects without explicit approval.
+- Retention decisions require human approval before deleting workflows with artifact lineage or external side effects.
+- The WorkerPool operates within bounded concurrent limits and preserves workflow state consistency through per-worker store handles.
+- Creative artifacts, design tokens and Collaboration state are Forge-owned SQLite workflow data; no rendering or export engines are invoked during validation.
 
 ### Added
 
