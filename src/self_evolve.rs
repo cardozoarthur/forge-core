@@ -1,7 +1,7 @@
 use crate::artifact::{hex_sha256, write_json_artifact};
 use crate::graph::{create_workflow, Workflow};
 use crate::intent::parse_intent;
-use crate::request::{create_run_record, save_run_record, update_run_status};
+use crate::request::{create_run_record, heartbeat_request, save_run_record, update_run_status};
 use crate::storage::ForgeStore;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -402,7 +402,15 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         let mut public_project_update = PublicProjectUpdateReport::planned(options.push);
 
         if !options.dry_run {
-            update_run_status(store, &run.run_id, "running", "forge_cli")?;
+            heartbeat_request(
+                store,
+                &run.run_id,
+                &executor,
+                &format!("Self-evolution cycle {cycle}: preparing"),
+                300,
+                std::process::id().into(),
+                "forge_cli",
+            )?;
             if let Ok(mut wf) = store.load_workflow(&workflow.id) {
                 wf.status = "running".to_string();
                 let _ = store.save_workflow(&wf);
@@ -428,6 +436,15 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             } else {
                 "failed"
             };
+            heartbeat_request(
+                store,
+                &run.run_id,
+                &executor,
+                &format!("Self-evolution cycle {cycle}: {cycle_workflow_status}"),
+                300,
+                std::process::id().into(),
+                "forge_cli",
+            )?;
             if let Ok(mut wf) = store.load_workflow(&workflow.id) {
                 wf.status = cycle_workflow_status.to_string();
                 let _ = store.save_workflow(&wf);
