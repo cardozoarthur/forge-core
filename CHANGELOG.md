@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.130 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 6: Forge 0.5 export/demo baseline closure and milestone promotion readiness.
+- Added `forge milestone export-demo` CLI command that creates a scheduled daily research workflow with a ScreenSpec creative artifact, a DocumentSpec creative artifact and a design token collection, proving the design/tokens/component export lineage for the Forge 0.5 export/demo baseline.
+- Added MCP tool `forge.milestone.export_demo` so agents can generate the same export/demo evidence through MCP without needing the CLI.
+- Added CLI contract and MCP contract tests proving the export-demo command creates the workflow, attaches creative artifacts, sets design tokens, and reports full lineage chain evidence including screen and document artifact IDs.
+
+### Changed
+
+- The package version is now `0.4.130`.
+- `export_demo_baseline` promoted from `groundwork` to `validated` in the Forge 0.5 milestone surface, closing the last remaining gap. All 9 Forge 0.5 milestone capabilities are now `validated`.
+- The Forge 0.5 promotion gate now reports `promote` with empty `blocked_by` list, confirming all capabilities have implementation and validation evidence.
+- `forge milestone status` and `forge milestone manifest` now reflect the complete `validated=9, groundwork=0, planned=0` summary.
+
+### Safety
+
+- This change only mutates Forge-owned source and tests.
+- `forge milestone export-demo` creates workflow state and creative artifacts in the configured SQLite store, which is the same store used by all other Forge operations.
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- The Forge 0.5 promotion gate passing does not automatically bump the package line; an explicit human-controlled release process is still required before changing the version line to 0.5.
+
 ## 0.4.129 - 2026-05-26
 
 ### Added
