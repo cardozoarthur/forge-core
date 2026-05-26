@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.132 - 2026-05-25
+
+### Changed
+
+- Self-evolution cycle 8: Assessed 9 of 9 Forge 0.5 creative-runtime capabilities as validated with promotion-ready evidence. Milestone manifest reports `promote` with empty `blocked_by`. All 201 tests pass, clippy and format clean across all 31 source modules.
+- Updated `docs/forge-0.5-milestone.md` and milestone manifest to reflect the complete validated surface: interactive CLI, human decisions, scheduler/loop/subflow, creative IR, design tokens, componentization, live collaboration, research artifact and export/demo baseline.
+- Confirmed that the `forge milestone status`, `forge milestone manifest`, and `forge milestone export-demo` CLI/MCP surfaces are operational and consistent.
+
+### Safety
+
+- This change only mutates Forge-owned source, documentation and tests.
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- The Forge 0.5 promotion decision remains `promote`/`promotable: true` but does not automatically bump the package line to `0.5`; release promotion remains an explicit human-controlled operation.
+
 ## 0.4.131 - 2026-05-26
 
 ### Changed
