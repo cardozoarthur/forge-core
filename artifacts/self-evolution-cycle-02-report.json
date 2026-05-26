@@ -1,0 +1,72 @@
+{
+  "schema_version": "forge.self_evolution.cycle_report.v1",
+  "cycle": 2,
+  "run_id": "cycle_02_self",
+  "workflow_id": "wf_self_evolution",
+  "status": "completed",
+  "executor": "opencode",
+  "operating_mode": "balanced",
+  "started_at": "2026-05-25T21:15:00Z",
+  "finished_at": "2026-05-25T21:20:00Z",
+  "prompt_packet_version": "forge.self_evolution.prompt.v2",
+  "overhead_ledger": {
+    "schema_version": "forge.self_evolution.overhead_ledger.v1",
+    "operating_mode": "balanced",
+    "cycle_count": 1,
+    "prompt_bytes": 8472,
+    "estimated_prompt_tokens": 2118,
+    "validation_command_count": 4,
+    "artifact_count": 3,
+    "metadata_bytes": 1532,
+    "orchestration_cost_score": 6
+  },
+  "decision_gate": {
+    "schema_version": "forge.self_evolution.decision_gate.v1",
+    "operating_mode": "balanced",
+    "mode_boundary": "default bounded governance; allow small validated increments with explicit value evidence and measured overhead",
+    "decision": "run_cycle",
+    "stop_loop": false,
+    "terminal_goal_reached": false,
+    "expected_value_score": 4,
+    "orchestration_cost_score": 3,
+    "reason": "expected value is high enough to justify one bounded self-evolution cycle"
+  },
+  "files_changed": [
+    "src/request.rs:216-237 (update_run_status helper)",
+    "src/self_evolve.rs:4 (import), 405-414 (running status before executor), 474-477 (final status), 487-492 (report status)",
+    "src/interactive.rs:754-896 (12 unit tests)",
+    "Cargo.toml:2 (version bump 0.4.125 -> 0.4.126)",
+    "CHANGELOG.md:4-37 (cycle 2 changelog)"
+  ],
+  "validation_results": {
+    "fmt_check": "passed",
+    "clippy": "passed",
+    "test": "passed (221 total: 27 unit + 194 integration)",
+    "build_release": "passed",
+    "test_details": {
+      "new_unit_tests": 12,
+      "new_test_cases": [
+        "can_answer_questions_about_current_state",
+        "can_answer_supports_help_questions",
+        "requires_workflow_detects_execution_keywords",
+        "decide_retention_keeps_recurring_workflows",
+        "decide_retention_keeps_workflows_with_artifacts_or_side_effects",
+        "decide_retention_archives_simple_execution_backed_workflows",
+        "decide_retention_blocks_deletion_of_artifact_or_side_effect_workflows",
+        "decide_retention_noops_when_no_workflow_created",
+        "route_slash_command_recognizes_known_commands",
+        "route_slash_command_reports_unknown_commands",
+        "route_slash_command_preserves_arguments",
+        "routing_classification_pure_simple_question"
+      ]
+    }
+  },
+  "self_update": {
+    "status": "not_applied",
+    "reason": "Cycle executed within same session without self-update"
+  },
+  "next_recommended_cycle": {
+    "priority": "high",
+    "focus": "Expand integration tests for schedule/loop nodes with failure edges; add lease-based executor adapter contracts for 0.5 groundwork"
+  }
+}

@@ -750,3 +750,140 @@ fn slash(
 fn anvil_mark() -> &'static str {
     "      _________\n  ___/         \\___\n |_______________|\n       |  |\n       |__|"
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn can_answer_questions_about_current_state() {
+        assert!(can_answer_directly("What is the current Forge status?"));
+        assert!(can_answer_directly("Show me the current help"));
+        assert!(can_answer_directly("what is happening right now"));
+        assert!(can_answer_directly("status please"));
+        assert!(!can_answer_directly("Research upcoming events"));
+        assert!(!can_answer_directly("implement a scheduler"));
+        assert!(!can_answer_directly("deploy to production"));
+        assert!(!can_answer_directly("validate the workflow"));
+    }
+
+    #[test]
+    fn requires_workflow_detects_execution_keywords() {
+        assert!(requires_workflow("research this topic"));
+        assert!(requires_workflow("implement a feature"));
+        assert!(requires_workflow("code a solution"));
+        assert!(requires_workflow("create artifact"));
+        assert!(requires_workflow("run the analysis"));
+        assert!(requires_workflow("deploy to server"));
+        assert!(requires_workflow("delete workflow"));
+        assert!(requires_workflow("schedule daily report"));
+        assert!(requires_workflow("cron every hour"));
+        assert!(!requires_workflow("what is the weather"));
+        assert!(!requires_workflow("current status"));
+        assert!(!requires_workflow("help me understand"));
+    }
+
+    #[test]
+    fn decide_retention_keeps_recurring_workflows() {
+        let decision = decide_retention("Research hackathons every day", true);
+        assert_eq!(decision.action, "retain");
+        assert!(!decision.requires_human_approval);
+        assert_eq!(
+            decision.schema_version,
+            "forge.interactive.retention_decision.v1"
+        );
+
+        let decision = decide_retention("Daily report with cron", true);
+        assert_eq!(decision.action, "retain");
+
+        let decision = decide_retention("Send artifact via telegram", true);
+        assert_eq!(decision.action, "retain");
+    }
+
+    #[test]
+    fn decide_retention_keeps_workflows_with_artifacts_or_side_effects() {
+        let decision = decide_retention("Generate PDF report", true);
+        assert_eq!(decision.action, "retain");
+
+        let decision = decide_retention("Send notification externally", true);
+        assert_eq!(decision.action, "retain");
+
+        let decision = decide_retention("Deploy the new version", true);
+        assert_eq!(decision.action, "retain");
+    }
+
+    #[test]
+    fn decide_retention_archives_simple_execution_backed_workflows() {
+        let decision = decide_retention("Run a quick calculation", true);
+        assert_eq!(decision.action, "archive");
+        assert!(!decision.requires_human_approval);
+        assert_eq!(decision.confidence, 0.68);
+    }
+
+    #[test]
+    fn decide_retention_blocks_deletion_of_artifact_or_side_effect_workflows() {
+        let decision = decide_retention("Create a PDF artifact then delete", true);
+        assert_eq!(decision.action, "keep_until_approved");
+        assert!(decision.requires_human_approval);
+        assert_eq!(decision.confidence, 0.94);
+
+        let decision = decide_retention("delete the deploy workflow", true);
+        assert_eq!(decision.action, "keep_until_approved");
+    }
+
+    #[test]
+    fn decide_retention_noops_when_no_workflow_created() {
+        let decision = decide_retention("anything", false);
+        assert_eq!(decision.action, "none");
+        assert!(decision.confidence > 0.99);
+    }
+
+    #[test]
+    fn route_slash_command_recognizes_known_commands() {
+        let report = route_slash_command("/status");
+        assert_eq!(report.input_kind, "slash_command");
+        assert_eq!(report.routing_decision, "slash_command");
+        assert!(!report.workflow_created);
+        let route = report.slash_command.unwrap();
+        assert_eq!(route.name, "/status");
+        assert!(route.recognized);
+        assert!(!route.mutates_workflow);
+        assert_eq!(route.risk_level, "low");
+    }
+
+    #[test]
+    fn route_slash_command_reports_unknown_commands() {
+        let report = route_slash_command("/nonexistent");
+        assert_eq!(report.input_kind, "slash_command");
+        let route = report.slash_command.unwrap();
+        assert_eq!(route.name, "/nonexistent");
+        assert!(!route.recognized);
+        assert_eq!(route.risk_level, "unknown");
+    }
+
+    #[test]
+    fn route_slash_command_preserves_arguments() {
+        let report = route_slash_command("/stop --workflow wf_demo --task task_1");
+        assert_eq!(report.input_kind, "slash_command");
+        let route = report.slash_command.unwrap();
+        assert_eq!(route.name, "/stop");
+        assert!(route.recognized);
+        assert!(route.mutates_workflow);
+        assert_eq!(route.risk_level, "high");
+    }
+
+    #[test]
+    fn can_answer_supports_help_questions() {
+        assert!(can_answer_directly("help"));
+        assert!(can_answer_directly("Help me understand Forge"));
+        assert!(!can_answer_directly("help me implement a workflow"));
+    }
+
+    #[test]
+    fn routing_classification_pure_simple_question() {
+        assert!(can_answer_directly("What is the current status?"));
+        assert!(!can_answer_directly(
+            "What is the best way to implement a cron job?"
+        ));
+    }
+}

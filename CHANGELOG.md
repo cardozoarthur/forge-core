@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.126 - 2026-05-25
+
+### Added
+
+- Self-evolution cycle 2: run lifecycle visibility with planned→running→completed/failed transitions.
+- `update_run_status` helper in `request.rs` that persists run status transitions and records events for observability by external pollers, MCP tools and the CLI.
+- Self-evolution runs now mark the run record as `running` while executor processes are alive, and set `completed` or `failed` after all cycles finish.
+- 12 unit tests for `interactive.rs` routing classification: `can_answer_directly`, `requires_workflow`, `decide_retention` and `route_slash_command` edge cases (known/unknown commands, artifact deletion guard, recurring schedule retention, no-workflow noop).
+
+### Changed
+
+- The package version is now `0.4.126`.
+- `run_self_evolution` transitions run status to `running` before `execute_cycle` and records `completed` or `failed` after all cycles, replacing the static `"started"` or `"planned"` status.
+
+### Validation
+
+- RED: `cargo fmt --check` failed on line-wrapped assert_eq and can_answer_directly in the new tests.
+- GREEN: Reformatting resolved all style complaints.
+- GREEN: `cargo clippy --all-targets --all-features -- -D warnings` passes with zero warnings.
+- GREEN: `cargo test` passes all 221 tests (27 unit, 194 integration).
+- GREEN: `cargo build --release` succeeds.
+
+### Safety
+
+- Run status mutations are persisted in SQLite with event recording for auditability.
+- `update_run_status` reuses the existing `load_run_record`/`save_run_record` pattern and does not introduce new failure modes.
+- All changes are backward-compatible: existing run records without status transitions continue to deserialize correctly.
+
 ## 0.4.125 - 2026-05-25
 
 ### Added
