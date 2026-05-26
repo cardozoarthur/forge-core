@@ -218,6 +218,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 "/workflows".to_string(),
                 "/runs".to_string(),
                 "/artifacts".to_string(),
+                "/milestone".to_string(),
                 "/sync".to_string(),
                 "/validate".to_string(),
                 "/logs".to_string(),
@@ -778,6 +779,54 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/manifest",
+            "Manifest",
+            "Show Forge 0.5 milestone manifest with promotion decision.",
+            &[
+                "forge",
+                "milestone",
+                "manifest",
+                "--version",
+                "0.5",
+                "--output",
+                "json",
+            ],
+            false,
+            "low",
+        ),
+        slash(
+            "/milestone",
+            "Milestone",
+            "Show Forge 0.5 milestone status and boundary gates.",
+            &[
+                "forge",
+                "milestone",
+                "status",
+                "--version",
+                "0.5",
+                "--output",
+                "json",
+            ],
+            false,
+            "low",
+        ),
+        slash(
+            "/research",
+            "Research",
+            "Show Forge 0.5 milestone research artifact summary.",
+            &[
+                "forge",
+                "milestone",
+                "research",
+                "--version",
+                "0.5",
+                "--output",
+                "json",
+            ],
+            false,
+            "low",
+        ),
+        slash(
             "/update",
             "Update",
             "Update/sync Forge surfaces.",
@@ -1029,6 +1078,27 @@ mod tests {
         assert_eq!(route.name, "/nonexistent");
         assert!(!route.recognized);
         assert_eq!(route.risk_level, "unknown");
+    }
+
+    #[test]
+    fn route_slash_command_recognizes_milestone_subcommands() {
+        let report = route_slash_command("/milestone");
+        assert_eq!(report.input_kind, "slash_command");
+        let route = report.slash_command.unwrap();
+        assert_eq!(route.name, "/milestone");
+        assert!(route.recognized);
+        assert!(route.equivalent_command.contains(&"milestone".to_string()));
+        assert!(!route.mutates_workflow);
+
+        let manifest = route_slash_command("/manifest");
+        let mr = manifest.slash_command.unwrap();
+        assert!(mr.recognized);
+        assert_eq!(mr.name, "/manifest");
+
+        let research = route_slash_command("/research");
+        let rr = research.slash_command.unwrap();
+        assert!(rr.recognized);
+        assert_eq!(rr.name, "/research");
     }
 
     #[test]

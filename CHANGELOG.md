@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.147 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 24: added `/milestone`, `/manifest` and `/research` slash commands to the interactive REPL so users can inspect Forge 0.5 milestone status, promotion manifest and research artifact without leaving the TUI.
+- Added `route_slash_command_recognizes_milestone_subcommands` unit test covering the three new slash commands.
+- Added `/milestone` to the interactive home quick-actions list for discoverability.
+
+### Changed
+
+- Updated package/readme/milestone version to `0.4.147` for this 0.4.x groundwork increment.
+- Updated the Interactive Forge CLI baseline milestone evidence to reference the 0.4.147 milestone slash commands.
+
+### Validation
+
+- New unit test `route_slash_command_recognizes_milestone_subcommands` passes.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` (58 unit + 220 integration) and `cargo build --release`.
+
+### Safety
+
+- This change only mutates Forge-owned source, tests, changelog, milestone docs and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- The new slash commands are read-only (low risk level) and map to existing `forge milestone` subcommands without changing execution semantics.
+
 ## 0.4.146 - 2026-05-26
 
 ### Added
