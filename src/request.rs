@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::Path;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +118,8 @@ pub struct RunActivity {
     pub schema_version: String,
     pub active: bool,
     pub heartbeat_status: String,
+    pub process_status: String,
+    pub process_alive: Option<bool>,
     pub executor: Option<String>,
     pub pid: Option<u32>,
     pub summary: Option<String>,
@@ -372,12 +375,21 @@ fn build_run_activity_at(run: &RunRecord, now: DateTime<Utc>) -> RunActivity {
     let seconds_until_stale = run
         .heartbeat_expires_at
         .map(|expires_at| (expires_at - now).num_seconds());
+    let process_alive = run.executor_pid.and_then(process_alive);
+    let process_status = match (run.executor_pid, process_alive) {
+        (None, _) => "not_recorded",
+        (Some(_), Some(true)) => "alive",
+        (Some(_), Some(false)) => "not_found",
+        (Some(_), None) => "unknown",
+    };
     let heartbeat_status = if run.status == "needs_attention" {
         "needs_attention"
     } else if run.status == "running" {
         match run.heartbeat_expires_at {
             Some(expires_at) if expires_at > now => "fresh",
+            Some(_) if process_alive == Some(true) => "process_alive",
             Some(_) => "stale",
+            None if process_alive == Some(true) => "process_alive",
             None => "missing",
         }
     } else if run.last_heartbeat_at.is_some() {
@@ -385,12 +397,14 @@ fn build_run_activity_at(run: &RunRecord, now: DateTime<Utc>) -> RunActivity {
     } else {
         "not_running"
     };
-    let active = run.status == "running" && heartbeat_status == "fresh";
+    let active = run.status == "running" && matches!(heartbeat_status, "fresh" | "process_alive");
     let recovery = recovery_recommendation(run, heartbeat_status);
     RunActivity {
         schema_version: "forge.run_activity.v1".to_string(),
         active,
         heartbeat_status: heartbeat_status.to_string(),
+        process_status: process_status.to_string(),
+        process_alive,
         executor: run.active_executor.clone(),
         pid: run.executor_pid,
         summary: run.progress_summary.clone(),
@@ -399,6 +413,23 @@ fn build_run_activity_at(run: &RunRecord, now: DateTime<Utc>) -> RunActivity {
         heartbeat_ttl_seconds: run.heartbeat_ttl_seconds,
         seconds_until_stale,
         recovery,
+    }
+}
+
+fn process_alive(pid: u32) -> Option<bool> {
+    if pid == 0 {
+        return Some(false);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        Some(Path::new("/proc").join(pid.to_string()).exists())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
     }
 }
 

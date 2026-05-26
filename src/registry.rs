@@ -116,6 +116,7 @@ pub struct RegistryRunActivitySummary {
     pub schema_version: String,
     pub total: usize,
     pub active: usize,
+    pub process_alive: usize,
     pub accepted: usize,
     pub resumed: usize,
     pub running: usize,
@@ -826,6 +827,7 @@ impl RegistryRunActivitySummary {
             schema_version: REGISTRY_RUN_ACTIVITY_SCHEMA_VERSION.to_string(),
             total: 0,
             active: 0,
+            process_alive: 0,
             accepted: 0,
             resumed: 0,
             running: 0,
@@ -859,6 +861,9 @@ impl RegistryRunActivitySummary {
         if activity.active {
             self.active += 1;
         }
+        if activity.process_alive == Some(true) {
+            self.process_alive += 1;
+        }
         match activity.heartbeat_status.as_str() {
             "stale" => self.stale += 1,
             "missing" => self.missing_heartbeat += 1,
@@ -871,6 +876,7 @@ impl RegistryRunActivitySummary {
     fn add(&mut self, other: &Self) {
         self.total += other.total;
         self.active += other.active;
+        self.process_alive += other.process_alive;
         self.accepted += other.accepted;
         self.resumed += other.resumed;
         self.running += other.running;

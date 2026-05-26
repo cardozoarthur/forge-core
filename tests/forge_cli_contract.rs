@@ -14273,6 +14273,150 @@ fn stale_request_heartbeat_surfaces_recovery_and_transitions_to_needs_attention(
 }
 
 #[test]
+fn live_executor_pid_keeps_expired_heartbeat_active_without_stale_recovery() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Self-evolution executor process liveness visibility",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+    let live_pid = std::process::id().to_string();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "heartbeat",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--summary",
+            "executor process remains alive after ttl",
+            "--ttl-seconds",
+            "1",
+            "--pid",
+            &live_pid,
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    force_run_heartbeat_expired(&store, run_id);
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status_json["status"], "running");
+    assert_eq!(status_json["activity"]["active"], true);
+    assert_eq!(status_json["activity"]["heartbeat_status"], "process_alive");
+    assert_eq!(status_json["activity"]["process_status"], "alive");
+    assert_eq!(status_json["activity"]["process_alive"], true);
+    assert_eq!(
+        status_json["activity"]["pid"],
+        live_pid.parse::<u32>().unwrap()
+    );
+    assert_eq!(status_json["activity"]["recovery"]["action"], "none");
+
+    let stale = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "list",
+            "--status",
+            "stale",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stale_json: Value = serde_json::from_slice(&stale).unwrap();
+    assert_eq!(stale_json["total"], 0);
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--lifecycle",
+            "running",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    let row = find_workflow(&listed_json, workflow_id);
+    assert_eq!(row["active_run_count"], 1);
+    assert_eq!(row["run_activity"]["process_alive"], 1);
+    assert_eq!(row["run_activity"]["stale"], 0);
+
+    let inspected = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected_json: Value = serde_json::from_slice(&inspected).unwrap();
+    assert_eq!(inspected_json["active_run_count"], 1);
+    assert_eq!(inspected_json["run_activity"]["process_alive"], 1);
+    assert!(inspected_json["diagram"]
+        .as_str()
+        .unwrap()
+        .contains("process_alive: 1"));
+}
+
+#[test]
 fn mcp_exposes_stale_request_recovery_tool_for_agent_observability() {
     let tools = forge()
         .args(["mcp", "tools", "--output", "json"])
