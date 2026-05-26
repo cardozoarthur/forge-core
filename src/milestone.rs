@@ -100,6 +100,66 @@ pub struct MilestoneManifestGap {
     pub next_action: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneResearchReport {
+    pub schema_version: String,
+    pub status: String,
+    pub milestone: String,
+    pub artifact_path: String,
+    pub source_count: usize,
+    pub sources: Vec<MilestoneResearchSource>,
+    pub local_skill_inputs: Vec<MilestoneResearchSource>,
+    pub findings: Vec<MilestoneResearchFinding>,
+    pub validation_gates: Vec<MilestoneResearchGate>,
+    pub workflow_templates: Vec<MilestoneResearchTemplate>,
+    pub lean_governance: Vec<MilestoneLeanDecision>,
+    pub promotion_impact: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneResearchSource {
+    pub label: String,
+    pub url_or_path: String,
+    pub evidence: String,
+    pub forge_implication: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneResearchFinding {
+    pub id: String,
+    pub title: String,
+    pub source_labels: Vec<String>,
+    pub finding: String,
+    pub forge_runtime_rule: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneResearchGate {
+    pub id: String,
+    pub title: String,
+    pub validates: String,
+    pub failure_condition: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneResearchTemplate {
+    pub id: String,
+    pub title: String,
+    pub stages: Vec<String>,
+    pub deterministic_nodes: Vec<String>,
+    pub ai_nodes: Vec<String>,
+    pub human_gates: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneLeanDecision {
+    pub id: String,
+    pub decision: String,
+    pub accepted_complexity: String,
+    pub rejected_complexity: String,
+    pub evidence_metric: String,
+}
+
 pub fn build_milestone_status(version: &str) -> Result<MilestoneStatusReport> {
     let version = version.trim();
     if version != SUPPORTED_MILESTONE {
@@ -135,10 +195,41 @@ pub fn build_milestone_status(version: &str) -> Result<MilestoneStatusReport> {
                 "Forge 0.5 promotion is blocked while any required capability remains planned, blocked or only groundwork."
                     .to_string()
             },
-            next_action:
+            next_action: if promotable {
+                "Run an explicit human-controlled release promotion, version-boundary update and artifact bundle before changing the package line to 0.5."
+                    .to_string()
+            } else {
                 "Implement the next planned creative runtime capability with tests, demos and milestone evidence before reconsidering 0.5 promotion."
-                    .to_string(),
+                    .to_string()
+            },
         },
+    })
+}
+
+pub fn build_milestone_research(version: &str) -> Result<MilestoneResearchReport> {
+    let version = version.trim();
+    if version != SUPPORTED_MILESTONE {
+        bail!("unsupported milestone {version}; currently supported: {SUPPORTED_MILESTONE}");
+    }
+
+    let sources = research_sources();
+    let local_skill_inputs = local_research_inputs();
+
+    Ok(MilestoneResearchReport {
+        schema_version: "forge.milestone.research.v1".to_string(),
+        status: "validated".to_string(),
+        milestone: SUPPORTED_MILESTONE.to_string(),
+        artifact_path: "docs/research/forge-0.5-creative-runtime-source-research.md".to_string(),
+        source_count: sources.len() + local_skill_inputs.len(),
+        sources,
+        local_skill_inputs,
+        findings: research_findings(),
+        validation_gates: research_validation_gates(),
+        workflow_templates: research_workflow_templates(),
+        lean_governance: research_lean_decisions(),
+        promotion_impact:
+            "The required Forge 0.5 research baseline is now source-grounded and converted into Forge-owned gates and templates; promotion remains controlled by the full milestone manifest rather than by this report alone."
+                .to_string(),
     })
 }
 
@@ -273,15 +364,15 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
         capability(
             "research_artifact_baseline",
             "Research artifact baseline",
-            "groundwork",
-            "Cycle 4 adds the bounded concurrent WorkerPool (forge.worker_pool.v1) as reusable research-and-execution infrastructure. The WorkerPool provides configurable concurrency, cancellation, backpressure reporting, and wave-level scheduling — directly usable for batched research, parallel page inspection, artifact generation, and executor handoff preparation. CLI contract tests and unit tests prove wave scheduling, backpressure detection, failure handling, and schema stability. Research topics (Penpot, Stitch, v0, AGUI protocols, Remotion, OBS) are documented in the scheduler/loop/subflow validation reports and milestone document.",
-            "Need source-grounded comparison report with actionable Forge validation gates and workflow templates before 0.5 promotion.",
+            "validated",
+            "0.4.129 adds `forge milestone research` and MCP tool `forge.milestone.research` with a source-grounded comparison across Penpot, Stitch, v0, AG-UI, Impeccable, Figma MCP, Remotion, OBS and local creative/productivity skills. The research is converted into Forge-owned validation gates, creative workflow templates and lean governance decisions in `docs/research/forge-0.5-creative-runtime-source-research.md`.",
+            "Keep the research artifact current as external creative/runtime protocols drift; no 0.5 promotion claim should bypass the full milestone manifest.",
         ),
         capability(
             "export_demo_baseline",
             "Export/demo baseline",
-            "validated",
-            "Cycle 28 validates MCP creative artifact list/inspect/attach and token get/set tools, exposing the full creative IR, design token and componentization surface through agent-facing MCP tools. Cycle 29 validates native scheduler worker-status surface with due/idle scheduling posture, scale-to-zero eligibility and bounded worker-pool capacity. Daily Goal smoke produces Markdown/PDF artifacts and Telegram delivery records through Forge-owned workflow semantics across all cycles.",
+            "groundwork",
+            "Cycle 28 validates MCP creative artifact list/inspect/attach and token get/set tools, exposing the creative IR, design token and componentization surface through agent-facing MCP tools. Cycle 29 validates native scheduler worker-status surface with due/idle scheduling posture, scale-to-zero eligibility and bounded worker-pool capacity. Daily Goal smoke produces Markdown/PDF artifacts and Telegram delivery records through Forge-owned workflow semantics across all cycles.",
             "Need one design/tokens/component workflow demo generating actual rendered artifacts and one structured document/slide/whiteboard workflow demo before 0.5 promotion.",
         ),
     ]
@@ -343,9 +434,434 @@ fn next_action_for_gap(capability_id: &str) -> &'static str {
             "Extend the validated artifact collaboration baseline into browser transport, richer conflict UX and rendered rollback demos."
         }
         "research_artifact_baseline" => {
-            "Produce the source-grounded creative-runtime research report before promotion."
+            "Keep the source-grounded creative-runtime research report fresh as protocols and local skills change."
+        }
+        "export_demo_baseline" => {
+            "Produce rendered design/tokens/component demo evidence and one structured document/slide/whiteboard workflow demo before 0.5 promotion."
         }
         _ => "Implement the missing capability with tests, artifacts and milestone evidence.",
+    }
+}
+
+fn research_sources() -> Vec<MilestoneResearchSource> {
+    vec![
+        research_source(
+            "Penpot data model",
+            "https://help.penpot.app/technical-guide/developer/data-model/",
+            "Pages and components share a Container abstraction; ShapeTree and Shape carry the editable design model.",
+            "Forge creative IR should preserve identity, hierarchy and rendering/export metadata instead of flattening designs into screenshots.",
+        ),
+        research_source(
+            "Penpot data guide",
+            "https://help.penpot.app/technical-guide/developer/data-guide/",
+            "Penpot treats data evolution, optional attributes and component synchronization as compatibility-sensitive model concerns.",
+            "Forge migrations, patch diffs and token/component propagation need backward-compatible defaults plus explicit sync/touched state.",
+        ),
+        research_source(
+            "Penpot design tokens",
+            "https://help.penpot.app/user-guide/design-systems/design-tokens/",
+            "Penpot aligns tokens with the W3C DTCG format and integrates tokens with components and layout.",
+            "Forge tokens should remain source-of-truth artifacts with import/export adapters, semantic aliases and layout/component impact previews.",
+        ),
+        research_source(
+            "Google Stitch real-time design",
+            "https://blog.google/innovation-and-ai/models-and-research/google-labs/stitch-updates/",
+            "Stitch turns text, voice, codebase and design-file inputs into real-time canvas iterations and production exports.",
+            "Forge should model prompt-to-design as staged workflows: brief, variants, critique, patch, validation and export, not one-shot prompting.",
+        ),
+        research_source(
+            "v0 docs",
+            "https://v0.app/docs",
+            "v0 positions prompt input as a path to high-fidelity UIs, full-stack code, live prototypes, pull requests and deployment.",
+            "Forge should route code/product generation through workflow state, validation gates and retention policy before exposing generated products.",
+        ),
+        research_source(
+            "AG-UI protocol",
+            "https://github.com/ag-ui-protocol/ag-ui",
+            "AG-UI defines event-based agent-user interaction with streaming, shared state, frontend tool calls and human-in-the-loop collaboration.",
+            "Forge should own event/audit semantics and expose AGUI-style adapters as transport layers, not as orchestration authority.",
+        ),
+        research_source(
+            "AG-UI overview",
+            "https://docs.ag-ui.com/introduction",
+            "The protocol highlights typed shared state, streamed event diffs, interrupts, sub-agents, steering and cancellation.",
+            "Forge interaction nodes need pause/resume, state diffs, cancellation and durable decision records across CLI, web and MCP surfaces.",
+        ),
+        research_source(
+            "Impeccable design guidance",
+            "https://impeccable.style/docs/impeccable/",
+            "Impeccable turns design taste into explicit PRODUCT.md/DESIGN.md guidance and anti-pattern checks before code changes.",
+            "Forge creative workflows need design-system discovery, anti-generic design gates and explicit persona/taste routing per node.",
+        ),
+        research_source(
+            "Figma MCP developer docs",
+            "https://developers.figma.com/docs/figma-mcp-server/",
+            "Figma MCP lets agents read design context and write native frames, components, variables and auto-layout using a design system.",
+            "Forge MCP tools should exchange structured IR patches and token/component references rather than forcing agents to rewrite whole artifacts.",
+        ),
+        research_source(
+            "Remotion fundamentals",
+            "https://www.remotion.dev/docs/the-fundamentals",
+            "Remotion models video as React-rendered frames with explicit width, height, duration and fps metadata.",
+            "Forge media plans should use deterministic timeline metadata, frame-level validation and bounded renderer adapters without making Remotion a hard dependency.",
+        ),
+        research_source(
+            "Remotion Sequence",
+            "https://www.remotion.dev/docs/sequence",
+            "Sequences express timed mounting, trimming, nesting and named timeline segments.",
+            "Forge animation/video IR should model sequence/timeline nodes, duration constraints and nested composition before choosing an export engine.",
+        ),
+        research_source(
+            "OBS Studio overview",
+            "https://obsproject.com/kb/obs-studio-overview",
+            "OBS centers composition on scenes, sources, ordering, filters and transitions.",
+            "Forge lightweight media composition can reuse scene/source/filter/transition concepts as portable IR while avoiding heavy editor dependencies.",
+        ),
+    ]
+}
+
+fn local_research_inputs() -> Vec<MilestoneResearchSource> {
+    vec![
+        research_source(
+            "Local Superpowers brainstorming skill",
+            "/home/arthur/.codex/plugins/cache/openai-curated/superpowers/6188456f/skills/brainstorming/SKILL.md",
+            "Requires explicit design exploration, alternatives and approval before implementation.",
+            "Forge should convert creative ambiguity into human decision/form nodes with durable approval evidence.",
+        ),
+        research_source(
+            "Local stitch-design skill",
+            "/home/arthur/.codex/skills/stitch-design/SKILL.md",
+            "Defines prompt enhancement, design-system synthesis and screen generation/editing workflows.",
+            "Forge should preserve design-system context and route generation vs edit operations as separate workflow nodes.",
+        ),
+        research_source(
+            "Local imagegen skill",
+            "/home/arthur/.codex/skills/.system/imagegen/SKILL.md",
+            "Separates generated bitmap assets from repo-native vector/code assets and requires project-bound assets to be persisted.",
+            "Forge creative artifacts should distinguish deterministic IR patches from generated bitmap assets with explicit artifact lineage.",
+        ),
+        research_source(
+            "Local Figma generate-design skill",
+            "/home/arthur/.codex/plugins/cache/openai-curated/figma/6188456f/skills/figma-generate-design/SKILL.md",
+            "Requires component, variable and style discovery before mutating Figma screens.",
+            "Forge product workflows should inspect design systems before high-volume generation and reject hardcoded-token drift.",
+        ),
+        research_source(
+            "Local Remotion best-practices skill",
+            "/home/arthur/.codex/skills/remotion/SKILL.md",
+            "Uses frame/time primitives, sequences and explicit render metadata for code-based video.",
+            "Forge can borrow the timeline discipline while keeping video rendering adapters optional.",
+        ),
+    ]
+}
+
+fn research_findings() -> Vec<MilestoneResearchFinding> {
+    vec![
+        research_finding(
+            "editable_ir_identity",
+            "Editable creative artifacts need stable identity and hierarchy",
+            &["Penpot data model", "Figma MCP developer docs"],
+            "Design tools preserve object identity, hierarchy, component context and native editability.",
+            "Every Forge creative artifact patch must target stable IDs and preserve token/component references unless the patch explicitly replaces them.",
+        ),
+        research_finding(
+            "tokens_are_runtime_inputs",
+            "Tokens are executable creative configuration",
+            &["Penpot design tokens", "Local Figma generate-design skill"],
+            "Design tokens drive components, layout and cross-tool consistency.",
+            "Token changes must run high-impact validation gates and produce impact previews before promotion.",
+        ),
+        research_finding(
+            "prompt_to_ui_is_multi_stage",
+            "Prompt-to-UI should become workflow stages",
+            &["Google Stitch real-time design", "v0 docs", "Local stitch-design skill"],
+            "Modern tools turn prompts into variants, refinements, code and export paths.",
+            "Forge must represent brief intake, variant generation, critique, human approval, patching, validation and export as separate nodes.",
+        ),
+        research_finding(
+            "agent_ui_needs_event_state",
+            "Agent UI needs durable events and shared state",
+            &["AG-UI protocol", "AG-UI overview"],
+            "Agent-facing apps need streaming events, shared state, interrupts, frontend tool calls and cancellation.",
+            "Forge should expose event streams and MCP tools while keeping authoritative workflow state, audit history and permission policy in Forge.",
+        ),
+        research_finding(
+            "taste_is_a_gate",
+            "Design taste is a validation input",
+            &["Impeccable design guidance", "Local Superpowers brainstorming skill"],
+            "Generic UI failures are predictable enough to become explicit checks.",
+            "Forge creative flows should include anti-generic gates, persona/soul routing and human direction choices when taste matters.",
+        ),
+        research_finding(
+            "media_is_timeline_ir",
+            "Media output should start from portable timeline IR",
+            &["Remotion fundamentals", "Remotion Sequence", "OBS Studio overview"],
+            "Video and live composition tools converge on scenes, sources, sequences, timing, filters and transitions.",
+            "Forge should model media plans as timeline/scene/source IR first and choose renderer adapters only after validation.",
+        ),
+    ]
+}
+
+fn research_validation_gates() -> Vec<MilestoneResearchGate> {
+    vec![
+        research_gate(
+            "creative_ir_round_trip_fidelity",
+            "Creative IR round-trip fidelity",
+            "AI and human edits preserve IDs, hierarchy, comments, token references and audit history.",
+            "A patch rewrites unrelated artifact content or destroys human-edited fields without explicit approval.",
+        ),
+        research_gate(
+            "design_token_source_of_truth",
+            "Design-token source of truth",
+            "Raw tokens, semantic aliases, modes and overrides resolve deterministically across artifacts.",
+            "A rendered or exported artifact embeds hardcoded values where token references are required.",
+        ),
+        research_gate(
+            "agent_ui_event_audit",
+            "Agent UI event audit",
+            "Slash commands, web actions and MCP calls produce replayable event records with origin and permission state.",
+            "An agent-visible action mutates workflow/artifact state without a durable event.",
+        ),
+        research_gate(
+            "collaboration_conflict_replay",
+            "Collaboration conflict replay",
+            "Concurrent human/AI patches expose conflict state, chosen resolution and rollback evidence.",
+            "A conflict is silently resolved or loses either participant's intent.",
+        ),
+        research_gate(
+            "anti_generic_design_review",
+            "Anti-generic design review",
+            "Generated creative output is checked for known weak patterns, accessibility and responsive text overflow.",
+            "A creative artifact passes while still containing unreviewed generic style, inaccessible contrast or clipped text.",
+        ),
+        research_gate(
+            "media_timeline_determinism",
+            "Media timeline determinism",
+            "Media/storyboard artifacts declare scenes, sources, timeline, dimensions, fps and duration before rendering.",
+            "A video or animation export cannot be reproduced from stored Forge artifact state.",
+        ),
+        research_gate(
+            "export_fidelity_accessibility",
+            "Export fidelity and accessibility",
+            "Markdown/PDF/slides/web exports preserve source artifact meaning, structure and accessibility metadata.",
+            "An export is treated as the source of truth or cannot be traced back to editable IR.",
+        ),
+    ]
+}
+
+fn research_workflow_templates() -> Vec<MilestoneResearchTemplate> {
+    vec![
+        research_template(
+            "prompt_to_screen_with_tokens",
+            "Prompt-to-screen with design tokens",
+            &[
+                "brief intake",
+                "design-system discovery",
+                "token proposal or reuse",
+                "screen variant generation",
+                "human direction choice",
+                "patch-by-intent",
+                "accessibility/export validation",
+            ],
+            &[
+                "token resolution",
+                "component dependency scan",
+                "text overflow checks",
+            ],
+            &["variant generation", "design critique"],
+            &["approve design-system baseline", "choose visual direction"],
+        ),
+        research_template(
+            "ai_first_whiteboard_brainstorm",
+            "AI-first collaborative whiteboard brainstorm",
+            &[
+                "goal framing",
+                "idea generation",
+                "duplicate detection",
+                "semantic clustering",
+                "vote/decision recording",
+                "task/subflow conversion",
+                "board export",
+            ],
+            &[
+                "duplicate detection",
+                "decision trace export",
+                "Markdown/PDF export",
+            ],
+            &["alternative generation", "assumption challenge"],
+            &[
+                "approve clusters",
+                "approve decisions",
+                "approve task conversion",
+            ],
+        ),
+        research_template(
+            "structured_deck_document_export",
+            "Structured document and slide export",
+            &[
+                "outline",
+                "narrative validation",
+                "asset selection",
+                "slide/document IR assembly",
+                "export",
+                "fidelity check",
+            ],
+            &[
+                "outline schema validation",
+                "link/image checks",
+                "PDF/Markdown export",
+            ],
+            &["narrative synthesis", "visual brief generation"],
+            &["approve outline", "approve final delivery constraints"],
+        ),
+        research_template(
+            "long_video_storyboard_plan",
+            "Long-form video storyboard plan",
+            &[
+                "media brief",
+                "scene/source/timeline planning",
+                "script and beat sheet",
+                "asset manifest",
+                "render adapter selection",
+                "frame/sample validation",
+            ],
+            &[
+                "timeline duration checks",
+                "asset hash manifest",
+                "sample frame checks",
+            ],
+            &["script summarization", "scene direction options"],
+            &["approve script", "approve render budget"],
+        ),
+        research_template(
+            "agent_visible_component_patch",
+            "Agent-visible component patch",
+            &[
+                "component lookup",
+                "intent-to-prop mapping",
+                "token dependency impact preview",
+                "bounded patch",
+                "human review if high impact",
+                "status/inspect evidence",
+            ],
+            &[
+                "component manifest parse",
+                "action registry validation",
+                "token impact preview",
+            ],
+            &["patch wording normalization"],
+            &["approve high-impact component changes"],
+        ),
+    ]
+}
+
+fn research_lean_decisions() -> Vec<MilestoneLeanDecision> {
+    vec![
+        lean_decision(
+            "forge_ir_before_vendor_adapter",
+            "Forge-owned IR is the source of truth; vendor tools are import/export or executor adapters.",
+            "Compact schemas for screens, whiteboards, documents, slides, media plans, tokens, components and collaboration events.",
+            "A hard dependency on Penpot, Figma, Stitch, v0, Remotion or OBS to own workflow state.",
+            "Round-trip patch fidelity and fewer whole-artifact rewrites.",
+        ),
+        lean_decision(
+            "deterministic_gates_before_ai_review",
+            "Run deterministic validation before spending AI calls on judgment.",
+            "Schema checks, token resolution, dependency scans, text overflow checks, artifact hashing and export checks.",
+            "Model calls for stable parsing, hashing, listing, PDF generation or Telegram delivery.",
+            "Lower cost per recurring workflow and fewer retries after AI review.",
+        ),
+        lean_decision(
+            "event_stream_adapter_not_orchestrator",
+            "AGUI-style event streams are transport surfaces; Forge keeps orchestration and audit authority.",
+            "Event schema mapping and permission-aware command routing.",
+            "Letting frontend event protocols mutate workflow state without Forge revisioning.",
+            "Durable replay, pause/resume and cross-surface decision consistency.",
+        ),
+    ]
+}
+
+fn research_source(
+    label: &str,
+    url_or_path: &str,
+    evidence: &str,
+    forge_implication: &str,
+) -> MilestoneResearchSource {
+    MilestoneResearchSource {
+        label: label.to_string(),
+        url_or_path: url_or_path.to_string(),
+        evidence: evidence.to_string(),
+        forge_implication: forge_implication.to_string(),
+    }
+}
+
+fn research_finding(
+    id: &str,
+    title: &str,
+    source_labels: &[&str],
+    finding: &str,
+    forge_runtime_rule: &str,
+) -> MilestoneResearchFinding {
+    MilestoneResearchFinding {
+        id: id.to_string(),
+        title: title.to_string(),
+        source_labels: source_labels
+            .iter()
+            .map(|label| (*label).to_string())
+            .collect(),
+        finding: finding.to_string(),
+        forge_runtime_rule: forge_runtime_rule.to_string(),
+    }
+}
+
+fn research_gate(
+    id: &str,
+    title: &str,
+    validates: &str,
+    failure_condition: &str,
+) -> MilestoneResearchGate {
+    MilestoneResearchGate {
+        id: id.to_string(),
+        title: title.to_string(),
+        validates: validates.to_string(),
+        failure_condition: failure_condition.to_string(),
+    }
+}
+
+fn research_template(
+    id: &str,
+    title: &str,
+    stages: &[&str],
+    deterministic_nodes: &[&str],
+    ai_nodes: &[&str],
+    human_gates: &[&str],
+) -> MilestoneResearchTemplate {
+    MilestoneResearchTemplate {
+        id: id.to_string(),
+        title: title.to_string(),
+        stages: stages.iter().map(|stage| (*stage).to_string()).collect(),
+        deterministic_nodes: deterministic_nodes
+            .iter()
+            .map(|node| (*node).to_string())
+            .collect(),
+        ai_nodes: ai_nodes.iter().map(|node| (*node).to_string()).collect(),
+        human_gates: human_gates.iter().map(|gate| (*gate).to_string()).collect(),
+    }
+}
+
+fn lean_decision(
+    id: &str,
+    decision: &str,
+    accepted_complexity: &str,
+    rejected_complexity: &str,
+    evidence_metric: &str,
+) -> MilestoneLeanDecision {
+    MilestoneLeanDecision {
+        id: id.to_string(),
+        decision: decision.to_string(),
+        accepted_complexity: accepted_complexity.to_string(),
+        rejected_complexity: rejected_complexity.to_string(),
+        evidence_metric: evidence_metric.to_string(),
     }
 }
 

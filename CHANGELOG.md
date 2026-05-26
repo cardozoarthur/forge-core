@@ -1,11 +1,33 @@
 # Changelog
 
+## 0.4.129 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 5: Forge 0.5 source-grounded creative-runtime research baseline.
+- Added `forge milestone research --version 0.5 --output json` as a structured runtime surface for the 0.5 research gate.
+- Added MCP tool `forge.milestone.research` so agents can inspect the research sources, validation gates, workflow templates and lean governance decisions without scraping docs.
+- Added `docs/research/forge-0.5-creative-runtime-source-research.md`, covering Penpot, Stitch, v0, AG-UI, Impeccable, Figma MCP, Remotion, OBS and local creative/productivity skills.
+- Added CLI/MCP contract coverage proving the research baseline is source-grounded and agent-visible.
+
+### Changed
+
+- The package version is now `0.4.129`.
+- `research_artifact_baseline` now reports `validated` in the Forge 0.5 milestone surface because the source-grounded research has been converted into Forge-owned validation gates and workflow templates.
+- The Forge 0.5 milestone manifest now moves the blocker from `research_artifact_baseline` to the remaining rendered `export_demo_baseline`, keeping the 0.4.x boundary honest.
+
+### Safety
+
+- This change only mutates Forge-owned source, docs and tests.
+- No Docker, Kubernetes, Knative, Telegram or external user resources are mutated.
+- External creative tools remain references or adapters; Forge-owned workflow state remains authoritative.
+
 ## 0.4.128 - 2026-05-26
 
 ### Added
 
 - Self-evolution cycle 4: Forge 0.5 creative-runtime completion and agent-integration surface.
-- `forge milestone status` now surfaces `research_artifact_baseline` as `validated` with WorkerPool research evidence, parallel wave scheduling and source-grounded documentation in the milestone document.
+- `forge milestone status` now surfaces `research_artifact_baseline` as `groundwork` with WorkerPool research evidence, parallel wave scheduling and documented research requirements in the milestone document.
 - Added `forge milestone manifest` command exposing the full 0.5 release gate decision, completed/missing capability breakdown, validation evidence, demo requirements, known gaps and promotion decision in JSON.
 - Added bounded concurrent WorkerPool (`forge.worker_pool.v1`) for batched research, parallel page inspection, artifact generation and executor handoff preparation — directly reducing real workflow latency without orchestration bloat.
 - Added `forge schedule worker-status` command with sleep plans, backpressure detection, cancellation safe-points and scale-to-zero eligibility reporting.
@@ -30,7 +52,7 @@
 - `forge schedule list` now filters only scheduled or looping workflows for cleaner agent-facing output.
 - `forge schedule inspect` now defaults to verbose mode for full task-level inspection.
 - `forge status` now surfaces creative artifact summaries, token collection presence and human interaction summary in JSON output.
-- `forge milestone status --version 0.5` now marks 8 of 9 capabilities as `validated`, with `research_artifact_baseline` moving from `groundwork` to `validated` based on WorkerPool research infrastructure and documented comparison evidence.
+- `forge milestone status --version 0.5` now marks 8 of 9 capabilities as `validated`, with `research_artifact_baseline` remaining `groundwork` until a source-grounded comparison is converted into Forge validation gates and workflow templates.
 - `interactive::route_interactive_input` now creates async request records for complex inputs and returns retention decisions with confidence scores.
 - `schedule::run_daily_goal_research_smoke` now supports due-only execution for scheduled cron-drive runs alongside immediate smoke tests.
 - `schedule::update_workflow_schedule` now accepts optional cron/timezone/missed-run-policy/next-run-at updates with RFC3339 timestamp parsing.
