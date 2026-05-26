@@ -16,7 +16,7 @@ use crate::multimodal::{
     build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
     build_multimodal_status, evaluate_multimodal_guard,
 };
-use crate::patch::build_patch_plan;
+use crate::patch::{build_patch_apply, build_patch_plan, build_patch_revert};
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
@@ -388,6 +388,23 @@ struct PatchPlanInput {
     task_id: String,
     intent: String,
     paths: Vec<String>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchApplyInput {
+    workflow_id: String,
+    task_id: String,
+    paths: Vec<String>,
+    origin: Option<String>,
+    plan_artifact: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchRevertInput {
+    workflow_id: String,
+    task_id: String,
+    apply_artifact: String,
     origin: Option<String>,
 }
 
@@ -802,6 +819,35 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &["workflow_id", "task_id", "intent", "paths"]),
                 "forge.patch_plan.v1",
                 &["forge", "patch", "plan", "--workflow", "<workflow-id>", "--task", "<task-id>", "--intent", "<intent>", "--path", "<path>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.patch.apply",
+                "Apply File Patch",
+                "Record a file patch as applied: snapshot current file state, run validation, and persist an apply artifact with rollback support.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("task_id", "string", "task id"),
+                    ("paths", "array", "repo-relative file paths that were modified"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                    ("plan_artifact", "string", "optional path to patch plan artifact for lineage"),
+                ], &["workflow_id", "task_id", "paths"]),
+                "forge.patch_apply.v1",
+                &["forge", "patch", "apply", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.patch.revert",
+                "Revert File Patch",
+                "Revert a previously applied file patch: restore files via git checkout, run validation, and record the revert artifact.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("task_id", "string", "task id"),
+                    ("apply_artifact", "string", "path to the apply artifact to revert"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id", "task_id", "apply_artifact"]),
+                "forge.patch_revert.v1",
+                &["forge", "patch", "revert", "--workflow", "<workflow-id>", "--task", "<task-id>", "--apply-artifact", "<path>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -1417,6 +1463,29 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.paths,
                 &input.intent,
                 input.origin.as_deref().unwrap_or("mcp"),
+            )?)?
+        }
+        "forge.patch.apply" => {
+            let input: PatchApplyInput = parse_input(input)?;
+            serde_json::to_value(build_patch_apply(
+                store,
+                &input.workflow_id,
+                &input.task_id,
+                input.paths,
+                input.origin.as_deref().unwrap_or("mcp"),
+                input.plan_artifact.as_deref(),
+                None,
+            )?)?
+        }
+        "forge.patch.revert" => {
+            let input: PatchRevertInput = parse_input(input)?;
+            serde_json::to_value(build_patch_revert(
+                store,
+                &input.workflow_id,
+                &input.task_id,
+                &input.apply_artifact,
+                input.origin.as_deref().unwrap_or("mcp"),
+                None,
             )?)?
         }
         "forge.validation.status" => {
