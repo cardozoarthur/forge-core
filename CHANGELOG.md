@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.139 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 15: interactive dashboard attention projection for stale/recovered async executor handoffs.
+- `forge interactive home --output json` now includes `dashboard.runs_needing_attention` and `dashboard.attention_actions`, counting `needs_attention` runs and stale heartbeat-backed runs that require operator or executor follow-up.
+- The human `forge interactive home` dashboard now renders `Runs needing attention` and safe attention actions such as listing `needs_attention`/stale requests, inspecting the affected run, resuming/cancelling recovered handoffs, or explicitly recovering stale runs.
+- Updated package/readme version to `0.4.139` for this 0.4.x groundwork increment.
+
+### Validation
+
+- Added `interactive_home_surfaces_needs_attention_runs_with_recovery_actions`, proving a stale run recovered into `needs_attention` appears in the interactive home JSON and human dashboard with actionable Forge commands.
+
+### Safety
+
+- This change only mutates Forge-owned source, tests, changelog, README and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- Attention actions are command suggestions only; the dashboard does not resume, cancel, recover or execute runs by itself.
+
 ## 0.4.138 - 2026-05-26
 
 ### Added

@@ -16110,6 +16110,7 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("forge"));
     assert!(text.contains("Active runs"));
+    assert!(text.contains("Runs needing attention"));
     assert!(text.contains("Scheduled workflows"));
     assert!(text.contains("Paused/idle workflows"));
     assert!(text.contains("Recent artifacts"));
@@ -16120,9 +16121,121 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     assert!(text.contains("Scheduler worker status"));
     assert!(text.contains("Repository context"));
     assert!(text.contains("Estimated costs"));
+    assert!(text.contains("Attention actions"));
     assert!(text.contains("Quick actions"));
     assert!(text.contains("/status"));
     assert!(text.contains("/workflows"));
+}
+
+#[test]
+fn interactive_home_surfaces_needs_attention_runs_with_recovery_actions() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Recover a stale executor handoff from the dashboard",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "heartbeat",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--summary",
+            "dashboard attention test",
+            "--ttl-seconds",
+            "300",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    force_run_heartbeat_expired(&store, run_id);
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "recover-stale",
+            "--run",
+            run_id,
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let json_home = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&json_home).unwrap();
+    assert_eq!(home["dashboard"]["runs_needing_attention"], 1);
+    assert!(home["dashboard"]["attention_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge request list --status needs_attention"
+        )));
+    assert!(home["dashboard"]["attention_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(format!(
+            "forge request status --run {run_id}"
+        ))));
+    assert!(home["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/runs")));
+
+    let text_home = forge()
+        .args(["--store", store.to_str().unwrap(), "interactive", "home"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_home).unwrap();
+    assert!(text.contains("Runs needing attention: 1"));
+    assert!(text.contains("forge request list --status needs_attention"));
+    assert!(text.contains(&format!("forge request status --run {run_id}")));
 }
 
 #[test]
