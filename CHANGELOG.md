@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.145 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 22: added executor-aware, runtime-aware and cost-sensitive keyword classification to the interactive conversational routing (`executor_or_runtime_required`, `cost_sensitive`), improving `requires_workflow` and `classify_workflow_reason` to route executor-specific (codex, opencode, gemini, docker, kubernetes, knative) and cost-sensitive requests into workflows.
+- Added `creative_artifact_count`, `has_token_collection` and `token_count` fields to `WorkflowInspectionReport` and the `forge inspect` diagram output, surfacing creative artifact IR and design token dependency info from the workflow graph.
+- Added 5 unit tests in `interactive.rs` for executor/routing classification, cost-sensitive routing detection, enriched workflow reasoning, and direct-answer blocking for executor/cost terms.
+- Updated the `replacement_grade_cli` milestone evidence to reference the routing and inspect improvements.
+
+### Changed
+
+- `requires_workflow` now delegates to `executor_or_runtime_required` and `cost_sensitive` helpers alongside existing base terms.
+- `classify_workflow_reason` returns executor-specific and cost-specific explanations when those patterns are detected.
+- `WorkflowInspectionReport` gains `creative_artifact_count: usize`, `has_token_collection: bool` and `token_count: usize` populated from the loaded workflow.
+- `render_diagram` now accepts `creative_artifact_count` and `token_count` and displays them in the header line.
+- Updated package/readme version to `0.4.145` for this 0.4.x groundwork increment.
+
+### Validation
+
+- 5 new unit tests in `interactive.rs` (`executor_aware_routing_detects_codex_and_opencode`, `cost_sensitive_routing_detects_expensive_actions`, `classify_workflow_reason_includes_executor_and_cost_reasons`, `executor_and_cost_terms_prevent_direct_answer`) all pass.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` and `cargo build --release`.
+
+### Safety
+
+- This change only mutates Forge-owned source, tests, changelog and milestone evidence.
+- No Docker, Kubernetes, Knative, Telegram send, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- The routing enhancements add new keywords to text-based classification without changing the execution model, and the inspect additions are purely additive output fields.
+- Default `cargo install --path . --force` validates the release build.
+
 ## 0.4.144 - 2026-05-26
 
 ### Added

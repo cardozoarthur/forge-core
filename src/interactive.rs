@@ -412,8 +412,30 @@ fn can_answer_directly(input: &str) -> bool {
     asks_state && !requires_workflow(&lower)
 }
 
+fn executor_or_runtime_required(lower: &str) -> bool {
+    lower.contains("codex")
+        || lower.contains("opencode")
+        || lower.contains("gemini")
+        || lower.contains("docker")
+        || lower.contains("k8s")
+        || lower.contains("kubernetes")
+        || lower.contains("knative")
+}
+
+fn cost_sensitive(lower: &str) -> bool {
+    let has_cost_keyword =
+        lower.contains("cost") || lower.contains("expensive") || lower.contains("budget");
+    let has_expensive_action = lower.contains("deploy")
+        || lower.contains("external")
+        || lower.contains("telegram")
+        || lower.contains("send")
+        || lower.contains("notification")
+        || lower.contains("artifact");
+    has_cost_keyword && has_expensive_action
+}
+
 fn requires_workflow(lower: &str) -> bool {
-    [
+    let base_terms = [
         "research",
         "pesquise",
         "implement",
@@ -431,9 +453,10 @@ fn requires_workflow(lower: &str) -> bool {
         "external",
         "deploy",
         "delete",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+    ];
+    base_terms.iter().any(|needle| lower.contains(needle))
+        || executor_or_runtime_required(lower)
+        || cost_sensitive(lower)
 }
 
 fn classify_workflow_reason(input: &str) -> String {
@@ -451,6 +474,12 @@ fn classify_workflow_reason(input: &str) -> String {
     if lower.contains("research") || lower.contains("validate") || lower.contains("implement") {
         return "Request needs multi-step execution and validation; Forge created a workflow/run."
             .to_string();
+    }
+    if executor_or_runtime_required(&lower) {
+        return "Request references an executor or async runtime; Forge created a workflow/run for durable orchestration.".to_string();
+    }
+    if cost_sensitive(&lower) {
+        return "Request has cost or budget implications; Forge created a workflow/run for tracking and simulation.".to_string();
     }
     "Request is not a simple low-risk answer; Forge created a workflow/run.".to_string()
 }
@@ -1026,5 +1055,60 @@ mod tests {
         assert!(!can_answer_directly(
             "What is the best way to implement a cron job?"
         ));
+    }
+
+    #[test]
+    fn executor_aware_routing_detects_codex_and_opencode() {
+        assert!(executor_or_runtime_required("run this with codex"));
+        assert!(executor_or_runtime_required("opencode can handle this"));
+        assert!(executor_or_runtime_required("deploy via docker"));
+        assert!(executor_or_runtime_required("run on kubernetes"));
+        assert!(executor_or_runtime_required("k8s deployment"));
+        assert!(executor_or_runtime_required("knative service"));
+        assert!(requires_workflow("codex implement feature"));
+        assert!(requires_workflow("opencode research topic"));
+        assert!(requires_workflow("docker run analysis"));
+        assert!(!executor_or_runtime_required("what is the status"));
+        assert!(!executor_or_runtime_required("help me understand"));
+    }
+
+    #[test]
+    fn cost_sensitive_routing_detects_expensive_actions() {
+        assert!(cost_sensitive("what is the cost of deploy"));
+        assert!(cost_sensitive("expensive external delivery"));
+        assert!(cost_sensitive("budget for external notification"));
+        assert!(cost_sensitive("cost of external delivery"));
+        assert!(requires_workflow("cost of deploy"));
+        assert!(!cost_sensitive("what is the cost"));
+        assert!(!cost_sensitive("help"));
+        assert!(!cost_sensitive("current status"));
+    }
+
+    #[test]
+    fn classify_workflow_reason_includes_executor_and_cost_reasons() {
+        let reason = classify_workflow_reason("codex analysis");
+        assert!(
+            reason.contains("executor"),
+            "expected executor reason, got: {reason}"
+        );
+
+        let reason = classify_workflow_reason("expensive deploy");
+        assert!(
+            reason.contains("cost"),
+            "expected cost reason, got: {reason}"
+        );
+
+        let reason = classify_workflow_reason("docker run analysis");
+        assert!(
+            reason.contains("executor"),
+            "expected executor reason, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn executor_and_cost_terms_prevent_direct_answer() {
+        assert!(!can_answer_directly("What is the cost of deploying?"));
+        assert!(!can_answer_directly("What is the status of my codex run?"));
+        assert!(!can_answer_directly("Help me use opencode for research"));
     }
 }

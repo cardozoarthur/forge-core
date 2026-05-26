@@ -33,6 +33,9 @@ pub struct WorkflowInspectionReport {
     pub lifecycle_state: String,
     pub workflow_revision: u64,
     pub artifact_count: usize,
+    pub creative_artifact_count: usize,
+    pub has_token_collection: bool,
+    pub token_count: usize,
     pub workflow_task_count: usize,
     pub task_count: usize,
     pub verbose: bool,
@@ -212,6 +215,12 @@ pub fn inspect_workflow_with_focus(
     let schedule_summary = summarize_schedules(&workflow.tasks);
     let loop_summary = summarize_loops(&workflow.tasks);
     let human_interaction_summary = summarize_human_interactions(&workflow.tasks);
+    let creative_artifact_count = workflow.creative_artifacts.len();
+    let token_count = workflow
+        .token_collection
+        .as_ref()
+        .map(|tc| tc.tokens.len())
+        .unwrap_or(0);
     let diagram = render_diagram(
         &registry_row,
         &nodes,
@@ -219,6 +228,8 @@ pub fn inspect_workflow_with_focus(
         verbose,
         focus.as_ref(),
         workflow.tasks.len(),
+        creative_artifact_count,
+        token_count,
     );
 
     Ok(WorkflowInspectionReport {
@@ -232,6 +243,13 @@ pub fn inspect_workflow_with_focus(
         lifecycle_state: registry_row.lifecycle_state,
         workflow_revision: registry_row.workflow_revision,
         artifact_count: registry_row.artifact_count,
+        creative_artifact_count: workflow.creative_artifacts.len(),
+        has_token_collection: workflow.token_collection.is_some(),
+        token_count: workflow
+            .token_collection
+            .as_ref()
+            .map(|tc| tc.tokens.len())
+            .unwrap_or(0),
         workflow_task_count: workflow.tasks.len(),
         task_count: nodes.len(),
         verbose,
@@ -600,6 +618,7 @@ fn derive_child_lifecycle_state(workflow: &Workflow) -> String {
     "idle".to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_diagram(
     row: &WorkflowRegistryRow,
     nodes: &[TaskInspectionNode],
@@ -607,15 +626,19 @@ fn render_diagram(
     verbose: bool,
     focus: Option<&InspectionFocus>,
     workflow_task_count: usize,
+    creative_artifact_count: usize,
+    token_count: usize,
 ) -> String {
     let mut lines = vec![
         format!("Workflow {} [{}]", row.workflow_id, row.lifecycle_state),
         format!("initial_request: {}", row.initial_request),
         format!("current_goal: {}", row.current_goal),
         format!(
-            "revision: {} artifacts: {} tasks: {} subflows: {}",
+            "revision: {} artifacts: {} creative_artifacts: {} tokens: {} tasks: {} subflows: {}",
             row.workflow_revision,
             row.artifact_count,
+            creative_artifact_count,
+            token_count,
             nodes.len(),
             subflows.len()
         ),
