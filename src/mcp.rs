@@ -7,6 +7,7 @@ use crate::interaction::{
     answer_human_interaction, create_choice_interaction, create_form_interaction,
     expire_human_interaction, list_human_interactions, CreateChoiceInteractionRequest,
 };
+use crate::interactive::{build_interactive_home, route_interactive_input, slash_command_catalog};
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::milestone::{
     build_milestone_export_demo, build_milestone_manifest, build_milestone_research,
@@ -111,6 +112,12 @@ struct WorkflowInspectInput {
     workflow_id: String,
     task_id: Option<String>,
     verbose: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InteractiveRouteInput {
+    input: String,
+    origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -439,6 +446,50 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.inspection.v1",
                 &["forge", "inspect", "<workflow-id>", "--output", "json"],
                 ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.home",
+                "Inspect Interactive Home",
+                "Return the no-argument Forge interactive home dashboard for agent-visible runtime state without launching a TTY.",
+                object_schema(&[], &[]),
+                "forge.interactive.home.v1",
+                &["forge", "interactive", "home", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.slash_commands",
+                "List Interactive Slash Commands",
+                "Return slash-command metadata so agents can map interactive operations to scriptable Forge commands.",
+                object_schema(&[], &[]),
+                "forge.interactive.slash_commands.v1",
+                &[
+                    "forge",
+                    "interactive",
+                    "slash-commands",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.route",
+                "Route Interactive Input",
+                "Classify a chat or slash-command input through Forge's interactive routing model. Complex chat input may create a durable workflow/run with retention policy evidence.",
+                object_schema(&[
+                    ("input", "string", "chat text or slash command"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["input"]),
+                "forge.interactive.route.v1",
+                &[
+                    "forge",
+                    "interactive",
+                    "route",
+                    "--input",
+                    "<input>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, true),
             ),
             tool(
                 "forge.schedule.create_daily_goal_research",
@@ -1196,6 +1247,16 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &input.workflow_id,
                 input.verbose.unwrap_or(false),
                 input.task_id.as_deref(),
+            )?)?
+        }
+        "forge.interactive.home" => serde_json::to_value(build_interactive_home(store)?)?,
+        "forge.interactive.slash_commands" => serde_json::to_value(slash_command_catalog())?,
+        "forge.interactive.route" => {
+            let input: InteractiveRouteInput = parse_input(input)?;
+            serde_json::to_value(route_interactive_input(
+                store,
+                &input.input,
+                input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
         "forge.schedule.create_daily_goal_research" => {

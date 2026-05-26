@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.154 - 2026-05-26
+
+### Added
+
+- Self-evolution cycle 33: exposed the interactive Forge CLI contract through MCP tools for agent callers.
+- Added `forge.interactive.home` so agents can inspect the no-argument interactive dashboard without launching a local TTY.
+- Added `forge.interactive.slash_commands` so agents can map slash commands to scriptable Forge commands.
+- Added `forge.interactive.route` so agents can reuse Forge's direct-chat versus durable-workflow routing model, including retention decision evidence.
+- Updated packaged `forge-core` skill guidance with the new interactive MCP examples.
+
+### Changed
+
+- Updated replacement-grade CLI milestone evidence to mention 0.4.154 interactive MCP surfaces.
+- Updated package/readme version to `0.4.154` for this 0.4.x groundwork increment.
+
+### Validation
+
+- RED observed first with `cargo test mcp_exposes_interactive_cli_home_slash_and_route_for_agents --test forge_cli_contract`: the MCP manifest did not expose the interactive tools.
+- RED observed first with `cargo test packaged_skill_mentions_interactive_mcp_agent_surfaces --test forge_cli_contract`: the packaged skill did not mention interactive MCP routing.
+- Targeted GREEN passed for both new tests.
+
+### Safety
+
+- `forge.interactive.home` and `forge.interactive.slash_commands` are read-only.
+- `forge.interactive.route` is marked as workflow-mutating because complex conversational input may create a durable workflow/run.
+- No Docker, Kubernetes, Knative, Telegram send, camera, microphone, screen, mouse, keyboard, peripheral, model download or external user resource is mutated.
+- The change remains 0.5 groundwork; Forge still needs richer in-TUI diff/patch review, provider/session management and end-to-end Forge-first coding/research workflows before claiming replacement-grade CLI readiness.
+
 ## 0.4.153 - 2026-05-26
 
 ### Added
