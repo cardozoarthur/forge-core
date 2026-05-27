@@ -151,7 +151,7 @@ forge mcp call forge.milestone.manifest --input '{"version":"0.5"}' --output jso
 forge mcp call forge.milestone.export_demo --output json
 forge mcp call forge.milestone.cli_demo --output json
 forge improve --workflow <workflow-id> --target-version 0.3.0 --output json
-forge self run --repo /home/arthur/projects/forge-core --until 2026-05-25T10:00:00-03:00 --executor codex --executor opencode --max-cycles 1 --output json
+forge self run --repo /home/arthur/projects/forge-core --until 2026-05-25T10:00:00-03:00 --executor opencode --fallback-executor codex --max-cycles 1 --output json
 ```
 "#;
 
