@@ -40,6 +40,8 @@ pub struct RunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat_ttl_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executor_fallbacks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub executor_switches: Vec<ExecutorSwitchRecord>,
 }
 
@@ -74,6 +76,8 @@ pub struct RequestStatusReport {
     pub latest_checkpoint: Option<TaskCheckpoint>,
     pub task_summary: TaskStatusSummary,
     pub activity: RunActivity,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executor_fallbacks: Vec<String>,
     pub executor_switch_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_executor_switch: Option<ExecutorSwitchRecord>,
@@ -114,6 +118,8 @@ pub struct RequestExecutorSwitchReport {
     pub origin: String,
     pub previous_executor: Option<String>,
     pub new_executor: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_executors: Vec<String>,
     pub activity: RunActivity,
     pub executor_switch: ExecutorSwitchRecord,
     pub checkpoint_count: usize,
@@ -160,6 +166,8 @@ pub struct ExecutorSwitchRecord {
     pub to_executor: String,
     pub from_pid: Option<u32>,
     pub to_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_executors: Vec<String>,
     pub previous_heartbeat_at: Option<DateTime<Utc>>,
     pub switched_at: DateTime<Utc>,
     pub origin: String,
@@ -325,6 +333,7 @@ pub fn create_run_record(workflow: &Workflow, origin: &str, status: &str) -> Run
         last_heartbeat_at: None,
         heartbeat_expires_at: None,
         heartbeat_ttl_seconds: None,
+        executor_fallbacks: Vec::new(),
         executor_switches: Vec::new(),
     }
 }
@@ -422,6 +431,7 @@ pub fn switch_request_executor(
     store: &ForgeStore,
     run_id: &str,
     executor: &str,
+    fallback_executors: &[String],
     summary: &str,
     ttl_seconds: u64,
     pid: Option<u32>,
@@ -436,6 +446,7 @@ pub fn switch_request_executor(
     let switched_at = Utc::now();
     let ttl_seconds = ttl_seconds.max(1);
     let expires_at = switched_at + Duration::seconds(ttl_seconds.min(i64::MAX as u64) as i64);
+    let fallback_executors = normalize_executor_fallbacks(executor, fallback_executors);
     let continuity_policy = ExecutorSwitchContinuityPolicy {
         preserve_run_id: true,
         preserve_workflow_id: true,
@@ -450,6 +461,7 @@ pub fn switch_request_executor(
         to_executor: executor.to_string(),
         from_pid: previous_pid,
         to_pid: pid,
+        fallback_executors: fallback_executors.clone(),
         previous_heartbeat_at,
         switched_at,
         origin: origin.to_string(),
@@ -465,6 +477,7 @@ pub fn switch_request_executor(
     run.last_heartbeat_at = Some(switched_at);
     run.heartbeat_expires_at = Some(expires_at);
     run.heartbeat_ttl_seconds = Some(ttl_seconds);
+    run.executor_fallbacks = fallback_executors.clone();
     run.updated_at = switched_at;
     run.executor_switches.push(executor_switch.clone());
     save_run_record(store, &run)?;
@@ -490,6 +503,7 @@ pub fn switch_request_executor(
             "new_status": run.status,
             "previous_executor": previous_executor,
             "new_executor": executor,
+            "fallback_executors": fallback_executors,
             "previous_pid": previous_pid,
             "new_pid": pid,
             "summary": summary,
@@ -510,6 +524,7 @@ pub fn switch_request_executor(
         origin: origin.to_string(),
         previous_executor,
         new_executor: executor.to_string(),
+        fallback_executors,
         activity,
         executor_switch,
         checkpoint_count: checkpoints.len(),
@@ -517,6 +532,25 @@ pub fn switch_request_executor(
         handoff_summary,
         updated_at: switched_at,
     })
+}
+
+fn normalize_executor_fallbacks(
+    primary_executor: &str,
+    fallback_executors: &[String],
+) -> Vec<String> {
+    let primary_executor = primary_executor.trim();
+    let mut normalized = Vec::new();
+    for fallback in fallback_executors {
+        let fallback = fallback.trim();
+        if fallback.is_empty()
+            || fallback == primary_executor
+            || normalized.iter().any(|existing| existing == fallback)
+        {
+            continue;
+        }
+        normalized.push(fallback.to_string());
+    }
+    normalized
 }
 
 pub fn build_run_activity(run: &RunRecord) -> RunActivity {
@@ -663,6 +697,7 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
         latest_checkpoint,
         task_summary,
         activity,
+        executor_fallbacks: run.executor_fallbacks,
         executor_switch_count: run.executor_switches.len(),
         latest_executor_switch: run.executor_switches.last().cloned(),
         handoff_summary,
@@ -688,6 +723,8 @@ pub struct RequestListRow {
     pub goal: String,
     pub origin: String,
     pub activity: RunActivity,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executor_fallbacks: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -738,6 +775,7 @@ pub fn list_requests(store: &ForgeStore, status_filter: Option<&str>) -> Result<
             goal: run.goal,
             origin: run.origin,
             created_at: run.created_at,
+            executor_fallbacks: run.executor_fallbacks,
             updated_at: run.updated_at,
         })
         .collect();

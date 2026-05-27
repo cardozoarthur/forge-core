@@ -768,6 +768,8 @@ enum RequestCommands {
         run_id: String,
         #[arg(long)]
         executor: String,
+        #[arg(long = "fallback-executor")]
+        fallback_executors: Vec<String>,
         #[arg(long, default_value = "executor hot swap")]
         summary: String,
         #[arg(long = "ttl-seconds", default_value_t = 300)]
@@ -2089,6 +2091,7 @@ fn run() -> Result<i32> {
             RequestCommands::SwitchExecutor {
                 run_id,
                 executor,
+                fallback_executors,
                 summary,
                 ttl_seconds,
                 pid,
@@ -2101,6 +2104,7 @@ fn run() -> Result<i32> {
                     &store,
                     &run_id,
                     &executor,
+                    &fallback_executors,
                     &summary,
                     ttl_seconds,
                     pid,

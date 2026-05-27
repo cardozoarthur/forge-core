@@ -238,13 +238,13 @@ Skill-style async handoff:
 forge request start --goal "Improve Forge Core" --origin codex --output json
 forge request status --run <run-id> --output json
 forge request resume --run <run-id> --origin codex --output json
-forge request switch-executor --run <run-id> --executor opencode --summary "codex limit approaching; opencode continuing from Forge state" --origin codex --output json
+forge request switch-executor --run <run-id> --executor opencode --fallback-executor codex --summary "codex limit approaching; opencode continuing from Forge state" --origin codex --output json
 ```
 
 Codex/OpenCode should prefer this pattern when using Forge as a skill: make a short request, receive a `run_id`, and let Forge own the asynchronous workflow state.
 `forge request start` uses the same registry-derived reuse pass as `forge plan`, returning `reuse_candidates`, `attached_subflows` and `forge.agent_handoff_contract.v1` when Forge can attach a compatible deterministic child subflow before persisting the async workflow.
 `forge request status` resolves the run id back to the current Forge workflow state, including the current goal, original requested goal, latest revision, artifact count, task status summary and context handoff summary for every task.
-`forge request switch-executor` hot-swaps the active executor without cancelling the run, changing the workflow id, dropping checkpoints or weakening explicit user directives. Use it when Codex/OpenCode/Gemini/other adapters approach model limits or need to hand work to another authorized executor while Forge remains the source of truth.
+`forge request switch-executor` hot-swaps the active executor without cancelling the run, changing the workflow id, dropping checkpoints or weakening explicit user directives. Use `--fallback-executor` to persist an ordered executor recovery chain, for example OpenCode primary with Codex fallback. Use it when Codex/OpenCode/Gemini/other adapters approach model limits or need to hand work to another authorized executor while Forge remains the source of truth.
 The handoff summary includes aggregate routing quality counts and each task's quality contract, so async callers can distinguish dependency waits from context budget/profile pressure without opening full context packets.
 `forge list` exposes the workflow registry across planned and async workflows, including stable workflow ids, associated run ids, initial request, current goal, lifecycle state, task summary, execution-policy route counts and deterministic code-node subflows that can be reused by compatible future workflows. Completed finite workflows are projected as `scaled_to_zero` when there is no remaining task work. Operators can use `forge list --context-actions` to discover valid handoff/resume/retry filter values, then combine lifecycle slices with `--context-action <action>` to find workflows whose next context route includes a specific handoff action such as `wait_for_dependencies`, `increase_context_budget` or `partial_retry_with_fresh_context`. Each registry row also includes `context_action_refs`, a per-task list with the task id, title, executor, next action, handoff status, blocker refs, checkpoint refs and current routing cache key, so operators can jump directly from a filtered registry row to the affected tasks without opening a full inspection first.
 
@@ -255,7 +255,7 @@ forge mcp tools --output json
 forge mcp call forge.run.start --input '{"goal":"Improve Forge Core","origin":"codex"}' --output json
 forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json
 forge mcp call forge.run.resume --input '{"run_id":"<run-id>","origin":"opencode"}' --output json
-forge mcp call forge.run.switch_executor --input '{"run_id":"<run-id>","executor":"opencode","summary":"take over without stopping workflow","origin":"codex"}' --output json
+forge mcp call forge.run.switch_executor --input '{"run_id":"<run-id>","executor":"opencode","fallback_executors":["codex"],"summary":"take over without stopping workflow","origin":"codex"}' --output json
 forge mcp call forge.workflow.inspect --input '{"workflow_id":"<workflow-id>","verbose":true}' --output json
 forge mcp call forge.context.request --input '{"workflow_id":"<workflow-id>","task_id":"task-001","budget":1200}' --output json
 forge mcp call forge.task.handoff --input '{"workflow_id":"<workflow-id>","task_id":"task-001","executor":"codex","budget":1200}' --output json
