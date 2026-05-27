@@ -196,6 +196,8 @@ struct RunHeartbeatInput {
 struct RunSwitchExecutorInput {
     run_id: String,
     executor: String,
+    #[serde(default)]
+    fallback_executors: Vec<String>,
     summary: Option<String>,
     ttl_seconds: Option<u64>,
     pid: Option<u32>,
@@ -705,6 +707,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[
                     ("run_id", "string", "run id"),
                     ("executor", "string", "new executor id such as opencode|codex|custom"),
+                    ("fallback_executors", "array", "ordered fallback executor ids, for example [\"codex\"]"),
                     ("summary", "string", "short takeover summary without secrets"),
                     ("ttl_seconds", "integer", "heartbeat freshness TTL for the new executor"),
                     ("pid", "integer", "optional new executor process id"),
@@ -712,7 +715,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["run_id", "executor"]),
                 "forge.request_executor_switch.v1",
-                &["forge", "request", "switch-executor", "--run", "<run-id>", "--executor", "<executor>", "--output", "json"],
+                &["forge", "request", "switch-executor", "--run", "<run-id>", "--executor", "<executor>", "--fallback-executor", "<fallback-executor>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -1436,6 +1439,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 store,
                 &input.run_id,
                 &input.executor,
+                &input.fallback_executors,
                 input
                     .summary
                     .as_deref()

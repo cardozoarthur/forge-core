@@ -14536,6 +14536,10 @@ fn request_switch_executor_hot_swaps_agent_without_stopping_run_or_losing_direct
             run_id,
             "--executor",
             "opencode",
+            "--fallback-executor",
+            "codex",
+            "--fallback-executor",
+            "opencode",
             "--summary",
             "opencode takes over from persisted Forge state",
             "--reason",
@@ -14564,10 +14568,18 @@ fn request_switch_executor_hot_swaps_agent_without_stopping_run_or_losing_direct
     assert_eq!(switched_json["previous_status"], "running");
     assert_eq!(switched_json["previous_executor"], "codex");
     assert_eq!(switched_json["new_executor"], "opencode");
+    assert_eq!(
+        switched_json["fallback_executors"],
+        serde_json::json!(["codex"])
+    );
     assert_eq!(switched_json["activity"]["executor"], "opencode");
     assert_eq!(switched_json["activity"]["heartbeat_status"], "fresh");
     assert_eq!(switched_json["executor_switch"]["from_executor"], "codex");
     assert_eq!(switched_json["executor_switch"]["to_executor"], "opencode");
+    assert_eq!(
+        switched_json["executor_switch"]["fallback_executors"],
+        serde_json::json!(["codex"])
+    );
     assert_eq!(
         switched_json["executor_switch"]["reason"],
         "codex model limit approaching"
@@ -14613,6 +14625,10 @@ fn request_switch_executor_hot_swaps_agent_without_stopping_run_or_losing_direct
     let status_json: Value = serde_json::from_slice(&status).unwrap();
     assert_eq!(status_json["status"], "running");
     assert_eq!(status_json["activity"]["executor"], "opencode");
+    assert_eq!(
+        status_json["executor_fallbacks"],
+        serde_json::json!(["codex"])
+    );
     assert_eq!(status_json["executor_switch_count"], 1);
     assert_eq!(
         status_json["latest_executor_switch"]["to_executor"],
@@ -14809,6 +14825,7 @@ fn mcp_run_switch_executor_tool_exposes_hot_swap_contract_to_agents() {
             && tool["output_schema"] == "forge.request_executor_switch.v1"
             && tool["async_safe"] == true
             && tool["mutates_workflow"] == true
+            && tool["input_schema"]["properties"]["fallback_executors"]["type"] == "array"
     }));
 
     assert!(
@@ -14864,6 +14881,7 @@ fn mcp_run_switch_executor_tool_exposes_hot_swap_contract_to_agents() {
     let input = serde_json::json!({
         "run_id": run_id,
         "executor": "opencode",
+        "fallback_executors": ["codex"],
         "summary": "opencode takes over through MCP",
         "reason": "codex limit approaching",
         "ttl_seconds": 600,
@@ -14896,6 +14914,10 @@ fn mcp_run_switch_executor_tool_exposes_hot_swap_contract_to_agents() {
     );
     assert_eq!(switched_json["result"]["previous_executor"], "codex");
     assert_eq!(switched_json["result"]["new_executor"], "opencode");
+    assert_eq!(
+        switched_json["result"]["fallback_executors"],
+        serde_json::json!(["codex"])
+    );
     assert_eq!(
         switched_json["result"]["executor_switch"]["continuity_policy"]
             ["user_directives_remain_authoritative"],
