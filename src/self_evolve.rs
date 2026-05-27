@@ -485,7 +485,8 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         .or(persisted_self_evolution_goal)
         .unwrap_or_else(|| BASE_SELF_EVOLUTION_GOAL.to_string());
     let workflow = create_workflow(parse_intent(&self_evolution_goal));
-    let run = create_run_record(&workflow, "forge_cli", "planned");
+    let mut run = create_run_record(&workflow, "forge_cli", "planned");
+    run.executor_fallbacks = executor_fallbacks.clone();
     store.save_workflow(&workflow)?;
     save_run_record(store, &run)?;
 
