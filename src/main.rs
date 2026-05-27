@@ -1037,6 +1037,8 @@ enum SelfCommands {
         sleep_seconds: u64,
         #[arg(long = "executor")]
         executors: Vec<String>,
+        #[arg(long = "fallback-executor")]
+        fallback_executors: Vec<String>,
         #[arg(long)]
         goal: Option<String>,
         #[arg(long = "validation-command")]
@@ -2394,6 +2396,7 @@ fn run() -> Result<i32> {
                 max_cycles,
                 sleep_seconds,
                 executors,
+                fallback_executors,
                 goal,
                 validation_commands,
                 mode,
@@ -2412,6 +2415,7 @@ fn run() -> Result<i32> {
                         max_cycles,
                         sleep_seconds,
                         executors,
+                        fallback_executors,
                         goal,
                         validation_commands,
                         mode,

@@ -31,6 +31,7 @@ pub struct SelfRunOptions {
     pub max_cycles: u32,
     pub sleep_seconds: u64,
     pub executors: Vec<String>,
+    pub fallback_executors: Vec<String>,
     pub goal: Option<String>,
     pub validation_commands: Vec<String>,
     pub mode: String,
@@ -48,6 +49,8 @@ pub struct SelfRunReport {
     pub stop_at: String,
     pub repo: String,
     pub executors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executor_fallbacks: Vec<String>,
     pub operating_mode: String,
     pub max_cycles: u32,
     pub dry_run: bool,
@@ -60,7 +63,12 @@ pub struct SelfRunReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct SelfCycleReport {
     pub cycle: u32,
+    pub requested_executor: String,
     pub executor: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executor_fallbacks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executor_attempts: Vec<SelfExecutorAttempt>,
     pub status: String,
     pub prompt_path: String,
     pub prompt_packet_version: String,
@@ -75,6 +83,20 @@ pub struct SelfCycleReport {
     pub committed: bool,
     pub commit: Option<String>,
     pub public_project_update: PublicProjectUpdateReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SelfExecutorAttempt {
+    pub executor: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+struct SelfExecutorExecution {
+    executor: String,
+    status: String,
+    attempts: Vec<SelfExecutorAttempt>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -127,6 +149,7 @@ struct SelfEvolutionPromptPacket {
     version: String,
     cycle: u32,
     executor: String,
+    executor_fallbacks: Vec<String>,
     workflow_id: String,
     run_id: String,
     workflow_goal: String,
@@ -452,6 +475,8 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
     } else {
         options.executors.clone()
     };
+    let executor_fallbacks =
+        normalize_self_executor_fallbacks(&executors, &options.fallback_executors);
 
     let persisted_self_evolution_goal = load_persisted_self_evolution_goal(store)?;
     let self_evolution_goal = options
@@ -478,6 +503,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             stop_at: options.until,
             repo: options.repo.display().to_string(),
             executors,
+            executor_fallbacks,
             operating_mode: operating_mode.as_str().to_string(),
             max_cycles: options.max_cycles,
             dry_run: options.dry_run,
@@ -493,13 +519,16 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         if Utc::now() >= stop_at.with_timezone(&Utc) {
             break;
         }
-        let executor = executors[((cycle - 1) as usize) % executors.len()].clone();
+        let requested_executor = executors[((cycle - 1) as usize) % executors.len()].clone();
+        let mut executor = requested_executor.clone();
+        let mut executor_attempts = Vec::new();
         let current_workflow = store
             .load_workflow(&workflow.id)
             .unwrap_or_else(|_| workflow.clone());
         let prompt_packet = SelfEvolutionPromptPacket::new(
             cycle,
-            &executor,
+            &requested_executor,
+            &executor_fallbacks,
             &current_workflow,
             &run.run_id,
             &options,
@@ -551,8 +580,13 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
                 wf.status = "running".to_string();
                 let _ = store.save_workflow(&wf);
             }
-            status = match execute_cycle(&options.repo, &executor, &prompt) {
-                Ok(s) => s,
+            let execution = match execute_cycle_with_fallback(
+                &options.repo,
+                &requested_executor,
+                &executor_fallbacks,
+                &prompt,
+            ) {
+                Ok(execution) => execution,
                 Err(e) => {
                     let _ = update_run_status(store, &run.run_id, "failed", "forge_cli");
                     if let Ok(mut wf) = store.load_workflow(&workflow.id) {
@@ -562,6 +596,9 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
                     return Err(e.context(format!("executor cycle {cycle} failed")));
                 }
             };
+            executor = execution.executor;
+            executor_attempts = execution.attempts;
+            status = execution.status;
             validation_report = run_validation(&options.repo, &prompt_packet)?;
             if !validation_report.validation_passed {
                 emit_validation_failure_logs(&validation_report);
@@ -619,7 +656,10 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
 
         let cycle_report = SelfCycleReport {
             cycle,
+            requested_executor,
             executor,
+            executor_fallbacks: executor_fallbacks.clone(),
+            executor_attempts,
             status,
             prompt_path: prompt_path.clone(),
             prompt_packet_version: prompt_packet.version,
@@ -674,6 +714,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         stop_at: options.until,
         repo: options.repo.display().to_string(),
         executors,
+        executor_fallbacks,
         operating_mode: operating_mode.as_str().to_string(),
         max_cycles: options.max_cycles,
         dry_run: options.dry_run,
@@ -688,6 +729,7 @@ impl SelfEvolutionPromptPacket {
     fn new(
         cycle: u32,
         executor: &str,
+        executor_fallbacks: &[String],
         workflow: &Workflow,
         run_id: &str,
         options: &SelfRunOptions,
@@ -699,6 +741,7 @@ impl SelfEvolutionPromptPacket {
             version: SELF_EVOLUTION_PROMPT_PACKET_VERSION.to_string(),
             cycle,
             executor: executor.to_string(),
+            executor_fallbacks: executor_fallbacks.to_vec(),
             workflow_id: workflow.id.clone(),
             run_id: run_id.to_string(),
             workflow_goal: workflow.goal.clone(),
@@ -1010,6 +1053,7 @@ You are executing Forge self-evolution cycle {}.
 Run id: `{}`
 Workflow id: `{}`
 Executor: `{}`
+Executor fallback chain: `{}`
 Stop date: `{}`
 
 Persisted Forge workflow goal (authoritative):
@@ -1069,6 +1113,7 @@ Return a concise final report with:
         packet.run_id,
         packet.workflow_id,
         packet.executor,
+        render_executor_fallbacks(&packet.executor_fallbacks),
         packet.stop_at,
         packet.workflow_goal,
         packet.initial_workflow_goal,
@@ -1147,6 +1192,14 @@ fn render_capability_breakdown(packet: &SelfEvolutionPromptPacket) -> String {
     buf
 }
 
+fn render_executor_fallbacks(fallback_executors: &[String]) -> String {
+    if fallback_executors.is_empty() {
+        "none".to_string()
+    } else {
+        fallback_executors.join(", ")
+    }
+}
+
 fn write_text_artifact(base_dir: &Path, relative_path: &str, content: &str) -> Result<()> {
     let full_path = base_dir.join(relative_path);
     if let Some(parent) = full_path.parent() {
@@ -1154,6 +1207,50 @@ fn write_text_artifact(base_dir: &Path, relative_path: &str, content: &str) -> R
     }
     fs::write(full_path, content)?;
     Ok(())
+}
+
+fn execute_cycle_with_fallback(
+    repo: &Path,
+    primary_executor: &str,
+    fallback_executors: &[String],
+    prompt: &str,
+) -> Result<SelfExecutorExecution> {
+    let mut attempts = Vec::new();
+    let primary = primary_executor.trim().to_string();
+    let mut candidates = vec![primary.clone()];
+    candidates.extend(normalize_self_executor_fallbacks(
+        &[primary],
+        fallback_executors,
+    ));
+    let mut errors = Vec::new();
+
+    for executor in candidates {
+        match execute_cycle(repo, &executor, prompt) {
+            Ok(status) => {
+                attempts.push(SelfExecutorAttempt {
+                    executor: executor.clone(),
+                    status: "completed".to_string(),
+                    error: None,
+                });
+                return Ok(SelfExecutorExecution {
+                    executor,
+                    status,
+                    attempts,
+                });
+            }
+            Err(error) => {
+                let error = error.to_string();
+                errors.push(format!("{executor}: {error}"));
+                attempts.push(SelfExecutorAttempt {
+                    executor,
+                    status: "failed".to_string(),
+                    error: Some(error),
+                });
+            }
+        }
+    }
+
+    bail!("all self-evolution executors failed: {}", errors.join("; "))
 }
 
 fn execute_cycle(repo: &Path, executor: &str, prompt: &str) -> Result<String> {
@@ -1206,6 +1303,26 @@ fn execute_cycle(repo: &Path, executor: &str, prompt: &str) -> Result<String> {
         }
         other => bail!("unsupported self-evolution executor: {other}"),
     }
+}
+
+fn normalize_self_executor_fallbacks(
+    primary_executors: &[String],
+    fallback_executors: &[String],
+) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for fallback in fallback_executors {
+        let fallback = fallback.trim();
+        if fallback.is_empty()
+            || primary_executors
+                .iter()
+                .any(|executor| executor.trim() == fallback)
+            || normalized.iter().any(|existing| existing == fallback)
+        {
+            continue;
+        }
+        normalized.push(fallback.to_string());
+    }
+    normalized
 }
 
 fn run_validation(
@@ -1513,7 +1630,10 @@ mod tests {
     fn test_overhead_ledger_aggregate() {
         let r1 = SelfCycleReport {
             cycle: 1,
+            requested_executor: "test".to_string(),
             executor: "test".to_string(),
+            executor_fallbacks: Vec::new(),
+            executor_attempts: Vec::new(),
             status: "completed".to_string(),
             prompt_path: "p1.md".to_string(),
             prompt_packet_version: "v1".to_string(),
@@ -1547,7 +1667,10 @@ mod tests {
         };
         let r2 = SelfCycleReport {
             cycle: 2,
+            requested_executor: "test".to_string(),
             executor: "test".to_string(),
+            executor_fallbacks: Vec::new(),
+            executor_attempts: Vec::new(),
             status: "completed".to_string(),
             prompt_path: "p2.md".to_string(),
             prompt_packet_version: "v1".to_string(),
@@ -1817,6 +1940,7 @@ mod tests {
             version: "v2".to_string(),
             cycle: 1,
             executor: "test".to_string(),
+            executor_fallbacks: Vec::new(),
             workflow_id: "wf-1".to_string(),
             run_id: "run-1".to_string(),
             workflow_goal: "".to_string(),
@@ -1842,6 +1966,7 @@ mod tests {
             version: "v2".to_string(),
             cycle: 1,
             executor: "test".to_string(),
+            executor_fallbacks: Vec::new(),
             workflow_id: "wf-1".to_string(),
             run_id: "run-1".to_string(),
             workflow_goal:

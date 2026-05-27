@@ -8161,6 +8161,8 @@ fn self_run_prompt_packet_is_versioned_and_checksummed_for_executor_replay() {
             "--max-cycles",
             "1",
             "--executor",
+            "opencode",
+            "--fallback-executor",
             "codex",
             "--dry-run",
             "--output",
@@ -8174,6 +8176,13 @@ fn self_run_prompt_packet_is_versioned_and_checksummed_for_executor_replay() {
 
     let json: Value = serde_json::from_slice(&output).unwrap();
     let cycle_report = &json["cycle_reports"][0];
+    assert_eq!(json["executor_fallbacks"], serde_json::json!(["codex"]));
+    assert_eq!(cycle_report["requested_executor"], "opencode");
+    assert_eq!(cycle_report["executor"], "opencode");
+    assert_eq!(
+        cycle_report["executor_fallbacks"],
+        serde_json::json!(["codex"])
+    );
     assert_eq!(
         cycle_report["prompt_packet_version"],
         "forge.self_evolution.prompt.v2"
@@ -8184,7 +8193,8 @@ fn self_run_prompt_packet_is_versioned_and_checksummed_for_executor_replay() {
         .join(cycle_report["prompt_path"].as_str().unwrap());
     let prompt = fs::read_to_string(prompt_path).unwrap();
     assert!(prompt.contains("Prompt packet version: `forge.self_evolution.prompt.v2`"));
-    assert!(prompt.contains("Executor: `codex`"));
+    assert!(prompt.contains("Executor: `opencode`"));
+    assert!(prompt.contains("Executor fallback chain: `codex`"));
     assert_eq!(cycle_report["prompt_sha256"], hex_sha256(prompt.as_bytes()));
 }
 

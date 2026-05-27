@@ -373,14 +373,14 @@ Run Forge self-evolution:
 forge self run \
   --repo /home/arthur/projects/forge-core \
   --until 2026-05-25T10:00:00-03:00 \
-  --executor codex \
   --executor opencode \
+  --fallback-executor codex \
   --mode balanced \
   --max-cycles 1 \
   --output json
 ```
 
-`forge self run` creates a run id and workflow id, writes prompt/report artifacts for every cycle, runs validation before committing, and only pushes when `--push` is passed.
+`forge self run` creates a run id and workflow id, writes prompt/report artifacts for every cycle, runs validation before committing, and only pushes when `--push` is passed. `--executor` defines the primary executor schedule; `--fallback-executor` defines the ordered recovery chain for failed executor attempts without stopping the cycle.
 Each self-evolution cycle report includes the prompt packet version and SHA-256 checksum so executor runs can be replayed and audited against the exact instructions given to Codex/OpenCode. Prompt packet `forge.self_evolution.prompt.v2` includes the current persisted workflow goal, the initial goal and the workflow revision before the generic strategic backlog, so human goal mutations such as clusterization or n8n node research are carried into subsequent self-evolution runs.
 The self-evolution report also includes `forge.self_evolution.overhead_ledger.v1` and `forge.self_evolution.decision_gate.v1`. `--mode lean` rejects governance-heavy cycles when expected value is below orchestration cost; `balanced` is the default; `strict` allows more overhead only for audit, safety or distributed-execution needs. When the persisted terminal goal already has the mode boundary, ledger and decision gate, Forge returns `terminal_goal_reached` and creates no new cycle prompts.
 
