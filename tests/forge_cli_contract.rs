@@ -8175,6 +8175,28 @@ fn self_run_prompt_packet_is_versioned_and_checksummed_for_executor_replay() {
         .clone();
 
     let json: Value = serde_json::from_slice(&output).unwrap();
+    let run_id = json["run_id"].as_str().unwrap();
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(
+        status_json["executor_fallbacks"],
+        serde_json::json!(["codex"])
+    );
     let cycle_report = &json["cycle_reports"][0];
     assert_eq!(json["executor_fallbacks"], serde_json::json!(["codex"]));
     assert_eq!(cycle_report["requested_executor"], "opencode");
