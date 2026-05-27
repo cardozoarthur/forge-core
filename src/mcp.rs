@@ -23,7 +23,7 @@ use crate::registry::{
 };
 use crate::request::{
     cancel_request, heartbeat_request, list_requests, load_request_status, recover_stale_request,
-    resume_async_request, start_async_request,
+    resume_async_request, start_async_request, switch_request_executor,
 };
 use crate::schedule::{
     aggregate_summary, build_schedule_worker_status, create_daily_goal_research_workflow,
@@ -189,6 +189,17 @@ struct RunHeartbeatInput {
     summary: Option<String>,
     ttl_seconds: Option<u64>,
     pid: Option<u32>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunSwitchExecutorInput {
+    run_id: String,
+    executor: String,
+    summary: Option<String>,
+    ttl_seconds: Option<u64>,
+    pid: Option<u32>,
+    reason: Option<String>,
     origin: Option<String>,
 }
 
@@ -685,6 +696,23 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &["run_id"]),
                 "forge.request_heartbeat.v1",
                 &["forge", "request", "heartbeat", "--run", "<run-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.run.switch_executor",
+                "Switch Async Run Executor",
+                "Hot-swap the active executor for an async run without cancelling the run, changing workflow id, dropping checkpoints or weakening explicit user directives.",
+                object_schema(&[
+                    ("run_id", "string", "run id"),
+                    ("executor", "string", "new executor id such as opencode|codex|custom"),
+                    ("summary", "string", "short takeover summary without secrets"),
+                    ("ttl_seconds", "integer", "heartbeat freshness TTL for the new executor"),
+                    ("pid", "integer", "optional new executor process id"),
+                    ("reason", "string", "why the executor is being switched"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["run_id", "executor"]),
+                "forge.request_executor_switch.v1",
+                &["forge", "request", "switch-executor", "--run", "<run-id>", "--executor", "<executor>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -1399,6 +1427,26 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.ttl_seconds.unwrap_or(300),
                 input.pid,
                 &origin,
+            )?)?
+        }
+        "forge.run.switch_executor" => {
+            let input: RunSwitchExecutorInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(switch_request_executor(
+                store,
+                &input.run_id,
+                &input.executor,
+                input
+                    .summary
+                    .as_deref()
+                    .unwrap_or("executor hot swap through MCP"),
+                input.ttl_seconds.unwrap_or(300),
+                input.pid,
+                &origin,
+                input
+                    .reason
+                    .as_deref()
+                    .unwrap_or("executor limit or availability changed"),
             )?)?
         }
         "forge.run.recover_stale" => {

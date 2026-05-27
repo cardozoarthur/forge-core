@@ -39,6 +39,8 @@ pub struct RunRecord {
     pub heartbeat_expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat_ttl_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executor_switches: Vec<ExecutorSwitchRecord>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -72,6 +74,9 @@ pub struct RequestStatusReport {
     pub latest_checkpoint: Option<TaskCheckpoint>,
     pub task_summary: TaskStatusSummary,
     pub activity: RunActivity,
+    pub executor_switch_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_executor_switch: Option<ExecutorSwitchRecord>,
     pub handoff_summary: ContextHandoffSummary,
     pub latest_validation_evidence: Option<ValidationEvidenceSummary>,
     pub created_at: DateTime<Utc>,
@@ -96,6 +101,24 @@ pub struct RequestHeartbeatReport {
     pub previous_status: String,
     pub origin: String,
     pub activity: RunActivity,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestExecutorSwitchReport {
+    pub status: String,
+    pub schema_version: String,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub previous_status: String,
+    pub origin: String,
+    pub previous_executor: Option<String>,
+    pub new_executor: String,
+    pub activity: RunActivity,
+    pub executor_switch: ExecutorSwitchRecord,
+    pub checkpoint_count: usize,
+    pub latest_checkpoint: Option<TaskCheckpoint>,
+    pub handoff_summary: ContextHandoffSummary,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -130,6 +153,31 @@ pub struct RunActivity {
     pub recovery: RunRecoveryRecommendation,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutorSwitchRecord {
+    pub schema_version: String,
+    pub from_executor: Option<String>,
+    pub to_executor: String,
+    pub from_pid: Option<u32>,
+    pub to_pid: Option<u32>,
+    pub previous_heartbeat_at: Option<DateTime<Utc>>,
+    pub switched_at: DateTime<Utc>,
+    pub origin: String,
+    pub reason: String,
+    pub summary: String,
+    pub continuity_policy: ExecutorSwitchContinuityPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutorSwitchContinuityPolicy {
+    pub preserve_run_id: bool,
+    pub preserve_workflow_id: bool,
+    pub preserve_checkpoints: bool,
+    pub keep_workflow_running: bool,
+    pub old_executor_shutdown_required: bool,
+    pub user_directives_remain_authoritative: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RunRecoveryRecommendation {
     pub schema_version: String,
@@ -162,6 +210,8 @@ pub struct AgentHandoffPolicy {
     pub source_of_truth: String,
     pub executor_policy_required: bool,
     pub validation_before_promotion: bool,
+    pub user_directives_remain_authoritative: bool,
+    pub executor_hot_swap_supported: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -275,6 +325,7 @@ pub fn create_run_record(workflow: &Workflow, origin: &str, status: &str) -> Run
         last_heartbeat_at: None,
         heartbeat_expires_at: None,
         heartbeat_ttl_seconds: None,
+        executor_switches: Vec::new(),
     }
 }
 
@@ -364,6 +415,107 @@ pub fn heartbeat_request(
         origin: origin.to_string(),
         activity,
         updated_at: heartbeat_at,
+    })
+}
+
+pub fn switch_request_executor(
+    store: &ForgeStore,
+    run_id: &str,
+    executor: &str,
+    summary: &str,
+    ttl_seconds: u64,
+    pid: Option<u32>,
+    origin: &str,
+    reason: &str,
+) -> Result<RequestExecutorSwitchReport> {
+    let mut run = load_run_record(store, run_id)?;
+    let previous_status = run.status.clone();
+    let previous_executor = run.active_executor.clone();
+    let previous_pid = run.executor_pid;
+    let previous_heartbeat_at = run.last_heartbeat_at;
+    let switched_at = Utc::now();
+    let ttl_seconds = ttl_seconds.max(1);
+    let expires_at = switched_at + Duration::seconds(ttl_seconds.min(i64::MAX as u64) as i64);
+    let continuity_policy = ExecutorSwitchContinuityPolicy {
+        preserve_run_id: true,
+        preserve_workflow_id: true,
+        preserve_checkpoints: true,
+        keep_workflow_running: true,
+        old_executor_shutdown_required: false,
+        user_directives_remain_authoritative: true,
+    };
+    let executor_switch = ExecutorSwitchRecord {
+        schema_version: "forge.executor_switch.v1".to_string(),
+        from_executor: previous_executor.clone(),
+        to_executor: executor.to_string(),
+        from_pid: previous_pid,
+        to_pid: pid,
+        previous_heartbeat_at,
+        switched_at,
+        origin: origin.to_string(),
+        reason: reason.to_string(),
+        summary: summary.to_string(),
+        continuity_policy,
+    };
+
+    run.status = "running".to_string();
+    run.active_executor = Some(executor.to_string());
+    run.executor_pid = pid;
+    run.progress_summary = Some(summary.to_string());
+    run.last_heartbeat_at = Some(switched_at);
+    run.heartbeat_expires_at = Some(expires_at);
+    run.heartbeat_ttl_seconds = Some(ttl_seconds);
+    run.updated_at = switched_at;
+    run.executor_switches.push(executor_switch.clone());
+    save_run_record(store, &run)?;
+
+    let mut workflow = store.load_workflow(&run.workflow_id)?;
+    workflow.status = "running".to_string();
+    store.save_workflow(&workflow)?;
+
+    let checkpoints = load_workflow_checkpoints(store, &run.workflow_id)?;
+    let latest_checkpoint = checkpoints.last().cloned();
+    let handoff_summary =
+        build_context_handoff_summary(&workflow, DEFAULT_CONTEXT_BUDGET, &checkpoints)?;
+    let activity = build_run_activity_at(&run, switched_at);
+    store.record_event(
+        &run.workflow_id,
+        "async_request_executor_switched",
+        &serde_json::json!({
+            "schema_version": "forge.request_executor_switch.v1",
+            "run_id": run.run_id,
+            "workflow_id": run.workflow_id,
+            "origin": origin,
+            "previous_status": previous_status,
+            "new_status": run.status,
+            "previous_executor": previous_executor,
+            "new_executor": executor,
+            "previous_pid": previous_pid,
+            "new_pid": pid,
+            "summary": summary,
+            "reason": reason,
+            "switched_at": switched_at,
+            "heartbeat_expires_at": expires_at,
+            "heartbeat_ttl_seconds": ttl_seconds,
+            "continuity_policy": executor_switch.continuity_policy,
+        }),
+    )?;
+
+    Ok(RequestExecutorSwitchReport {
+        status: run.status,
+        schema_version: "forge.request_executor_switch.v1".to_string(),
+        run_id: run.run_id,
+        workflow_id: run.workflow_id,
+        previous_status,
+        origin: origin.to_string(),
+        previous_executor,
+        new_executor: executor.to_string(),
+        activity,
+        executor_switch,
+        checkpoint_count: checkpoints.len(),
+        latest_checkpoint,
+        handoff_summary,
+        updated_at: switched_at,
     })
 }
 
@@ -511,6 +663,8 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
         latest_checkpoint,
         task_summary,
         activity,
+        executor_switch_count: run.executor_switches.len(),
+        latest_executor_switch: run.executor_switches.last().cloned(),
         handoff_summary,
         latest_validation_evidence,
         created_at: run.created_at,
@@ -748,6 +902,8 @@ fn build_agent_handoff_contract(run: &RunRecord) -> AgentHandoffContract {
             source_of_truth: "forge_sqlite_workflow_state".to_string(),
             executor_policy_required: true,
             validation_before_promotion: true,
+            user_directives_remain_authoritative: true,
+            executor_hot_swap_supported: true,
         },
         allowed_context: AgentAllowedContext {
             tool: "forge.context.request".to_string(),
@@ -772,6 +928,8 @@ fn build_agent_handoff_contract(run: &RunRecord) -> AgentHandoffContract {
             "mutations-must-be-revisioned".to_string(),
             "artifacts-must-be-content-addressed".to_string(),
             "executor-policy-must-allow-local-executor".to_string(),
+            "explicit-user-directives-outrank-autonomous-executor-preferences".to_string(),
+            "executor-switch-must-preserve-run-workflow-checkpoints-and-artifacts".to_string(),
         ],
         artifact_refs: Vec::new(),
         status_poll: AgentStatusPoll {

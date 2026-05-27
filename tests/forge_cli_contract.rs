@@ -14463,6 +14463,169 @@ fn request_heartbeat_marks_async_run_active_and_surfaces_it_in_status_list_and_i
 }
 
 #[test]
+fn request_switch_executor_hot_swaps_agent_without_stopping_run_or_losing_directives() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Implement SDK because the user explicitly requested it",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+    assert_eq!(
+        started_json["handoff_contract"]["policy"]["user_directives_remain_authoritative"],
+        true
+    );
+    assert_eq!(
+        started_json["handoff_contract"]["policy"]["executor_hot_swap_supported"],
+        true
+    );
+    assert!(started_json["handoff_contract"]["validation_rules"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "explicit-user-directives-outrank-autonomous-executor-preferences"
+        )));
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "heartbeat",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--summary",
+            "codex is close to limit but workflow remains active",
+            "--ttl-seconds",
+            "600",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let switched = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "switch-executor",
+            "--run",
+            run_id,
+            "--executor",
+            "opencode",
+            "--summary",
+            "opencode takes over from persisted Forge state",
+            "--reason",
+            "codex model limit approaching",
+            "--ttl-seconds",
+            "900",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let switched_json: Value = serde_json::from_slice(&switched).unwrap();
+    assert_eq!(
+        switched_json["schema_version"],
+        "forge.request_executor_switch.v1"
+    );
+    assert_eq!(switched_json["status"], "running");
+    assert_eq!(switched_json["run_id"], run_id);
+    assert_eq!(switched_json["workflow_id"], workflow_id);
+    assert_eq!(switched_json["previous_status"], "running");
+    assert_eq!(switched_json["previous_executor"], "codex");
+    assert_eq!(switched_json["new_executor"], "opencode");
+    assert_eq!(switched_json["activity"]["executor"], "opencode");
+    assert_eq!(switched_json["activity"]["heartbeat_status"], "fresh");
+    assert_eq!(switched_json["executor_switch"]["from_executor"], "codex");
+    assert_eq!(switched_json["executor_switch"]["to_executor"], "opencode");
+    assert_eq!(
+        switched_json["executor_switch"]["reason"],
+        "codex model limit approaching"
+    );
+    assert_eq!(
+        switched_json["executor_switch"]["continuity_policy"]["preserve_run_id"],
+        true
+    );
+    assert_eq!(
+        switched_json["executor_switch"]["continuity_policy"]["preserve_workflow_id"],
+        true
+    );
+    assert_eq!(
+        switched_json["executor_switch"]["continuity_policy"]["preserve_checkpoints"],
+        true
+    );
+    assert_eq!(
+        switched_json["executor_switch"]["continuity_policy"]["old_executor_shutdown_required"],
+        false
+    );
+    assert_eq!(
+        switched_json["executor_switch"]["continuity_policy"]
+            ["user_directives_remain_authoritative"],
+        true
+    );
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status_json["status"], "running");
+    assert_eq!(status_json["activity"]["executor"], "opencode");
+    assert_eq!(status_json["executor_switch_count"], 1);
+    assert_eq!(
+        status_json["latest_executor_switch"]["to_executor"],
+        "opencode"
+    );
+    assert_eq!(
+        status_json["latest_executor_switch"]["continuity_policy"]
+            ["user_directives_remain_authoritative"],
+        true
+    );
+}
+
+#[test]
 fn list_and_inspect_surface_running_run_health_even_without_fresh_heartbeat() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -14626,6 +14789,118 @@ fn mcp_run_heartbeat_tool_keeps_agent_handoff_observable() {
     assert_eq!(heartbeat_json["result"]["status"], "running");
     assert_eq!(heartbeat_json["result"]["activity"]["active"], true);
     assert_eq!(heartbeat_json["result"]["activity"]["executor"], "opencode");
+}
+
+#[test]
+fn mcp_run_switch_executor_tool_exposes_hot_swap_contract_to_agents() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.run.switch_executor"
+            && tool["output_schema"] == "forge.request_executor_switch.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == true
+    }));
+
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge request switch-executor"),
+        "the packaged skill must teach executors how to hot-swap active agents"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.run.switch_executor"),
+        "the packaged skill must expose the MCP executor switch tool"
+    );
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "MCP executor switch test",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "heartbeat",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--summary",
+            "codex active before MCP switch",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let input = serde_json::json!({
+        "run_id": run_id,
+        "executor": "opencode",
+        "summary": "opencode takes over through MCP",
+        "reason": "codex limit approaching",
+        "ttl_seconds": 600,
+        "origin": "mcp"
+    })
+    .to_string();
+
+    let switched = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.run.switch_executor",
+            "--input",
+            &input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let switched_json: Value = serde_json::from_slice(&switched).unwrap();
+    assert_eq!(switched_json["status"], "ok");
+    assert_eq!(
+        switched_json["result"]["schema_version"],
+        "forge.request_executor_switch.v1"
+    );
+    assert_eq!(switched_json["result"]["previous_executor"], "codex");
+    assert_eq!(switched_json["result"]["new_executor"], "opencode");
+    assert_eq!(
+        switched_json["result"]["executor_switch"]["continuity_policy"]
+            ["user_directives_remain_authoritative"],
+        true
+    );
 }
 
 #[test]
