@@ -45,7 +45,7 @@ use forge_core::registry::{
 };
 use forge_core::request::{
     cancel_request, heartbeat_request, list_requests, load_request_status, recover_stale_request,
-    resume_async_request, start_async_request,
+    resume_async_request, start_async_request, switch_request_executor,
 };
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
@@ -758,6 +758,24 @@ enum RequestCommands {
         ttl_seconds: u64,
         #[arg(long)]
         pid: Option<u32>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    SwitchExecutor {
+        #[arg(long = "run")]
+        run_id: String,
+        #[arg(long)]
+        executor: String,
+        #[arg(long, default_value = "executor hot swap")]
+        summary: String,
+        #[arg(long = "ttl-seconds", default_value_t = 300)]
+        ttl_seconds: u64,
+        #[arg(long)]
+        pid: Option<u32>,
+        #[arg(long, default_value = "executor limit or availability changed")]
+        reason: String,
         #[arg(long, default_value = "forge_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -2064,6 +2082,30 @@ fn run() -> Result<i32> {
                     ttl_seconds,
                     pid,
                     &origin,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            RequestCommands::SwitchExecutor {
+                run_id,
+                executor,
+                summary,
+                ttl_seconds,
+                pid,
+                reason,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = switch_request_executor(
+                    &store,
+                    &run_id,
+                    &executor,
+                    &summary,
+                    ttl_seconds,
+                    pid,
+                    &origin,
+                    &reason,
                 )?;
                 print_response(output, &report)?;
                 Ok(0)
