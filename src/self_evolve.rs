@@ -85,6 +85,7 @@ pub struct SelfCycleReport {
     pub validation_report_path: String,
     pub validation_report_sha256: String,
     pub report_path: String,
+    pub markdown_report_path: String,
     pub validation_passed: bool,
     pub overhead_ledger: SelfOverheadLedger,
     pub decision_gate: SelfDecisionGateReport,
@@ -688,7 +689,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             &operating_mode,
             prompt.len() as u64,
             prompt_packet.validation_commands.len() as u32,
-            3,
+            4,
             serde_json::to_vec(&prompt_packet)?.len() as u64,
         );
         let prompt_path = format!(
@@ -697,6 +698,10 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         );
         let report_path = format!(
             "artifacts/{}/self-evolution-cycle-{:03}-report.json",
+            workflow.id, cycle
+        );
+        let markdown_report_path = format!(
+            "artifacts/{}/self-evolution-cycle-{:03}-report.md",
             workflow.id, cycle
         );
         let validation_report_path = format!(
@@ -816,6 +821,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             validation_report_path: validation_report_path.clone(),
             validation_report_sha256,
             report_path: report_path.clone(),
+            markdown_report_path: markdown_report_path.clone(),
             validation_passed: validation_report.validation_passed,
             overhead_ledger: cycle_overhead_ledger,
             decision_gate: decision_gate.clone(),
@@ -828,6 +834,11 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             &store.base_dir(),
             &report_path,
             &serde_json::to_value(&cycle_report)?,
+        )?;
+        write_text_artifact(
+            &store.base_dir(),
+            &markdown_report_path,
+            &render_cycle_markdown_report(&cycle_report),
         )?;
         cycle_reports.push(cycle_report);
 
@@ -1505,6 +1516,99 @@ Return a concise final report with:
     )
 }
 
+fn render_cycle_markdown_report(report: &SelfCycleReport) -> String {
+    let mut output = String::new();
+    output.push_str(&format!(
+        "# Forge self-evolution cycle {}\n\n",
+        report.cycle
+    ));
+    output.push_str(&format!("- Status: {}\n", report.status));
+    output.push_str(&format!(
+        "- Requested executor: {}\n",
+        report.requested_executor
+    ));
+    output.push_str(&format!("- Selected executor: {}\n", report.executor));
+    output.push_str(&format!(
+        "- Validation: {}\n",
+        if report.validation_passed {
+            "passed"
+        } else {
+            "not passed"
+        }
+    ));
+    output.push_str(&format!("- JSON report: {}\n", report.report_path));
+    output.push_str(&format!(
+        "- Validation report: {}\n\n",
+        report.validation_report_path
+    ));
+
+    output.push_str("## Quota-aware executor policy\n\n");
+    output.push_str(&format!(
+        "- Policy: {}\n",
+        report.executor_policy.selection_principle
+    ));
+    output.push_str(&format!(
+        "- Repair status: {}\n\n",
+        report.executor_policy.active_repair_status
+    ));
+    output
+        .push_str("| Executor | Provider | Model | Locality | Quota | Cost | Status | Reason |\n");
+    output.push_str("| --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    for candidate in &report.executor_policy.candidates {
+        output.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            markdown_cell(&candidate.executor),
+            markdown_cell(&candidate.provider),
+            markdown_cell(candidate.model.as_deref().unwrap_or("default")),
+            markdown_cell(&candidate.local_vs_non_local),
+            markdown_cell(&candidate.quota_model),
+            markdown_cell(&candidate.monetary_or_token_cost),
+            markdown_cell(&candidate.selection_status),
+            markdown_cell(&candidate.reason),
+        ));
+    }
+
+    if !report.executor_attempts.is_empty() {
+        output.push_str("\n## Executor attempts\n\n");
+        output
+            .push_str("| Executor | Provider | Model | Local | Quota | Cost | Status | Error |\n");
+        output.push_str("| --- | --- | --- | --- | --- | --- | --- | --- |\n");
+        for attempt in &report.executor_attempts {
+            output.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                markdown_cell(&attempt.executor),
+                markdown_cell(attempt.provider.as_deref().unwrap_or("default")),
+                markdown_cell(attempt.model.as_deref().unwrap_or("default")),
+                attempt.local,
+                markdown_cell(&attempt.quota_model),
+                markdown_cell(&attempt.monetary_or_token_cost),
+                markdown_cell(&attempt.status),
+                markdown_cell(attempt.error.as_deref().unwrap_or("none")),
+            ));
+        }
+    }
+
+    if !report.executor_policy.skipped_to_preserve_quota.is_empty() {
+        output.push_str("\n## Quota preservation\n\n");
+        for item in &report.executor_policy.skipped_to_preserve_quota {
+            output.push_str(&format!("- {}\n", item));
+        }
+    }
+
+    if !report.executor_policy.repair_goals.is_empty() {
+        output.push_str("\n## Repair goals\n\n");
+        for goal in &report.executor_policy.repair_goals {
+            output.push_str(&format!("- {}\n", goal));
+        }
+    }
+
+    output
+}
+
+fn markdown_cell(value: &str) -> String {
+    value.replace('|', "/").replace('\n', " ")
+}
+
 fn render_capability_breakdown(packet: &SelfEvolutionPromptPacket) -> String {
     let critical: Vec<_> = packet
         .capability_analysis
@@ -1744,11 +1848,8 @@ fn opencode_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate
                 .ok()
                 .map(|_| "openai/gpt-4o".to_string())
         })
-        .or_else(|| {
-            std::env::var("GEMINI_API_KEY")
-                .ok()
-                .map(|_| "gemini/gemini-2.5-pro".to_string())
-        });
+        .or_else(|| std::env::var("OPENCODE_FREE_MODEL").ok())
+        .or_else(|| Some("google/gemini-2.5-pro".to_string()));
     let provider = model
         .as_deref()
         .and_then(|model| model.split('/').next())
@@ -2064,6 +2165,7 @@ fn execute_command_capture(
     let mut command = Command::new(cmd);
     command.current_dir(repo);
     command.args(command_args.iter().map(String::as_str));
+    command.stdin(std::process::Stdio::null());
     let output = command.output().map_err(|error| {
         if error.kind() == ErrorKind::NotFound && cmd == "timeout" {
             anyhow::anyhow!("`timeout` command not found in PATH")
@@ -2485,6 +2587,7 @@ mod tests {
             validation_report_path: "v1.json".to_string(),
             validation_report_sha256: "b".to_string(),
             report_path: "r1.json".to_string(),
+            markdown_report_path: "r1.md".to_string(),
             validation_passed: true,
             overhead_ledger: SelfOverheadLedger::for_cycle(
                 &SelfOperatingMode::Balanced,
@@ -2523,6 +2626,7 @@ mod tests {
             validation_report_path: "v2.json".to_string(),
             validation_report_sha256: "d".to_string(),
             report_path: "r2.json".to_string(),
+            markdown_report_path: "r2.md".to_string(),
             validation_passed: true,
             overhead_ledger: SelfOverheadLedger::for_cycle(
                 &SelfOperatingMode::Balanced,
@@ -2826,7 +2930,7 @@ mod tests {
         assert_eq!(
             ordered,
             vec![
-                ("opencode", "configured_cli", "non_local"),
+                ("opencode", "google", "non_local"),
                 ("gemini", "google", "non_local"),
                 ("codex", "openai", "non_local"),
                 ("opencode", "ollama", "local"),
@@ -2927,6 +3031,7 @@ mod tests {
             validation_report_path: "v1.json".to_string(),
             validation_report_sha256: "sha".to_string(),
             report_path: "r1.json".to_string(),
+            markdown_report_path: "r1.md".to_string(),
             validation_passed: false,
             overhead_ledger: SelfOverheadLedger::empty(&SelfOperatingMode::Balanced),
             decision_gate: SelfDecisionGateReport::evaluate("", &SelfOperatingMode::Balanced),

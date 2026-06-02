@@ -8565,7 +8565,7 @@ fn self_run_reports_quota_aware_executor_policy_for_cycle() {
     assert_eq!(
         ordered,
         vec![
-            ("opencode", "configured_cli", "non_local"),
+            ("opencode", "google", "non_local"),
             ("gemini", "google", "non_local"),
             ("codex", "openai", "non_local"),
             ("opencode", "ollama", "local"),
@@ -8596,6 +8596,61 @@ fn self_run_reports_quota_aware_executor_policy_for_cycle() {
         .unwrap()
         .iter()
         .any(|goal| goal.as_str().unwrap().contains("Gemini non-interactive")));
+}
+
+#[test]
+fn self_run_persists_markdown_executor_policy_report_for_human_review() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("README.md"), "# Repo\n").unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2999-01-01T00:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--executor",
+            "opencode",
+            "--fallback-executor",
+            "gemini",
+            "--fallback-executor",
+            "codex",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let markdown_path = json["cycle_reports"][0]["markdown_report_path"]
+        .as_str()
+        .expect("cycle should expose markdown report path");
+    assert!(markdown_path.ends_with("-report.md"));
+
+    let markdown = fs::read_to_string(temp.path().join(markdown_path)).unwrap();
+    assert!(markdown.contains("# Forge self-evolution cycle 1"));
+    assert!(markdown.contains("## Quota-aware executor policy"));
+    assert!(markdown
+        .contains("| Executor | Provider | Model | Locality | Quota | Cost | Status | Reason |"));
+    assert!(markdown.contains("| opencode | google | google/gemini-2.5-pro | non_local |"));
+    assert!(markdown.contains("| gemini | google | gemini-2.5-pro | non_local | quota_bound |"));
+    assert!(markdown.contains("Gemini non-interactive repair"));
+    assert!(markdown.contains(
+        "Use deterministic validation commands directly instead of spending Gemini/Codex quota."
+    ));
 }
 
 #[test]
