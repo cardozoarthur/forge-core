@@ -6,6 +6,7 @@ use crate::request::start_async_request;
 use crate::runtime::load_runtimes;
 use crate::schedule::build_schedule_worker_status;
 use crate::storage::ForgeStore;
+use crate::workflow::{record_product_decision, ProductDecisionInput};
 use anyhow::Result;
 use serde::Serialize;
 use std::env;
@@ -83,6 +84,8 @@ pub struct InteractiveRouteReport {
     pub workflow_id: Option<String>,
     pub answer: Option<String>,
     pub slash_command: Option<SlashCommandRoute>,
+    pub product_decision_id: Option<String>,
+    pub product_decision_revision: Option<u64>,
     pub retention_decision: RetentionDecision,
 }
 
@@ -263,6 +266,9 @@ pub fn route_interactive_input(
     origin: &str,
 ) -> Result<InteractiveRouteReport> {
     let trimmed = input.trim();
+    if let Some(pm_goal) = parse_pm_goal(trimmed) {
+        return route_pm_workflow(store, pm_goal, origin);
+    }
     if trimmed.starts_with('/') {
         return Ok(route_slash_command(trimmed));
     }
@@ -284,6 +290,8 @@ pub fn route_interactive_input(
                     .to_string(),
             ),
             slash_command: None,
+            product_decision_id: None,
+            product_decision_revision: None,
             retention_decision: no_retention_decision(),
         });
     }
@@ -301,7 +309,87 @@ pub fn route_interactive_input(
         workflow_id: Some(request.workflow_id),
         answer: None,
         slash_command: None,
+        product_decision_id: None,
+        product_decision_revision: None,
         retention_decision,
+    })
+}
+
+fn parse_pm_goal(input: &str) -> Option<&str> {
+    input
+        .trim()
+        .strip_prefix("/pm")
+        .map(str::trim)
+        .filter(|goal| !goal.is_empty())
+}
+
+fn route_pm_workflow(
+    store: &ForgeStore,
+    pm_goal: &str,
+    origin: &str,
+) -> Result<InteractiveRouteReport> {
+    let workflow_goal = format!("Product/PM guided workflow: {pm_goal}");
+    let request = start_async_request(store, &workflow_goal, origin)?;
+    let decision = record_product_decision(
+        store,
+        &request.workflow_id,
+        ProductDecisionInput {
+            title: format!("Product/PM entrypoint decision for {pm_goal}"),
+            rationale: "Product/PM mode creates durable workflow state first so product and business outcome, alternatives, trade-offs, success metrics and backlog mutation are auditable before executor work.".to_string(),
+            alternatives: vec![
+                "answer as transient chat without durable workflow state".to_string(),
+                "create a technical workflow without recording product rationale".to_string(),
+            ],
+            trade_offs: vec![
+                "adds one governance revision before execution".to_string(),
+                "improves adoption by making PM intent inspectable from the main CLI/TUI entrypoint".to_string(),
+            ],
+            success_metrics: vec![
+                "workflow can be inspected from the interactive dashboard".to_string(),
+                "initial product decision is visible in workflow registry and inspect output".to_string(),
+                "backlog mutation is recorded before executor handoff".to_string(),
+            ],
+            backlog_mutation: "prioritize_pm_guided_workflow_creation".to_string(),
+            author: origin.to_string(),
+            affected_goals: vec![workflow_goal],
+            affected_tasks: Vec::new(),
+            affected_artifacts: Vec::new(),
+            origin: origin.to_string(),
+        },
+    )?;
+
+    Ok(InteractiveRouteReport {
+        status: "routed".to_string(),
+        schema_version: INTERACTIVE_ROUTE_SCHEMA_VERSION.to_string(),
+        input_kind: "slash_command".to_string(),
+        routing_decision: "pm_workflow_created".to_string(),
+        routing_explanation: "Product/PM entrypoint created a durable workflow and initial product decision before executor handoff.".to_string(),
+        workflow_created: true,
+        run_id: Some(request.run_id),
+        workflow_id: Some(request.workflow_id),
+        answer: None,
+        slash_command: Some(SlashCommandRoute {
+            name: "/pm".to_string(),
+            recognized: true,
+            equivalent_command: vec![
+                "forge".to_string(),
+                "interactive".to_string(),
+                "route".to_string(),
+                "--input".to_string(),
+                format!("/pm {pm_goal}"),
+            ],
+            mutates_workflow: true,
+            risk_level: "medium".to_string(),
+        }),
+        product_decision_id: Some(decision.decision_id),
+        product_decision_revision: Some(decision.revision),
+        retention_decision: RetentionDecision {
+            schema_version: "forge.interactive.retention_decision.v1".to_string(),
+            action: "retain".to_string(),
+            reason: "Product/PM workflow contains durable product decision state and should remain inspectable.".to_string(),
+            confidence: 0.91,
+            requires_human_approval: false,
+        },
     })
 }
 
@@ -432,6 +520,8 @@ fn route_slash_command(trimmed: &str) -> InteractiveRouteReport {
         workflow_id: None,
         answer: None,
         slash_command: Some(route),
+        product_decision_id: None,
+        product_decision_revision: None,
         retention_decision: no_retention_decision(),
     }
 }

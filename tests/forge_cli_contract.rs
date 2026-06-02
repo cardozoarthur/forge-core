@@ -19166,6 +19166,94 @@ fn interactive_route_slash_command_stays_command_mode_without_workflow() {
 }
 
 #[test]
+fn interactive_pm_route_creates_workflow_with_initial_product_decision() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "route",
+            "--input",
+            "/pm Launch a quota-aware agent runtime for product teams",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["input_kind"], "slash_command");
+    assert_eq!(json["routing_decision"], "pm_workflow_created");
+    assert_eq!(json["workflow_created"], true);
+    assert!(json["run_id"].as_str().unwrap().starts_with("run_"));
+    assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
+    assert!(json["product_decision_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("dec_"));
+    assert_eq!(json["product_decision_revision"], 1);
+    assert_eq!(json["retention_decision"]["action"], "retain");
+    assert!(json["routing_explanation"]
+        .as_str()
+        .unwrap()
+        .contains("Product/PM"));
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    assert_eq!(listed_json["summary"]["total"], 1);
+    assert_eq!(listed_json["workflows"][0]["product_decision_count"], 1);
+
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let connection = Connection::open(&store).unwrap();
+    let decision_json: String = connection
+        .query_row(
+            "SELECT data_json FROM events WHERE workflow_id = ?1 AND kind = 'product_decision_recorded'",
+            [workflow_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let decision: Value = serde_json::from_str(&decision_json).unwrap();
+    assert_eq!(
+        decision["title"],
+        "Product/PM entrypoint decision for Launch a quota-aware agent runtime for product teams"
+    );
+    assert!(decision["rationale"]
+        .as_str()
+        .unwrap()
+        .contains("business outcome"));
+    assert!(decision["success_metrics"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "workflow can be inspected from the interactive dashboard"
+        )));
+    assert_eq!(
+        decision["backlog_mutation"],
+        "prioritize_pm_guided_workflow_creation"
+    );
+}
+
+#[test]
 fn interactive_retention_requires_approval_before_deleting_artifact_workflow() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
