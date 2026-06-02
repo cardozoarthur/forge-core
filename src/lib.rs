@@ -17,6 +17,7 @@ pub mod lease;
 pub mod mcp;
 pub mod milestone;
 pub mod multimodal;
+pub mod notify;
 pub mod patch;
 pub mod registry;
 pub mod request;

@@ -66,6 +66,7 @@ pub struct SelfRunReport {
     pub overhead_ledger: SelfOverheadLedger,
     pub decision_gate: SelfDecisionGateReport,
     pub cycle_reports: Vec<SelfCycleReport>,
+    pub publication: SelfEvolutionPublicationReport,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,6 +94,21 @@ pub struct SelfCycleReport {
     pub committed: bool,
     pub commit: Option<String>,
     pub public_project_update: PublicProjectUpdateReport,
+    pub publication: SelfEvolutionPublicationReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SelfEvolutionPublicationReport {
+    pub schema_version: String,
+    pub last_push_commit: Option<String>,
+    pub last_push_at: Option<String>,
+    pub push_due: bool,
+    pub push_interval_seconds: u64,
+    pub next_push_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report_since_last_push: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub telegram: Option<crate::notify::TelegramReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -252,6 +268,125 @@ pub struct SelfUpdateReport {
     pub status: String,
     pub command: Vec<String>,
     pub reason: Option<String>,
+}
+
+impl SelfEvolutionPublicationReport {
+    fn empty() -> Self {
+        Self {
+            schema_version: "forge.self_evolution.publication.v1".to_string(),
+            last_push_commit: None,
+            last_push_at: None,
+            push_due: false,
+            push_interval_seconds: 7200, // 2 hours
+            next_push_at: None,
+            report_since_last_push: None,
+            telegram: None,
+        }
+    }
+
+    fn evaluate(repo: &Path, last_report: Option<&SelfEvolutionPublicationReport>) -> Result<Self> {
+        let mut report = Self::empty();
+        let _current_commit = run_git(repo, &["rev-parse", "HEAD"])?.trim().to_string();
+
+        let last_push_commit = match last_report {
+            Some(r) => r.last_push_commit.clone(),
+            None => {
+                // Try to find the last push commit from git
+                run_git(repo, &["rev-parse", "origin/main"])
+                    .map(|s| s.trim().to_string())
+                    .ok()
+            }
+        };
+
+        let last_push_at = match last_report {
+            Some(r) => r.last_push_at.clone(),
+            None => {
+                // Try to get timestamp of last push commit
+                if let Some(ref commit) = last_push_commit {
+                    run_git(repo, &["show", "-s", "--format=%cI", commit])
+                        .map(|s| s.trim().to_string())
+                        .ok()
+                } else {
+                    None
+                }
+            }
+        };
+
+        report.last_push_commit = last_push_commit;
+        report.last_push_at = last_push_at.clone();
+
+        if let Some(last_at) = last_push_at {
+            if let Ok(last_dt) = DateTime::parse_from_rfc3339(&last_at) {
+                let elapsed = Utc::now().signed_duration_since(last_dt.with_timezone(&Utc));
+                if elapsed.num_seconds() >= report.push_interval_seconds as i64 {
+                    report.push_due = true;
+                }
+                let next_dt = last_dt.with_timezone(&Utc)
+                    + chrono::Duration::seconds(report.push_interval_seconds as i64);
+                report.next_push_at = Some(next_dt.to_rfc3339());
+            }
+        } else {
+            report.push_due = true;
+        }
+
+        if report.push_due {
+            report.report_since_last_push = Some(build_publication_markdown_report(
+                repo,
+                report.last_push_commit.as_deref(),
+            )?);
+        }
+
+        Ok(report)
+    }
+}
+
+fn build_publication_markdown_report(
+    repo: &Path,
+    last_push_commit: Option<&str>,
+) -> Result<String> {
+    let mut output = String::new();
+    output.push_str("# Forge Self-Evolution 2-Hour Publication Report\n\n");
+
+    let range = match last_push_commit {
+        Some(commit) => format!("{commit}..HEAD"),
+        None => "HEAD".to_string(),
+    };
+
+    output.push_str("## What was worked on since the last push\n\n");
+    output.push_str(&format!("Commit range: `{range}`\n\n"));
+    let log = run_git(repo, &["log", "--oneline", &range]).unwrap_or_default();
+    output.push_str("```\n");
+    output.push_str(&log);
+    output.push_str("```\n\n");
+
+    output.push_str("## How it was worked on\n\n");
+    output.push_str("Forge self-evolution executed a bounded validated increment, recorded executor/model policy evidence, and kept deterministic validation separate from quota-bound reasoning.\n\n");
+
+    output.push_str("## Validation and push status\n\n");
+    output.push_str("- Validation status: recorded by the current cycle validation artifact before publication.\n");
+    output.push_str("- Push status: publication is due when at least 7200 seconds elapsed since the previous push evidence.\n\n");
+
+    output.push_str("## Current Forge run/workflow state\n\n");
+    output.push_str("- The live run id and workflow id are recorded in the cycle JSON report and Telegram publication payload.\n\n");
+
+    output.push_str("## Remaining uncommitted work\n\n");
+    let stats = run_git(repo, &["diff", "--stat", &range]).unwrap_or_default();
+    output.push_str("```\n");
+    output.push_str(&stats);
+    output.push_str("```\n\n");
+
+    output.push_str("## v0.5 movement\n\n");
+    output.push_str("- Real-time agent runtime: preserves run/workflow publication evidence for recurring self-evolution.\n");
+    output.push_str("- Creative capabilities: keeps publication as an artifact surface that future creative/runtime reports can reuse.\n");
+    output.push_str(
+        "- Advanced TUI: exposes status/report fields suitable for terminal inspection.\n",
+    );
+    output.push_str("- Visual workflow/whiteboard/design surfaces: keeps UI out of the source of truth while producing durable workflow artifacts.\n");
+    output.push_str("- Governed mutations: publishes only after validation and records remaining uncommitted work.\n");
+    output.push_str("- Quota-aware executor policy: reports local vs non-local, quota/cost assumptions and fallback rationale.\n");
+    output.push_str("- Better business/product decisions: ties cycle output to user value, cost, speed, risk and implementation leverage.\n");
+
+    Ok(output)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -671,6 +806,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             overhead_ledger,
             decision_gate,
             cycle_reports: Vec::new(),
+            publication: SelfEvolutionPublicationReport::empty(),
         });
     }
 
@@ -741,6 +877,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         let mut committed = false;
         let mut commit = None;
         let mut public_project_update = PublicProjectUpdateReport::planned(options.push);
+        let mut publication = SelfEvolutionPublicationReport::empty();
 
         if !options.dry_run {
             heartbeat_request(
@@ -825,6 +962,10 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
                 public_project_update =
                     PublicProjectUpdateReport::skipped(options.push, "validation failed");
             }
+            publication = SelfEvolutionPublicationReport::evaluate(
+                &options.repo,
+                cycle_reports.last().map(|report| &report.publication),
+            )?;
         }
         let (_validation_full_path, validation_report_sha256) = write_json_artifact(
             &store.base_dir(),
@@ -854,6 +995,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             committed,
             commit,
             public_project_update,
+            publication,
         };
         write_json_artifact(
             &store.base_dir(),
@@ -886,6 +1028,11 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         }
     }
 
+    let publication = cycle_reports
+        .last()
+        .map(|report| report.publication.clone())
+        .unwrap_or_else(SelfEvolutionPublicationReport::empty);
+
     Ok(SelfRunReport {
         status: if options.dry_run {
             "planned".to_string()
@@ -908,6 +1055,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         overhead_ledger,
         decision_gate,
         cycle_reports,
+        publication,
     })
 }
 
@@ -1769,6 +1917,54 @@ fn select_executor_strategies(
     .collect()
 }
 
+fn apply_executor_state_to_candidate(
+    candidate: &mut SelfExecutorPolicyCandidate,
+    states: &[crate::executor::ExecutorState],
+) {
+    if states.is_empty() {
+        return;
+    }
+
+    let state = states.iter().find(|s| s.id == candidate.executor);
+    match state {
+        Some(state) => {
+            if !state.installed {
+                candidate.selection_status = "eligible_not_installed".to_string();
+                candidate.reason =
+                    format!("{} is not installed on this machine.", state.display_name);
+            } else if !state.configured {
+                candidate.selection_status = "eligible_not_configured".to_string();
+                candidate.reason = format!(
+                    "{} is installed but not configured with auth/model evidence.",
+                    state.display_name
+                );
+            } else if !state.allowed {
+                candidate.selection_status = "eligible_not_allowed".to_string();
+                candidate.reason = format!(
+                    "{} is installed and configured but not human-authorized for Forge use.",
+                    state.display_name
+                );
+            } else if !state.non_interactive_ready {
+                candidate.selection_status = "eligible_interactive_hang_risk".to_string();
+                candidate.reason = format!("{} probe failed non-interactive smoke test; skipping to avoid hanging self-evolution cycle.", state.display_name);
+            }
+            candidate
+                .capability_evidence
+                .extend(state.config_evidence.clone());
+            candidate
+                .capability_evidence
+                .extend(state.probe_evidence.clone());
+        }
+        None => {
+            candidate.selection_status = "skipped_unknown_executor".to_string();
+            candidate.reason = format!(
+                "Executor {} is not registered in Forge system.",
+                candidate.executor
+            );
+        }
+    }
+}
+
 fn build_executor_policy(
     store: &ForgeStore,
     primary_executor: &str,
@@ -1776,12 +1972,19 @@ fn build_executor_policy(
     previous_reports: &[SelfCycleReport],
 ) -> SelfExecutorPolicyReport {
     let requested_chain = normalize_executor_chain(primary_executor, fallback_executors);
+    let executor_states = store
+        .load_executor_states()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<crate::executor::ExecutorState>(v).ok())
+        .collect::<Vec<_>>();
+
     let mut candidates = vec![
-        opencode_free_non_local_candidate(&requested_chain),
-        gemini_non_local_candidate(&requested_chain),
-        codex_non_local_candidate(&requested_chain),
-        opencode_paid_non_local_candidate(&requested_chain),
-        opencode_local_candidate(&requested_chain),
+        opencode_free_non_local_candidate(&requested_chain, &executor_states),
+        gemini_non_local_candidate(&requested_chain, &executor_states),
+        codex_non_local_candidate(&requested_chain, &executor_states),
+        opencode_paid_non_local_candidate(&requested_chain, &executor_states),
+        opencode_local_candidate(&requested_chain, &executor_states),
     ];
 
     // Apply previous failure status to candidates
@@ -1914,6 +2117,10 @@ fn selected_executor_candidate(
         .find(|candidate| {
             !candidate.selection_status.starts_with("failed")
                 && !candidate.selection_status.starts_with("skipped")
+                && candidate.selection_status != "eligible_not_installed"
+                && candidate.selection_status != "eligible_not_configured"
+                && candidate.selection_status != "eligible_not_allowed"
+                && candidate.selection_status != "eligible_interactive_hang_risk"
         })
         .map(|candidate| SelfExecutorSelectedCandidate {
             executor: candidate.executor.clone(),
@@ -1953,7 +2160,10 @@ fn quota_aware_selection_tier(chain: &[String], executor: &str, capability_rank:
     capability_rank * 10 + requested_rank(chain, executor).min(9)
 }
 
-fn opencode_free_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
+fn opencode_free_non_local_candidate(
+    chain: &[String],
+    states: &[crate::executor::ExecutorState],
+) -> SelfExecutorPolicyCandidate {
     let model = std::env::var("OPENCODE_FREE_MODEL")
         .ok()
         .or_else(|| Some("google/gemini-2.5-pro".to_string()));
@@ -1961,7 +2171,7 @@ fn opencode_free_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCand
         .as_deref()
         .and_then(|model| model.split('/').next())
         .unwrap_or("configured_cli");
-    SelfExecutorPolicyCandidate {
+    let mut candidate = SelfExecutorPolicyCandidate {
         executor: "opencode".to_string(),
         provider: provider.to_string(),
         model,
@@ -1983,14 +2193,19 @@ fn opencode_free_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCand
             "Supports --model override".to_string(),
             "Non-interactive --dangerously-skip-permissions mode available".to_string(),
         ],
-    }
+    };
+    apply_executor_state_to_candidate(&mut candidate, states);
+    candidate
 }
 
-fn gemini_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
+fn gemini_non_local_candidate(
+    chain: &[String],
+    states: &[crate::executor::ExecutorState],
+) -> SelfExecutorPolicyCandidate {
     let model = std::env::var("GEMINI_MODEL")
         .ok()
         .or_else(|| Some("gemini-2.5-pro".to_string()));
-    SelfExecutorPolicyCandidate {
+    let mut candidate = SelfExecutorPolicyCandidate {
         executor: "gemini".to_string(),
         provider: "google".to_string(),
         model,
@@ -2012,11 +2227,16 @@ fn gemini_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
             "Supports --approval-mode yolo".to_string(),
             "Non-interactive --skip-trust flag available".to_string(),
         ],
-    }
+    };
+    apply_executor_state_to_candidate(&mut candidate, states);
+    candidate
 }
 
-fn codex_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
-    SelfExecutorPolicyCandidate {
+fn codex_non_local_candidate(
+    chain: &[String],
+    states: &[crate::executor::ExecutorState],
+) -> SelfExecutorPolicyCandidate {
+    let mut candidate = SelfExecutorPolicyCandidate {
         executor: "codex".to_string(),
         provider: "openai".to_string(),
         model: None,
@@ -2038,10 +2258,15 @@ fn codex_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
             "Supports --ask-for-approval never".to_string(),
             "Non-interactive --sandbox workspace-write available".to_string(),
         ],
-    }
+    };
+    apply_executor_state_to_candidate(&mut candidate, states);
+    candidate
 }
 
-fn opencode_paid_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
+fn opencode_paid_non_local_candidate(
+    chain: &[String],
+    states: &[crate::executor::ExecutorState],
+) -> SelfExecutorPolicyCandidate {
     let model = std::env::var("OPENCODE_MODEL")
         .ok()
         .or_else(|| {
@@ -2058,7 +2283,7 @@ fn opencode_paid_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCand
         .as_deref()
         .and_then(|model| model.split('/').next())
         .unwrap_or("configured_cli");
-    SelfExecutorPolicyCandidate {
+    let mut candidate = SelfExecutorPolicyCandidate {
         executor: "opencode".to_string(),
         provider: provider.to_string(),
         model,
@@ -2085,11 +2310,16 @@ fn opencode_paid_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCand
             "Supports --model override".to_string(),
             "Requires provider/model classification before handoff".to_string(),
         ],
-    }
+    };
+    apply_executor_state_to_candidate(&mut candidate, states);
+    candidate
 }
 
-fn opencode_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
-    SelfExecutorPolicyCandidate {
+fn opencode_local_candidate(
+    chain: &[String],
+    states: &[crate::executor::ExecutorState],
+) -> SelfExecutorPolicyCandidate {
+    let mut candidate = SelfExecutorPolicyCandidate {
         executor: "opencode".to_string(),
         provider: "ollama".to_string(),
         model: Some(
@@ -2114,7 +2344,9 @@ fn opencode_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
             "Supports local Ollama provider".to_string(),
             "Non-interactive --model override available".to_string(),
         ],
-    }
+    };
+    apply_executor_state_to_candidate(&mut candidate, states);
+    candidate
 }
 
 fn execute_cycle_with_fallback(
@@ -2777,6 +3009,7 @@ mod tests {
             committed: false,
             commit: None,
             public_project_update: PublicProjectUpdateReport::skipped(false, "test"),
+            publication: SelfEvolutionPublicationReport::empty(),
         };
         let r2 = SelfCycleReport {
             cycle: 2,
@@ -2816,6 +3049,7 @@ mod tests {
             committed: true,
             commit: Some("abc123".to_string()),
             public_project_update: PublicProjectUpdateReport::skipped(false, "test"),
+            publication: SelfEvolutionPublicationReport::empty(),
         };
         let aggregated = SelfOverheadLedger::aggregate(&SelfOperatingMode::Balanced, &[r1, r2]);
         assert_eq!(aggregated.cycle_count, 2);
@@ -3208,6 +3442,7 @@ mod tests {
             committed: false,
             commit: None,
             public_project_update: PublicProjectUpdateReport::skipped(false, "test"),
+            publication: SelfEvolutionPublicationReport::empty(),
         };
 
         let policy = build_executor_policy(&store, "gemini", &[], &[timeout_report]);
@@ -3230,5 +3465,86 @@ mod tests {
         assert!(gemini_candidate
             .reason
             .contains("Previously failed due to timeout"));
+    }
+
+    #[test]
+    fn test_executor_policy_uses_persisted_executor_readiness_before_selection() {
+        let (_temp, store) = test_store();
+        for state in [
+            crate::executor::ExecutorState {
+                id: "opencode".to_string(),
+                display_name: "OpenCode CLI".to_string(),
+                command: "opencode".to_string(),
+                installed: true,
+                configured: true,
+                command_path: Some("/tmp/opencode".to_string()),
+                config_evidence: vec!["test opencode config".to_string()],
+                non_interactive_ready: false,
+                probe_evidence: vec!["test opencode probe timed out".to_string()],
+                allowed: true,
+                decision_source: "human_allow".to_string(),
+                synced_at: Utc::now().to_rfc3339(),
+            },
+            crate::executor::ExecutorState {
+                id: "gemini".to_string(),
+                display_name: "Gemini CLI".to_string(),
+                command: "gemini".to_string(),
+                installed: true,
+                configured: true,
+                command_path: Some("/tmp/gemini".to_string()),
+                config_evidence: vec!["test gemini config".to_string()],
+                non_interactive_ready: true,
+                probe_evidence: vec!["test gemini probe passed".to_string()],
+                allowed: false,
+                decision_source: "pending_human_approval".to_string(),
+                synced_at: Utc::now().to_rfc3339(),
+            },
+            crate::executor::ExecutorState {
+                id: "codex".to_string(),
+                display_name: "Codex CLI".to_string(),
+                command: "codex".to_string(),
+                installed: true,
+                configured: true,
+                command_path: Some("/tmp/codex".to_string()),
+                config_evidence: vec!["test codex config".to_string()],
+                non_interactive_ready: true,
+                probe_evidence: vec!["test codex probe passed".to_string()],
+                allowed: true,
+                decision_source: "human_allow".to_string(),
+                synced_at: Utc::now().to_rfc3339(),
+            },
+        ] {
+            store
+                .save_executor_state(&state.id, &serde_json::to_value(&state).unwrap())
+                .unwrap();
+        }
+
+        let policy = build_executor_policy(
+            &store,
+            "opencode",
+            &["gemini".to_string(), "codex".to_string()],
+            &[],
+        );
+
+        assert_eq!(
+            policy.selected_candidate.as_ref().unwrap().executor,
+            "codex"
+        );
+        let opencode = policy
+            .candidates
+            .iter()
+            .find(|candidate| candidate.executor == "opencode")
+            .unwrap();
+        assert_eq!(opencode.selection_status, "eligible_interactive_hang_risk");
+        assert!(opencode
+            .capability_evidence
+            .iter()
+            .any(|evidence| evidence.contains("test opencode probe timed out")));
+        let gemini = policy
+            .candidates
+            .iter()
+            .find(|candidate| candidate.executor == "gemini")
+            .unwrap();
+        assert_eq!(gemini.selection_status, "eligible_not_allowed");
     }
 }

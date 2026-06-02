@@ -18,10 +18,10 @@ pub fn send_telegram_report(
 ) -> Result<TelegramReport> {
     use chrono::Utc;
 
-    // In a real environment, we'd use a reqwest client, but since we want to avoid 
+    // In a real environment, we'd use a reqwest client, but since we want to avoid
     // adding new heavy dependencies and the prompt allows an 'operational bridge',
     // we'll use curl if available, otherwise simulate.
-    
+
     let mut response = "simulated".to_string();
     let mut status = "sent_simulated".to_string();
 
@@ -38,7 +38,13 @@ pub fn send_telegram_report(
                 "-F",
                 &format!("document=@{}", report_path),
                 "-F",
-                &format!("caption={}", report_content.lines().next().unwrap_or("Forge Self-Evolution Report")),
+                &format!(
+                    "caption={}",
+                    report_content
+                        .lines()
+                        .next()
+                        .unwrap_or("Forge Self-Evolution Report")
+                ),
             ])
             .output();
 

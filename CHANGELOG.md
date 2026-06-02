@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.164 - 2026-06-02
+
+### Changed
+
+- Self-evolution cycle 13 now carries persisted executor sync readiness into the self-run quota policy before selecting a model/executor.
+- Persisted executor states can block candidates as `eligible_not_installed`, `eligible_not_configured`, `eligible_not_allowed` or `eligible_interactive_hang_risk`, preventing OpenCode/Gemini interactive readiness failures from being selected just because they are early in the fallback chain.
+- Self-run reports now include `forge.self_evolution.publication.v1` publication metadata at both cycle and run level, including two-hour push due state, last push commit/time evidence and a Markdown publication report body for the native Telegram/report workflow.
+- The publication Markdown explicitly covers work since last push, how it was worked, validation/push status, current run/workflow state, remaining uncommitted work and v0.5 movement.
+
+### Validation
+
+- Targeted GREEN passed for `cargo test self_run_reports_quota_aware_executor_policy_for_cycle --test forge_cli_contract`.
+- Targeted GREEN passed for `cargo test test_executor_policy_uses_persisted_executor_readiness_before_selection --lib`.
+- Targeted GREEN passed for `cargo test test_executor_policy_detects_timeout_and_requires_repair --lib`.
+- Full required validation for this cycle is recorded in `docs/reports/forge-core-v0.4.164-report-2026-06-02.md`.
+
+### Safety
+
+- The change is scoped to Forge Core self-evolution policy/reporting, notify module export, version metadata and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should persist/send the Markdown report as a real Telegram document artifact from a Forge-owned scheduled workflow.
+
 ## 0.4.162 - 2026-06-02
 
 ### Changed
