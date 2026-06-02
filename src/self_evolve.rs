@@ -164,6 +164,8 @@ pub struct SelfExecutorPolicyReport {
     pub fallback_order: Vec<SelfExecutorFallbackCandidate>,
     pub candidates: Vec<SelfExecutorPolicyCandidate>,
     pub skipped_to_preserve_quota: Vec<String>,
+    pub quota_assumptions: Vec<String>,
+    pub business_reasoning_summary: String,
     pub repair_goals: Vec<String>,
     pub active_repair_status: String,
 }
@@ -177,6 +179,7 @@ pub struct SelfExecutorSelectedCandidate {
     pub selection_tier: u32,
     pub selection_status: String,
     pub reason: String,
+    pub business_value_justification: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -208,6 +211,7 @@ pub struct SelfExecutorPolicyCandidate {
     pub selection_tier: u32,
     pub selection_status: String,
     pub reason: String,
+    pub business_value_score: u32,
     pub capability_evidence: Vec<String>,
 }
 
@@ -1800,6 +1804,10 @@ fn render_cycle_markdown_report(report: &SelfCycleReport) -> String {
         "- Repair status: {}\n\n",
         report.executor_policy.active_repair_status
     ));
+    output.push_str(&format!(
+        "- Business reasoning: {}\n",
+        markdown_cell(&report.executor_policy.business_reasoning_summary)
+    ));
     if let Some(selected) = &report.executor_policy.selected_candidate {
         output.push_str(&format!(
             "- Selected quota-aware candidate: {} / {} / {} / {} / tier {} / {}\n",
@@ -1809,6 +1817,10 @@ fn render_cycle_markdown_report(report: &SelfCycleReport) -> String {
             markdown_cell(&selected.local_vs_non_local),
             selected.selection_tier,
             markdown_cell(&selected.selection_status),
+        ));
+        output.push_str(&format!(
+            "- Selected candidate business value: {}\n",
+            markdown_cell(&selected.business_value_justification)
         ));
     }
     if !report.executor_policy.fallback_order.is_empty() {
@@ -1831,12 +1843,19 @@ fn render_cycle_markdown_report(report: &SelfCycleReport) -> String {
         output.push_str(&format!("- Fallback order: {}\n", order));
     }
     output.push('\n');
+    if !report.executor_policy.quota_assumptions.is_empty() {
+        output.push_str("## Quota assumptions\n\n");
+        for assumption in &report.executor_policy.quota_assumptions {
+            output.push_str(&format!("- {}\n", markdown_cell(assumption)));
+        }
+        output.push('\n');
+    }
     output
-        .push_str("| Executor | Provider | Model | Locality | Quota | Cost | Quality | Suitability | Status | Reason |\n");
-    output.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+        .push_str("| Executor | Provider | Model | Locality | Quota | Cost | Quality | Suitability | Value | Status | Reason |\n");
+    output.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for candidate in &report.executor_policy.candidates {
         output.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             markdown_cell(&candidate.executor),
             markdown_cell(&candidate.provider),
             markdown_cell(candidate.model.as_deref().unwrap_or("default")),
@@ -1845,6 +1864,7 @@ fn render_cycle_markdown_report(report: &SelfCycleReport) -> String {
             markdown_cell(&candidate.monetary_or_token_cost),
             markdown_cell(&candidate.expected_quality),
             markdown_cell(&candidate.suitability_for_product_business_reasoning),
+            candidate.business_value_score,
             markdown_cell(&candidate.selection_status),
             markdown_cell(&candidate.reason),
         ));
@@ -2146,14 +2166,29 @@ fn build_executor_policy(
     );
     skipped_to_preserve_quota.push("Prefer local OpenCode/Ollama for cheap repetitive or low-value work when non-local quota value is low.".to_string());
 
+    let mut quota_assumptions = vec![
+        "Gemini and Codex are non-local quota-bound capabilities.".to_string(),
+        "OpenCode non-local models (google/, openai/, anthropic/) are quota or rate-limit bound.".to_string(),
+        "Local models (Ollama) consume local compute but no remote quota.".to_string(),
+        "Deterministic command nodes (cargo, git, gh) are zero-quota and preferred for mechanical work.".to_string(),
+    ];
+
     for candidate in &candidates {
         if should_preserve_non_local_quota(candidate) {
-            skipped_to_preserve_quota.push(format!(
+            let msg = format!(
                 "Skipping non-local candidate {} due to quota preservation evidence: remaining_quota={}, rate_limit_risk={}",
                 candidate.executor, candidate.remaining_quota, candidate.rate_limit_risk
-            ));
+            );
+            skipped_to_preserve_quota.push(msg.clone());
+            quota_assumptions.push(msg);
         }
     }
+
+    let business_reasoning_summary = if selected_candidate.is_some() {
+        "Stronger non-local reasoning is worth scarce quota for self-evolution cycles where decision quality materially changes product or business outcome.".to_string()
+    } else {
+        "No eligible non-local candidates found; falling back to local or deterministic execution to preserve system progress under constraints.".to_string()
+    };
 
     let has_timeout_failure = candidates
         .iter()
@@ -2217,6 +2252,8 @@ fn build_executor_policy(
         fallback_order,
         candidates,
         skipped_to_preserve_quota,
+        quota_assumptions,
+        business_reasoning_summary,
         repair_goals,
         active_repair_status,
     }
@@ -2265,6 +2302,11 @@ fn selected_executor_candidate(
             reason:
                 "selected as first quota-aware candidate that is not blocked by prior timeout or configuration evidence"
                     .to_string(),
+            business_value_justification: format!(
+                "Selected candidate has business_value_score={} and suitability='{}'. Progressing with highest value eligible non-local option.",
+                candidate.business_value_score,
+                candidate.suitability_for_product_business_reasoning
+            ),
         })
 }
 
@@ -2322,6 +2364,7 @@ fn opencode_free_non_local_candidate(
         selection_tier: quota_aware_selection_tier(chain, "opencode", 1),
         selection_status: "eligible".to_string(),
         reason: "OpenCode non-local configured provider path is first choice when expected value justifies quota or cost.".to_string(),
+        business_value_score: 80,
         capability_evidence: vec![
             "Supports --model override".to_string(),
             "Non-interactive --dangerously-skip-permissions mode available".to_string(),
@@ -2356,6 +2399,7 @@ fn gemini_non_local_candidate(
         selection_tier: quota_aware_selection_tier(chain, "gemini", 2),
         selection_status: "eligible".to_string(),
         reason: "Gemini is a non-local quota-bound capability for high-value reasoning when non-interactive mode works.".to_string(),
+        business_value_score: 90,
         capability_evidence: vec![
             "Supports --approval-mode yolo".to_string(),
             "Non-interactive --skip-trust flag available".to_string(),
@@ -2387,6 +2431,7 @@ fn codex_non_local_candidate(
         selection_tier: quota_aware_selection_tier(chain, "codex", 3),
         selection_status: "eligible".to_string(),
         reason: "Codex is a reliable non-local quota-bound fallback when expected value justifies quota.".to_string(),
+        business_value_score: 95,
         capability_evidence: vec![
             "Supports --ask-for-approval never".to_string(),
             "Non-interactive --sandbox workspace-write available".to_string(),
@@ -2436,9 +2481,10 @@ fn opencode_paid_non_local_candidate(
         non_interactive_requirement:
             "must run through opencode run with explicit provider/model and no auth prompts"
                 .to_string(),
-        selection_tier: quota_aware_selection_tier(chain, "codex", 3).saturating_add(3),
+        selection_tier: quota_aware_selection_tier(chain, "opencode", 3).saturating_add(5),
         selection_status: "eligible".to_string(),
         reason: "OpenCode non-local paid-or-unknown provider path is used after configured no-cost options and stronger non-local fallbacks are unsuitable.".to_string(),
+        business_value_score: 85,
         capability_evidence: vec![
             "Supports --model override".to_string(),
             "Requires provider/model classification before handoff".to_string(),
@@ -2473,6 +2519,7 @@ fn opencode_local_candidate(
         selection_tier: quota_aware_selection_tier(chain, "opencode", 4),
         selection_status: "eligible".to_string(),
         reason: "OpenCode local/Ollama is efficient when quotas are low, work is cheap or privacy/locality matters.".to_string(),
+        business_value_score: 50,
         capability_evidence: vec![
             "Supports local Ollama provider".to_string(),
             "Non-interactive --model override available".to_string(),
@@ -3833,5 +3880,91 @@ mod tests {
             .tasks
             .iter()
             .any(|t| t.id.starts_with("repair-task-")));
+    }
+
+    #[test]
+    fn test_executor_policy_quota_aware_selection() {
+        let (_temp, store) = test_store();
+
+        // Scenario: gemini is requested but has low quota, opencode free is available
+        store
+            .save_executor_quota(
+                "gemini",
+                "google",
+                "gemini-2.5-pro",
+                &serde_json::json!({
+                    "executor": "gemini",
+                    "provider": "google",
+                    "model": "gemini-2.5-pro",
+                    "local_vs_non_local": "non_local",
+                    "free_vs_paid_if_known": "not_free_quota_bound",
+                    "remaining_quota": "low_preserve_for_strategic_work",
+                    "rate_limit_risk": "medium",
+                    "monetary_or_token_cost": "paid",
+                    "latency": "medium",
+                    "expected_quality": "high",
+                    "suitability": "high",
+                    "source": "test",
+                    "observed_at": "2026-06-02T00:00:00Z"
+                }),
+            )
+            .unwrap();
+
+        // Mark opencode as installed and ready
+        let opencode_state = crate::executor::ExecutorState {
+            id: "opencode".to_string(),
+            display_name: "OpenCode".to_string(),
+            command: "opencode".to_string(),
+            installed: true,
+            configured: true,
+            command_path: Some("/tmp/opencode".to_string()),
+            config_evidence: vec!["test".to_string()],
+            non_interactive_ready: true,
+            probe_evidence: vec!["ready".to_string()],
+            allowed: true,
+            decision_source: "human_allow".to_string(),
+            synced_at: "2026-06-02T00:00:00Z".to_string(),
+        };
+        store
+            .save_executor_state("opencode", &serde_json::to_value(opencode_state).unwrap())
+            .unwrap();
+
+        let gemini_state = crate::executor::ExecutorState {
+            id: "gemini".to_string(),
+            display_name: "Gemini".to_string(),
+            command: "gemini".to_string(),
+            installed: true,
+            configured: true,
+            command_path: Some("/tmp/gemini".to_string()),
+            config_evidence: vec!["test".to_string()],
+            non_interactive_ready: true,
+            probe_evidence: vec!["ready".to_string()],
+            allowed: true,
+            decision_source: "human_allow".to_string(),
+            synced_at: "2026-06-02T00:00:00Z".to_string(),
+        };
+        store
+            .save_executor_state("gemini", &serde_json::to_value(gemini_state).unwrap())
+            .unwrap();
+
+        let policy = build_executor_policy(&store, "gemini", &[], &[]);
+
+        assert_eq!(
+            policy.selected_candidate.as_ref().unwrap().executor,
+            "opencode"
+        );
+        assert!(policy
+            .quota_assumptions
+            .iter()
+            .any(|a| a.contains("Skipping non-local candidate gemini due to quota preservation")));
+        assert!(policy
+            .business_reasoning_summary
+            .contains("Stronger non-local reasoning is worth scarce quota"));
+        assert!(policy
+            .selected_candidate
+            .as_ref()
+            .unwrap()
+            .business_value_justification
+            .contains("business_value_score=80"));
     }
 }

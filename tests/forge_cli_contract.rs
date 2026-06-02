@@ -8636,7 +8636,8 @@ fn self_run_reports_quota_aware_executor_policy_for_cycle() {
             "local_vs_non_local": "non_local",
             "selection_tier": 10,
             "selection_status": "eligible",
-            "reason": "selected as first quota-aware candidate that is not blocked by prior timeout or configuration evidence"
+            "reason": "selected as first quota-aware candidate that is not blocked by prior timeout or configuration evidence",
+            "business_value_justification": "Selected candidate has business_value_score=80 and suitability='high_for_high_value_pm_business_or_creative_reasoning'. Progressing with highest value eligible non-local option."
         })
     );
     assert_eq!(
@@ -8862,14 +8863,22 @@ fn self_run_persists_markdown_executor_policy_report_for_human_review() {
         "- Selected quota-aware candidate: opencode / google / google/gemini-2.5-pro / non_local / tier 10 / eligible"
     ));
     assert!(markdown.contains(
+        "Selected candidate has business_value_score=80 and suitability='high_for_high_value_pm_business_or_creative_reasoning'"
+    ));
+    assert!(markdown.contains(
         "- Fallback order: opencode:google:google/gemini-2.5-pro:non_local:tier-10 -> gemini:google:gemini-2.5-pro:non_local:tier-21 -> codex:openai:default:non_local:tier-32 -> opencode:configured_cli:default:non_local:tier-35 -> opencode:ollama:ollama/qwen3:14b:local:tier-40"
     ));
     assert!(markdown.contains(
-        "| Executor | Provider | Model | Locality | Quota | Cost | Quality | Suitability | Status | Reason |"
+        "- Business reasoning: Stronger non-local reasoning is worth scarce quota for self-evolution cycles where decision quality materially changes product or business outcome."
+    ));
+    assert!(markdown.contains("## Quota assumptions"));
+    assert!(markdown.contains("- Gemini and Codex are non-local quota-bound capabilities."));
+    assert!(markdown.contains(
+        "| Executor | Provider | Model | Locality | Quota | Cost | Quality | Suitability | Value | Status | Reason |"
     ));
     assert!(markdown.contains("| opencode | google | google/gemini-2.5-pro | non_local |"));
     assert!(markdown.contains(
-        "| gemini | google | gemini-2.5-pro | non_local | unknown_until_gemini_probe | quota_or_paid_usage_if_configured |"
+        "| gemini | google | gemini-2.5-pro | non_local | unknown_until_gemini_probe | quota_or_paid_usage_if_configured | high | high_for_product_pm_and_business_decision_tasks | 90 |"
     ));
     assert!(markdown.contains("Gemini non-interactive repair"));
     assert!(markdown.contains(

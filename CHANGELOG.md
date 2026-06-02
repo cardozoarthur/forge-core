@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.171 - 2026-06-02
+
+### Changed
+
+- Self-evolution cycle Markdown reports now surface the quota-aware business reasoning summary, selected candidate business-value justification and quota assumptions.
+- The executor policy candidate table now includes `business_value_score`, making PM/business suitability visible in the human review artifact instead of only in JSON.
+- Added CLI contract coverage proving the persisted Markdown report includes business reasoning, quota assumptions and per-candidate value scoring.
+
+### Validation
+
+- RED observed first with `cargo test self_run_persists_markdown_executor_policy_report_for_human_review --test forge_cli_contract -- --nocapture`: the Markdown report did not include the selected candidate business-value justification.
+- Targeted GREEN passed for `cargo test self_run_persists_markdown_executor_policy_report_for_human_review --test forge_cli_contract -- --nocapture`.
+- Targeted GREEN passed for `cargo test self_evolve::tests::test_executor_policy_quota_aware_selection -- --nocapture`.
+- Full required validation for this cycle is recorded in `docs/reports/forge-core-v0.4.171-report-2026-06-02.md`.
+
+### Safety
+
+- The change is scoped to Forge Core self-evolution executor policy reporting, tests, version metadata and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should attach concrete validation gates and remediation commands to OpenCode/Gemini non-interactive repair tasks.
+
 ## 0.4.170 - 2026-06-02
 
 ### Changed
