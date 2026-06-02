@@ -66,8 +66,23 @@ pub struct ExecutorQuotaPolicyReport {
     pub workload_routes: Vec<ExecutorQuotaWorkloadRoute>,
     pub observed_quota_evidence: Vec<ExecutorQuotaObservation>,
     pub candidates: Vec<ExecutorQuotaPolicyCandidate>,
+    pub selection_trace: Vec<ExecutorSelectionTrace>,
     pub skipped_to_preserve_quota: Vec<String>,
     pub repair_goals: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutorSelectionTrace {
+    pub schema_version: String,
+    pub executor: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub local_vs_non_local: String,
+    pub selection_tier: u32,
+    pub selection_status: String,
+    pub decision: String,
+    pub reason: String,
+    pub next_fallback_reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -719,6 +734,7 @@ fn build_quota_policy(
     ];
     candidates.sort_by_key(|candidate| candidate.selection_tier);
     let repair_goals = quota_policy_repair_goals(&candidates);
+    let selection_trace = executor_selection_trace(&candidates);
 
     ExecutorQuotaPolicyReport {
         schema_version: "forge.executor_quota_policy.v1".to_string(),
@@ -741,12 +757,56 @@ fn build_quota_policy(
         workload_routes: quota_workload_routes(),
         observed_quota_evidence: observations,
         candidates,
+        selection_trace,
         skipped_to_preserve_quota: vec![
             "Use deterministic command nodes for repeated validation, file inspection and low-value mechanical work before spending non-local quota.".to_string(),
             "Use local models when quota is low, privacy/locality matters or the task value does not justify Gemini/Codex/OpenCode non-local capacity.".to_string(),
         ],
         repair_goals,
     }
+}
+
+fn executor_selection_trace(
+    candidates: &[ExecutorQuotaPolicyCandidate],
+) -> Vec<ExecutorSelectionTrace> {
+    let selected_index = candidates
+        .iter()
+        .position(|candidate| candidate.selection_status == "eligible");
+
+    candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let decision = if Some(index) == selected_index {
+                "select"
+            } else {
+                "skip"
+            };
+            let next_fallback_reason = if Some(index) == selected_index {
+                "selected as first quota-aware candidate that is installed, configured, authorized and non-interactive ready".to_string()
+            } else if candidate.selection_status == "eligible" {
+                "not selected because an earlier quota-aware candidate is eligible".to_string()
+            } else {
+                format!(
+                    "{}; try next quota-aware candidate if this executor is needed for the workflow",
+                    candidate.selection_status
+                )
+            };
+
+            ExecutorSelectionTrace {
+                schema_version: "forge.executor_selection_trace.v1".to_string(),
+                executor: candidate.executor.clone(),
+                provider: candidate.provider.clone(),
+                model: candidate.model.clone(),
+                local_vs_non_local: candidate.local_vs_non_local.clone(),
+                selection_tier: candidate.selection_tier,
+                selection_status: candidate.selection_status.clone(),
+                decision: decision.to_string(),
+                reason: candidate.reason.clone(),
+                next_fallback_reason,
+            }
+        })
+        .collect()
 }
 
 fn quota_policy_repair_goals(candidates: &[ExecutorQuotaPolicyCandidate]) -> Vec<String> {

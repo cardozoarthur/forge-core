@@ -7769,6 +7769,25 @@ fn sync_persists_human_allowed_executor_policy() {
         .unwrap()
         .contains("preserve Gemini/Codex/OpenCode non-local quota"));
     let policy_candidates = json["quota_policy"]["candidates"].as_array().unwrap();
+    let selection_trace = json["quota_policy"]["selection_trace"]
+        .as_array()
+        .expect("executor quota policy should expose a selection trace");
+    assert_eq!(
+        selection_trace[0]["schema_version"],
+        "forge.executor_selection_trace.v1"
+    );
+    assert_eq!(selection_trace[0]["executor"], "opencode");
+    assert_eq!(selection_trace[0]["provider"], "configured_cli");
+    assert_eq!(selection_trace[0]["local_vs_non_local"], "non_local");
+    assert_eq!(selection_trace[0]["decision"], "skip");
+    assert_eq!(
+        selection_trace[0]["selection_status"],
+        "skipped_not_allowed"
+    );
+    assert!(selection_trace[0]["next_fallback_reason"]
+        .as_str()
+        .unwrap()
+        .contains("try next quota-aware candidate"));
     let codex_candidate = policy_candidates
         .iter()
         .find(|candidate| candidate["executor"] == "codex")
@@ -8690,6 +8709,21 @@ fn self_run_reports_quota_aware_executor_policy_for_cycle() {
         ])
     );
     let candidates = policy["candidates"].as_array().unwrap();
+    let selection_trace = policy["selection_trace"]
+        .as_array()
+        .expect("self-evolution executor policy should expose a selection trace");
+    assert_eq!(
+        selection_trace[0]["schema_version"],
+        "forge.executor_selection_trace.v1"
+    );
+    assert_eq!(selection_trace[0]["executor"], "opencode");
+    assert_eq!(selection_trace[0]["provider"], "google");
+    assert_eq!(selection_trace[0]["decision"], "select");
+    assert_eq!(selection_trace[0]["selection_status"], "eligible");
+    assert!(selection_trace[0]["next_fallback_reason"]
+        .as_str()
+        .unwrap()
+        .contains("selected as first quota-aware candidate"));
     let ordered: Vec<_> = candidates
         .iter()
         .map(|candidate| {
@@ -8871,6 +8905,10 @@ fn self_run_persists_markdown_executor_policy_report_for_human_review() {
     ));
     assert!(markdown.contains(
         "- Fallback order: opencode:google:google/gemini-2.5-pro:non_local:tier-10 -> gemini:google:gemini-2.5-pro:non_local:tier-21 -> codex:openai:default:non_local:tier-32 -> opencode:configured_cli:default:non_local:tier-35 -> opencode:ollama:ollama/qwen3:14b:local:tier-40"
+    ));
+    assert!(markdown.contains("## Executor selection trace"));
+    assert!(markdown.contains(
+        "| opencode | google | google/gemini-2.5-pro | non_local | select | eligible | selected as first quota-aware candidate"
     ));
     assert!(markdown.contains(
         "- Business reasoning: Stronger non-local reasoning is worth scarce quota for self-evolution cycles where decision quality materially changes product or business outcome."

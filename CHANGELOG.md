@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.172 - 2026-06-02
+
+### Changed
+
+- Executor quota policy reports now include a structured `selection_trace` for every candidate, recording select/skip decisions, provider/model, locality, selection status and fallback rationale.
+- Self-evolution executor policy reports now expose the same trace in JSON and in the persisted Markdown cycle report.
+- Added CLI contract coverage proving `forge executors`, `forge self run` and the human Markdown report surface why Forge selected or skipped each OpenCode/Gemini/Codex/local candidate.
+
+### Validation
+
+- Targeted coverage passed for `cargo test sync_persists_human_allowed_executor_policy --test forge_cli_contract`.
+- Targeted coverage passed for `cargo test self_run_reports_quota_aware_executor_policy_for_cycle --test forge_cli_contract`.
+- Targeted coverage passed for `cargo test self_run_persists_markdown_executor_policy_report_for_human_review --test forge_cli_contract`.
+- Full required validation for this cycle is recorded in `docs/reports/forge-core-v0.4.172-report-2026-06-02.md`.
+
+### Safety
+
+- The change is scoped to Forge Core executor policy reporting, self-evolution Markdown reporting, tests, version metadata and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should attach concrete probe commands and validation gates to OpenCode/Gemini non-interactive repair tasks.
+
 ## 0.4.171 - 2026-06-02
 
 ### Changed

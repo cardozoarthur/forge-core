@@ -163,12 +163,27 @@ pub struct SelfExecutorPolicyReport {
     pub selected_candidate: Option<SelfExecutorSelectedCandidate>,
     pub fallback_order: Vec<SelfExecutorFallbackCandidate>,
     pub candidates: Vec<SelfExecutorPolicyCandidate>,
+    pub selection_trace: Vec<SelfExecutorSelectionTrace>,
     pub skipped_to_preserve_quota: Vec<String>,
     pub quota_assumptions: Vec<String>,
     pub business_reasoning_summary: String,
     pub quota_decision_summary: String,
     pub repair_goals: Vec<String>,
     pub active_repair_status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SelfExecutorSelectionTrace {
+    pub schema_version: String,
+    pub executor: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub local_vs_non_local: String,
+    pub selection_tier: u32,
+    pub selection_status: String,
+    pub decision: String,
+    pub reason: String,
+    pub next_fallback_reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1855,6 +1870,24 @@ fn render_cycle_markdown_report(report: &SelfCycleReport) -> String {
         }
         output.push('\n');
     }
+    if !report.executor_policy.selection_trace.is_empty() {
+        output.push_str("## Executor selection trace\n\n");
+        output.push_str("| Executor | Provider | Model | Locality | Decision | Status | Next fallback reason |\n");
+        output.push_str("| --- | --- | --- | --- | --- | --- | --- |\n");
+        for trace in &report.executor_policy.selection_trace {
+            output.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} |\n",
+                markdown_cell(&trace.executor),
+                markdown_cell(&trace.provider),
+                markdown_cell(trace.model.as_deref().unwrap_or("default")),
+                markdown_cell(&trace.local_vs_non_local),
+                markdown_cell(&trace.decision),
+                markdown_cell(&trace.selection_status),
+                markdown_cell(&trace.next_fallback_reason),
+            ));
+        }
+        output.push('\n');
+    }
     output
         .push_str("| Executor | Provider | Model | Locality | Quota | Cost | Quality | Suitability | Value | Status | Reason |\n");
     output.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
@@ -2158,6 +2191,7 @@ fn build_executor_policy(
         .iter()
         .map(SelfExecutorFallbackCandidate::from)
         .collect();
+    let selection_trace = self_executor_selection_trace(&candidates);
 
     let mut repair_goals = vec![
         "Gemini non-interactive repair: detect auth/model/approval prompts before handoff and create a repair goal instead of repeated timeouts.".to_string(),
@@ -2258,6 +2292,7 @@ fn build_executor_policy(
         selected_candidate,
         fallback_order,
         candidates,
+        selection_trace,
         skipped_to_preserve_quota,
         quota_assumptions,
         business_reasoning_summary,
@@ -2265,6 +2300,56 @@ fn build_executor_policy(
         repair_goals,
         active_repair_status,
     }
+}
+
+fn self_executor_selection_trace(
+    candidates: &[SelfExecutorPolicyCandidate],
+) -> Vec<SelfExecutorSelectionTrace> {
+    let selected_index = candidates.iter().position(|candidate| {
+        !candidate.selection_status.starts_with("failed")
+            && !candidate.selection_status.starts_with("skipped")
+            && candidate.selection_status != "eligible_not_installed"
+            && candidate.selection_status != "eligible_not_configured"
+            && candidate.selection_status != "eligible_not_allowed"
+            && candidate.selection_status != "eligible_interactive_hang_risk"
+    });
+
+    candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let decision = if Some(index) == selected_index {
+                "select"
+            } else {
+                "skip"
+            };
+            let next_fallback_reason = if Some(index) == selected_index {
+                "selected as first quota-aware candidate that is not blocked by prior timeout or configuration evidence".to_string()
+            } else if selected_index.is_some_and(|selected| index > selected)
+                && candidate.selection_status == "eligible"
+            {
+                "not selected because an earlier quota-aware candidate is eligible".to_string()
+            } else {
+                format!(
+                    "{}; advance to the next fallback candidate to preserve progress and avoid wasted quota",
+                    candidate.selection_status
+                )
+            };
+
+            SelfExecutorSelectionTrace {
+                schema_version: "forge.executor_selection_trace.v1".to_string(),
+                executor: candidate.executor.clone(),
+                provider: candidate.provider.clone(),
+                model: candidate.model.clone(),
+                local_vs_non_local: candidate.local_vs_non_local.clone(),
+                selection_tier: candidate.selection_tier,
+                selection_status: candidate.selection_status.clone(),
+                decision: decision.to_string(),
+                reason: candidate.reason.clone(),
+                next_fallback_reason,
+            }
+        })
+        .collect()
 }
 
 fn quota_decision_summary(
