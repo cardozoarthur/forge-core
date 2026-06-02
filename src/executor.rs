@@ -675,8 +675,8 @@ fn build_quota_policy(
         quota_candidate(
             executors,
             &observations,
+            "opencode",
             "ollama",
-            "local_runtime",
             Some("ollama/qwen3:14b".to_string()),
             "local",
             "local_resource_cost",
@@ -689,7 +689,7 @@ fn build_quota_policy(
             "efficient_for_repetitive_low_value_or_privacy_sensitive_work",
             "medium",
             40,
-            "Local Ollama models are efficient when quota should be preserved, work is repetitive, privacy matters or expected value does not justify non-local quota.",
+            "OpenCode local/Ollama models are efficient when quota should be preserved, work is repetitive, privacy matters or expected value does not justify non-local quota.",
         ),
     ];
     candidates.sort_by_key(|candidate| candidate.selection_tier);

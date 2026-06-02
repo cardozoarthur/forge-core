@@ -8,6 +8,8 @@
 - OpenCode non-local choices are split into a configured no-cost/free path and a paid-or-unknown provider path, making the fallback order visible as OpenCode free/configured non-local, Gemini non-local quota-bound, Codex non-local quota-bound, OpenCode paid/unknown non-local, then OpenCode local/Ollama.
 - Self-evolution attempt reports preserve quota/cost/latency evidence from policy candidates so operator-facing reports explain why an executor/model was chosen or skipped.
 - Self-evolution executor policy reports now expose `selected_candidate` and `fallback_order` in JSON plus a human-readable Markdown summary so operators can see the selected provider/model and complete quota-aware fallback path without reverse-engineering candidate tables.
+- Self-evolution cycle 11 tightened the quota-aware fallback ordering when Gemini is the requested executor: Codex non-local stays ahead of OpenCode paid/unknown and OpenCode local/Ollama, preventing the requested chain from accidentally pushing local or weaker options ahead of quota-bound non-local fallbacks.
+- `forge executors` now reports the local Ollama path as an OpenCode-governed candidate with provider `ollama`, model `ollama/qwen3:14b` and local capacity semantics instead of presenting Ollama as a separate cognitive executor choice.
 
 ### Validation
 
@@ -17,14 +19,17 @@
 - RED observed for Markdown visibility with `cargo test self_run_persists_markdown_executor_policy_report_for_human_review`: the report lacked the selected quota-aware candidate summary.
 - Targeted GREEN passed for `cargo test self_run_`.
 - Focused policy coverage passed for `cargo test executor_policy -- --nocapture` and `cargo test test_executor_strategy_preserves_quota_cost_fields_for_attempt_reports -- --nocapture`.
+- Cycle 11 targeted GREEN passed for `cargo test self_run_keeps_codex_non_local_ahead_of_opencode_paid_and_local_when_gemini_is_requested`, `cargo test sync_persists_human_allowed_executor_policy`, `cargo test self_run_reports_quota_aware_executor_policy_for_cycle` and `cargo test self_evolve::tests::test_executor_policy_prefers_non_local_quota_aware_capabilities_for_self_evolution`.
 - Full required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` and `cargo build --release`.
 - CLI smoke passed for `forge plan --goal "Create a delivery platform" --output json` and `forge skill install --target codex --target opencode --output json --home /tmp/forge-skill-smoke-v04162-2`.
+- Cycle 11 CLI smoke passed with `target/release/forge plan --goal "Create a delivery platform" --output json` and `target/release/forge skill install --target codex --target opencode --output json --home /tmp/forge-skill-smoke`; the skill smoke classified OpenCode as `skipped_interactive_hang_risk` after the model probe failed and left Codex as the usable fallback.
 
 ### Safety
 
 - The change is scoped to Forge Core executor policy/reporting, tests, version metadata and report artifacts.
 - No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
 - This still does not complete the full v0.5 promotion condition; the next cycle should add live non-interactive probing for Gemini/OpenCode and native scheduled publication artifacts.
+- Default `cargo install --path . --force` was attempted in cycle 11 and blocked by read-only `/home/arthur/.cargo/.crates.toml` in the sandbox, so the user-visible local Cargo installation was not updated from this process.
 
 ## 0.4.161 - 2026-06-02
 

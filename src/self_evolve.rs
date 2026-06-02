@@ -1776,32 +1776,13 @@ fn build_executor_policy(
     previous_reports: &[SelfCycleReport],
 ) -> SelfExecutorPolicyReport {
     let requested_chain = normalize_executor_chain(primary_executor, fallback_executors);
-    let mut candidates = Vec::new();
-
-    if requested_chain
-        .iter()
-        .any(|executor| executor == "opencode")
-    {
-        candidates.push(opencode_free_non_local_candidate(&requested_chain));
-    }
-    if requested_chain.iter().any(|executor| executor == "gemini") {
-        candidates.push(gemini_non_local_candidate(&requested_chain));
-    }
-    if requested_chain.iter().any(|executor| executor == "codex") {
-        candidates.push(codex_non_local_candidate(&requested_chain));
-    }
-    if requested_chain
-        .iter()
-        .any(|executor| executor == "opencode")
-    {
-        candidates.push(opencode_paid_non_local_candidate(&requested_chain));
-    }
-    if requested_chain
-        .iter()
-        .any(|executor| executor == "opencode")
-    {
-        candidates.push(opencode_local_candidate(&requested_chain));
-    }
+    let mut candidates = vec![
+        opencode_free_non_local_candidate(&requested_chain),
+        gemini_non_local_candidate(&requested_chain),
+        codex_non_local_candidate(&requested_chain),
+        opencode_paid_non_local_candidate(&requested_chain),
+        opencode_local_candidate(&requested_chain),
+    ];
 
     // Apply previous failure status to candidates
     for candidate in &mut candidates {
@@ -2060,7 +2041,7 @@ fn codex_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
     }
 }
 
-fn opencode_paid_non_local_candidate(_chain: &[String]) -> SelfExecutorPolicyCandidate {
+fn opencode_paid_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
     let model = std::env::var("OPENCODE_MODEL")
         .ok()
         .or_else(|| {
@@ -2097,7 +2078,7 @@ fn opencode_paid_non_local_candidate(_chain: &[String]) -> SelfExecutorPolicyCan
         non_interactive_requirement:
             "must run through opencode run with explicit provider/model and no auth prompts"
                 .to_string(),
-        selection_tier: 35,
+        selection_tier: quota_aware_selection_tier(chain, "codex", 3).saturating_add(3),
         selection_status: "eligible".to_string(),
         reason: "OpenCode non-local paid-or-unknown provider path is used after configured no-cost options and stronger non-local fallbacks are unsuitable.".to_string(),
         capability_evidence: vec![

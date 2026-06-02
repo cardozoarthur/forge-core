@@ -7738,6 +7738,19 @@ fn sync_persists_human_allowed_executor_policy() {
         opencode_candidate["selection_status"],
         "skipped_not_allowed"
     );
+    let opencode_local_candidate = policy_candidates
+        .iter()
+        .find(|candidate| {
+            candidate["executor"] == "opencode"
+                && candidate["provider"] == "ollama"
+                && candidate["local_vs_non_local"] == "local"
+        })
+        .unwrap();
+    assert_eq!(opencode_local_candidate["model"], "ollama/qwen3:14b");
+    assert!(opencode_local_candidate["reason"]
+        .as_str()
+        .unwrap()
+        .contains("OpenCode local/Ollama"));
     let codex = find_executor(&json, "codex");
     assert_eq!(codex["allowed"], true);
     assert_eq!(codex["decision_source"], "human_allow");
@@ -8654,6 +8667,87 @@ fn self_run_reports_quota_aware_executor_policy_for_cycle() {
         .unwrap()
         .iter()
         .any(|goal| goal.as_str().unwrap().contains("Gemini non-interactive")));
+}
+
+#[test]
+fn self_run_keeps_codex_non_local_ahead_of_opencode_paid_and_local_when_gemini_is_requested() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("README.md"), "# Repo\n").unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2999-01-01T00:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--executor",
+            "gemini",
+            "--fallback-executor",
+            "codex",
+            "--fallback-executor",
+            "opencode",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let policy = &json["cycle_reports"][0]["executor_policy"];
+    assert_eq!(
+        policy["requested_chain"],
+        serde_json::json!(["gemini", "codex", "opencode"])
+    );
+
+    let candidates = policy["candidates"].as_array().unwrap();
+    let codex_index = candidates
+        .iter()
+        .position(|candidate| candidate["executor"] == "codex")
+        .unwrap();
+    let opencode_paid_index = candidates
+        .iter()
+        .position(|candidate| {
+            candidate["executor"] == "opencode"
+                && candidate["provider"] == "configured_cli"
+                && candidate["local_vs_non_local"] == "non_local"
+        })
+        .unwrap();
+    let opencode_local_index = candidates
+        .iter()
+        .position(|candidate| {
+            candidate["executor"] == "opencode"
+                && candidate["provider"] == "ollama"
+                && candidate["local_vs_non_local"] == "local"
+        })
+        .unwrap();
+
+    assert!(
+        codex_index < opencode_paid_index,
+        "Codex non-local should be tried before OpenCode paid/unknown fallback"
+    );
+    assert!(
+        codex_index < opencode_local_index,
+        "Codex non-local should be tried before OpenCode local/Ollama fallback"
+    );
+    assert!(
+        candidates[opencode_local_index]["selection_tier"]
+            .as_u64()
+            .unwrap()
+            > candidates[codex_index]["selection_tier"].as_u64().unwrap()
+    );
 }
 
 #[test]
