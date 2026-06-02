@@ -4,8 +4,11 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct ExecutorSyncOptions {
@@ -25,6 +28,10 @@ pub struct ExecutorState {
     pub configured: bool,
     pub command_path: Option<String>,
     pub config_evidence: Vec<String>,
+    #[serde(default)]
+    pub non_interactive_ready: bool,
+    #[serde(default)]
+    pub probe_evidence: Vec<String>,
     pub allowed: bool,
     pub decision_source: String,
     pub synced_at: String,
@@ -98,6 +105,14 @@ pub struct ExecutorQuotaPolicyCandidate {
     pub selection_status: String,
     pub reason: String,
     pub evidence: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ProbeOutput {
+    status: Option<ExitStatus>,
+    timed_out: bool,
+    stdout: String,
+    stderr: String,
 }
 
 #[derive(Debug, Clone)]
@@ -178,7 +193,12 @@ fn build_report(
     executors.sort_by(|left, right| left.id.cmp(&right.id));
     let usable = executors
         .iter()
-        .filter(|executor| executor.allowed && executor.installed && executor.configured)
+        .filter(|executor| {
+            executor.allowed
+                && executor.installed
+                && executor.configured
+                && executor.non_interactive_ready
+        })
         .map(|executor| executor.id.clone())
         .collect::<Vec<_>>();
     let needs_human_approval = executors.iter().any(|executor| {
@@ -210,6 +230,15 @@ fn probe_executor(
     let config_evidence = config_evidence(definition.id, home);
     let configured = !config_evidence.is_empty();
 
+    let mut non_interactive_ready = false;
+    let mut probe_evidence = Vec::new();
+
+    if let Some(ref path) = command_path {
+        let (ready, evidence) = probe_non_interactive(definition.id, path);
+        non_interactive_ready = ready;
+        probe_evidence = evidence;
+    }
+
     ExecutorState {
         id: definition.id.to_string(),
         display_name: definition.display_name.to_string(),
@@ -218,10 +247,161 @@ fn probe_executor(
         configured,
         command_path: command_path.map(|path| path.display().to_string()),
         config_evidence,
+        non_interactive_ready,
+        probe_evidence,
         allowed: false,
         decision_source: "unavailable".to_string(),
         synced_at: Utc::now().to_rfc3339(),
     }
+}
+
+fn probe_non_interactive(id: &str, path: &Path) -> (bool, Vec<String>) {
+    let mut evidence = Vec::new();
+    let mut ready = false;
+
+    // Probe 1: Version/Help check (smoke test)
+    let args = match id {
+        "gemini" | "opencode" | "codex" | "claude" | "ollama" => vec!["--version"],
+        _ => vec!["--help"],
+    };
+
+    let start = Instant::now();
+    let output = run_probe_command(path, &args, Duration::from_secs(2));
+
+    match output {
+        Ok(output) if output.status.is_some_and(|status| status.success()) => {
+            evidence.push(format!(
+                "non-interactive smoke test `{}` passed in {}ms",
+                args.join(" "),
+                start.elapsed().as_millis()
+            ));
+            ready = true;
+        }
+        Ok(output) if output.timed_out => {
+            evidence.push(format!(
+                "non-interactive smoke test `{}` timed out after {}ms",
+                args.join(" "),
+                start.elapsed().as_millis()
+            ));
+        }
+        Ok(output) => {
+            evidence.push(format!(
+                "non-interactive smoke test `{}` failed with exit code {:?}",
+                args.join(" "),
+                output.status.and_then(|status| status.code())
+            ));
+            if !output.stderr.trim().is_empty() {
+                evidence.push(format!("probe stderr: {}", output.stderr.trim()));
+            }
+        }
+        Err(e) => {
+            evidence.push(format!("failed to run non-interactive smoke test: {}", e));
+        }
+    }
+
+    // Probe 2: Model/Provider check for AI executors
+    if ready && (id == "gemini" || id == "opencode") {
+        let (model_ready, model_evidence) = probe_model_availability(id, path);
+        ready = model_ready;
+        evidence.extend(model_evidence);
+    }
+
+    (ready, evidence)
+}
+
+fn probe_model_availability(id: &str, path: &Path) -> (bool, Vec<String>) {
+    let mut evidence = Vec::new();
+    match id {
+        "gemini" => {
+            // Gemini doesn't have a direct 'list models' that is guaranteed to be non-interactive without auth
+            // but we can check if the model env var is set
+            if let Ok(model) = std::env::var("GEMINI_MODEL") {
+                evidence.push(format!("GEMINI_MODEL is set to {} in environment", model));
+                (true, evidence)
+            } else {
+                evidence.push("GEMINI_MODEL not set; defaulting to gemini-2.5-pro".to_string());
+                (true, evidence)
+            }
+        }
+        "opencode" => {
+            let output = run_probe_command(path, &["models"], Duration::from_secs(3));
+            match output {
+                Ok(output) if output.status.is_some_and(|status| status.success()) => {
+                    evidence.push("opencode models listed successfully".to_string());
+                    if output.stdout.contains("google/")
+                        || output.stdout.contains("openai/")
+                        || output.stdout.contains("anthropic/")
+                    {
+                        evidence.push("non-local models detected in opencode".to_string());
+                    }
+                    (true, evidence)
+                }
+                Ok(output) if output.timed_out => {
+                    evidence.push(
+                        "opencode models probe timed out; non-interactive provider/model readiness is not validated"
+                            .to_string(),
+                    );
+                    (false, evidence)
+                }
+                Ok(output) => {
+                    evidence.push(format!(
+                        "failed to list opencode models with exit code {:?}; non-interactive provider/model readiness is not validated",
+                        output.status.and_then(|status| status.code())
+                    ));
+                    if !output.stderr.trim().is_empty() {
+                        evidence.push(format!("probe stderr: {}", output.stderr.trim()));
+                    }
+                    (false, evidence)
+                }
+                Err(error) => {
+                    evidence.push(format!(
+                        "failed to run opencode models probe: {error}; non-interactive provider/model readiness is not validated"
+                    ));
+                    (false, evidence)
+                }
+            }
+        }
+        _ => (true, evidence),
+    }
+}
+
+fn run_probe_command(path: &Path, args: &[&str], timeout: Duration) -> Result<ProbeOutput> {
+    let mut child = Command::new(path)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let start = Instant::now();
+    let mut timed_out = false;
+
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        if start.elapsed() >= timeout {
+            timed_out = true;
+            let _ = child.kill();
+            break child.wait().ok();
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_string(&mut stdout);
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+
+    Ok(ProbeOutput {
+        status,
+        timed_out,
+        stdout,
+        stderr,
+    })
 }
 
 fn apply_decision(
@@ -568,7 +748,22 @@ fn quota_candidate(
 ) -> ExecutorQuotaPolicyCandidate {
     let state = executors.iter().find(|state| state.id == executor);
     let selection_status = match state {
-        Some(state) if state.allowed && state.installed && state.configured => "eligible",
+        Some(state)
+            if state.allowed
+                && state.installed
+                && state.configured
+                && state.non_interactive_ready =>
+        {
+            "eligible"
+        }
+        Some(state)
+            if state.allowed
+                && state.installed
+                && state.configured
+                && !state.non_interactive_ready =>
+        {
+            "skipped_interactive_hang_risk"
+        }
         Some(state) if !state.installed => "skipped_not_installed",
         Some(state) if !state.configured => "skipped_not_configured",
         Some(_) => "skipped_not_allowed",
@@ -577,7 +772,11 @@ fn quota_candidate(
     let observation =
         matching_quota_observation(observations, executor, provider, model.as_deref());
     let mut evidence = state
-        .map(|state| state.config_evidence.clone())
+        .map(|state| {
+            let mut ev = state.config_evidence.clone();
+            ev.extend(state.probe_evidence.clone());
+            ev
+        })
         .unwrap_or_default();
     if let Some(observation) = observation {
         evidence.push(format!(
@@ -658,7 +857,12 @@ fn executor_is_allowed(executors: &[ExecutorState], id: &str) -> bool {
     executors
         .iter()
         .find(|executor| executor.id == id)
-        .map(|executor| executor.allowed && executor.installed && executor.configured)
+        .map(|executor| {
+            executor.allowed
+                && executor.installed
+                && executor.configured
+                && executor.non_interactive_ready
+        })
         .unwrap_or(false)
 }
 
@@ -681,6 +885,8 @@ mod tests {
             configured: true,
             command_path: Some("/tmp/codex".to_string()),
             config_evidence: vec!["test-config".to_string()],
+            non_interactive_ready: true,
+            probe_evidence: vec!["smoke test passed".to_string()],
             allowed: true,
             decision_source: "human_allow".to_string(),
             synced_at: "2026-06-02T00:00:00Z".to_string(),
@@ -730,5 +936,70 @@ mod tests {
             .evidence
             .iter()
             .any(|evidence| evidence.contains("quota_observation:self_evolution_cycle_5")));
+    }
+
+    #[test]
+    fn executor_report_excludes_interactive_hang_risk_from_usable() {
+        let temp = tempdir().unwrap();
+        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+
+        let gemini_state = ExecutorState {
+            id: "gemini".to_string(),
+            display_name: "Gemini CLI".to_string(),
+            command: "gemini".to_string(),
+            installed: true,
+            configured: true,
+            command_path: Some("/tmp/gemini".to_string()),
+            config_evidence: vec!["env:GEMINI_API_KEY".to_string()],
+            non_interactive_ready: false,
+            probe_evidence: vec![
+                "non-interactive smoke test `--version` timed out after 2000ms".to_string(),
+            ],
+            allowed: true,
+            decision_source: "human_allow".to_string(),
+            synced_at: "2026-06-02T00:00:00Z".to_string(),
+        };
+        store
+            .save_executor_state("gemini", &serde_json::to_value(gemini_state).unwrap())
+            .unwrap();
+
+        let report = load_executors(&store).unwrap();
+
+        assert!(!report.usable.iter().any(|executor| executor == "gemini"));
+        let gemini_candidate = report
+            .quota_policy
+            .candidates
+            .iter()
+            .find(|candidate| candidate.executor == "gemini")
+            .unwrap();
+        assert_eq!(
+            gemini_candidate.selection_status,
+            "skipped_interactive_hang_risk"
+        );
+        assert!(gemini_candidate
+            .evidence
+            .iter()
+            .any(|evidence| evidence.contains("timed out")));
+    }
+
+    #[test]
+    fn executor_state_loads_legacy_records_without_probe_fields() {
+        let legacy = json!({
+            "id": "codex",
+            "display_name": "Codex CLI",
+            "command": "codex",
+            "installed": true,
+            "configured": true,
+            "command_path": "/tmp/codex",
+            "config_evidence": ["test-config"],
+            "allowed": true,
+            "decision_source": "human_allow",
+            "synced_at": "2026-06-02T00:00:00Z"
+        });
+
+        let state: ExecutorState = serde_json::from_value(legacy).unwrap();
+
+        assert!(!state.non_interactive_ready);
+        assert!(state.probe_evidence.is_empty());
     }
 }
