@@ -8715,8 +8715,21 @@ fn self_run_falls_back_to_gemini_before_codex_if_previous_executor_fails() {
     assert_eq!(attempts.len(), 2);
     assert_eq!(attempts[0]["executor"], "opencode");
     assert_eq!(attempts[0]["status"], "failed");
+    assert_eq!(attempts[0]["local"], false);
+    assert_eq!(attempts[0]["provider"], "google");
+    assert_eq!(attempts[0]["model"], "google/gemini-2.5-pro");
+    assert!(attempts[0]["next_fallback_reason"]
+        .as_str()
+        .unwrap()
+        .contains("selected as first quota-aware candidate"));
     assert_eq!(attempts[1]["executor"], "gemini");
     assert_eq!(attempts[1]["status"], "completed");
+    assert_eq!(attempts[1]["provider"], "google");
+    assert_eq!(attempts[1]["model"], "gemini-2.5-pro");
+    assert!(attempts[1]["next_fallback_reason"]
+        .as_str()
+        .unwrap()
+        .contains("selected after an earlier quota-aware executor attempt failed"));
 }
 
 #[test]

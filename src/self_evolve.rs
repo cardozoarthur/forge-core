@@ -127,6 +127,7 @@ pub struct SelfExecutorAttempt {
     pub selection_tier: u32,
     pub status: String,
     pub reason: String,
+    pub next_fallback_reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -152,6 +153,7 @@ struct SelfExecutorStrategy {
     fallback_risk: String,
     selection_tier: u32,
     reason: String,
+    next_fallback_reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1911,11 +1913,11 @@ fn render_cycle_markdown_report(report: &SelfCycleReport) -> String {
     if !report.executor_attempts.is_empty() {
         output.push_str("\n## Executor attempts\n\n");
         output
-            .push_str("| Executor | Provider | Model | Local | Quota | Cost | Quality | Status | Reason | Error |\n");
-        output.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+            .push_str("| Executor | Provider | Model | Local | Quota | Cost | Quality | Status | Reason | Next fallback reason | Error |\n");
+        output.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
         for attempt in &report.executor_attempts {
             output.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                 markdown_cell(&attempt.executor),
                 markdown_cell(attempt.provider.as_deref().unwrap_or("default")),
                 markdown_cell(attempt.model.as_deref().unwrap_or("default")),
@@ -1925,6 +1927,7 @@ fn render_cycle_markdown_report(report: &SelfCycleReport) -> String {
                 markdown_cell(&attempt.expected_quality),
                 markdown_cell(&attempt.status),
                 markdown_cell(&attempt.reason),
+                markdown_cell(&attempt.next_fallback_reason),
                 markdown_cell(attempt.error.as_deref().unwrap_or("none")),
             ));
         }
@@ -2028,31 +2031,55 @@ fn select_executor_strategies(
     fallback_executors: &[String],
     previous_reports: &[SelfCycleReport],
 ) -> Vec<SelfExecutorStrategy> {
-    build_executor_policy(
+    let policy = build_executor_policy(
         store,
         primary_executor,
         fallback_executors,
         previous_reports,
-    )
-    .candidates
-    .into_iter()
-    .filter(|candidate| candidate.selection_status == "eligible")
-    .map(|candidate| SelfExecutorStrategy {
-        executor: candidate.executor,
-        provider: Some(candidate.provider).filter(|provider| provider != "configured_cli"),
-        model: candidate.model,
-        local: candidate.local_vs_non_local == "local",
-        quota_model: candidate.quota_model,
-        cost_model: candidate.free_vs_paid_if_known,
-        remaining_quota: candidate.remaining_quota,
-        rate_limit_risk: candidate.rate_limit_risk,
-        monetary_or_token_cost: candidate.monetary_or_token_cost,
-        expected_quality: candidate.expected_quality,
-        fallback_risk: candidate.fallback_risk,
-        selection_tier: candidate.selection_tier,
-        reason: candidate.reason,
-    })
-    .collect()
+    );
+    let selection_trace = policy.selection_trace.clone();
+
+    let mut strategies: Vec<SelfExecutorStrategy> = policy
+        .candidates
+        .into_iter()
+        .filter(|candidate| candidate.selection_status == "eligible")
+        .map(|candidate| SelfExecutorStrategy {
+            next_fallback_reason: selection_trace
+                .iter()
+                .find(|trace| {
+                    trace.executor == candidate.executor
+                        && trace.provider == candidate.provider
+                        && trace.model == candidate.model
+                        && trace.selection_tier == candidate.selection_tier
+                })
+                .map(|trace| trace.next_fallback_reason.clone())
+                .unwrap_or_else(|| {
+                    "advance to the next quota-aware fallback if this attempt fails".to_string()
+                }),
+            executor: candidate.executor,
+            provider: Some(candidate.provider).filter(|provider| provider != "configured_cli"),
+            model: candidate.model,
+            local: candidate.local_vs_non_local == "local",
+            quota_model: candidate.quota_model,
+            cost_model: candidate.free_vs_paid_if_known,
+            remaining_quota: candidate.remaining_quota,
+            rate_limit_risk: candidate.rate_limit_risk,
+            monetary_or_token_cost: candidate.monetary_or_token_cost,
+            expected_quality: candidate.expected_quality,
+            fallback_risk: candidate.fallback_risk,
+            selection_tier: candidate.selection_tier,
+            reason: candidate.reason,
+        })
+        .collect();
+
+    for strategy in strategies.iter_mut().skip(1) {
+        strategy.next_fallback_reason = format!(
+            "selected after an earlier quota-aware executor attempt failed; {}",
+            strategy.next_fallback_reason
+        );
+    }
+
+    strategies
 }
 
 fn apply_executor_state_to_candidate(
@@ -2685,6 +2712,7 @@ fn execute_cycle_with_fallback(
                     selection_tier: strategy.selection_tier,
                     status: "completed".to_string(),
                     reason: strategy.reason.clone(),
+                    next_fallback_reason: strategy.next_fallback_reason.clone(),
                     error: None,
                 });
                 return Ok(SelfExecutorExecution {
@@ -2711,6 +2739,7 @@ fn execute_cycle_with_fallback(
                     selection_tier: strategy.selection_tier,
                     status: "failed".to_string(),
                     reason: strategy.reason.clone(),
+                    next_fallback_reason: strategy.next_fallback_reason.clone(),
                     error: Some(error_msg),
                 });
             }
@@ -3887,6 +3916,8 @@ mod tests {
                 selection_tier: 20,
                 status: "failed".to_string(),
                 reason: "interactive timeout".to_string(),
+                next_fallback_reason:
+                    "failed timeout should advance to the next quota-aware fallback".to_string(),
                 error: Some("executor `gemini` timed out after 180s (likely waiting for interactive completion)".to_string()),
             }],
             status: "failed".to_string(),
@@ -4041,6 +4072,8 @@ mod tests {
                 selection_tier: 20,
                 status: "failed".to_string(),
                 reason: "interactive timeout".to_string(),
+                next_fallback_reason:
+                    "failed timeout should advance to the next quota-aware fallback".to_string(),
                 error: Some(
                     "executor `gemini` timed out after 180s (likely waiting for interactive completion)"
                         .to_string(),

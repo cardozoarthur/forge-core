@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.176 - 2026-06-02
+
+### Changed
+
+- Self-evolution executor attempts now include `next_fallback_reason`, carrying the quota-aware selection trace into the actual attempt record.
+- Fallback attempts now state when they were selected because an earlier executor attempt failed, making OpenCode/Gemini/Codex handoff decisions auditable in cycle JSON.
+- Persisted Markdown cycle reports now include the attempt-level fallback reason in the executor attempts table.
+
+### Validation
+
+- Targeted coverage passed for `cargo test self_run_falls_back_to_gemini_before_codex_if_previous_executor_fails --test forge_cli_contract`.
+- Full required validation for this cycle is recorded in `docs/reports/forge-core-v0.4.176-report-2026-06-02.md`.
+
+### Safety
+
+- The change is scoped to Forge Core self-evolution executor reporting, fallback observability, tests, version metadata and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should make OpenCode/Gemini readiness repair tasks executable and continue native scheduled GitHub/Telegram publication support.
+
 ## 0.4.174 - 2026-06-02
 
 ### Changed
