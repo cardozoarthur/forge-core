@@ -1,5 +1,5 @@
 use crate::artifact::{hex_sha256, write_json_artifact};
-use crate::graph::{create_workflow, Workflow};
+use crate::graph::{create_workflow, task, ExecutorKind, LoopSpec, Workflow};
 use crate::intent::parse_intent;
 use crate::request::{create_run_record, heartbeat_request, save_run_record, update_run_status};
 use crate::storage::ForgeStore;
@@ -7,9 +7,13 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
+
+const OPENCODE_TIMEOUT_SECONDS: u64 = 180;
+const EXECUTOR_TIMEOUT_SECONDS: u64 = 180;
 
 const SELF_EVOLUTION_PROMPT_PACKET_VERSION: &str = "forge.self_evolution.prompt.v2";
 const SELF_EVOLUTION_VALIDATION_REPORT_VERSION: &str = "forge.self_evolution.validation.v1";
@@ -23,6 +27,7 @@ const VALIDATION_COMMANDS: [&str; 4] = [
     "cargo test",
     "cargo build --release",
 ];
+const DEFAULT_SELF_EXECUTORS: [&str; 3] = ["opencode", "gemini", "codex"];
 
 #[derive(Debug, Clone)]
 pub struct SelfRunOptions {
@@ -471,12 +476,19 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
     }
 
     let executors = if options.executors.is_empty() {
-        vec!["codex".to_string(), "opencode".to_string()]
+        DEFAULT_SELF_EXECUTORS
+            .iter()
+            .map(|executor| executor.to_string())
+            .collect()
     } else {
         options.executors.clone()
     };
-    let executor_fallbacks =
-        normalize_self_executor_fallbacks(&executors, &options.fallback_executors);
+    let primary_executor = executors.first().map(String::as_str).unwrap_or("opencode");
+    let executor_fallbacks = executor_fallback_chain_for_requested(
+        primary_executor,
+        &executors,
+        &options.fallback_executors,
+    );
 
     let persisted_self_evolution_goal = load_persisted_self_evolution_goal(store)?;
     let self_evolution_goal = options
@@ -484,7 +496,18 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         .clone()
         .or(persisted_self_evolution_goal)
         .unwrap_or_else(|| BASE_SELF_EVOLUTION_GOAL.to_string());
-    let workflow = create_workflow(parse_intent(&self_evolution_goal));
+    let mut workflow = create_workflow(parse_intent(&self_evolution_goal));
+    ensure_self_evolution_loop_control(&mut workflow);
+
+    let loop_count = workflow
+        .tasks
+        .iter()
+        .filter(|t| t.loop_control.is_some())
+        .count();
+    if loop_count == 0 {
+        bail!("Self-evolution workflow has loop_count == 0. The planned workflow must include persisted loop_control tasks.");
+    }
+
     let mut run = create_run_record(&workflow, "forge_cli", "planned");
     run.executor_fallbacks = executor_fallbacks.clone();
     store.save_workflow(&workflow)?;
@@ -521,21 +544,26 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             break;
         }
         let requested_executor = executors[((cycle - 1) as usize) % executors.len()].clone();
+        let cycle_fallback_executors = executor_fallback_chain_for_requested(
+            &requested_executor,
+            &executors,
+            &options.fallback_executors,
+        );
         let mut executor = requested_executor.clone();
         let mut executor_attempts = Vec::new();
         let current_workflow = store
             .load_workflow(&workflow.id)
             .unwrap_or_else(|_| workflow.clone());
-        let prompt_packet = SelfEvolutionPromptPacket::new(
+        let prompt_packet = SelfEvolutionPromptPacket::new(SelfEvolutionPromptPacketParams {
             cycle,
-            &requested_executor,
-            &executor_fallbacks,
-            &current_workflow,
-            &run.run_id,
-            &options,
-            &operating_mode,
-            &decision_gate,
-        );
+            executor: &requested_executor,
+            executor_fallbacks: &cycle_fallback_executors,
+            workflow: &current_workflow,
+            run_id: &run.run_id,
+            options: &options,
+            operating_mode: &operating_mode,
+            decision_gate: &decision_gate,
+        });
         let prompt = render_prompt(&prompt_packet);
         let prompt_sha256 = hex_sha256(prompt.as_bytes());
         let cycle_overhead_ledger = SelfOverheadLedger::for_cycle(
@@ -584,7 +612,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             let execution = match execute_cycle_with_fallback(
                 &options.repo,
                 &requested_executor,
-                &executor_fallbacks,
+                &cycle_fallback_executors,
                 &prompt,
             ) {
                 Ok(execution) => execution,
@@ -659,7 +687,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             cycle,
             requested_executor,
             executor,
-            executor_fallbacks: executor_fallbacks.clone(),
+            executor_fallbacks: cycle_fallback_executors,
             executor_attempts,
             status,
             prompt_path: prompt_path.clone(),
@@ -726,36 +754,39 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
     })
 }
 
+struct SelfEvolutionPromptPacketParams<'a> {
+    cycle: u32,
+    executor: &'a str,
+    executor_fallbacks: &'a [String],
+    workflow: &'a Workflow,
+    run_id: &'a str,
+    options: &'a SelfRunOptions,
+    operating_mode: &'a SelfOperatingMode,
+    decision_gate: &'a SelfDecisionGateReport,
+}
+
 impl SelfEvolutionPromptPacket {
-    fn new(
-        cycle: u32,
-        executor: &str,
-        executor_fallbacks: &[String],
-        workflow: &Workflow,
-        run_id: &str,
-        options: &SelfRunOptions,
-        operating_mode: &SelfOperatingMode,
-        decision_gate: &SelfDecisionGateReport,
-    ) -> Self {
-        let capability_analysis = analyze_goal_capabilities(&workflow.goal);
+    fn new(params: SelfEvolutionPromptPacketParams<'_>) -> Self {
+        let capability_analysis = analyze_goal_capabilities(&params.workflow.goal);
         Self {
             version: SELF_EVOLUTION_PROMPT_PACKET_VERSION.to_string(),
-            cycle,
-            executor: executor.to_string(),
-            executor_fallbacks: executor_fallbacks.to_vec(),
-            workflow_id: workflow.id.clone(),
-            run_id: run_id.to_string(),
-            workflow_goal: workflow.goal.clone(),
-            initial_workflow_goal: workflow
+            cycle: params.cycle,
+            executor: params.executor.to_string(),
+            executor_fallbacks: params.executor_fallbacks.to_vec(),
+            workflow_id: params.workflow.id.clone(),
+            run_id: params.run_id.to_string(),
+            workflow_goal: params.workflow.goal.clone(),
+            initial_workflow_goal: params
+                .workflow
                 .initial_goal
                 .clone()
-                .unwrap_or_else(|| workflow.goal.clone()),
-            workflow_revision: workflow.revisions.len() as u64,
-            stop_at: options.until.clone(),
-            repo: options.repo.display().to_string(),
-            operating_mode: operating_mode.as_str().to_string(),
-            decision_gate: decision_gate.clone(),
-            validation_commands: effective_validation_commands(options),
+                .unwrap_or_else(|| params.workflow.goal.clone()),
+            workflow_revision: params.workflow.revisions.len() as u64,
+            stop_at: params.options.until.clone(),
+            repo: params.options.repo.display().to_string(),
+            operating_mode: params.operating_mode.as_str().to_string(),
+            decision_gate: params.decision_gate.clone(),
+            validation_commands: effective_validation_commands(params.options),
             capability_analysis,
         }
     }
@@ -893,6 +924,52 @@ impl PublicProjectUpdateReport {
             reason: Some(reason.to_string()),
         }
     }
+}
+
+fn ensure_self_evolution_loop_control(workflow: &mut Workflow) {
+    if workflow
+        .tasks
+        .iter()
+        .any(|task| task.loop_control.is_some())
+    {
+        return;
+    }
+
+    let id = format!("task-{:03}", workflow.tasks.len() + 1);
+    let dependency = workflow
+        .tasks
+        .last()
+        .map(|task| task.id.as_str())
+        .unwrap_or("task-001")
+        .to_string();
+    let mut loop_task = task(
+        &id,
+        "Continue self-evolution while product goal is not definitively ready",
+        &[dependency.as_str()],
+        &[
+            "current product-evolution goal",
+            "validation evidence",
+            "human pause/stop/mutation state",
+        ],
+        Vec::new(),
+        "Self-evolution loop-control trace",
+        (ExecutorKind::Command, 0.0002),
+    );
+    loop_task.loop_control = Some(LoopSpec {
+        schema_version: "forge.loop.v1".to_string(),
+        kind: "while_until".to_string(),
+        items: vec!["product_evolution_goal".to_string()],
+        max_iterations: None,
+        condition: Some(
+            "continue until goal ready, validation passes, or human pauses/stops/mutates workflow"
+                .to_string(),
+        ),
+        backoff_policy: None,
+        subflow_mode: "ordinary_forge_workflow".to_string(),
+        stop_policy: "human_pause_stop_or_revisioned_mutation".to_string(),
+        state: "active".to_string(),
+    });
+    workflow.tasks.push(loop_task);
 }
 
 fn load_persisted_self_evolution_goal(store: &ForgeStore) -> Result<Option<String>> {
@@ -1257,8 +1334,9 @@ fn execute_cycle_with_fallback(
 fn execute_cycle(repo: &Path, executor: &str, prompt: &str) -> Result<String> {
     match executor {
         "codex" => {
-            let output = Command::new("codex")
-                .args([
+            let output = execute_command_capture(
+                "codex",
+                &[
                     "--ask-for-approval",
                     "never",
                     "exec",
@@ -1269,9 +1347,10 @@ fn execute_cycle(repo: &Path, executor: &str, prompt: &str) -> Result<String> {
                     "--output-last-message",
                     ".forge/last-codex-self-evolution.md",
                     prompt,
-                ])
-                .current_dir(repo)
-                .output()?;
+                ],
+                repo,
+                None,
+            )?;
             if output.status.success() {
                 Ok("executor_completed".to_string())
             } else {
@@ -1282,17 +1361,19 @@ fn execute_cycle(repo: &Path, executor: &str, prompt: &str) -> Result<String> {
             }
         }
         "opencode" => {
-            let output = Command::new("opencode")
-                .args([
+            let output = execute_command_capture(
+                "opencode",
+                &[
                     "run",
                     "--dir",
                     repo.to_str().unwrap_or("."),
                     "--title",
                     "Forge self evolution",
                     prompt,
-                ])
-                .current_dir(repo)
-                .output()?;
+                ],
+                repo,
+                Some(OPENCODE_TIMEOUT_SECONDS),
+            )?;
             if output.status.success() {
                 Ok("executor_completed".to_string())
             } else {
@@ -1302,8 +1383,107 @@ fn execute_cycle(repo: &Path, executor: &str, prompt: &str) -> Result<String> {
                 )
             }
         }
+        "gemini" => {
+            let output = execute_command_capture(
+                "gemini",
+                &[
+                    "-p",
+                    prompt,
+                    "--approval-mode",
+                    "yolo",
+                    "--skip-trust",
+                    "--output-format",
+                    "text",
+                ],
+                repo,
+                Some(EXECUTOR_TIMEOUT_SECONDS),
+            )?;
+            fs::create_dir_all(repo.join(".forge"))?;
+            let response = String::from_utf8_lossy(&output.stdout);
+            fs::write(
+                repo.join(".forge/last-gemini-self-evolution.md"),
+                response.as_bytes(),
+            )?;
+            if output.status.success() {
+                Ok("executor_completed".to_string())
+            } else {
+                bail!(
+                    "gemini executor failed: {}{}",
+                    String::from_utf8_lossy(&output.stderr),
+                    response
+                )
+            }
+        }
         other => bail!("unsupported self-evolution executor: {other}"),
     }
+}
+
+fn execute_command_capture(
+    program: &str,
+    args: &[&str],
+    repo: &Path,
+    timeout_seconds: Option<u64>,
+) -> Result<std::process::Output> {
+    if !command_available(program) {
+        bail!("executor `{program}` binary not found in PATH");
+    }
+
+    let (cmd, command_args): (&str, Vec<String>) = if let Some(timeout_seconds) = timeout_seconds {
+        if command_available("timeout") {
+            let mut command_args = Vec::with_capacity(args.len() + 2);
+            command_args.push(format!("{timeout_seconds}s"));
+            command_args.push(program.to_string());
+            command_args.extend(args.iter().map(|arg| arg.to_string()));
+            ("timeout", command_args)
+        } else {
+            (program, args.iter().map(|arg| arg.to_string()).collect())
+        }
+    } else {
+        (program, args.iter().map(|arg| arg.to_string()).collect())
+    };
+
+    let mut command = Command::new(cmd);
+    command.current_dir(repo);
+    command.args(command_args.iter().map(String::as_str));
+    let output = command.output().map_err(|error| {
+        if error.kind() == ErrorKind::NotFound && cmd == "timeout" {
+            anyhow::anyhow!("`timeout` command not found in PATH")
+        } else {
+            error.into()
+        }
+    })?;
+    if let Some(timeout_seconds) = timeout_seconds {
+        if !output.status.success() && output.status.code() == Some(124) {
+            bail!(
+                "executor `{program}` timed out after {timeout_seconds}s (likely waiting for interactive completion)"
+            );
+        }
+    }
+    if output.status.success() {
+        Ok(output)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!("{program} command failed: {stderr}{stdout}")
+    }
+}
+
+fn command_available(command: &str) -> bool {
+    if command.is_empty() {
+        return false;
+    }
+
+    if command.contains('/') {
+        return fs::metadata(command).is_ok_and(|meta| meta.is_file());
+    }
+
+    if let Some(path) = std::env::var_os("PATH") {
+        return std::env::split_paths(&path).any(|dir| {
+            let candidate = dir.join(command);
+            candidate.exists()
+        });
+    }
+    false
 }
 
 fn normalize_self_executor_fallbacks(
@@ -1324,6 +1504,25 @@ fn normalize_self_executor_fallbacks(
         normalized.push(fallback.to_string());
     }
     normalized
+}
+
+fn executor_fallback_chain_for_requested(
+    requested_executor: &str,
+    all_executors: &[String],
+    explicit_fallbacks: &[String],
+) -> Vec<String> {
+    if !explicit_fallbacks.is_empty() {
+        return normalize_self_executor_fallbacks(
+            &[requested_executor.to_string()],
+            explicit_fallbacks,
+        );
+    }
+
+    all_executors
+        .iter()
+        .filter(|executor| executor.as_str() != requested_executor)
+        .cloned()
+        .collect()
 }
 
 fn run_validation(
@@ -1741,6 +1940,7 @@ mod tests {
             creative_artifacts: vec![],
             token_collection: None,
             revisions: vec![],
+            product_decisions: vec![],
         };
         assert!(is_self_evolution_workflow(&wf_evolution));
 
@@ -1762,6 +1962,7 @@ mod tests {
             creative_artifacts: vec![],
             token_collection: None,
             revisions: vec![],
+            product_decisions: vec![],
         };
         assert!(!is_self_evolution_workflow(&wf_other));
     }
@@ -1932,6 +2133,29 @@ mod tests {
         assert!(telegram.present_in_goal);
         let policy = caps.iter().find(|c| c.name == "execution policy").unwrap();
         assert!(policy.present_in_goal);
+    }
+
+    #[test]
+    fn test_executor_fallback_chain_uses_explicit_fallback_executors() {
+        let executors = vec![
+            "opencode".to_string(),
+            "gemini".to_string(),
+            "codex".to_string(),
+        ];
+        let explicit = vec!["codex".to_string(), "opencode".to_string()];
+        let resolved = executor_fallback_chain_for_requested("gemini", &executors, &explicit);
+        assert_eq!(resolved, vec!["codex", "opencode"]);
+    }
+
+    #[test]
+    fn test_executor_fallback_chain_defaults_to_remaining_executors_in_schedule_order() {
+        let executors = vec![
+            "opencode".to_string(),
+            "gemini".to_string(),
+            "codex".to_string(),
+        ];
+        let resolved = executor_fallback_chain_for_requested("gemini", &executors, &[]);
+        assert_eq!(resolved, vec!["opencode", "codex"]);
     }
 
     #[test]

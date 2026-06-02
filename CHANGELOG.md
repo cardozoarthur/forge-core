@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.157 - 2026-06-02
+
+### Added
+
+- Self-evolution cycle 1: added product/PM CLI groundwork with `/pm` and `/decision` slash commands in the interactive surface.
+- Added durable `ProductDecision` workflow state with author, rationale, status, affected goals/tasks/artifacts, revision and event history.
+- Added `forge workflow decision` to record approved product decisions as revisioned workflow mutations.
+- Added `forge request` flow-resolution evidence so agent handoffs show whether Forge searched existing flows and attached reusable subflows before creating new work.
+- Added Gemini to the self-evolution executor fallback path, preserving Forge validation and executor policy boundaries.
+
+### Changed
+
+- Self-evolution planning now rejects a self-run workflow with `loop_count == 0`, enforcing ordinary Forge workflow shape with persisted loop-control tasks.
+- Interactive home now surfaces product decision count and PM/decision quick actions.
+- Packaged Forge skill compatibility now includes Gemini alongside Codex and OpenCode.
+
+### Validation
+
+- RED observed first with targeted tests: compilation failed on the renamed `graph::task` parameter and missing `product_decisions` dashboard/test fixture fields.
+- Targeted GREEN passed for request start flow-resolution evidence, self-run executor default order, self-run dry-run loop shape, product decision recording and interactive slash-command catalog.
+
+### Safety
+
+- PM and decision commands mutate only Forge-owned workflow state and record revision/event lineage.
+- Self-evolution still uses bounded executor fallback and required validation-before-promotion semantics.
+- No Docker, Kubernetes, Knative or external user infrastructure resources are mutated.
+- This is still 0.5 groundwork: Forge does not yet satisfy the full promotion condition for end-to-end human-guided PM product creation with live agent switching, validation evidence and visual workflow editing.
+
 ## 0.4.154 - 2026-05-26
 
 ### Added

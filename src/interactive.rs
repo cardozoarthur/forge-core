@@ -40,6 +40,7 @@ pub struct InteractiveDashboard {
     pub looping_workflows: usize,
     pub paused_idle_workflows: usize,
     pub recent_artifacts: usize,
+    pub product_decisions: usize,
     pub pending_approvals: usize,
     pub validation_failures: usize,
     pub executor_availability: String,
@@ -145,6 +146,11 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
         .iter()
         .map(|workflow| workflow.artifact_count)
         .sum();
+    let product_decisions = workflows
+        .workflows
+        .iter()
+        .map(|workflow| workflow.product_decision_count)
+        .sum();
     let validation_failures = workflows
         .workflows
         .iter()
@@ -204,6 +210,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             looping_workflows,
             paused_idle_workflows: workflows.summary.non_running,
             recent_artifacts,
+            product_decisions,
             pending_approvals,
             validation_failures,
             executor_availability,
@@ -234,6 +241,8 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 "/workers".to_string(),
                 "/context".to_string(),
                 "/handoff".to_string(),
+                "/pm".to_string(),
+                "/decision".to_string(),
             ],
         },
         slash_commands: slash_commands(),
@@ -319,6 +328,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Looping workflows: {looping_workflows}\n\
          Paused/idle workflows: {paused_idle_workflows}\n\
          Recent artifacts: {recent_artifacts}\n\
+         Product decisions: {product_decisions}\n\
          Pending approvals: {pending_approvals}\n\
          Validation failures: {validation_failures}\n\
          Executor availability: {executor_availability}\n\
@@ -338,6 +348,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         looping_workflows = d.looping_workflows,
         paused_idle_workflows = d.paused_idle_workflows,
         recent_artifacts = d.recent_artifacts,
+        product_decisions = d.product_decisions,
         pending_approvals = d.pending_approvals,
         validation_failures = d.validation_failures,
         executor_availability = d.executor_availability,
@@ -930,6 +941,22 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "high",
         ),
         slash(
+            "/pm",
+            "PM Mode",
+            "Start a human-guided product management session to clarify goals, risks and MVP boundaries.",
+            &["forge", "interactive", "route", "--input", "start pm session"],
+            true,
+            "medium",
+        ),
+        slash(
+            "/decision",
+            "Decision",
+            "Record a durable product decision with rationale and impact trace. Use: /decision --workflow <id> --title \"...\" --rationale \"...\"",
+            &["forge", "workflow", "decision", "--workflow", "<workflow-id>", "--title", "...", "--rationale", "..."],
+            true,
+            "medium",
+        ),
+        slash(
             "/exit",
             "Exit",
             "Exit the interactive REPL.",
@@ -1025,6 +1052,14 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
             }
             if trimmed == "/handoff" || trimmed.starts_with("/handoff ") {
                 dispatch_handoff_command(trimmed, store_path)?;
+                continue;
+            }
+            if trimmed.starts_with("/pm ") {
+                dispatch_pm_command(&store, trimmed)?;
+                continue;
+            }
+            if trimmed.starts_with("/decision ") {
+                dispatch_decision_command(&store, trimmed, store_path)?;
                 continue;
             }
 
@@ -1291,6 +1326,112 @@ fn dispatch_context_command(input: &str, store_path: &std::path::Path) -> Result
     }
 
     Ok(())
+}
+
+fn dispatch_pm_command(store: &ForgeStore, input: &str) -> Result<()> {
+    let objective = input.trim().strip_prefix("/pm ").unwrap_or("").trim();
+    if objective.is_empty() {
+        println!("  Usage: /pm <broad objective>");
+        return Ok(());
+    }
+
+    println!("  PM Mode: starting human-guided product management session...");
+    let report = crate::request::start_pm_session(store, objective, "forge_repl")?;
+    println!("  Status: {}", report.status);
+    println!("  Run ID: {}", report.run_id);
+    println!("  Workflow ID: {}", report.workflow_id);
+    println!("  Goal: {}", report.goal);
+    println!("  Handoff: PM agent will now clarify the challenge, identify users and risks.");
+    Ok(())
+}
+
+fn dispatch_decision_command(
+    _store: &ForgeStore,
+    input: &str,
+    store_path: &std::path::Path,
+) -> Result<()> {
+    let rest = input.trim().strip_prefix("/decision ").unwrap_or("").trim();
+    if rest.is_empty() {
+        println!("  Usage: /decision --workflow <id> --title \"...\" --rationale \"...\"");
+        return Ok(());
+    }
+
+    println!("  Decision: recording durable product decision...");
+    let store_str = store_path.to_string_lossy();
+    let decision_output = Command::new(
+        std::env::args()
+            .next()
+            .unwrap_or_else(|| "forge".to_string()),
+    )
+    .args(["--store", &store_str, "workflow", "decision"])
+    .args(parse_repl_args(rest)?)
+    .arg("--output")
+    .arg("json")
+    .output()?;
+
+    if decision_output.status.success() {
+        let stdout = String::from_utf8_lossy(&decision_output.stdout);
+        if let Ok(report) = serde_json::from_str::<serde_json::Value>(&stdout) {
+            println!("  Status: {}", report["status"].as_str().unwrap_or("ok"));
+            println!(
+                "  Decision ID: {}",
+                report["decision_id"].as_str().unwrap_or("?")
+            );
+            println!("  Revision: {}", report["revision"]);
+            let decision = &report["decision"];
+            println!("  Title: {}", decision["title"].as_str().unwrap_or("?"));
+            println!("  Author: {}", decision["author"].as_str().unwrap_or("?"));
+            println!(
+                "  Rationale: {}",
+                decision["rationale"].as_str().unwrap_or("?")
+            );
+        } else {
+            println!("  Decision recorded successfully.");
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&decision_output.stderr);
+        println!("  Error: {}", stderr.trim());
+    }
+    Ok(())
+}
+
+fn parse_repl_args(input: &str) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut quote: Option<char> = None;
+
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), '\\') => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            (Some(_), c) => current.push(c),
+            (None, '"' | '\'') => quote = Some(ch),
+            (None, c) if c.is_whitespace() => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            (None, '\\') => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            (None, c) => current.push(c),
+        }
+    }
+
+    if let Some(q) = quote {
+        anyhow::bail!("unterminated quoted argument starting with {q}");
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    Ok(args)
 }
 
 fn dispatch_handoff_command(input: &str, store_path: &std::path::Path) -> Result<()> {
@@ -1670,5 +1811,24 @@ mod tests {
         assert!(route.mutates_workflow);
         assert_eq!(route.risk_level, "medium");
         assert!(route.equivalent_command.contains(&"handoff".to_string()));
+    }
+
+    #[test]
+    fn parse_repl_args_preserves_quoted_product_decision_fields() {
+        let args = parse_repl_args(
+            "--workflow wf_1 --title \"Serve operators first\" --rationale 'Repeated workflow pain'",
+        )
+        .unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "--workflow",
+                "wf_1",
+                "--title",
+                "Serve operators first",
+                "--rationale",
+                "Repeated workflow pain"
+            ]
+        );
     }
 }

@@ -45,7 +45,7 @@ use forge_core::registry::{
 };
 use forge_core::request::{
     cancel_request, heartbeat_request, list_requests, load_request_status, recover_stale_request,
-    resume_async_request, start_async_request, switch_request_executor,
+    resume_async_request, start_async_request, switch_request_executor, RequestExecutorSwitchInput,
 };
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
@@ -65,7 +65,7 @@ use forge_core::workflow::{
     inspect_creative_artifact, inspect_creative_collaboration, list_creative_artifacts,
     patch_workflow_token, record_creative_collaboration_event, resolve_workflow_tokens,
     set_workflow_token_collection, update_workflow_goal, validate_child_subflow_binding,
-    CreativeCollaborationEventRequest,
+    CreativeCollaborationEventRequest, ProductDecisionInput,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -631,6 +631,26 @@ enum WorkflowCommands {
         #[arg(long)]
         value: String,
         #[arg(long)]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Decision {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        rationale: String,
+        #[arg(long, default_value = "human")]
+        author: String,
+        #[arg(long = "affected-goal")]
+        affected_goals: Vec<String>,
+        #[arg(long = "affected-task")]
+        affected_tasks: Vec<String>,
+        #[arg(long = "affected-artifact")]
+        affected_artifacts: Vec<String>,
+        #[arg(long, default_value = "forge_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -1941,6 +1961,34 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(0)
             }
+            WorkflowCommands::Decision {
+                workflow,
+                title,
+                rationale,
+                author,
+                affected_goals,
+                affected_tasks,
+                affected_artifacts,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = forge_core::workflow::record_product_decision(
+                    &store,
+                    &workflow,
+                    ProductDecisionInput {
+                        title,
+                        rationale,
+                        author,
+                        affected_goals,
+                        affected_tasks,
+                        affected_artifacts,
+                        origin,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
         },
         Commands::Task { command } => match command {
             TaskCommands::Handoff {
@@ -2105,13 +2153,15 @@ fn run() -> Result<i32> {
                 let report = switch_request_executor(
                     &store,
                     &run_id,
-                    &executor,
-                    &fallback_executors,
-                    &summary,
-                    ttl_seconds,
-                    pid,
-                    &origin,
-                    &reason,
+                    RequestExecutorSwitchInput {
+                        executor,
+                        fallback_executors,
+                        summary,
+                        ttl_seconds,
+                        pid,
+                        origin,
+                        reason,
+                    },
                 )?;
                 print_response(output, &report)?;
                 Ok(0)

@@ -57,6 +57,68 @@ pub struct AttachedArtifact {
     pub bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ProductDecisionReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub decision_id: String,
+    pub revision: u64,
+    pub decision: crate::graph::ProductDecision,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProductDecisionInput {
+    pub title: String,
+    pub rationale: String,
+    pub author: String,
+    pub affected_goals: Vec<String>,
+    pub affected_tasks: Vec<String>,
+    pub affected_artifacts: Vec<String>,
+    pub origin: String,
+}
+
+pub fn record_product_decision(
+    store: &ForgeStore,
+    workflow_id: &str,
+    input: ProductDecisionInput,
+) -> Result<ProductDecisionReport> {
+    let mut workflow = store.load_workflow(workflow_id)?;
+    let decision_id = format!("dec_{}", Uuid::new_v4().to_string().replace('-', ""));
+    let revision = push_revision(
+        &mut workflow.revisions,
+        &input.origin,
+        "product_decision_recorded",
+        &format!("recorded product decision: {}", input.title),
+    );
+    let decision = crate::graph::ProductDecision {
+        id: decision_id.clone(),
+        title: input.title,
+        rationale: input.rationale,
+        author: input.author,
+        status: "approved".to_string(), // default to approved for now as per human-guided requirement
+        revision,
+        created_at: Utc::now(),
+        affected_goals: input.affected_goals,
+        affected_tasks: input.affected_tasks,
+        affected_artifacts: input.affected_artifacts,
+    };
+    workflow.product_decisions.push(decision.clone());
+    store.save_workflow(&workflow)?;
+    store.record_event(
+        workflow_id,
+        "product_decision_recorded",
+        &serde_json::to_value(&decision)?,
+    )?;
+
+    Ok(ProductDecisionReport {
+        status: "product_decision_recorded".to_string(),
+        workflow_id: workflow_id.to_string(),
+        decision_id,
+        revision,
+        decision,
+    })
+}
+
 pub fn update_workflow_goal(
     store: &ForgeStore,
     workflow_id: &str,

@@ -9,7 +9,7 @@ pub const SKILL_MD: &str = r#"---
 name: forge-core
 description: Use Forge Core to run autonomous or mixed AI/non-AI workflows with goal-oriented DAGs, executor/runtime sync, mutable goals/artifacts, validation gates, persistence, rework loops, and controlled self-improvement.
 license: MIT
-compatibility: codex, opencode
+compatibility: codex, opencode, gemini
 metadata:
   runtime: rust
   cli: forge
@@ -22,11 +22,11 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 ## Required Workflow
 
 1. Run `forge plan --goal "<human objective>" --output json`.
-2. For skill-style use, prefer `forge request start --goal "<objective>" --origin codex|opencode|skill --output json` and return the `run_id` to the caller.
+2. For skill-style use, prefer `forge request start --goal "<objective>" --origin codex|opencode|gemini|skill --output json` and return the `run_id` to the caller.
 3. Run `forge sync all --home "$HOME" --output json` when executor or runtime availability may have changed.
 4. Inspect the generated atomic tasks, task goals, subtasks, impediments, async policy and validation rules.
-5. Use `forge workflow update-goal ... --origin codex|opencode|forge_cli|skill` when the human changes direction during execution.
-6. Use `forge workflow attach-artifact ... --origin codex|opencode|forge_cli|skill` when new artifacts appear during execution.
+5. Use `forge workflow update-goal ... --origin codex|opencode|gemini|forge_cli|skill` when the human changes direction during execution.
+6. Use `forge workflow attach-artifact ... --origin codex|opencode|gemini|forge_cli|skill` when new artifacts appear during execution.
 7. Use `forge context --workflow <id> --task <task-id> --budget <bytes> --strict --output json` before giving an agent task-specific context.
 8. Run `forge validate --workflow <id> --output json` before promotion. If `rework_tasks` is not empty, return those tasks to work.
 9. Run `forge improve --workflow <id> --target-version <version> --output json` only to generate a controlled experiment and changelog. Do not auto-promote without benchmark and validation evidence.

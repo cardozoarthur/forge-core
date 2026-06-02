@@ -23,7 +23,7 @@ use crate::registry::{
 };
 use crate::request::{
     cancel_request, heartbeat_request, list_requests, load_request_status, recover_stale_request,
-    resume_async_request, start_async_request, switch_request_executor,
+    resume_async_request, start_async_request, switch_request_executor, RequestExecutorSwitchInput,
 };
 use crate::schedule::{
     aggregate_summary, build_schedule_worker_status, create_daily_goal_research_workflow,
@@ -1438,19 +1438,19 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(switch_request_executor(
                 store,
                 &input.run_id,
-                &input.executor,
-                &input.fallback_executors,
-                input
-                    .summary
-                    .as_deref()
-                    .unwrap_or("executor hot swap through MCP"),
-                input.ttl_seconds.unwrap_or(300),
-                input.pid,
-                &origin,
-                input
-                    .reason
-                    .as_deref()
-                    .unwrap_or("executor limit or availability changed"),
+                RequestExecutorSwitchInput {
+                    executor: input.executor,
+                    fallback_executors: input.fallback_executors,
+                    summary: input
+                        .summary
+                        .unwrap_or_else(|| "executor hot swap through MCP".to_string()),
+                    ttl_seconds: input.ttl_seconds.unwrap_or(300),
+                    pid: input.pid,
+                    origin,
+                    reason: input
+                        .reason
+                        .unwrap_or_else(|| "executor limit or availability changed".to_string()),
+                },
             )?)?
         }
         "forge.run.recover_stale" => {

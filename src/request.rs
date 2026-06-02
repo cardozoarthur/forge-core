@@ -54,9 +54,34 @@ pub struct RequestStartReport {
     pub origin: String,
     #[serde(rename = "async")]
     pub async_run: bool,
+    pub flow_resolution: FlowResolutionReport,
     pub handoff_contract: AgentHandoffContract,
     pub reuse_candidates: Vec<WorkflowReuseCandidate>,
     pub attached_subflows: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FlowResolutionReport {
+    pub schema_version: String,
+    pub searched_existing_flows: bool,
+    pub decision: String,
+    pub decision_summary: String,
+    pub candidate_count: usize,
+    pub attachable_candidate_count: usize,
+    pub attached_subflow_count: usize,
+    pub reused_workflow_ids: Vec<String>,
+    pub selected_existing_workflow_id: Option<String>,
+    pub created_workflow_id: String,
+    pub self_evolution_is_default: bool,
+    pub policy: FlowResolutionPolicy,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FlowResolutionPolicy {
+    pub reuse_existing_subflows_by_default: bool,
+    pub create_new_flow_only_when_needed: bool,
+    pub self_run_evolution_is_ordinary_flow: bool,
+    pub preserve_user_requested_flow_scope: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -186,6 +211,17 @@ pub struct ExecutorSwitchContinuityPolicy {
     pub user_directives_remain_authoritative: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct RequestExecutorSwitchInput {
+    pub executor: String,
+    pub fallback_executors: Vec<String>,
+    pub summary: String,
+    pub ttl_seconds: u64,
+    pub pid: Option<u32>,
+    pub origin: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RunRecoveryRecommendation {
     pub schema_version: String,
@@ -203,6 +239,7 @@ pub struct AgentHandoffContract {
     pub run_id: String,
     pub workflow_id: String,
     pub origin: String,
+    pub flow_resolution: FlowResolutionReport,
     pub policy: AgentHandoffPolicy,
     pub allowed_context: AgentAllowedContext,
     pub validation_rules: Vec<String>,
@@ -286,6 +323,103 @@ struct ValidationCommandArtifact {
     status: String,
 }
 
+pub fn start_pm_session(
+    store: &ForgeStore,
+    objective: &str,
+    origin: &str,
+) -> Result<RequestStartReport> {
+    let mut intent = parse_intent(objective);
+    intent.goal = format!("PM Session: {}", intent.goal);
+    let mut workflow = create_workflow(intent);
+
+    // Customize workflow for PM session
+    workflow.tasks = vec![
+        crate::graph::task(
+            "pm-001",
+            "Clarify challenge and users",
+            &[],
+            &["objective"],
+            vec![],
+            "User and Challenge matrix",
+            (crate::graph::ExecutorKind::Ai, 0.01),
+        ),
+        crate::graph::task(
+            "pm-002",
+            "Identify constraints and risks",
+            &["pm-001"],
+            &["User and Challenge matrix"],
+            vec![],
+            "Constraint and Risk log",
+            (crate::graph::ExecutorKind::Ai, 0.01),
+        ),
+        crate::graph::task(
+            "pm-003",
+            "Define success metrics and trade-offs",
+            &["pm-002"],
+            &["Constraint and Risk log"],
+            vec![],
+            "Success Metric dashboard",
+            (crate::graph::ExecutorKind::Ai, 0.01),
+        ),
+        crate::graph::task(
+            "pm-004",
+            "Define MVP boundaries and validation strategy",
+            &["pm-003"],
+            &["Success Metric dashboard"],
+            vec![],
+            "MVP Roadmap",
+            (crate::graph::ExecutorKind::Ai, 0.01),
+        ),
+        crate::graph::task(
+            "pm-005",
+            "Generate Product Decision artifacts",
+            &["pm-004"],
+            &["MVP Roadmap"],
+            vec![],
+            "Product Decision records",
+            (crate::graph::ExecutorKind::Command, 0.001),
+        ),
+        crate::graph::task(
+            "pm-006",
+            "Convert decisions into executable backlog",
+            &["pm-005"],
+            &["Product Decision records"],
+            vec![],
+            "Execution Backlog",
+            (crate::graph::ExecutorKind::Ai, 0.02),
+        ),
+    ];
+
+    let reuse_candidates = Vec::new(); // PM sessions are unique
+    let attached_subflows = 0;
+    let flow_resolution =
+        build_flow_resolution_report(&workflow, &reuse_candidates, attached_subflows);
+    let run = create_run_record(&workflow, origin, "accepted");
+    store.save_workflow(&workflow)?;
+    save_run_record(store, &run)?;
+    store.record_event(
+        &workflow.id,
+        "pm_session_started",
+        &serde_json::json!({
+            "run": run,
+            "objective": objective,
+        }),
+    )?;
+    let handoff_contract = build_agent_handoff_contract(&run, flow_resolution.clone());
+    Ok(RequestStartReport {
+        status: run.status,
+        run_id: run.run_id,
+        workflow_id: run.workflow_id,
+        goal: run.goal,
+        origin: run.origin,
+        async_run: run.async_run,
+        flow_resolution,
+        handoff_contract,
+        reuse_candidates,
+        attached_subflows,
+    })
+}
+
 pub fn start_async_request(
     store: &ForgeStore,
     goal: &str,
@@ -295,15 +429,20 @@ pub fn start_async_request(
     let reuse_candidates = find_reuse_candidates(store, &workflow)?;
     let attached_subflows =
         attach_reuse_candidates_as_child_subflows(&mut workflow, &reuse_candidates);
+    let flow_resolution =
+        build_flow_resolution_report(&workflow, &reuse_candidates, attached_subflows);
     let run = create_run_record(&workflow, origin, "accepted");
     store.save_workflow(&workflow)?;
     save_run_record(store, &run)?;
     store.record_event(
         &workflow.id,
         "async_request_started",
-        &serde_json::to_value(&run)?,
+        &serde_json::json!({
+            "run": run,
+            "flow_resolution": flow_resolution,
+        }),
     )?;
-    let handoff_contract = build_agent_handoff_contract(&run);
+    let handoff_contract = build_agent_handoff_contract(&run, flow_resolution.clone());
     Ok(RequestStartReport {
         status: run.status,
         run_id: run.run_id,
@@ -311,10 +450,70 @@ pub fn start_async_request(
         goal: run.goal,
         origin: run.origin,
         async_run: run.async_run,
+        flow_resolution,
         handoff_contract,
         reuse_candidates,
         attached_subflows,
     })
+}
+
+fn build_flow_resolution_report(
+    workflow: &Workflow,
+    reuse_candidates: &[WorkflowReuseCandidate],
+    attached_subflows: usize,
+) -> FlowResolutionReport {
+    let attachable_candidate_count = reuse_candidates
+        .iter()
+        .filter(|candidate| candidate.attachable_as_child_subflow)
+        .count();
+    let mut reused_workflow_ids = Vec::new();
+    for candidate in reuse_candidates
+        .iter()
+        .filter(|candidate| candidate.attachable_as_child_subflow)
+    {
+        if !reused_workflow_ids.contains(&candidate.candidate_workflow_id) {
+            reused_workflow_ids.push(candidate.candidate_workflow_id.clone());
+        }
+    }
+
+    let decision = if attached_subflows > 0 {
+        "create_new_flow_with_reused_child_subflows"
+    } else if reuse_candidates.is_empty() {
+        "create_new_flow"
+    } else {
+        "create_new_flow_without_attachable_reuse"
+    };
+    let decision_summary = match decision {
+        "create_new_flow_with_reused_child_subflows" => format!(
+            "Forge searched existing flows, created a request-specific workflow, and attached {attached_subflows} reusable child subflow(s)."
+        ),
+        "create_new_flow_without_attachable_reuse" => format!(
+            "Forge searched existing flows and found {} candidate(s), but none were attachable under lifecycle and validation policy; a new workflow was created.",
+            reuse_candidates.len()
+        ),
+        _ => "Forge searched existing flows and found no reusable match; a new workflow was created."
+            .to_string(),
+    };
+
+    FlowResolutionReport {
+        schema_version: "forge.flow_resolution.v1".to_string(),
+        searched_existing_flows: true,
+        decision: decision.to_string(),
+        decision_summary,
+        candidate_count: reuse_candidates.len(),
+        attachable_candidate_count,
+        attached_subflow_count: attached_subflows,
+        reused_workflow_ids,
+        selected_existing_workflow_id: None,
+        created_workflow_id: workflow.id.clone(),
+        self_evolution_is_default: false,
+        policy: FlowResolutionPolicy {
+            reuse_existing_subflows_by_default: true,
+            create_new_flow_only_when_needed: true,
+            self_run_evolution_is_ordinary_flow: true,
+            preserve_user_requested_flow_scope: true,
+        },
+    }
 }
 
 pub fn create_run_record(workflow: &Workflow, origin: &str, status: &str) -> RunRecord {
@@ -430,13 +629,7 @@ pub fn heartbeat_request(
 pub fn switch_request_executor(
     store: &ForgeStore,
     run_id: &str,
-    executor: &str,
-    fallback_executors: &[String],
-    summary: &str,
-    ttl_seconds: u64,
-    pid: Option<u32>,
-    origin: &str,
-    reason: &str,
+    input: RequestExecutorSwitchInput,
 ) -> Result<RequestExecutorSwitchReport> {
     let mut run = load_run_record(store, run_id)?;
     let previous_status = run.status.clone();
@@ -444,9 +637,10 @@ pub fn switch_request_executor(
     let previous_pid = run.executor_pid;
     let previous_heartbeat_at = run.last_heartbeat_at;
     let switched_at = Utc::now();
-    let ttl_seconds = ttl_seconds.max(1);
+    let ttl_seconds = input.ttl_seconds.max(1);
     let expires_at = switched_at + Duration::seconds(ttl_seconds.min(i64::MAX as u64) as i64);
-    let fallback_executors = normalize_executor_fallbacks(executor, fallback_executors);
+    let fallback_executors =
+        normalize_executor_fallbacks(&input.executor, &input.fallback_executors);
     let continuity_policy = ExecutorSwitchContinuityPolicy {
         preserve_run_id: true,
         preserve_workflow_id: true,
@@ -458,22 +652,22 @@ pub fn switch_request_executor(
     let executor_switch = ExecutorSwitchRecord {
         schema_version: "forge.executor_switch.v1".to_string(),
         from_executor: previous_executor.clone(),
-        to_executor: executor.to_string(),
+        to_executor: input.executor.clone(),
         from_pid: previous_pid,
-        to_pid: pid,
+        to_pid: input.pid,
         fallback_executors: fallback_executors.clone(),
         previous_heartbeat_at,
         switched_at,
-        origin: origin.to_string(),
-        reason: reason.to_string(),
-        summary: summary.to_string(),
+        origin: input.origin.clone(),
+        reason: input.reason.clone(),
+        summary: input.summary.clone(),
         continuity_policy,
     };
 
     run.status = "running".to_string();
-    run.active_executor = Some(executor.to_string());
-    run.executor_pid = pid;
-    run.progress_summary = Some(summary.to_string());
+    run.active_executor = Some(input.executor.clone());
+    run.executor_pid = input.pid;
+    run.progress_summary = Some(input.summary.clone());
     run.last_heartbeat_at = Some(switched_at);
     run.heartbeat_expires_at = Some(expires_at);
     run.heartbeat_ttl_seconds = Some(ttl_seconds);
@@ -498,16 +692,16 @@ pub fn switch_request_executor(
             "schema_version": "forge.request_executor_switch.v1",
             "run_id": run.run_id,
             "workflow_id": run.workflow_id,
-            "origin": origin,
+            "origin": input.origin.clone(),
             "previous_status": previous_status,
             "new_status": run.status,
             "previous_executor": previous_executor,
-            "new_executor": executor,
+            "new_executor": input.executor.clone(),
             "fallback_executors": fallback_executors,
             "previous_pid": previous_pid,
-            "new_pid": pid,
-            "summary": summary,
-            "reason": reason,
+            "new_pid": input.pid,
+            "summary": input.summary.clone(),
+            "reason": input.reason.clone(),
             "switched_at": switched_at,
             "heartbeat_expires_at": expires_at,
             "heartbeat_ttl_seconds": ttl_seconds,
@@ -521,9 +715,9 @@ pub fn switch_request_executor(
         run_id: run.run_id,
         workflow_id: run.workflow_id,
         previous_status,
-        origin: origin.to_string(),
+        origin: input.origin,
         previous_executor,
-        new_executor: executor.to_string(),
+        new_executor: input.executor,
         fallback_executors,
         activity,
         executor_switch,
@@ -928,12 +1122,16 @@ pub fn recover_stale_request(
     })
 }
 
-fn build_agent_handoff_contract(run: &RunRecord) -> AgentHandoffContract {
+fn build_agent_handoff_contract(
+    run: &RunRecord,
+    flow_resolution: FlowResolutionReport,
+) -> AgentHandoffContract {
     AgentHandoffContract {
         schema_version: "forge.agent_handoff_contract.v1".to_string(),
         run_id: run.run_id.clone(),
         workflow_id: run.workflow_id.clone(),
         origin: run.origin.clone(),
+        flow_resolution,
         policy: AgentHandoffPolicy {
             execution_authority: "forge".to_string(),
             async_run: true,
@@ -965,6 +1163,8 @@ fn build_agent_handoff_contract(run: &RunRecord) -> AgentHandoffContract {
             "validate-before-promotion".to_string(),
             "mutations-must-be-revisioned".to_string(),
             "artifacts-must-be-content-addressed".to_string(),
+            "existing-flows-and-subflows-must-be-checked-before-new-workflow-execution".to_string(),
+            "self-run-evolution-is-a-normal-flow-not-the-default-flow-resolution".to_string(),
             "executor-policy-must-allow-local-executor".to_string(),
             "explicit-user-directives-outrank-autonomous-executor-preferences".to_string(),
             "executor-switch-must-preserve-run-workflow-checkpoints-and-artifacts".to_string(),

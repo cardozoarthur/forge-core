@@ -4,6 +4,8 @@ use forge_core::storage::ForgeStore;
 use rusqlite::Connection;
 use serde_json::Value;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use tempfile::tempdir;
 
@@ -18,6 +20,15 @@ fn setup_test_workflow(store: &ForgeStore) -> String {
 
 fn forge() -> Command {
     Command::cargo_bin("forge").expect("forge binary should build")
+}
+
+#[cfg(unix)]
+fn write_fake_executor(bin_dir: &Path, name: &str, body: &str) {
+    let executor_path = bin_dir.join(name);
+    fs::write(&executor_path, body).unwrap();
+    let mut perms = fs::metadata(&executor_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&executor_path, perms).unwrap();
 }
 
 #[test]
@@ -1228,6 +1239,95 @@ fn patch_plan_creates_bounded_diff_review_artifact_without_mutating_files() {
             .as_str()
             .unwrap()
             .contains("attached-patch_plan-")));
+}
+
+#[test]
+fn workflow_decision_records_revisioned_product_state() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Shape a marketplace workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "decision",
+            "--workflow",
+            workflow_id,
+            "--title",
+            "Serve operators first",
+            "--rationale",
+            "Operators have the strongest repeated workflow pain",
+            "--author",
+            "human",
+            "--affected-goal",
+            "goal:marketplace-workflow",
+            "--affected-task",
+            "task-001",
+            "--origin",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "product_decision_recorded");
+    assert_eq!(json["workflow_id"], workflow_id);
+    assert!(json["decision_id"].as_str().unwrap().starts_with("dec_"));
+    assert_eq!(json["revision"], 1);
+    assert_eq!(json["decision"]["title"], "Serve operators first");
+    assert_eq!(
+        json["decision"]["rationale"],
+        "Operators have the strongest repeated workflow pain"
+    );
+    assert_eq!(json["decision"]["author"], "human");
+    assert_eq!(
+        json["decision"]["affected_goals"],
+        serde_json::json!(["goal:marketplace-workflow"])
+    );
+    assert_eq!(
+        json["decision"]["affected_tasks"],
+        serde_json::json!(["task-001"])
+    );
+
+    let listed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "list",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listed_json: Value = serde_json::from_slice(&listed).unwrap();
+    assert_eq!(listed_json["workflows"][0]["product_decision_count"], 1);
 }
 
 #[test]
@@ -8141,6 +8241,115 @@ fn self_run_dry_run_creates_bounded_self_evolution_workflow_and_artifacts() {
 }
 
 #[test]
+fn self_run_defaults_to_opencode_gemini_codex_order() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2999-01-01T00:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["executors"],
+        serde_json::json!(["opencode", "gemini", "codex"])
+    );
+    assert_eq!(
+        json["executor_fallbacks"],
+        serde_json::json!(["gemini", "codex"])
+    );
+}
+
+#[test]
+fn self_run_falls_back_to_gemini_before_codex_if_previous_executor_fails() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let status = std::process::Command::new("git")
+        .arg("init")
+        .arg(&repo)
+        .status()
+        .expect("git init should succeed");
+    assert!(status.success());
+    fs::write(repo.join("README.md"), "# repo\n").unwrap();
+
+    let executors_dir = temp.path().join("bin");
+    fs::create_dir_all(&executors_dir).unwrap();
+
+    write_fake_executor(&executors_dir, "opencode", "#!/bin/sh\nexit 1\n");
+    write_fake_executor(
+        &executors_dir,
+        "gemini",
+        "#!/bin/sh\nprintf 'ok from gemini'\nexit 0\n",
+    );
+    write_fake_executor(&executors_dir, "codex", "#!/bin/sh\nexit 0\n");
+
+    let old_path = std::env::var("PATH").unwrap_or_else(|_| "".to_string());
+    let path = format!("{}:{}", executors_dir.display(), old_path);
+
+    let output = forge()
+        .env("PATH", path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2999-01-01T00:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--validation-command",
+            "true",
+            "--skip-self-update",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let cycle_report = &json["cycle_reports"][0];
+    assert_eq!(cycle_report["requested_executor"], "opencode");
+    assert_eq!(cycle_report["executor"], "gemini");
+    assert_eq!(
+        cycle_report["executor_fallbacks"],
+        serde_json::json!(["gemini", "codex"])
+    );
+    let attempts = cycle_report["executor_attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["executor"], "opencode");
+    assert_eq!(attempts[0]["status"], "failed");
+    assert_eq!(attempts[1]["executor"], "gemini");
+    assert_eq!(attempts[1]["status"], "completed");
+}
+
+#[test]
 fn self_run_prompt_packet_is_versioned_and_checksummed_for_executor_replay() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -8916,6 +9125,25 @@ fn request_start_returns_async_run_identifier_for_skill_callers() {
     assert_eq!(json["async"], true);
     assert!(json["run_id"].as_str().unwrap().starts_with("run_"));
     assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
+    assert_eq!(json["flow_resolution"]["searched_existing_flows"], true);
+    assert_eq!(json["flow_resolution"]["decision"], "create_new_flow");
+    assert_eq!(json["flow_resolution"]["candidate_count"], 0);
+    assert_eq!(json["flow_resolution"]["attached_subflow_count"], 0);
+    assert_eq!(json["flow_resolution"]["self_evolution_is_default"], false);
+    assert_eq!(
+        json["flow_resolution"]["policy"]["self_run_evolution_is_ordinary_flow"],
+        true
+    );
+    assert_eq!(
+        json["handoff_contract"]["flow_resolution"]["decision"],
+        "create_new_flow"
+    );
+    assert!(json["handoff_contract"]["validation_rules"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "existing-flows-and-subflows-must-be-checked-before-new-workflow-execution"
+        )));
 
     forge()
         .args([
@@ -10669,6 +10897,23 @@ fn request_start_reuses_compatible_subflows_before_persisting_async_workflow() {
     let second_workflow_id = started_json["workflow_id"].as_str().unwrap();
     assert_eq!(started_json["status"], "accepted");
     assert_eq!(started_json["attached_subflows"], 1);
+    assert_eq!(
+        started_json["flow_resolution"]["decision"],
+        "create_new_flow_with_reused_child_subflows"
+    );
+    assert_eq!(
+        started_json["flow_resolution"]["searched_existing_flows"],
+        true
+    );
+    assert_eq!(started_json["flow_resolution"]["attached_subflow_count"], 1);
+    assert_eq!(
+        started_json["flow_resolution"]["reused_workflow_ids"],
+        serde_json::json!([first_workflow_id])
+    );
+    assert_eq!(
+        started_json["handoff_contract"]["flow_resolution"]["reused_workflow_ids"],
+        serde_json::json!([first_workflow_id])
+    );
     assert_eq!(
         started_json["reuse_candidates"][0]["candidate_workflow_id"],
         first_workflow_id
@@ -17667,6 +17912,7 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     assert!(text.contains("Scheduled workflows"));
     assert!(text.contains("Paused/idle workflows"));
     assert!(text.contains("Recent artifacts"));
+    assert!(text.contains("Product decisions"));
     assert!(text.contains("Pending approvals"));
     assert!(text.contains("Validation failures"));
     assert!(text.contains("Executor availability"));
@@ -17679,6 +17925,8 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     assert!(text.contains("/status"));
     assert!(text.contains("/workflows"));
     assert!(text.contains("/context"));
+    assert!(text.contains("/pm"));
+    assert!(text.contains("/decision"));
 }
 
 #[test]
@@ -17896,6 +18144,8 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         "/workers",
         "/context",
         "/handoff",
+        "/pm",
+        "/decision",
         "/exit",
         "/quit",
     ] {
@@ -17938,6 +18188,22 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         .as_array()
         .unwrap()
         .contains(&Value::String("handoff".to_string())));
+
+    let pm = find_slash_command(&json, "/pm");
+    assert_eq!(pm["risk_level"], "medium");
+    assert_eq!(pm["mutates_workflow"], true);
+    assert!(pm["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("interactive".to_string())));
+
+    let decision = find_slash_command(&json, "/decision");
+    assert_eq!(decision["risk_level"], "medium");
+    assert_eq!(decision["mutates_workflow"], true);
+    assert!(decision["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("decision".to_string())));
 }
 
 #[test]

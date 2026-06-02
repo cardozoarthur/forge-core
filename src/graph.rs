@@ -370,6 +370,23 @@ pub struct WorkflowRevision {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProductDecision {
+    pub id: String,
+    pub title: String,
+    pub rationale: String,
+    pub author: String,
+    pub status: String, // proposed, approved, rejected, obsolete
+    pub revision: u64,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub affected_goals: Vec<String>,
+    #[serde(default)]
+    pub affected_tasks: Vec<String>,
+    #[serde(default)]
+    pub affected_artifacts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workflow {
     pub id: String,
     pub goal: String,
@@ -387,6 +404,8 @@ pub struct Workflow {
     pub token_collection: Option<ir::TokenCollection>,
     #[serde(default)]
     pub revisions: Vec<WorkflowRevision>,
+    #[serde(default)]
+    pub product_decisions: Vec<ProductDecision>,
 }
 
 pub fn create_workflow(intent: IntentSpec) -> Workflow {
@@ -404,6 +423,7 @@ pub fn create_workflow(intent: IntentSpec) -> Workflow {
         creative_artifacts: Vec::new(),
         token_collection: None,
         revisions: Vec::new(),
+        product_decisions: Vec::new(),
     }
 }
 
@@ -459,16 +479,16 @@ fn human_decision_schema_version() -> String {
     "forge.human_decision.v1".to_string()
 }
 
-fn task(
+pub fn task(
     id: &str,
     title: &str,
     dependencies: &[&str],
     context_requirements: &[&str],
     validation_rules: Vec<ValidationRule>,
     expected_output: &str,
-    execution: (ExecutorKind, f64),
+    executor: (ExecutorKind, f64),
 ) -> AtomicTask {
-    let (executor, estimated_cost_usd) = execution;
+    let (executor, estimated_cost_usd) = executor;
     let work_item = work_item(id, title, dependencies, &validation_rules);
     let execution_policy = default_execution_policy(&executor);
     AtomicTask {
@@ -1863,6 +1883,8 @@ fn detect_loop_kind(goal: &str) -> Option<String> {
         || lower.contains("infinite_recurring_subflow")
         || lower.contains("infinite-recurring")
         || lower.contains("recurring subflow")
+        || lower.contains("improve forge core autonomously")
+        || lower.contains("self-evolution")
     {
         Some("infinite_recurring_subflow".to_string())
     } else {
