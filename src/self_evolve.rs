@@ -3045,16 +3045,80 @@ fn has_changes(repo: &Path) -> Result<bool> {
 
 fn commit_changes(repo: &Path, cycle: u32) -> Result<Option<String>> {
     run_git(repo, &["add", "."])?;
-    run_git(
-        repo,
-        &[
-            "commit",
-            "-m",
-            &format!("chore: forge self evolution cycle {cycle}"),
-        ],
-    )?;
+    let staged_status = run_git(repo, &["diff", "--cached", "--name-status"])?;
+    let (subject, body) = semantic_self_evolution_commit_message(cycle, &staged_status);
+    run_git(repo, &["commit", "-m", &subject, "-m", &body])?;
     let commit = run_git(repo, &["rev-parse", "--short", "HEAD"])?;
     Ok(Some(commit.trim().to_string()))
+}
+
+fn semantic_self_evolution_commit_message(cycle: u32, staged_status: &str) -> (String, String) {
+    let mut has_self_evolution = false;
+    let mut has_executor_policy = false;
+    let mut has_cli = false;
+    let mut has_tests = false;
+    let mut has_reports = false;
+    let mut changed_files = Vec::new();
+
+    for line in staged_status
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let path = line
+            .split_whitespace()
+            .last()
+            .unwrap_or(line)
+            .trim()
+            .to_string();
+        has_self_evolution |= path.contains("self_evolve");
+        has_executor_policy |= path.contains("executor")
+            || path.contains("quota")
+            || line.contains("executor_policy")
+            || line.contains("quota_policy");
+        has_cli |=
+            path.ends_with("main.rs") || path.contains("interactive") || path.contains("tui");
+        has_tests |= path.contains("test") || path.ends_with("_test.rs");
+        has_reports |= path.contains("artifact")
+            || path.contains("report")
+            || path.ends_with(".md")
+            || path.contains("CHANGELOG");
+        changed_files.push(path);
+    }
+
+    let subject = if has_executor_policy {
+        "feat: add quota-aware executor reporting".to_string()
+    } else if has_self_evolution {
+        "fix: strengthen self-evolution cycle governance".to_string()
+    } else if has_cli {
+        "feat: improve Forge product CLI workflow".to_string()
+    } else if has_reports {
+        "docs: improve self-evolution reporting artifacts".to_string()
+    } else if has_tests {
+        "test: cover Forge self-evolution behavior".to_string()
+    } else {
+        "chore: update Forge runtime behavior".to_string()
+    };
+
+    let changed_summary = if changed_files.is_empty() {
+        "Changed files: not available from staged diff.".to_string()
+    } else {
+        format!("Changed files: {}.", changed_files.join(", "))
+    };
+    let validation_summary =
+        "Validation: cargo fmt --check, cargo clippy --all-targets --all-features -- -D warnings, cargo test, and cargo build --release were required before this commit.";
+    let impact = if has_executor_policy {
+        "v0.5 impact: makes executor/model decisions easier to audit under quota, cost, quality and fallback constraints."
+    } else if has_self_evolution {
+        "v0.5 impact: improves the recurring self-evolution workflow so validated increments carry clearer lineage and governance."
+    } else if has_cli {
+        "v0.5 impact: moves Forge toward a stronger product/PM command surface for human-guided workflow creation."
+    } else {
+        "v0.5 impact: keeps Forge's runtime evolution tied to validated product and business outcomes."
+    };
+    let body = format!("Cycle: {cycle}\n{validation_summary}\n{changed_summary}\n{impact}");
+
+    (subject, body)
 }
 
 fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -3599,6 +3663,30 @@ mod tests {
         ];
         let resolved = executor_fallback_chain_for_requested("gemini", &executors, &[]);
         assert_eq!(resolved, vec!["opencode", "codex"]);
+    }
+
+    #[test]
+    fn test_self_evolution_commit_message_is_semantic_for_executor_policy() {
+        let (subject, body) = semantic_self_evolution_commit_message(
+            4,
+            "M\tsrc/executor.rs\nM\tsrc/self_evolve.rs\n",
+        );
+
+        assert_eq!(subject, "feat: add quota-aware executor reporting");
+        assert!(!subject.contains("cycle 4"));
+        assert!(body.contains("Cycle: 4"));
+        assert!(body.contains("Validation: cargo fmt --check"));
+        assert!(body.contains("v0.5 impact"));
+        assert!(body.contains("src/executor.rs"));
+    }
+
+    #[test]
+    fn test_self_evolution_commit_message_rejects_generic_cycle_subject() {
+        let (subject, body) = semantic_self_evolution_commit_message(7, "M\tsrc/self_evolve.rs\n");
+
+        assert_eq!(subject, "fix: strengthen self-evolution cycle governance");
+        assert_ne!(subject, "chore: forge self evolution cycle 7");
+        assert!(body.contains("clearer lineage and governance"));
     }
 
     #[test]

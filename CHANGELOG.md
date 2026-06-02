@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.174 - 2026-06-02
+
+### Changed
+
+- Self-evolution commits now generate semantic, behavior-specific subjects instead of generic `chore: forge self evolution cycle N` messages.
+- Commit bodies now include the cycle id, required validation summary, changed-file summary and v0.5 impact statement.
+- Added unit coverage preventing regression to generic cycle-number-only commit subjects.
+
+### Validation
+
+- Targeted coverage passed for `cargo test self_evolution_commit_message`.
+- Full required validation for this cycle is recorded in `docs/reports/forge-core-v0.4.174-report-2026-06-02.md`.
+
+### Safety
+
+- The change is scoped to Forge Core self-evolution commit publication behavior, tests, version metadata and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should make native scheduled GitHub/Telegram publication AI-assisted with persisted Markdown report metadata and delivery evidence.
+
 ## 0.4.173 - 2026-06-02
 
 ### Changed
