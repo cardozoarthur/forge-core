@@ -8624,6 +8624,10 @@ fn self_run_reports_quota_aware_executor_policy_for_cycle() {
         "maximize useful progress under expected value, quota, cost, latency, quality and fallback risk constraints"
     );
     assert_eq!(
+        policy["quota_decision_summary"],
+        "spend_non_local_quota_for_high_value_self_evolution"
+    );
+    assert_eq!(
         policy["requested_chain"],
         serde_json::json!(["opencode", "gemini", "codex"])
     );
@@ -8871,6 +8875,9 @@ fn self_run_persists_markdown_executor_policy_report_for_human_review() {
     assert!(markdown.contains(
         "- Business reasoning: Stronger non-local reasoning is worth scarce quota for self-evolution cycles where decision quality materially changes product or business outcome."
     ));
+    assert!(
+        markdown.contains("- Quota decision: spend_non_local_quota_for_high_value_self_evolution")
+    );
     assert!(markdown.contains("## Quota assumptions"));
     assert!(markdown.contains("- Gemini and Codex are non-local quota-bound capabilities."));
     assert!(markdown.contains(
@@ -8963,6 +8970,10 @@ fn request_status_surfaces_latest_self_evolution_executor_policy_summary() {
     assert_eq!(
         policy["selected_candidate"]["local_vs_non_local"],
         "non_local"
+    );
+    assert_eq!(
+        policy["quota_decision_summary"],
+        "spend_non_local_quota_for_high_value_self_evolution"
     );
     assert!(policy["fallback_order"]
         .as_array()

@@ -166,6 +166,7 @@ pub struct SelfExecutorPolicyReport {
     pub skipped_to_preserve_quota: Vec<String>,
     pub quota_assumptions: Vec<String>,
     pub business_reasoning_summary: String,
+    pub quota_decision_summary: String,
     pub repair_goals: Vec<String>,
     pub active_repair_status: String,
 }
@@ -1808,6 +1809,10 @@ fn render_cycle_markdown_report(report: &SelfCycleReport) -> String {
         "- Business reasoning: {}\n",
         markdown_cell(&report.executor_policy.business_reasoning_summary)
     ));
+    output.push_str(&format!(
+        "- Quota decision: {}\n",
+        markdown_cell(&report.executor_policy.quota_decision_summary)
+    ));
     if let Some(selected) = &report.executor_policy.selected_candidate {
         output.push_str(&format!(
             "- Selected quota-aware candidate: {} / {} / {} / {} / tier {} / {}\n",
@@ -2204,6 +2209,8 @@ fn build_executor_policy(
     } else {
         "stable".to_string()
     };
+    let quota_decision_summary =
+        quota_decision_summary(selected_candidate.as_ref(), &active_repair_status);
 
     if has_timeout_failure {
         repair_goals.push("Urgent: Fix interactive timeout in primary executor chain.".to_string());
@@ -2254,8 +2261,29 @@ fn build_executor_policy(
         skipped_to_preserve_quota,
         quota_assumptions,
         business_reasoning_summary,
+        quota_decision_summary,
         repair_goals,
         active_repair_status,
+    }
+}
+
+fn quota_decision_summary(
+    selected_candidate: Option<&SelfExecutorSelectedCandidate>,
+    active_repair_status: &str,
+) -> String {
+    if active_repair_status != "stable" {
+        return "repair_executor_policy_before_spending_quota".to_string();
+    }
+
+    match selected_candidate {
+        Some(candidate) if candidate.local_vs_non_local == "non_local" => {
+            "spend_non_local_quota_for_high_value_self_evolution".to_string()
+        }
+        Some(candidate) if candidate.local_vs_non_local == "local" => {
+            "preserve_non_local_quota_use_local_execution".to_string()
+        }
+        Some(_) => "use_selected_quota_aware_candidate".to_string(),
+        None => "no_eligible_executor_preserve_quota".to_string(),
     }
 }
 

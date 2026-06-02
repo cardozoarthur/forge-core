@@ -308,6 +308,7 @@ pub struct RequestExecutorPolicySummary {
     pub requested_executor: String,
     pub selected_executor: String,
     pub active_repair_status: String,
+    pub quota_decision_summary: String,
     pub selected_candidate: Option<RequestExecutorPolicyCandidateSummary>,
     pub fallback_order: Vec<RequestExecutorPolicyCandidateSummary>,
     pub quota_preservation: Vec<String>,
@@ -360,6 +361,7 @@ struct SelfEvolutionCycleArtifact {
 #[derive(Debug, Deserialize)]
 struct SelfEvolutionExecutorPolicyArtifact {
     active_repair_status: String,
+    quota_decision_summary: String,
     selected_candidate: Option<SelfEvolutionSelectedExecutorArtifact>,
     fallback_order: Vec<RequestExecutorPolicyCandidateSummary>,
     skipped_to_preserve_quota: Vec<String>,
@@ -1333,6 +1335,7 @@ fn load_latest_executor_policy_summary(
         requested_executor: payload.requested_executor,
         selected_executor: payload.executor,
         active_repair_status: policy.active_repair_status,
+        quota_decision_summary: policy.quota_decision_summary,
         selected_candidate: policy.selected_candidate.map(Into::into),
         fallback_order: policy.fallback_order,
         quota_preservation: policy.skipped_to_preserve_quota,
