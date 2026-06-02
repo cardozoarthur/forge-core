@@ -102,6 +102,11 @@ pub struct SelfExecutorAttempt {
     pub local: bool,
     pub quota_model: String,
     pub cost_model: String,
+    pub remaining_quota: String,
+    pub rate_limit_risk: String,
+    pub monetary_or_token_cost: String,
+    pub expected_quality: String,
+    pub fallback_risk: String,
     pub selection_tier: u32,
     pub status: String,
     pub reason: String,
@@ -123,6 +128,11 @@ struct SelfExecutorStrategy {
     local: bool,
     quota_model: String,
     cost_model: String,
+    remaining_quota: String,
+    rate_limit_risk: String,
+    monetary_or_token_cost: String,
+    expected_quality: String,
+    fallback_risk: String,
     selection_tier: u32,
     reason: String,
 }
@@ -131,6 +141,7 @@ struct SelfExecutorStrategy {
 pub struct SelfExecutorPolicyReport {
     pub schema_version: String,
     pub selection_principle: String,
+    pub decision_factors: Vec<String>,
     pub requested_chain: Vec<String>,
     pub candidates: Vec<SelfExecutorPolicyCandidate>,
     pub skipped_to_preserve_quota: Vec<String>,
@@ -1581,6 +1592,11 @@ fn select_executor_strategies(
             local: candidate.local_vs_non_local == "local",
             quota_model: candidate.quota_model,
             cost_model: candidate.free_vs_paid_if_known,
+            remaining_quota: candidate.remaining_quota,
+            rate_limit_risk: candidate.rate_limit_risk,
+            monetary_or_token_cost: candidate.monetary_or_token_cost,
+            expected_quality: candidate.expected_quality,
+            fallback_risk: candidate.fallback_risk,
             selection_tier: candidate.selection_tier,
             reason: candidate.reason,
         })
@@ -1663,6 +1679,20 @@ fn build_executor_policy(
         selection_principle:
             "maximize useful progress under expected value, quota, cost, latency, quality and fallback risk constraints"
                 .to_string(),
+        decision_factors: vec![
+            "provider".to_string(),
+            "model".to_string(),
+            "local_vs_non_local".to_string(),
+            "free_vs_paid_if_known".to_string(),
+            "remaining_quota_if_available".to_string(),
+            "rate_limit_risk".to_string(),
+            "monetary_or_token_cost".to_string(),
+            "latency".to_string(),
+            "expected_quality".to_string(),
+            "suitability_for_product_business_reasoning".to_string(),
+            "fallback_risk".to_string(),
+            "non_interactive_requirement".to_string(),
+        ],
         requested_chain,
         candidates,
         skipped_to_preserve_quota: vec![
@@ -1862,6 +1892,11 @@ fn execute_cycle_with_fallback(
                     local: strategy.local,
                     quota_model: strategy.quota_model.clone(),
                     cost_model: strategy.cost_model.clone(),
+                    remaining_quota: strategy.remaining_quota.clone(),
+                    rate_limit_risk: strategy.rate_limit_risk.clone(),
+                    monetary_or_token_cost: strategy.monetary_or_token_cost.clone(),
+                    expected_quality: strategy.expected_quality.clone(),
+                    fallback_risk: strategy.fallback_risk.clone(),
                     selection_tier: strategy.selection_tier,
                     status: "completed".to_string(),
                     reason: strategy.reason.clone(),
@@ -1883,6 +1918,11 @@ fn execute_cycle_with_fallback(
                     local: strategy.local,
                     quota_model: strategy.quota_model.clone(),
                     cost_model: strategy.cost_model.clone(),
+                    remaining_quota: strategy.remaining_quota.clone(),
+                    rate_limit_risk: strategy.rate_limit_risk.clone(),
+                    monetary_or_token_cost: strategy.monetary_or_token_cost.clone(),
+                    expected_quality: strategy.expected_quality.clone(),
+                    fallback_risk: strategy.fallback_risk.clone(),
                     selection_tier: strategy.selection_tier,
                     status: "failed".to_string(),
                     reason: strategy.reason.clone(),
@@ -2794,9 +2834,40 @@ mod tests {
         );
         assert!(policy.selection_principle.contains("expected value"));
         assert!(policy
+            .decision_factors
+            .iter()
+            .any(|factor| factor == "remaining_quota_if_available"));
+        assert!(policy
+            .decision_factors
+            .iter()
+            .any(|factor| factor == "monetary_or_token_cost"));
+        assert!(policy
             .skipped_to_preserve_quota
             .iter()
             .any(|entry| entry.contains("low-value")));
+    }
+
+    #[test]
+    fn test_executor_strategy_preserves_quota_cost_fields_for_attempt_reports() {
+        let strategies = select_executor_strategies(
+            "codex",
+            &["opencode".to_string(), "gemini".to_string()],
+            &[],
+        );
+
+        let opencode = strategies
+            .iter()
+            .find(|strategy| strategy.executor == "opencode" && !strategy.local)
+            .unwrap();
+
+        assert_eq!(opencode.remaining_quota, "unknown_until_provider_probe");
+        assert_eq!(opencode.rate_limit_risk, "medium");
+        assert_eq!(
+            opencode.monetary_or_token_cost,
+            "provider_configured_or_unknown"
+        );
+        assert!(opencode.expected_quality.contains("high"));
+        assert!(opencode.fallback_risk.contains("provider auth"));
     }
 
     #[test]
@@ -2838,6 +2909,11 @@ mod tests {
                 local: false,
                 quota_model: "quota_bound".to_string(),
                 cost_model: "paid".to_string(),
+                remaining_quota: "unknown_until_gemini_probe".to_string(),
+                rate_limit_risk: "medium".to_string(),
+                monetary_or_token_cost: "quota_or_paid_usage_if_configured".to_string(),
+                expected_quality: "high".to_string(),
+                fallback_risk: "interactive auth/model prompt".to_string(),
                 selection_tier: 20,
                 status: "failed".to_string(),
                 reason: "interactive timeout".to_string(),
