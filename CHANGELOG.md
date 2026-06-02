@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.170 - 2026-06-02
+
+### Changed
+
+- `forge request status` now projects the latest self-evolution executor policy summary from the workflow's cycle report artifact.
+- The status payload exposes the selected executor/model candidate, fallback order, active repair status, quota-preservation rules and repair goals without requiring operators to open the full cycle JSON.
+- Agent handoff status polling now advertises `latest_executor_policy`, making quota-aware OpenCode/Gemini/Codex/local decisions visible from the normal run status contract.
+
+### Validation
+
+- RED observed first with `cargo test request_status_surfaces_latest_self_evolution_executor_policy_summary --test forge_cli_contract`: `latest_executor_policy` was missing from `forge request status`.
+- Targeted GREEN passed for `cargo test request_status_surfaces_latest_self_evolution_executor_policy_summary --test forge_cli_contract`.
+- Full required validation for this cycle is recorded in `docs/reports/forge-core-v0.4.170-report-2026-06-02.md`.
+
+### Safety
+
+- The change is scoped to Forge Core request status reporting, self-evolution artifact projection, tests, version metadata and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should attach concrete validation gates and remediation commands to OpenCode/Gemini non-interactive repair tasks.
+
 ## 0.4.169 - 2026-06-02
 
 ### Changed

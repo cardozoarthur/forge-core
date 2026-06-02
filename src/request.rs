@@ -107,6 +107,7 @@ pub struct RequestStatusReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_executor_switch: Option<ExecutorSwitchRecord>,
     pub handoff_summary: ContextHandoffSummary,
+    pub latest_executor_policy: Option<RequestExecutorPolicySummary>,
     pub latest_validation_evidence: Option<ValidationEvidenceSummary>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -298,6 +299,31 @@ pub struct ValidationEvidenceSummary {
     pub command_summary: ValidationCommandSummary,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestExecutorPolicySummary {
+    pub schema_version: String,
+    pub artifact_path: String,
+    pub artifact_sha256: String,
+    pub cycle: u32,
+    pub requested_executor: String,
+    pub selected_executor: String,
+    pub active_repair_status: String,
+    pub selected_candidate: Option<RequestExecutorPolicyCandidateSummary>,
+    pub fallback_order: Vec<RequestExecutorPolicyCandidateSummary>,
+    pub quota_preservation: Vec<String>,
+    pub repair_goals: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestExecutorPolicyCandidateSummary {
+    pub executor: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub local_vs_non_local: String,
+    pub selection_tier: u32,
+    pub selection_status: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ValidationCommandSummary {
     pub total: usize,
@@ -321,6 +347,46 @@ struct ValidationEvidenceArtifact {
 #[derive(Debug, Deserialize)]
 struct ValidationCommandArtifact {
     status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SelfEvolutionCycleArtifact {
+    cycle: u32,
+    requested_executor: String,
+    executor: String,
+    executor_policy: SelfEvolutionExecutorPolicyArtifact,
+}
+
+#[derive(Debug, Deserialize)]
+struct SelfEvolutionExecutorPolicyArtifact {
+    active_repair_status: String,
+    selected_candidate: Option<SelfEvolutionSelectedExecutorArtifact>,
+    fallback_order: Vec<RequestExecutorPolicyCandidateSummary>,
+    skipped_to_preserve_quota: Vec<String>,
+    repair_goals: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SelfEvolutionSelectedExecutorArtifact {
+    executor: String,
+    provider: String,
+    model: Option<String>,
+    local_vs_non_local: String,
+    selection_tier: u32,
+    selection_status: String,
+}
+
+impl From<SelfEvolutionSelectedExecutorArtifact> for RequestExecutorPolicyCandidateSummary {
+    fn from(candidate: SelfEvolutionSelectedExecutorArtifact) -> Self {
+        Self {
+            executor: candidate.executor,
+            provider: candidate.provider,
+            model: candidate.model,
+            local_vs_non_local: candidate.local_vs_non_local,
+            selection_tier: candidate.selection_tier,
+            selection_status: candidate.selection_status,
+        }
+    }
 }
 
 pub fn start_pm_session(
@@ -866,6 +932,7 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
     let workflow = store.load_workflow(&run.workflow_id)?;
     let task_summary = summarize_tasks(&workflow);
     let latest_validation_evidence = load_latest_validation_evidence(store, &workflow.id)?;
+    let latest_executor_policy = load_latest_executor_policy_summary(store, &workflow.id)?;
     let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
     let latest_checkpoint = checkpoints.last().cloned();
     let handoff_summary =
@@ -895,6 +962,7 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
         executor_switch_count: run.executor_switches.len(),
         latest_executor_switch: run.executor_switches.last().cloned(),
         handoff_summary,
+        latest_executor_policy,
         latest_validation_evidence,
         created_at: run.created_at,
         updated_at: run.updated_at,
@@ -1186,6 +1254,7 @@ fn build_agent_handoff_contract(
                 "workflow_revision".to_string(),
                 "task_summary".to_string(),
                 "handoff_summary".to_string(),
+                "latest_executor_policy".to_string(),
                 "latest_validation_evidence".to_string(),
             ],
         },
@@ -1236,6 +1305,38 @@ fn load_latest_validation_evidence(
         cycle: payload.cycle,
         executor: payload.executor,
         command_summary: summarize_validation_commands(&payload.commands),
+    }))
+}
+
+fn load_latest_executor_policy_summary(
+    store: &ForgeStore,
+    workflow_id: &str,
+) -> Result<Option<RequestExecutorPolicySummary>> {
+    let artifacts = list_workflow_artifacts(&store.base_dir(), workflow_id)?;
+    let Some(artifact) = artifacts.into_iter().rev().find(|artifact| {
+        artifact.path.contains("/self-evolution-cycle-") && artifact.path.ends_with("-report.json")
+    }) else {
+        return Ok(None);
+    };
+
+    let bytes = fs::read(store.base_dir().join(&artifact.path))
+        .with_context(|| format!("failed to read self-evolution report {}", artifact.path))?;
+    let payload: SelfEvolutionCycleArtifact = serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to parse self-evolution report {}", artifact.path))?;
+    let policy = payload.executor_policy;
+
+    Ok(Some(RequestExecutorPolicySummary {
+        schema_version: "forge.request_executor_policy_summary.v1".to_string(),
+        artifact_path: artifact.path,
+        artifact_sha256: artifact.sha256,
+        cycle: payload.cycle,
+        requested_executor: payload.requested_executor,
+        selected_executor: payload.executor,
+        active_repair_status: policy.active_repair_status,
+        selected_candidate: policy.selected_candidate.map(Into::into),
+        fallback_order: policy.fallback_order,
+        quota_preservation: policy.skipped_to_preserve_quota,
+        repair_goals: policy.repair_goals,
     }))
 }
 

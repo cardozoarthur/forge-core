@@ -8878,6 +8878,105 @@ fn self_run_persists_markdown_executor_policy_report_for_human_review() {
 }
 
 #[test]
+fn request_status_surfaces_latest_self_evolution_executor_policy_summary() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("README.md"), "# Repo\n").unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2999-01-01T00:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--executor",
+            "opencode",
+            "--fallback-executor",
+            "gemini",
+            "--fallback-executor",
+            "codex",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let self_run: Value = serde_json::from_slice(&output).unwrap();
+    let run_id = self_run["run_id"].as_str().unwrap();
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    let policy = &status_json["latest_executor_policy"];
+    assert_eq!(
+        policy["schema_version"],
+        "forge.request_executor_policy_summary.v1"
+    );
+    assert_eq!(
+        policy["artifact_path"],
+        self_run["cycle_reports"][0]["report_path"]
+    );
+    assert_eq!(policy["cycle"], 1);
+    assert_eq!(policy["requested_executor"], "opencode");
+    assert_eq!(policy["selected_executor"], "opencode");
+    assert_eq!(policy["selected_candidate"]["provider"], "google");
+    assert_eq!(
+        policy["selected_candidate"]["model"],
+        "google/gemini-2.5-pro"
+    );
+    assert_eq!(
+        policy["selected_candidate"]["local_vs_non_local"],
+        "non_local"
+    );
+    assert!(policy["fallback_order"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate["executor"] == "codex"
+            && candidate["local_vs_non_local"] == "non_local"));
+    assert!(policy["quota_preservation"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item
+            .as_str()
+            .unwrap()
+            .contains("deterministic validation commands")));
+    assert!(policy["repair_goals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|goal| goal.as_str().unwrap().contains("Gemini non-interactive")));
+}
+
+#[test]
 fn self_run_prompt_packet_is_versioned_and_checksummed_for_executor_replay() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
