@@ -1276,6 +1276,14 @@ fn workflow_decision_records_revisioned_product_state() {
             "Serve operators first",
             "--rationale",
             "Operators have the strongest repeated workflow pain",
+            "--alternative",
+            "Serve platform admins first",
+            "--trade-off",
+            "Operator-first scope delays admin configuration polish",
+            "--success-metric",
+            "Operator time-to-first-workflow under 10 minutes",
+            "--backlog-mutation",
+            "Prioritize PM/TUI guided workflow creation backlog",
             "--author",
             "human",
             "--affected-goal",
@@ -1302,6 +1310,22 @@ fn workflow_decision_records_revisioned_product_state() {
     assert_eq!(
         json["decision"]["rationale"],
         "Operators have the strongest repeated workflow pain"
+    );
+    assert_eq!(
+        json["decision"]["alternatives"],
+        serde_json::json!(["Serve platform admins first"])
+    );
+    assert_eq!(
+        json["decision"]["trade_offs"],
+        serde_json::json!(["Operator-first scope delays admin configuration polish"])
+    );
+    assert_eq!(
+        json["decision"]["success_metrics"],
+        serde_json::json!(["Operator time-to-first-workflow under 10 minutes"])
+    );
+    assert_eq!(
+        json["decision"]["backlog_mutation"],
+        "Prioritize PM/TUI guided workflow creation backlog"
     );
     assert_eq!(json["decision"]["author"], "human");
     assert_eq!(
@@ -7717,6 +7741,33 @@ fn sync_persists_human_allowed_executor_policy() {
         .unwrap()
         .iter()
         .any(|factor| factor == "remaining_quota_if_available"));
+    let workload_routes = json["quota_policy"]["workload_routes"].as_array().unwrap();
+    let high_value_route = workload_routes
+        .iter()
+        .find(|route| route["workload_class"] == "high_value_pm_business_creative_reasoning")
+        .unwrap();
+    assert_eq!(
+        high_value_route["default_policy"],
+        "prefer_best_authorized_non_local_when_quota_value_is_justified"
+    );
+    assert!(high_value_route["quota_spend_rule"]
+        .as_str()
+        .unwrap()
+        .contains("product or business outcome"));
+    let deterministic_route = workload_routes
+        .iter()
+        .find(|route| {
+            route["workload_class"] == "deterministic_validation_file_inspection_reporting"
+        })
+        .unwrap();
+    assert_eq!(
+        deterministic_route["preferred_candidate"],
+        "command_node_or_opencode_local"
+    );
+    assert!(deterministic_route["quota_preservation_rule"]
+        .as_str()
+        .unwrap()
+        .contains("preserve Gemini/Codex/OpenCode non-local quota"));
     let policy_candidates = json["quota_policy"]["candidates"].as_array().unwrap();
     let codex_candidate = policy_candidates
         .iter()

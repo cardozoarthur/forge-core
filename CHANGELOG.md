@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.168 - 2026-06-02
+
+### Changed
+
+- `forge executors` quota policy now includes workload routes for high-value PM/business/creative reasoning, deterministic validation/reporting and privacy-sensitive or low-value repetitive work.
+- Executor policy output now explains when non-local quota should be spent for product value and when Forge should preserve Gemini/Codex/OpenCode non-local quota by using deterministic command nodes or local OpenCode/Ollama.
+- Product decision artifacts now capture alternatives, trade-offs, success metrics and backlog mutation through `forge workflow decision`, with legacy workflow loading protected by serde defaults.
+- Self-evolution next-goal decisions now persist the same richer product-decision fields so recurring loop choices carry rationale, alternatives and backlog impact.
+
+### Validation
+
+- Targeted coverage passed for `cargo test workflow_decision_records_revisioned_product_state`.
+- Targeted coverage passed for `cargo test sync_persists_human_allowed_executor_policy`.
+- Targeted coverage passed for `cargo test executor_report_surfaces_persisted_quota_observations`.
+- Full required validation for this cycle is recorded in `docs/reports/forge-core-v0.4.168-report-2026-06-02.md`.
+
+### Safety
+
+- The change is scoped to Forge Core executor policy reporting, product decision artifacts, self-evolution decision persistence, tests, version metadata and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should use these workload routes to drive concrete executor handoff selection and repair gates.
+
 ## 0.4.167 - 2026-06-02
 
 ### Changed

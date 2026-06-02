@@ -70,6 +70,10 @@ pub struct ProductDecisionReport {
 pub struct ProductDecisionInput {
     pub title: String,
     pub rationale: String,
+    pub alternatives: Vec<String>,
+    pub trade_offs: Vec<String>,
+    pub success_metrics: Vec<String>,
+    pub backlog_mutation: String,
     pub author: String,
     pub affected_goals: Vec<String>,
     pub affected_tasks: Vec<String>,
@@ -94,6 +98,10 @@ pub fn record_product_decision(
         id: decision_id.clone(),
         title: input.title,
         rationale: input.rationale,
+        alternatives: input.alternatives,
+        trade_offs: input.trade_offs,
+        success_metrics: input.success_metrics,
+        backlog_mutation: input.backlog_mutation,
         author: input.author,
         status: "approved".to_string(), // default to approved for now as per human-guided requirement
         revision,

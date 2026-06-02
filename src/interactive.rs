@@ -950,8 +950,8 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
         ),
         slash(
             "/decision",
-            "Decision",
-            "Record a durable product decision with rationale and impact trace. Use: /decision --workflow <id> --title \"...\" --rationale \"...\"",
+            "Product Decision",
+            "Record a durable product decision with rationale and impact trace. Use: /decision --workflow <id> --title \"...\" --rationale \"...\" [--alternative \"...\"] [--trade-off \"...\"] [--success-metric \"...\"] [--backlog-mutation \"...\"]",
             &["forge", "workflow", "decision", "--workflow", "<workflow-id>", "--title", "...", "--rationale", "..."],
             true,
             "medium",

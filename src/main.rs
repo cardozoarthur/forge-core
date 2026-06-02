@@ -642,6 +642,14 @@ enum WorkflowCommands {
         title: String,
         #[arg(long)]
         rationale: String,
+        #[arg(long = "alternative")]
+        alternatives: Vec<String>,
+        #[arg(long = "trade-off")]
+        trade_offs: Vec<String>,
+        #[arg(long = "success-metric")]
+        success_metrics: Vec<String>,
+        #[arg(long = "backlog-mutation", default_value = "none")]
+        backlog_mutation: String,
         #[arg(long, default_value = "human")]
         author: String,
         #[arg(long = "affected-goal")]
@@ -1965,6 +1973,10 @@ fn run() -> Result<i32> {
                 workflow,
                 title,
                 rationale,
+                alternatives,
+                trade_offs,
+                success_metrics,
+                backlog_mutation,
                 author,
                 affected_goals,
                 affected_tasks,
@@ -1979,6 +1991,10 @@ fn run() -> Result<i32> {
                     ProductDecisionInput {
                         title,
                         rationale,
+                        alternatives,
+                        trade_offs,
+                        success_metrics,
+                        backlog_mutation,
                         author,
                         affected_goals,
                         affected_tasks,

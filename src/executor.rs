@@ -63,10 +63,21 @@ pub struct ExecutorQuotaPolicyReport {
     pub schema_version: String,
     pub selection_principle: String,
     pub decision_factors: Vec<String>,
+    pub workload_routes: Vec<ExecutorQuotaWorkloadRoute>,
     pub observed_quota_evidence: Vec<ExecutorQuotaObservation>,
     pub candidates: Vec<ExecutorQuotaPolicyCandidate>,
     pub skipped_to_preserve_quota: Vec<String>,
     pub repair_goals: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutorQuotaWorkloadRoute {
+    pub workload_class: String,
+    pub default_policy: String,
+    pub preferred_candidate: String,
+    pub quota_spend_rule: String,
+    pub quota_preservation_rule: String,
+    pub business_reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -726,6 +737,7 @@ fn build_quota_policy(
             "product_business_suitability".to_string(),
             "fallback_risk".to_string(),
         ],
+        workload_routes: quota_workload_routes(),
         observed_quota_evidence: observations,
         candidates,
         skipped_to_preserve_quota: vec![
@@ -738,6 +750,51 @@ fn build_quota_policy(
             "Persist observed quota, rate-limit and cost evidence when executors report it so future selection can move from estimates to measurements.".to_string(),
         ],
     }
+}
+
+fn quota_workload_routes() -> Vec<ExecutorQuotaWorkloadRoute> {
+    vec![
+        ExecutorQuotaWorkloadRoute {
+            workload_class: "high_value_pm_business_creative_reasoning".to_string(),
+            default_policy: "prefer_best_authorized_non_local_when_quota_value_is_justified"
+                .to_string(),
+            preferred_candidate: "opencode_non_local_then_gemini_then_codex".to_string(),
+            quota_spend_rule:
+                "spend non-local quota when decision quality materially changes product or business outcome"
+                    .to_string(),
+            quota_preservation_rule:
+                "fall back when quota is low, rate-limit risk is high or provider readiness is unvalidated"
+                    .to_string(),
+            business_reason:
+                "stronger reasoning is worth scarce quota for product direction, trade-off analysis and creative leverage"
+                    .to_string(),
+        },
+        ExecutorQuotaWorkloadRoute {
+            workload_class: "deterministic_validation_file_inspection_reporting".to_string(),
+            default_policy: "prefer_no_ai_command_or_local_execution".to_string(),
+            preferred_candidate: "command_node_or_opencode_local".to_string(),
+            quota_spend_rule:
+                "avoid non-local model calls unless failures require high-value diagnosis".to_string(),
+            quota_preservation_rule:
+                "preserve Gemini/Codex/OpenCode non-local quota for reasoning that cannot be checked deterministically"
+                    .to_string(),
+            business_reason:
+                "keeps recurring validation cheap and repeatable while reserving quota for decisions with user value"
+                    .to_string(),
+        },
+        ExecutorQuotaWorkloadRoute {
+            workload_class: "privacy_sensitive_or_low_value_repetitive_work".to_string(),
+            default_policy: "prefer_local_model_when_quality_is_sufficient".to_string(),
+            preferred_candidate: "opencode_local_ollama".to_string(),
+            quota_spend_rule:
+                "use non-local quota only when local output quality blocks validated progress".to_string(),
+            quota_preservation_rule:
+                "local capacity is acceptable when latency, privacy or low expected value outweighs model quality"
+                    .to_string(),
+            business_reason:
+                "reduces operating cost and quota burn without blocking routine workflow progress".to_string(),
+        },
+    ]
 }
 
 #[allow(clippy::too_many_arguments)]

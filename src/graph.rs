@@ -374,6 +374,14 @@ pub struct ProductDecision {
     pub id: String,
     pub title: String,
     pub rationale: String,
+    #[serde(default)]
+    pub alternatives: Vec<String>,
+    #[serde(default)]
+    pub trade_offs: Vec<String>,
+    #[serde(default)]
+    pub success_metrics: Vec<String>,
+    #[serde(default)]
+    pub backlog_mutation: String,
     pub author: String,
     pub status: String, // proposed, approved, rejected, obsolete
     pub revision: u64,
