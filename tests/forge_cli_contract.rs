@@ -8551,6 +8551,63 @@ fn self_run_reports_quota_aware_executor_policy_for_cycle() {
         policy["requested_chain"],
         serde_json::json!(["opencode", "gemini", "codex"])
     );
+    assert_eq!(
+        policy["selected_candidate"],
+        serde_json::json!({
+            "executor": "opencode",
+            "provider": "google",
+            "model": "google/gemini-2.5-pro",
+            "local_vs_non_local": "non_local",
+            "selection_tier": 10,
+            "selection_status": "eligible",
+            "reason": "selected as first quota-aware candidate that is not blocked by prior timeout or configuration evidence"
+        })
+    );
+    assert_eq!(
+        policy["fallback_order"],
+        serde_json::json!([
+            {
+                "executor": "opencode",
+                "provider": "google",
+                "model": "google/gemini-2.5-pro",
+                "local_vs_non_local": "non_local",
+                "selection_tier": 10,
+                "selection_status": "eligible"
+            },
+            {
+                "executor": "gemini",
+                "provider": "google",
+                "model": "gemini-2.5-pro",
+                "local_vs_non_local": "non_local",
+                "selection_tier": 21,
+                "selection_status": "eligible"
+            },
+            {
+                "executor": "codex",
+                "provider": "openai",
+                "model": null,
+                "local_vs_non_local": "non_local",
+                "selection_tier": 32,
+                "selection_status": "eligible"
+            },
+            {
+                "executor": "opencode",
+                "provider": "configured_cli",
+                "model": null,
+                "local_vs_non_local": "non_local",
+                "selection_tier": 35,
+                "selection_status": "eligible"
+            },
+            {
+                "executor": "opencode",
+                "provider": "ollama",
+                "model": "ollama/qwen3:14b",
+                "local_vs_non_local": "local",
+                "selection_tier": 40,
+                "selection_status": "eligible"
+            }
+        ])
+    );
     let candidates = policy["candidates"].as_array().unwrap();
     let ordered: Vec<_> = candidates
         .iter()
@@ -8644,6 +8701,12 @@ fn self_run_persists_markdown_executor_policy_report_for_human_review() {
     let markdown = fs::read_to_string(temp.path().join(markdown_path)).unwrap();
     assert!(markdown.contains("# Forge self-evolution cycle 1"));
     assert!(markdown.contains("## Quota-aware executor policy"));
+    assert!(markdown.contains(
+        "- Selected quota-aware candidate: opencode / google / google/gemini-2.5-pro / non_local / tier 10 / eligible"
+    ));
+    assert!(markdown.contains(
+        "- Fallback order: opencode:google:google/gemini-2.5-pro:non_local:tier-10 -> gemini:google:gemini-2.5-pro:non_local:tier-21 -> codex:openai:default:non_local:tier-32 -> opencode:configured_cli:default:non_local:tier-35 -> opencode:ollama:ollama/qwen3:14b:local:tier-40"
+    ));
     assert!(markdown
         .contains("| Executor | Provider | Model | Locality | Quota | Cost | Status | Reason |"));
     assert!(markdown.contains("| opencode | google | google/gemini-2.5-pro | non_local |"));

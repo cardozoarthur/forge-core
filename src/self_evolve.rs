@@ -144,10 +144,33 @@ pub struct SelfExecutorPolicyReport {
     pub selection_principle: String,
     pub decision_factors: Vec<String>,
     pub requested_chain: Vec<String>,
+    pub selected_candidate: Option<SelfExecutorSelectedCandidate>,
+    pub fallback_order: Vec<SelfExecutorFallbackCandidate>,
     pub candidates: Vec<SelfExecutorPolicyCandidate>,
     pub skipped_to_preserve_quota: Vec<String>,
     pub repair_goals: Vec<String>,
     pub active_repair_status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SelfExecutorSelectedCandidate {
+    pub executor: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub local_vs_non_local: String,
+    pub selection_tier: u32,
+    pub selection_status: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SelfExecutorFallbackCandidate {
+    pub executor: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub local_vs_non_local: String,
+    pub selection_tier: u32,
+    pub selection_status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1553,6 +1576,37 @@ fn render_cycle_markdown_report(report: &SelfCycleReport) -> String {
         "- Repair status: {}\n\n",
         report.executor_policy.active_repair_status
     ));
+    if let Some(selected) = &report.executor_policy.selected_candidate {
+        output.push_str(&format!(
+            "- Selected quota-aware candidate: {} / {} / {} / {} / tier {} / {}\n",
+            markdown_cell(&selected.executor),
+            markdown_cell(&selected.provider),
+            markdown_cell(selected.model.as_deref().unwrap_or("default")),
+            markdown_cell(&selected.local_vs_non_local),
+            selected.selection_tier,
+            markdown_cell(&selected.selection_status),
+        ));
+    }
+    if !report.executor_policy.fallback_order.is_empty() {
+        let order = report
+            .executor_policy
+            .fallback_order
+            .iter()
+            .map(|candidate| {
+                format!(
+                    "{}:{}:{}:{}:tier-{}",
+                    markdown_cell(&candidate.executor),
+                    markdown_cell(&candidate.provider),
+                    markdown_cell(candidate.model.as_deref().unwrap_or("default")),
+                    markdown_cell(&candidate.local_vs_non_local),
+                    candidate.selection_tier,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        output.push_str(&format!("- Fallback order: {}\n", order));
+    }
+    output.push('\n');
     output
         .push_str("| Executor | Provider | Model | Locality | Quota | Cost | Status | Reason |\n");
     output.push_str("| --- | --- | --- | --- | --- | --- | --- | --- |\n");
@@ -1800,6 +1854,11 @@ fn build_executor_policy(
     }
 
     candidates.sort_by_key(|candidate| candidate.selection_tier);
+    let selected_candidate = selected_executor_candidate(&candidates);
+    let fallback_order = candidates
+        .iter()
+        .map(SelfExecutorFallbackCandidate::from)
+        .collect();
 
     let mut repair_goals = vec![
         "Gemini non-interactive repair: detect auth/model/approval prompts before handoff and create a repair goal instead of repeated timeouts.".to_string(),
@@ -1839,6 +1898,8 @@ fn build_executor_policy(
             "non_interactive_requirement".to_string(),
         ],
         requested_chain,
+        selected_candidate,
+        fallback_order,
         candidates,
         skipped_to_preserve_quota: vec![
             "Use deterministic validation commands directly instead of spending Gemini/Codex quota."
@@ -1849,6 +1910,41 @@ fn build_executor_policy(
         repair_goals,
         active_repair_status,
     }
+}
+
+impl From<&SelfExecutorPolicyCandidate> for SelfExecutorFallbackCandidate {
+    fn from(candidate: &SelfExecutorPolicyCandidate) -> Self {
+        Self {
+            executor: candidate.executor.clone(),
+            provider: candidate.provider.clone(),
+            model: candidate.model.clone(),
+            local_vs_non_local: candidate.local_vs_non_local.clone(),
+            selection_tier: candidate.selection_tier,
+            selection_status: candidate.selection_status.clone(),
+        }
+    }
+}
+
+fn selected_executor_candidate(
+    candidates: &[SelfExecutorPolicyCandidate],
+) -> Option<SelfExecutorSelectedCandidate> {
+    candidates
+        .iter()
+        .find(|candidate| {
+            !candidate.selection_status.starts_with("failed")
+                && !candidate.selection_status.starts_with("skipped")
+        })
+        .map(|candidate| SelfExecutorSelectedCandidate {
+            executor: candidate.executor.clone(),
+            provider: candidate.provider.clone(),
+            model: candidate.model.clone(),
+            local_vs_non_local: candidate.local_vs_non_local.clone(),
+            selection_tier: candidate.selection_tier,
+            selection_status: candidate.selection_status.clone(),
+            reason:
+                "selected as first quota-aware candidate that is not blocked by prior timeout or configuration evidence"
+                    .to_string(),
+        })
 }
 
 fn normalize_executor_chain(primary_executor: &str, fallback_executors: &[String]) -> Vec<String> {
