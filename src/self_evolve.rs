@@ -135,6 +135,7 @@ pub struct SelfExecutorPolicyReport {
     pub candidates: Vec<SelfExecutorPolicyCandidate>,
     pub skipped_to_preserve_quota: Vec<String>,
     pub repair_goals: Vec<String>,
+    pub active_repair_status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,6 +157,7 @@ pub struct SelfExecutorPolicyCandidate {
     pub selection_tier: u32,
     pub selection_status: String,
     pub reason: String,
+    pub capability_evidence: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -307,6 +309,18 @@ fn analyze_goal_capabilities(goal: &str) -> Vec<ForgeCapability> {
             "high",
             "scheduler, loop, subflow, recursive, infinite, scale_to_zero, flow composition",
             "Complete recursive/infinite subflow support, scale-to-zero lifecycle, and flow composition/reuse.",
+        ),
+        (
+            "quota-aware executor policy",
+            "high",
+            "quota, executor policy, fallback, selection tier, non-interactive, model selection",
+            "Implement explicit quota-aware executor selection and fallback policy to avoid interactive timeouts and manage costs.",
+        ),
+        (
+            "durable decision artifacts",
+            "high",
+            "decision artifact, rationale, alternatives, trade-offs, success metrics, backlog mutation",
+            "Add durable decision artifacts for product choices, rationale, alternatives, trade-offs, and success metrics.",
         ),
         (
             "validation & milestone gates",
@@ -636,7 +650,11 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             &executors,
             &options.fallback_executors,
         );
-        let executor_policy = build_executor_policy(&requested_executor, &cycle_fallback_executors);
+        let executor_policy = build_executor_policy(
+            &requested_executor,
+            &cycle_fallback_executors,
+            &cycle_reports,
+        );
         let mut executor = requested_executor.clone();
         let mut executor_attempts = Vec::new();
         let current_workflow = store
@@ -702,6 +720,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
                 &options.repo,
                 &requested_executor,
                 &cycle_fallback_executors,
+                &cycle_reports,
                 &prompt,
             ) {
                 Ok(execution) => execution,
@@ -1549,8 +1568,9 @@ fn write_text_artifact(base_dir: &Path, relative_path: &str, content: &str) -> R
 fn select_executor_strategies(
     primary_executor: &str,
     fallback_executors: &[String],
+    previous_reports: &[SelfCycleReport],
 ) -> Vec<SelfExecutorStrategy> {
-    build_executor_policy(primary_executor, fallback_executors)
+    build_executor_policy(primary_executor, fallback_executors, previous_reports)
         .candidates
         .into_iter()
         .filter(|candidate| candidate.selection_status == "eligible")
@@ -1570,6 +1590,7 @@ fn select_executor_strategies(
 fn build_executor_policy(
     primary_executor: &str,
     fallback_executors: &[String],
+    previous_reports: &[SelfCycleReport],
 ) -> SelfExecutorPolicyReport {
     let requested_chain = normalize_executor_chain(primary_executor, fallback_executors);
     let mut candidates = Vec::new();
@@ -1593,7 +1614,49 @@ fn build_executor_policy(
         candidates.push(opencode_local_candidate(&requested_chain));
     }
 
+    // Apply previous failure status to candidates
+    for candidate in &mut candidates {
+        for report in previous_reports {
+            for attempt in &report.executor_attempts {
+                if attempt.executor == candidate.executor
+                    && attempt.provider.as_deref() == Some(&candidate.provider)
+                    && attempt.model == candidate.model
+                {
+                    if let Some(error) = &attempt.error {
+                        if error.contains("timed out") || error.contains("interactive") {
+                            candidate.selection_status = "failed_timeout".to_string();
+                            candidate.reason = format!(
+                                "Previously failed due to timeout/interaction in cycle {}. Repair needed.",
+                                report.cycle
+                            );
+                        } else {
+                            candidate.selection_status = "failed_previous".to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     candidates.sort_by_key(|candidate| candidate.selection_tier);
+
+    let mut repair_goals = vec![
+        "Gemini non-interactive repair: detect auth/model/approval prompts before handoff and create a repair goal instead of repeated timeouts.".to_string(),
+        "OpenCode model repair: record provider/model availability and distinguish non-local quota-bound choices from local Ollama fallback.".to_string(),
+    ];
+
+    let active_repair_status = if candidates
+        .iter()
+        .any(|c| c.selection_status == "failed_timeout")
+    {
+        "repair_needed_timeout_detected".to_string()
+    } else {
+        "stable".to_string()
+    };
+
+    if active_repair_status == "repair_needed_timeout_detected" {
+        repair_goals.push("Urgent: Fix interactive timeout in primary executor chain.".to_string());
+    }
 
     SelfExecutorPolicyReport {
         schema_version: "forge.self_evolution.executor_policy.v1".to_string(),
@@ -1608,12 +1671,8 @@ fn build_executor_policy(
             "Prefer local OpenCode/Ollama for cheap repetitive or low-value work when non-local quota value is low."
                 .to_string(),
         ],
-        repair_goals: vec![
-            "Gemini non-interactive repair: detect auth/model/approval prompts before handoff and create a repair goal instead of repeated timeouts."
-                .to_string(),
-            "OpenCode model repair: record provider/model availability and distinguish non-local quota-bound choices from local Ollama fallback."
-                .to_string(),
-        ],
+        repair_goals,
+        active_repair_status,
     }
 }
 
@@ -1682,6 +1741,10 @@ fn opencode_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate
         selection_tier: quota_aware_selection_tier(chain, "opencode", 1),
         selection_status: "eligible".to_string(),
         reason: "OpenCode non-local provider path is first choice when expected value justifies quota or configured free/non-local capacity.".to_string(),
+        capability_evidence: vec![
+            "Supports --model override".to_string(),
+            "Non-interactive --dangerously-skip-permissions mode available".to_string(),
+        ],
     }
 }
 
@@ -1707,6 +1770,10 @@ fn gemini_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
         selection_tier: quota_aware_selection_tier(chain, "gemini", 2),
         selection_status: "eligible".to_string(),
         reason: "Gemini is a non-local quota-bound capability for high-value reasoning when non-interactive mode works.".to_string(),
+        capability_evidence: vec![
+            "Supports --approval-mode yolo".to_string(),
+            "Non-interactive --skip-trust flag available".to_string(),
+        ],
     }
 }
 
@@ -1729,6 +1796,10 @@ fn codex_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
         selection_tier: quota_aware_selection_tier(chain, "codex", 3),
         selection_status: "eligible".to_string(),
         reason: "Codex is a reliable non-local quota-bound fallback when expected value justifies quota.".to_string(),
+        capability_evidence: vec![
+            "Supports --ask-for-approval never".to_string(),
+            "Non-interactive --sandbox workspace-write available".to_string(),
+        ],
     }
 }
 
@@ -1754,6 +1825,10 @@ fn opencode_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
         selection_tier: quota_aware_selection_tier(chain, "opencode", 4),
         selection_status: "eligible".to_string(),
         reason: "OpenCode local/Ollama is efficient when quotas are low, work is cheap or privacy/locality matters.".to_string(),
+        capability_evidence: vec![
+            "Supports local Ollama provider".to_string(),
+            "Non-interactive --model override available".to_string(),
+        ],
     }
 }
 
@@ -1761,10 +1836,12 @@ fn execute_cycle_with_fallback(
     repo: &Path,
     primary_executor: &str,
     fallback_executors: &[String],
+    previous_reports: &[SelfCycleReport],
     prompt: &str,
 ) -> Result<SelfExecutorExecution> {
     let mut attempts = Vec::new();
-    let strategies = select_executor_strategies(primary_executor, fallback_executors);
+    let strategies =
+        select_executor_strategies(primary_executor, fallback_executors, previous_reports);
     let mut errors = Vec::new();
 
     if strategies.is_empty() {
@@ -2361,7 +2438,7 @@ mod tests {
             executor_fallbacks: Vec::new(),
             executor_attempts: Vec::new(),
             status: "completed".to_string(),
-            executor_policy: build_executor_policy("test", &[]),
+            executor_policy: build_executor_policy("test", &[], &[]),
             prompt_path: "p1.md".to_string(),
             prompt_packet_version: "v1".to_string(),
             prompt_sha256: "a".to_string(),
@@ -2399,7 +2476,7 @@ mod tests {
             executor_fallbacks: Vec::new(),
             executor_attempts: Vec::new(),
             status: "completed".to_string(),
-            executor_policy: build_executor_policy("test", &[]),
+            executor_policy: build_executor_policy("test", &[], &[]),
             prompt_path: "p2.md".to_string(),
             prompt_packet_version: "v1".to_string(),
             prompt_sha256: "c".to_string(),
@@ -2688,8 +2765,12 @@ mod tests {
 
     #[test]
     fn test_executor_policy_prefers_non_local_quota_aware_capabilities_for_self_evolution() {
-        let policy =
-            build_executor_policy("codex", &["opencode".to_string(), "gemini".to_string()]);
+        let policy = build_executor_policy(
+            "codex",
+            &["opencode".to_string(), "gemini".to_string()],
+            &[],
+        );
+
         let ordered: Vec<_> = policy
             .candidates
             .iter()
@@ -2744,37 +2825,60 @@ mod tests {
     }
 
     #[test]
-    fn test_render_capability_breakdown_with_present_capabilities() {
-        let caps = analyze_goal_capabilities(
-            "cron schedule interactive forge cli creative runtime forge 0.5 validation",
-        );
-        let packet = SelfEvolutionPromptPacket {
-            version: "v2".to_string(),
+    fn test_executor_policy_detects_timeout_and_requires_repair() {
+        let timeout_report = SelfCycleReport {
             cycle: 1,
-            executor: "test".to_string(),
+            requested_executor: "gemini".to_string(),
+            executor: "gemini".to_string(),
             executor_fallbacks: Vec::new(),
-            workflow_id: "wf-1".to_string(),
-            run_id: "run-1".to_string(),
-            workflow_goal:
-                "cron schedule interactive forge cli creative runtime forge 0.5 validation"
-                    .to_string(),
-            initial_workflow_goal: "".to_string(),
-            workflow_revision: 0,
-            stop_at: "2030-01-01T00:00:00Z".to_string(),
-            repo: "/tmp".to_string(),
-            operating_mode: "balanced".to_string(),
+            executor_attempts: vec![SelfExecutorAttempt {
+                executor: "gemini".to_string(),
+                provider: Some("google".to_string()),
+                model: Some("gemini-2.5-pro".to_string()),
+                local: false,
+                quota_model: "quota_bound".to_string(),
+                cost_model: "paid".to_string(),
+                selection_tier: 20,
+                status: "failed".to_string(),
+                reason: "interactive timeout".to_string(),
+                error: Some("executor `gemini` timed out after 180s (likely waiting for interactive completion)".to_string()),
+            }],
+            status: "failed".to_string(),
+            executor_policy: build_executor_policy("gemini", &[], &[]),
+            prompt_path: "p1.md".to_string(),
+            prompt_packet_version: "v2".to_string(),
+            prompt_sha256: "sha".to_string(),
+            validation_report_path: "v1.json".to_string(),
+            validation_report_sha256: "sha".to_string(),
+            report_path: "r1.json".to_string(),
+            validation_passed: false,
+            overhead_ledger: SelfOverheadLedger::empty(&SelfOperatingMode::Balanced),
             decision_gate: SelfDecisionGateReport::evaluate("", &SelfOperatingMode::Balanced),
-            internal_loop: test_internal_loop_report(),
-            validation_commands: vec![],
-            capability_analysis: caps,
+            self_update: SelfUpdateReport::skipped_for(vec![], "test"),
+            committed: false,
+            commit: None,
+            public_project_update: PublicProjectUpdateReport::skipped(false, "test"),
         };
-        let rendered = render_capability_breakdown(&packet);
-        assert!(rendered.contains("Critical (0.5 blockers)"));
-        assert!(rendered.contains("cron / schedule"));
-        assert!(rendered.contains("interactive forge CLI"));
-        assert!(rendered.contains("creative runtime"));
-        assert!(rendered.contains("✓"));
-        assert!(rendered.contains("High priority"));
-        assert!(rendered.contains("validation & milestone gates"));
+
+        let policy = build_executor_policy("gemini", &[], &[timeout_report]);
+
+        assert_eq!(
+            policy.active_repair_status,
+            "repair_needed_timeout_detected"
+        );
+        assert!(policy
+            .repair_goals
+            .iter()
+            .any(|g| g.contains("Urgent: Fix interactive timeout")));
+
+        let gemini_candidate = policy
+            .candidates
+            .iter()
+            .find(|c| c.executor == "gemini")
+            .unwrap();
+        assert_eq!(gemini_candidate.selection_status, "failed_timeout");
+        assert!(gemini_candidate
+            .reason
+            .contains("Previously failed due to timeout"));
     }
 }

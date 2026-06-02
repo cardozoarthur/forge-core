@@ -48,6 +48,38 @@ pub struct ExecutorSyncReport {
     pub usable: Vec<String>,
     pub executors: Vec<ExecutorState>,
     pub integrations: Vec<ExecutorIntegration>,
+    pub quota_policy: ExecutorQuotaPolicyReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutorQuotaPolicyReport {
+    pub schema_version: String,
+    pub selection_principle: String,
+    pub decision_factors: Vec<String>,
+    pub candidates: Vec<ExecutorQuotaPolicyCandidate>,
+    pub skipped_to_preserve_quota: Vec<String>,
+    pub repair_goals: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutorQuotaPolicyCandidate {
+    pub executor: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub local_vs_non_local: String,
+    pub free_vs_paid_if_known: String,
+    pub quota_model: String,
+    pub remaining_quota: String,
+    pub rate_limit_risk: String,
+    pub cost_model: String,
+    pub latency: String,
+    pub expected_quality: String,
+    pub product_business_suitability: String,
+    pub fallback_risk: String,
+    pub selection_tier: u32,
+    pub selection_status: String,
+    pub reason: String,
+    pub evidence: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +169,7 @@ fn build_report(
             && executor.decision_source == "pending_human_approval"
     });
     let integrations = build_integrations(&executors);
+    let quota_policy = build_quota_policy(&executors);
 
     ExecutorSyncReport {
         status: status.to_string(),
@@ -145,6 +178,7 @@ fn build_report(
         usable,
         executors,
         integrations,
+        quota_policy,
     }
 }
 
@@ -352,6 +386,166 @@ fn build_integrations(executors: &[ExecutorState]) -> Vec<ExecutorIntegration> {
                 .to_string()
         },
     }]
+}
+
+fn build_quota_policy(executors: &[ExecutorState]) -> ExecutorQuotaPolicyReport {
+    let mut candidates = vec![
+        quota_candidate(
+            executors,
+            "opencode",
+            "configured_cli",
+            None,
+            "non_local",
+            "unknown",
+            "quota_or_provider_bound",
+            "unknown",
+            "medium",
+            "provider_config_dependent",
+            "medium",
+            "medium_high",
+            "good_for_product_and_code_when_configured",
+            "medium",
+            10,
+            "OpenCode non-local provider path is preferred when authorized and expected value justifies provider quota or configured no-cost capacity.",
+        ),
+        quota_candidate(
+            executors,
+            "gemini",
+            "google",
+            None,
+            "non_local",
+            "quota_bound",
+            "quota_bound",
+            "unknown",
+            "medium_high",
+            "quota_or_paid",
+            "medium",
+            "high",
+            "strong_for_product_business_reasoning_when_non_interactive",
+            "medium_high",
+            20,
+            "Gemini is a non-local quota-bound capability; use it for high-value reasoning when non-interactive auth and model selection are validated.",
+        ),
+        quota_candidate(
+            executors,
+            "codex",
+            "openai",
+            None,
+            "non_local",
+            "quota_bound",
+            "quota_bound",
+            "unknown",
+            "medium",
+            "quota_or_paid",
+            "medium",
+            "high",
+            "strong_for_product_business_reasoning_and_code_when_quota_value_is_justified",
+            "low",
+            30,
+            "Codex is an authorized non-local quota-bound fallback when expected value justifies consuming quota.",
+        ),
+        quota_candidate(
+            executors,
+            "ollama",
+            "local_runtime",
+            Some("configured_local_model".to_string()),
+            "local",
+            "local_resource_cost",
+            "local_capacity_bound",
+            "local_capacity",
+            "low",
+            "local_compute",
+            "low",
+            "medium",
+            "efficient_for_repetitive_low_value_or_privacy_sensitive_work",
+            "medium",
+            40,
+            "Local Ollama models are efficient when quota should be preserved, work is repetitive, privacy matters or expected value does not justify non-local quota.",
+        ),
+    ];
+    candidates.sort_by_key(|candidate| candidate.selection_tier);
+
+    ExecutorQuotaPolicyReport {
+        schema_version: "forge.executor_quota_policy.v1".to_string(),
+        selection_principle:
+            "maximize useful progress under expected value, quota, cost, latency, quality and fallback risk constraints"
+                .to_string(),
+        decision_factors: vec![
+            "provider".to_string(),
+            "model".to_string(),
+            "local_vs_non_local".to_string(),
+            "free_vs_paid_if_known".to_string(),
+            "remaining_quota_if_available".to_string(),
+            "rate_limit_risk".to_string(),
+            "monetary_or_token_cost".to_string(),
+            "latency".to_string(),
+            "expected_quality".to_string(),
+            "product_business_suitability".to_string(),
+            "fallback_risk".to_string(),
+        ],
+        candidates,
+        skipped_to_preserve_quota: vec![
+            "Use deterministic command nodes for repeated validation, file inspection and low-value mechanical work before spending non-local quota.".to_string(),
+            "Use local models when quota is low, privacy/locality matters or the task value does not justify Gemini/Codex/OpenCode non-local capacity.".to_string(),
+        ],
+        repair_goals: vec![
+            "Detect Gemini non-interactive auth/model/approval readiness before handoff and mark interactive waits as executor configuration failures.".to_string(),
+            "Record OpenCode provider/model availability, including non-local provider options and local Ollama fallback, before selection.".to_string(),
+            "Persist observed quota, rate-limit and cost evidence when executors report it so future selection can move from estimates to measurements.".to_string(),
+        ],
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn quota_candidate(
+    executors: &[ExecutorState],
+    executor: &str,
+    provider: &str,
+    model: Option<String>,
+    local_vs_non_local: &str,
+    free_vs_paid_if_known: &str,
+    quota_model: &str,
+    remaining_quota: &str,
+    rate_limit_risk: &str,
+    cost_model: &str,
+    latency: &str,
+    expected_quality: &str,
+    product_business_suitability: &str,
+    fallback_risk: &str,
+    selection_tier: u32,
+    reason: &str,
+) -> ExecutorQuotaPolicyCandidate {
+    let state = executors.iter().find(|state| state.id == executor);
+    let selection_status = match state {
+        Some(state) if state.allowed && state.installed && state.configured => "eligible",
+        Some(state) if !state.installed => "skipped_not_installed",
+        Some(state) if !state.configured => "skipped_not_configured",
+        Some(_) => "skipped_not_allowed",
+        None => "skipped_unknown_executor",
+    };
+    let evidence = state
+        .map(|state| state.config_evidence.clone())
+        .unwrap_or_default();
+
+    ExecutorQuotaPolicyCandidate {
+        executor: executor.to_string(),
+        provider: provider.to_string(),
+        model,
+        local_vs_non_local: local_vs_non_local.to_string(),
+        free_vs_paid_if_known: free_vs_paid_if_known.to_string(),
+        quota_model: quota_model.to_string(),
+        remaining_quota: remaining_quota.to_string(),
+        rate_limit_risk: rate_limit_risk.to_string(),
+        cost_model: cost_model.to_string(),
+        latency: latency.to_string(),
+        expected_quality: expected_quality.to_string(),
+        product_business_suitability: product_business_suitability.to_string(),
+        fallback_risk: fallback_risk.to_string(),
+        selection_tier,
+        selection_status: selection_status.to_string(),
+        reason: reason.to_string(),
+        evidence,
+    }
 }
 
 fn executor_is_allowed(executors: &[ExecutorState], id: &str) -> bool {

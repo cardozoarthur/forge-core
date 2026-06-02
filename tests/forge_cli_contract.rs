@@ -7704,6 +7704,40 @@ fn sync_persists_human_allowed_executor_policy() {
     assert_eq!(json["usable"], serde_json::json!(["codex"]));
     assert_eq!(json["integrations"][0]["id"], "opencode_codex_bridge");
     assert_eq!(json["integrations"][0]["enabled"], false);
+    assert_eq!(
+        json["quota_policy"]["schema_version"],
+        "forge.executor_quota_policy.v1"
+    );
+    assert_eq!(
+        json["quota_policy"]["selection_principle"],
+        "maximize useful progress under expected value, quota, cost, latency, quality and fallback risk constraints"
+    );
+    assert!(json["quota_policy"]["decision_factors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|factor| factor == "remaining_quota_if_available"));
+    let policy_candidates = json["quota_policy"]["candidates"].as_array().unwrap();
+    let codex_candidate = policy_candidates
+        .iter()
+        .find(|candidate| candidate["executor"] == "codex")
+        .unwrap();
+    assert_eq!(codex_candidate["provider"], "openai");
+    assert_eq!(codex_candidate["local_vs_non_local"], "non_local");
+    assert_eq!(codex_candidate["quota_model"], "quota_bound");
+    assert_eq!(codex_candidate["selection_status"], "eligible");
+    assert!(codex_candidate["reason"]
+        .as_str()
+        .unwrap()
+        .contains("authorized non-local"));
+    let opencode_candidate = policy_candidates
+        .iter()
+        .find(|candidate| candidate["executor"] == "opencode")
+        .unwrap();
+    assert_eq!(
+        opencode_candidate["selection_status"],
+        "skipped_not_allowed"
+    );
     let codex = find_executor(&json, "codex");
     assert_eq!(codex["allowed"], true);
     assert_eq!(codex["decision_source"], "human_allow");
