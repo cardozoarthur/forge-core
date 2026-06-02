@@ -106,9 +106,36 @@ pub struct SelfEvolutionPublicationReport {
     pub push_interval_seconds: u64,
     pub next_push_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_report_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_commit_range: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_commit_range: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pushed_commit: Option<String>,
+    pub ai_synthesis: SelfEvolutionPublicationAiSynthesis,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report_artifact_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub report_since_last_push: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub telegram: Option<crate::notify::TelegramReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SelfEvolutionPublicationAiSynthesis {
+    pub schema_version: String,
+    pub status: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub reason: String,
+    pub fallback_reason: Option<String>,
+}
+
+struct PublicationMarkdownReport {
+    content: String,
+    current_commit_range: String,
+    ai_synthesis: SelfEvolutionPublicationAiSynthesis,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -301,6 +328,12 @@ impl SelfEvolutionPublicationReport {
             push_due: false,
             push_interval_seconds: 7200, // 2 hours
             next_push_at: None,
+            previous_report_path: None,
+            previous_commit_range: None,
+            current_commit_range: None,
+            pushed_commit: None,
+            ai_synthesis: SelfEvolutionPublicationAiSynthesis::deterministic_not_due(),
+            report_artifact_path: None,
             report_since_last_push: None,
             telegram: None,
         }
@@ -308,7 +341,16 @@ impl SelfEvolutionPublicationReport {
 
     fn evaluate(repo: &Path, last_report: Option<&SelfEvolutionPublicationReport>) -> Result<Self> {
         let mut report = Self::empty();
-        let _current_commit = run_git(repo, &["rev-parse", "HEAD"])?.trim().to_string();
+        let current_commit = run_git(repo, &["rev-parse", "HEAD"])?.trim().to_string();
+        report.previous_report_path = last_report.and_then(|last| {
+            last.report_artifact_path.clone().or_else(|| {
+                last.telegram
+                    .as_ref()
+                    .map(|telegram| telegram.report_path.clone())
+            })
+        });
+        report.previous_commit_range =
+            last_report.and_then(|last| last.current_commit_range.clone());
 
         let last_push_commit = match last_report {
             Some(r) => r.last_push_commit.clone(),
@@ -336,6 +378,7 @@ impl SelfEvolutionPublicationReport {
 
         report.last_push_commit = last_push_commit;
         report.last_push_at = last_push_at.clone();
+        report.pushed_commit = Some(current_commit);
 
         if let Some(last_at) = last_push_at {
             if let Ok(last_dt) = DateTime::parse_from_rfc3339(&last_at) {
@@ -352,20 +395,53 @@ impl SelfEvolutionPublicationReport {
         }
 
         if report.push_due {
-            report.report_since_last_push = Some(build_publication_markdown_report(
+            let markdown_report = build_publication_markdown_report(
                 repo,
                 report.last_push_commit.as_deref(),
-            )?);
+                report.previous_report_path.as_deref(),
+                report.previous_commit_range.as_deref(),
+            )?;
+            report.current_commit_range = Some(markdown_report.current_commit_range);
+            report.ai_synthesis = markdown_report.ai_synthesis;
+            report.report_since_last_push = Some(markdown_report.content);
+        } else {
+            report.ai_synthesis = SelfEvolutionPublicationAiSynthesis::deterministic_not_due();
         }
 
         Ok(report)
     }
 }
 
+impl SelfEvolutionPublicationAiSynthesis {
+    fn deterministic_not_due() -> Self {
+        Self {
+            schema_version: "forge.self_evolution.publication_ai_synthesis.v1".to_string(),
+            status: "not_due".to_string(),
+            provider: None,
+            model: None,
+            reason: "publication interval has not elapsed".to_string(),
+            fallback_reason: None,
+        }
+    }
+
+    fn deterministic_fallback(reason: &str) -> Self {
+        Self {
+            schema_version: "forge.self_evolution.publication_ai_synthesis.v1".to_string(),
+            status: "deterministic_fallback".to_string(),
+            provider: None,
+            model: None,
+            reason: "native AI-assisted publication synthesis is not yet wired to a validated Forge executor node".to_string(),
+            fallback_reason: Some(reason.to_string()),
+        }
+    }
+}
+
 fn build_publication_markdown_report(
     repo: &Path,
     last_push_commit: Option<&str>,
-) -> Result<String> {
+    previous_report_path: Option<&str>,
+    previous_commit_range: Option<&str>,
+) -> Result<PublicationMarkdownReport> {
     let mut output = String::new();
     output.push_str("# Forge Self-Evolution 2-Hour Publication Report\n\n");
 
@@ -373,6 +449,9 @@ fn build_publication_markdown_report(
         Some(commit) => format!("{commit}..HEAD"),
         None => "HEAD".to_string(),
     };
+    let ai_synthesis = SelfEvolutionPublicationAiSynthesis::deterministic_fallback(
+        "AI report generation is required by the native goal, but this increment only has a deterministic bridge; Forge records the fallback instead of hiding it.",
+    );
 
     output.push_str("## What was worked on since the last push\n\n");
     output.push_str(&format!("Commit range: `{range}`\n\n"));
@@ -380,6 +459,28 @@ fn build_publication_markdown_report(
     output.push_str("```\n");
     output.push_str(&log);
     output.push_str("```\n\n");
+
+    output.push_str("## AI synthesis metadata\n\n");
+    output.push_str("- Schema: `forge.self_evolution.publication_ai_synthesis.v1`\n");
+    output.push_str(&format!("- Status: `{}`\n", ai_synthesis.status));
+    output.push_str("- Provider/model: `none` / `none`\n");
+    output.push_str(&format!("- Reason: {}\n", ai_synthesis.reason));
+    if let Some(reason) = &ai_synthesis.fallback_reason {
+        output.push_str(&format!("- Fallback reason: {}\n", reason));
+    }
+    if let Some(previous_report_path) = previous_report_path {
+        output.push_str(&format!(
+            "- Previous Markdown report: `{}`\n",
+            previous_report_path
+        ));
+    }
+    if let Some(previous_commit_range) = previous_commit_range {
+        output.push_str(&format!(
+            "- Previous commit range: `{}`\n",
+            previous_commit_range
+        ));
+    }
+    output.push_str(&format!("- Current commit range: `{range}`\n\n"));
 
     output.push_str("## How it was worked on\n\n");
     output.push_str("Forge self-evolution executed a bounded validated increment, recorded executor/model policy evidence, and kept deterministic validation separate from quota-bound reasoning.\n\n");
@@ -408,7 +509,11 @@ fn build_publication_markdown_report(
     output.push_str("- Quota-aware executor policy: reports local vs non-local, quota/cost assumptions and fallback rationale.\n");
     output.push_str("- Better business/product decisions: ties cycle output to user value, cost, speed, risk and implementation leverage.\n");
 
-    Ok(output)
+    Ok(PublicationMarkdownReport {
+        content: output,
+        current_commit_range: range,
+        ai_synthesis,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1008,6 +1113,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
                             Utc::now().format("%Y%m%d-%H%M%S")
                         );
                         write_text_artifact(&store.base_dir(), &pub_report_path, report_content)?;
+                        publication.report_artifact_path = Some(pub_report_path.clone());
                         let full_pub_report_path = store.base_dir().join(&pub_report_path);
 
                         match crate::notify::send_telegram_report(
@@ -4200,5 +4306,52 @@ mod tests {
             .unwrap()
             .business_value_justification
             .contains("business_value_score=80"));
+    }
+
+    #[test]
+    fn test_publication_markdown_records_ai_synthesis_fallback_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        run_program(repo, "git", &["init"]).unwrap();
+        run_program(repo, "git", &["config", "user.email", "forge@example.test"]).unwrap();
+        run_program(repo, "git", &["config", "user.name", "Forge Test"]).unwrap();
+        fs::write(repo.join("README.md"), "# Forge\n").unwrap();
+        run_program(repo, "git", &["add", "."]).unwrap();
+        run_program(repo, "git", &["commit", "-m", "initial"]).unwrap();
+
+        let report = build_publication_markdown_report(
+            repo,
+            None,
+            Some("artifacts/wf_previous/self-evolution-publication-report.md"),
+            Some("abc123..def456"),
+        )
+        .unwrap();
+
+        assert_eq!(report.current_commit_range, "HEAD");
+        assert_eq!(
+            report.ai_synthesis.schema_version,
+            "forge.self_evolution.publication_ai_synthesis.v1"
+        );
+        assert_eq!(report.ai_synthesis.status, "deterministic_fallback");
+        assert_eq!(report.ai_synthesis.provider, None);
+        assert_eq!(report.ai_synthesis.model, None);
+        assert!(report
+            .ai_synthesis
+            .fallback_reason
+            .as_deref()
+            .unwrap()
+            .contains("deterministic bridge"));
+        assert!(report.content.contains("## AI synthesis metadata"));
+        assert!(report
+            .content
+            .contains("- Status: `deterministic_fallback`"));
+        assert!(report.content.contains("- Provider/model: `none` / `none`"));
+        assert!(report.content.contains(
+            "- Previous Markdown report: `artifacts/wf_previous/self-evolution-publication-report.md`"
+        ));
+        assert!(report
+            .content
+            .contains("- Previous commit range: `abc123..def456`"));
+        assert!(report.content.contains("- Current commit range: `HEAD`"));
     }
 }

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.177 - 2026-06-02
+
+### Changed
+
+- Self-evolution publication reports now persist previous report path, previous/current commit ranges, pushed commit and report artifact path metadata.
+- Periodic publication Markdown now includes an AI synthesis metadata section with provider/model fields and an explicit deterministic fallback reason when native AI report generation is not yet wired.
+- Added unit coverage proving publication reports preserve previous Markdown/commit-range context and do not hide deterministic fallback behavior.
+
+### Validation
+
+- Targeted coverage passed for `cargo test self_evolve::tests::test_publication_markdown_records_ai_synthesis_fallback_metadata`.
+- Full required validation for this cycle is recorded in `docs/reports/forge-core-v0.4.177-report-2026-06-02.md`.
+
+### Safety
+
+- The change is scoped to Forge Core self-evolution publication metadata, report rendering, tests, version metadata and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should replace the deterministic publication bridge with a validated Forge-owned AI synthesis node and Telegram delivery evidence metadata.
+
 ## 0.4.176 - 2026-06-02
 
 ### Changed
