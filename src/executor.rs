@@ -718,6 +718,7 @@ fn build_quota_policy(
         ),
     ];
     candidates.sort_by_key(|candidate| candidate.selection_tier);
+    let repair_goals = quota_policy_repair_goals(&candidates);
 
     ExecutorQuotaPolicyReport {
         schema_version: "forge.executor_quota_policy.v1".to_string(),
@@ -744,11 +745,47 @@ fn build_quota_policy(
             "Use deterministic command nodes for repeated validation, file inspection and low-value mechanical work before spending non-local quota.".to_string(),
             "Use local models when quota is low, privacy/locality matters or the task value does not justify Gemini/Codex/OpenCode non-local capacity.".to_string(),
         ],
-        repair_goals: vec![
-            "Detect Gemini non-interactive auth/model/approval readiness before handoff and mark interactive waits as executor configuration failures.".to_string(),
-            "Record OpenCode provider/model availability, including non-local provider options and local Ollama fallback, before selection.".to_string(),
-            "Persist observed quota, rate-limit and cost evidence when executors report it so future selection can move from estimates to measurements.".to_string(),
-        ],
+        repair_goals,
+    }
+}
+
+fn quota_policy_repair_goals(candidates: &[ExecutorQuotaPolicyCandidate]) -> Vec<String> {
+    let mut goals = vec![
+        "Detect Gemini non-interactive auth/model/approval readiness before handoff and mark interactive waits as executor configuration failures.".to_string(),
+        "Record OpenCode provider/model availability, including non-local provider options and local Ollama fallback, before selection.".to_string(),
+        "Persist observed quota, rate-limit and cost evidence when executors report it so future selection can move from estimates to measurements.".to_string(),
+    ];
+    let mut reported_executors = BTreeSet::new();
+
+    for candidate in candidates
+        .iter()
+        .filter(|candidate| candidate.selection_status == "skipped_interactive_hang_risk")
+    {
+        if !reported_executors.insert(candidate.executor.clone()) {
+            continue;
+        }
+        goals.push(format!(
+            "Repair {} non-interactive readiness before executor selection; current evidence: {}.",
+            executor_display_name(&candidate.executor),
+            if candidate.evidence.is_empty() {
+                "no probe evidence recorded".to_string()
+            } else {
+                candidate.evidence.join(" | ")
+            }
+        ));
+    }
+
+    goals
+}
+
+fn executor_display_name(executor: &str) -> &str {
+    match executor {
+        "codex" => "Codex",
+        "opencode" => "OpenCode",
+        "gemini" => "Gemini",
+        "claude" => "Claude",
+        "ollama" => "Ollama",
+        _ => executor,
     }
 }
 
@@ -1051,6 +1088,47 @@ mod tests {
             .evidence
             .iter()
             .any(|evidence| evidence.contains("timed out")));
+        assert!(report.quota_policy.repair_goals.iter().any(|goal| {
+            goal.contains("Repair Gemini non-interactive readiness")
+                && goal.contains("non-interactive smoke test `--version` timed out")
+        }));
+    }
+
+    #[test]
+    fn executor_report_deduplicates_repair_goals_for_one_executor() {
+        let temp = tempdir().unwrap();
+        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+
+        let opencode_state = ExecutorState {
+            id: "opencode".to_string(),
+            display_name: "OpenCode CLI".to_string(),
+            command: "opencode".to_string(),
+            installed: true,
+            configured: true,
+            command_path: Some("/tmp/opencode".to_string()),
+            config_evidence: vec!["test opencode config".to_string()],
+            non_interactive_ready: false,
+            probe_evidence: vec![
+                "failed to list opencode models; non-interactive provider/model readiness is not validated"
+                    .to_string(),
+            ],
+            allowed: true,
+            decision_source: "human_allow".to_string(),
+            synced_at: "2026-06-02T00:00:00Z".to_string(),
+        };
+        store
+            .save_executor_state("opencode", &serde_json::to_value(opencode_state).unwrap())
+            .unwrap();
+
+        let report = load_executors(&store).unwrap();
+
+        let dynamic_opencode_goals = report
+            .quota_policy
+            .repair_goals
+            .iter()
+            .filter(|goal| goal.contains("Repair OpenCode non-interactive readiness"))
+            .count();
+        assert_eq!(dynamic_opencode_goals, 1);
     }
 
     #[test]

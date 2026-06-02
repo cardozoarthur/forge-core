@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.169 - 2026-06-02
+
+### Changed
+
+- `forge executors` quota policy now derives concrete repair goals from persisted executor probe failures instead of only listing generic OpenCode/Gemini repair guidance.
+- Executor candidates marked `skipped_interactive_hang_risk` now contribute a repair goal with executor name and current probe evidence, making non-interactive timeout/configuration failures visible from status/report artifacts.
+- Duplicate candidates for the same executor now collapse to one dynamic repair goal, keeping OpenCode non-local/local fallback reports readable.
+- Added regression coverage proving Gemini is excluded from usable executors and emits a repair goal when its non-interactive probe timed out, plus coverage for OpenCode repair-goal deduplication.
+
+### Validation
+
+- RED observed first with `cargo test executor::tests::executor_report_excludes_interactive_hang_risk_from_usable`: the Gemini repair goal was missing from `forge executors` quota policy.
+- Targeted GREEN passed for `cargo test executor::tests::executor_report_excludes_interactive_hang_risk_from_usable`.
+- RED observed first with `cargo test executor::tests::executor_report_deduplicates_repair_goals_for_one_executor`: OpenCode emitted three duplicate repair goals.
+- Targeted GREEN passed for `cargo test executor::tests::executor_report_deduplicates_repair_goals_for_one_executor`.
+- Full required validation for this cycle is recorded in `docs/reports/forge-core-v0.4.169-report-2026-06-02.md`.
+
+### Safety
+
+- The change is scoped to Forge Core executor quota-policy reporting, tests, version metadata and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should connect these executor-sync repair goals to ordinary workflow tasks or `forge status`/`forge inspect` evidence.
+
 ## 0.4.168 - 2026-06-02
 
 ### Changed
