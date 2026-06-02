@@ -2107,17 +2107,42 @@ fn build_executor_policy(
         }
     }
 
-    let active_repair_status = if candidates
+    let has_timeout_failure = candidates
         .iter()
-        .any(|c| c.selection_status == "failed_timeout")
-    {
+        .any(|c| c.selection_status == "failed_timeout");
+    let has_non_interactive_probe_failure = candidates
+        .iter()
+        .any(|c| c.selection_status == "eligible_interactive_hang_risk");
+
+    let active_repair_status = if has_timeout_failure {
         "repair_needed_timeout_detected".to_string()
+    } else if has_non_interactive_probe_failure {
+        "repair_needed_non_interactive_probe_failed".to_string()
     } else {
         "stable".to_string()
     };
 
-    if active_repair_status == "repair_needed_timeout_detected" {
+    if has_timeout_failure {
         repair_goals.push("Urgent: Fix interactive timeout in primary executor chain.".to_string());
+    }
+    for candidate in candidates
+        .iter()
+        .filter(|c| c.selection_status == "eligible_interactive_hang_risk")
+    {
+        let executor_name = match candidate.executor.as_str() {
+            "opencode" => "OpenCode",
+            "gemini" => "Gemini",
+            "codex" => "Codex",
+            other => other,
+        };
+        repair_goals.push(format!(
+            "Repair {executor_name} non-interactive provider/model probe before executor handoff; current evidence: {}.",
+            if candidate.capability_evidence.is_empty() {
+                "no probe evidence recorded".to_string()
+            } else {
+                candidate.capability_evidence.join(" | ")
+            }
+        ));
     }
 
     SelfExecutorPolicyReport {
@@ -3682,6 +3707,13 @@ mod tests {
             .capability_evidence
             .iter()
             .any(|evidence| evidence.contains("test opencode probe timed out")));
+        assert_eq!(
+            policy.active_repair_status,
+            "repair_needed_non_interactive_probe_failed"
+        );
+        assert!(policy.repair_goals.iter().any(|goal| goal.contains(
+            "Repair OpenCode non-interactive provider/model probe before executor handoff"
+        )));
         let gemini = policy
             .candidates
             .iter()

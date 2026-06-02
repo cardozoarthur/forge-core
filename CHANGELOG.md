@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.166 - 2026-06-02
+
+### Changed
+
+- Self-evolution executor policy now promotes persisted non-interactive probe failures to `repair_needed_non_interactive_probe_failed` instead of leaving the aggregate policy status `stable`.
+- Policy reports now add concrete repair goals for OpenCode/Gemini/Codex candidates that are installed, configured and allowed but fail non-interactive readiness probes.
+- Fallback selection still skips those candidates, but the visible report now explains the repair objective before the next executor is selected.
+
+### Validation
+
+- RED observed first with `cargo test self_evolve::tests::test_executor_policy_uses_persisted_executor_readiness_before_selection -- --nocapture`: `active_repair_status` remained `stable`.
+- Targeted GREEN passed for `cargo test self_evolve::tests::test_executor_policy_uses_persisted_executor_readiness_before_selection -- --nocapture`.
+- Full required validation for this cycle is recorded in `docs/reports/forge-core-v0.4.166-report-2026-06-02.md`.
+
+### Safety
+
+- The change is scoped to Forge Core self-evolution executor policy, tests, version metadata and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should persist executor repair goals as ordinary workflow goals/tasks instead of report-only policy guidance.
+
 ## 0.4.165 - 2026-06-02
 
 ### Changed
