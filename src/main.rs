@@ -1053,7 +1053,7 @@ enum SelfCommands {
         until: String,
         #[arg(long, default_value_t = 1)]
         max_cycles: u32,
-        #[arg(long, default_value_t = 1800)]
+        #[arg(long, default_value_t = 180)]
         sleep_seconds: u64,
         #[arg(long = "executor")]
         executors: Vec<String>,

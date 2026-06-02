@@ -1,5 +1,7 @@
 use crate::artifact::{hex_sha256, write_json_artifact};
-use crate::graph::{create_workflow, task, ExecutorKind, LoopSpec, Workflow};
+use crate::graph::{
+    create_workflow, task, ExecutorKind, LoopSpec, ProductDecision, Workflow, WorkflowRevision,
+};
 use crate::intent::parse_intent;
 use crate::request::{create_run_record, heartbeat_request, save_run_record, update_run_status};
 use crate::storage::ForgeStore;
@@ -60,6 +62,7 @@ pub struct SelfRunReport {
     pub max_cycles: u32,
     pub dry_run: bool,
     pub push: bool,
+    pub internal_loop: SelfEvolutionLoopReport,
     pub overhead_ledger: SelfOverheadLedger,
     pub decision_gate: SelfDecisionGateReport,
     pub cycle_reports: Vec<SelfCycleReport>,
@@ -131,6 +134,32 @@ pub struct SelfDecisionGateReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SelfEvolutionLoopReport {
+    pub schema_version: String,
+    pub loop_count: u32,
+    pub loop_task_id: String,
+    pub loop_control_kind: String,
+    pub execution_shape: String,
+    pub sleep_seconds: u64,
+    pub sleep_policy: String,
+    pub next_goal_decision: SelfNextGoalDecisionReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SelfNextGoalDecisionReport {
+    pub schema_version: String,
+    pub decision_id: String,
+    pub selected_goal: String,
+    pub source: String,
+    pub rationale: String,
+    pub alternatives: Vec<String>,
+    pub trade_offs: Vec<String>,
+    pub success_metrics: Vec<String>,
+    pub backlog_mutation: String,
+    pub workflow_revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SelfUpdateReport {
     pub status: String,
     pub command: Vec<String>,
@@ -164,6 +193,7 @@ struct SelfEvolutionPromptPacket {
     repo: String,
     operating_mode: String,
     decision_gate: SelfDecisionGateReport,
+    internal_loop: SelfEvolutionLoopReport,
     validation_commands: Vec<String>,
     /// Structured breakdown of forge 0.5 capabilities detected in the goal text,
     /// each with a prioritised maturity target.
@@ -498,6 +528,11 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         .unwrap_or_else(|| BASE_SELF_EVOLUTION_GOAL.to_string());
     let mut workflow = create_workflow(parse_intent(&self_evolution_goal));
     ensure_self_evolution_loop_control(&mut workflow);
+    let internal_loop = persist_self_evolution_loop_state(
+        &mut workflow,
+        options.sleep_seconds,
+        options.goal.as_deref(),
+    )?;
 
     let loop_count = workflow
         .tasks
@@ -532,6 +567,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             max_cycles: options.max_cycles,
             dry_run: options.dry_run,
             push: options.push,
+            internal_loop,
             overhead_ledger,
             decision_gate,
             cycle_reports: Vec::new(),
@@ -563,6 +599,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             options: &options,
             operating_mode: &operating_mode,
             decision_gate: &decision_gate,
+            internal_loop: &internal_loop,
         });
         let prompt = render_prompt(&prompt_packet);
         let prompt_sha256 = hex_sha256(prompt.as_bytes());
@@ -748,6 +785,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         max_cycles: options.max_cycles,
         dry_run: options.dry_run,
         push: options.push,
+        internal_loop,
         overhead_ledger,
         decision_gate,
         cycle_reports,
@@ -763,6 +801,7 @@ struct SelfEvolutionPromptPacketParams<'a> {
     options: &'a SelfRunOptions,
     operating_mode: &'a SelfOperatingMode,
     decision_gate: &'a SelfDecisionGateReport,
+    internal_loop: &'a SelfEvolutionLoopReport,
 }
 
 impl SelfEvolutionPromptPacket {
@@ -786,6 +825,7 @@ impl SelfEvolutionPromptPacket {
             repo: params.options.repo.display().to_string(),
             operating_mode: params.operating_mode.as_str().to_string(),
             decision_gate: params.decision_gate.clone(),
+            internal_loop: params.internal_loop.clone(),
             validation_commands: effective_validation_commands(params.options),
             capability_analysis,
         }
@@ -927,11 +967,15 @@ impl PublicProjectUpdateReport {
 }
 
 fn ensure_self_evolution_loop_control(workflow: &mut Workflow) {
-    if workflow
-        .tasks
-        .iter()
-        .any(|task| task.loop_control.is_some())
-    {
+    if let Some(task) = workflow.tasks.iter_mut().find(|task| {
+        task.title == "Continue self-evolution while product goal is not definitively ready"
+    }) {
+        if task.loop_control.is_some() {
+            ensure_loop_decision_inputs(task);
+            return;
+        }
+        task.loop_control = Some(self_evolution_loop_spec());
+        ensure_loop_decision_inputs(task);
         return;
     }
 
@@ -950,12 +994,19 @@ fn ensure_self_evolution_loop_control(workflow: &mut Workflow) {
             "current product-evolution goal",
             "validation evidence",
             "human pause/stop/mutation state",
+            "next goal decision with product/business rationale",
         ],
         Vec::new(),
         "Self-evolution loop-control trace",
         (ExecutorKind::Command, 0.0002),
     );
-    loop_task.loop_control = Some(LoopSpec {
+    loop_task.loop_control = Some(self_evolution_loop_spec());
+    ensure_loop_decision_inputs(&mut loop_task);
+    workflow.tasks.push(loop_task);
+}
+
+fn self_evolution_loop_spec() -> LoopSpec {
+    LoopSpec {
         schema_version: "forge.loop.v1".to_string(),
         kind: "while_until".to_string(),
         items: vec!["product_evolution_goal".to_string()],
@@ -968,8 +1019,141 @@ fn ensure_self_evolution_loop_control(workflow: &mut Workflow) {
         subflow_mode: "ordinary_forge_workflow".to_string(),
         stop_policy: "human_pause_stop_or_revisioned_mutation".to_string(),
         state: "active".to_string(),
+    }
+}
+
+fn ensure_loop_decision_inputs(task: &mut crate::graph::AtomicTask) {
+    let required_input = "next goal decision with product/business rationale".to_string();
+    if !task
+        .context_requirements
+        .iter()
+        .any(|input| input == &required_input)
+    {
+        task.context_requirements.push(required_input);
+    }
+    if !task
+        .expected_output
+        .contains("next goal decision with product/business rationale")
+    {
+        task.expected_output = format!(
+            "{} including next goal decision with product/business rationale",
+            task.expected_output
+        );
+    }
+}
+
+fn persist_self_evolution_loop_state(
+    workflow: &mut Workflow,
+    sleep_seconds: u64,
+    explicit_human_goal: Option<&str>,
+) -> Result<SelfEvolutionLoopReport> {
+    let (loop_task_id, loop_control_kind) = workflow
+        .tasks
+        .iter()
+        .find_map(|task| {
+            if task.title == "Continue self-evolution while product goal is not definitively ready" {
+                task.loop_control
+                    .as_ref()
+                    .map(|loop_control| (task.id.clone(), loop_control.kind.clone()))
+            } else {
+                None
+            }
+        })
+        .context("Self-evolution workflow must include persisted loop_control before loop state can be reported")?;
+    let loop_count = workflow
+        .tasks
+        .iter()
+        .filter(|task| task.loop_control.is_some())
+        .count() as u32;
+    if loop_count == 0 {
+        bail!("Self-evolution workflow has loop_count == 0. The planned workflow must include persisted loop_control tasks.");
+    }
+
+    let selected_goal = explicit_human_goal
+        .map(str::trim)
+        .filter(|goal| !goal.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            "Make the Product/PM CLI-TUI the main entry point for human-guided product/workflow creation."
+                .to_string()
+        });
+    let source = if explicit_human_goal
+        .map(str::trim)
+        .is_some_and(|goal| !goal.is_empty())
+    {
+        "human_goal".to_string()
+    } else {
+        "autonomous_v0_5_priority_selection".to_string()
+    };
+    let rationale = if source == "human_goal" {
+        "A fresh human goal outranks generic self-evolution guidance and preserves Forge as the source of truth for runtime steering.".to_string()
+    } else {
+        "This improves the product and business outcome by making Forge easier to adopt for product managers and founders before deeper runtime automation, while preserving validation evidence and low implementation leverage risk.".to_string()
+    };
+    let alternatives = vec![
+        "Add durable decision artifacts before the PM/TUI entry point".to_string(),
+        "Improve executor non-interactive policy before human product workflow creation"
+            .to_string(),
+        "Start visual workflow editing before terminal product decisions are durable".to_string(),
+    ];
+    let trade_offs = vec![
+        "Prioritizes user-facing product workflow value over lower-level executor polish for this cycle".to_string(),
+        "Keeps the increment small enough for validation while delaying richer visual surfaces".to_string(),
+    ];
+    let success_metrics = vec![
+        "self run report exposes internal recurring loop evidence".to_string(),
+        "workflow inspect shows a loop_control node tied to next-goal selection".to_string(),
+        "next selected goal includes product/business rationale and revision lineage".to_string(),
+    ];
+    let revision = workflow
+        .revisions
+        .last()
+        .map(|item| item.revision + 1)
+        .unwrap_or(1);
+    let decision_id = format!("decision-self-evolution-next-goal-r{revision}");
+    workflow.product_decisions.push(ProductDecision {
+        id: decision_id.clone(),
+        title: "Self-evolution next goal selection".to_string(),
+        rationale: rationale.clone(),
+        author: "forge_self_evolution".to_string(),
+        status: "approved".to_string(),
+        revision,
+        created_at: Utc::now(),
+        affected_goals: vec![selected_goal.clone()],
+        affected_tasks: vec![loop_task_id.clone()],
+        affected_artifacts: Vec::new(),
     });
-    workflow.tasks.push(loop_task);
+    workflow.revisions.push(WorkflowRevision {
+        revision,
+        origin: "forge_self_evolution".to_string(),
+        change_type: "self_evolution_next_goal_decision".to_string(),
+        summary: format!(
+            "selected next self-evolution goal `{selected_goal}` with product/business rationale"
+        ),
+        created_at: Utc::now(),
+    });
+
+    Ok(SelfEvolutionLoopReport {
+        schema_version: "forge.self_evolution.loop.v1".to_string(),
+        loop_count,
+        loop_task_id,
+        loop_control_kind,
+        execution_shape: "ordinary_forge_workflow_internal_recurring_loop".to_string(),
+        sleep_seconds,
+        sleep_policy: "rest_between_iterations".to_string(),
+        next_goal_decision: SelfNextGoalDecisionReport {
+            schema_version: "forge.self_evolution.next_goal_decision.v1".to_string(),
+            decision_id,
+            selected_goal,
+            source,
+            rationale,
+            alternatives,
+            trade_offs,
+            success_metrics,
+            backlog_mutation: "persisted_as_product_decision_for_next_iteration".to_string(),
+            workflow_revision: revision,
+        },
+    })
 }
 
 fn load_persisted_self_evolution_goal(store: &ForgeStore) -> Result<Option<String>> {
@@ -1158,6 +1342,18 @@ Automated self-evolution decision gate:
 - Orchestration cost score: `{}`
 - Reason: {}
 
+Internal recurring loop state:
+- Schema: `{}`
+- Execution shape: `{}`
+- Loop count: `{}`
+- Loop control task: `{}`
+- Loop control kind: `{}`
+- Rest between iterations: `{}s`
+- Next goal decision: `{}`
+- Next goal source: `{}`
+- Next goal rationale: {}
+- Next goal workflow revision: `{}`
+
 Strategic goal guidance:
 {}
 
@@ -1203,6 +1399,16 @@ Return a concise final report with:
         packet.decision_gate.expected_value_score,
         packet.decision_gate.orchestration_cost_score,
         packet.decision_gate.reason,
+        packet.internal_loop.schema_version,
+        packet.internal_loop.execution_shape,
+        packet.internal_loop.loop_count,
+        packet.internal_loop.loop_task_id,
+        packet.internal_loop.loop_control_kind,
+        packet.internal_loop.sleep_seconds,
+        packet.internal_loop.next_goal_decision.selected_goal,
+        packet.internal_loop.next_goal_decision.source,
+        packet.internal_loop.next_goal_decision.rationale,
+        packet.internal_loop.next_goal_decision.workflow_revision,
         strategic_guidance,
         render_capability_breakdown(packet),
         packet.repo,
@@ -1361,16 +1567,35 @@ fn execute_cycle(repo: &Path, executor: &str, prompt: &str) -> Result<String> {
             }
         }
         "opencode" => {
+            let mut args = vec![
+                "run".to_string(),
+                "--dir".to_string(),
+                repo.to_str().unwrap_or(".").to_string(),
+                "--title".to_string(),
+                "Forge self evolution".to_string(),
+                "--dangerously-skip-permissions".to_string(),
+            ];
+
+            if let Ok(model) = std::env::var("OPENCODE_MODEL") {
+                args.push("--model".to_string());
+                args.push(model);
+            } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+                args.push("--model".to_string());
+                args.push("anthropic/claude-3-7-sonnet-20250219".to_string());
+            } else if std::env::var("OPENAI_API_KEY").is_ok() {
+                args.push("--model".to_string());
+                args.push("openai/gpt-4o".to_string());
+            } else if std::env::var("GEMINI_API_KEY").is_ok() {
+                args.push("--model".to_string());
+                args.push("gemini/gemini-2.5-pro".to_string());
+            }
+
+            args.push(prompt.to_string());
+            let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+
             let output = execute_command_capture(
                 "opencode",
-                &[
-                    "run",
-                    "--dir",
-                    repo.to_str().unwrap_or("."),
-                    "--title",
-                    "Forge self evolution",
-                    prompt,
-                ],
+                &args_ref,
                 repo,
                 Some(OPENCODE_TIMEOUT_SECONDS),
             )?;
@@ -1384,20 +1609,34 @@ fn execute_cycle(repo: &Path, executor: &str, prompt: &str) -> Result<String> {
             }
         }
         "gemini" => {
-            let output = execute_command_capture(
-                "gemini",
-                &[
-                    "-p",
-                    prompt,
-                    "--approval-mode",
-                    "yolo",
-                    "--skip-trust",
-                    "--output-format",
-                    "text",
-                ],
-                repo,
-                Some(EXECUTOR_TIMEOUT_SECONDS),
-            )?;
+            let mut args = vec![
+                "-p".to_string(),
+                prompt.to_string(),
+                "--approval-mode".to_string(),
+                "yolo".to_string(),
+                "--skip-trust".to_string(),
+                "--output-format".to_string(),
+                "text".to_string(),
+            ];
+
+            if let Ok(model) = std::env::var("GEMINI_MODEL") {
+                args.push("--model".to_string());
+                args.push(model);
+            } else if std::env::var("GEMINI_API_KEY").is_ok() {
+                args.push("--model".to_string());
+                args.push("gemini-2.5-pro".to_string());
+            } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+                args.push("--model".to_string());
+                args.push("claude-3-7-sonnet-20250219".to_string());
+            } else if std::env::var("OPENAI_API_KEY").is_ok() {
+                args.push("--model".to_string());
+                args.push("gpt-4o".to_string());
+            }
+
+            let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+
+            let output =
+                execute_command_capture("gemini", &args_ref, repo, Some(EXECUTOR_TIMEOUT_SECONDS))?;
             fs::create_dir_all(repo.join(".forge"))?;
             let response = String::from_utf8_lossy(&output.stdout);
             fs::write(
@@ -1739,6 +1978,30 @@ mod tests {
     use super::*;
     use crate::graph::Workflow;
     use chrono::Utc;
+
+    fn test_internal_loop_report() -> SelfEvolutionLoopReport {
+        SelfEvolutionLoopReport {
+            schema_version: "forge.self_evolution.loop.v1".to_string(),
+            loop_count: 1,
+            loop_task_id: "task-loop".to_string(),
+            loop_control_kind: "while_until".to_string(),
+            execution_shape: "ordinary_forge_workflow_internal_recurring_loop".to_string(),
+            sleep_seconds: 180,
+            sleep_policy: "rest_between_iterations".to_string(),
+            next_goal_decision: SelfNextGoalDecisionReport {
+                schema_version: "forge.self_evolution.next_goal_decision.v1".to_string(),
+                decision_id: "decision-test".to_string(),
+                selected_goal: "Make the Product/PM CLI-TUI the main entry point.".to_string(),
+                source: "autonomous_v0_5_priority_selection".to_string(),
+                rationale: "Test product/business rationale.".to_string(),
+                alternatives: Vec::new(),
+                trade_offs: Vec::new(),
+                success_metrics: Vec::new(),
+                backlog_mutation: "persisted_as_product_decision_for_next_iteration".to_string(),
+                workflow_revision: 1,
+            },
+        }
+    }
 
     #[test]
     fn test_operating_mode_parse_valid() {
@@ -2175,6 +2438,7 @@ mod tests {
             repo: "/tmp".to_string(),
             operating_mode: "balanced".to_string(),
             decision_gate: SelfDecisionGateReport::evaluate("", &SelfOperatingMode::Balanced),
+            internal_loop: test_internal_loop_report(),
             validation_commands: vec![],
             capability_analysis: caps,
         };
@@ -2203,6 +2467,7 @@ mod tests {
             repo: "/tmp".to_string(),
             operating_mode: "balanced".to_string(),
             decision_gate: SelfDecisionGateReport::evaluate("", &SelfOperatingMode::Balanced),
+            internal_loop: test_internal_loop_report(),
             validation_commands: vec![],
             capability_analysis: caps,
         };

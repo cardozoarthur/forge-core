@@ -8241,6 +8241,124 @@ fn self_run_dry_run_creates_bounded_self_evolution_workflow_and_artifacts() {
 }
 
 #[test]
+fn self_run_persists_internal_recurring_loop_status_and_next_goal_decision() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("README.md"), "# Repo\n").unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2999-01-01T00:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--sleep-seconds",
+            "180",
+            "--executor",
+            "codex",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["internal_loop"]["schema_version"],
+        "forge.self_evolution.loop.v1"
+    );
+    assert!(
+        json["internal_loop"]["loop_count"].as_u64().unwrap() > 0,
+        "self-evolution must not have loop_count == 0"
+    );
+    assert_eq!(json["internal_loop"]["sleep_seconds"], 180);
+    assert_eq!(
+        json["internal_loop"]["sleep_policy"],
+        "rest_between_iterations"
+    );
+    assert!(
+        matches!(
+            json["internal_loop"]["loop_control_kind"].as_str().unwrap(),
+            "while_until" | "infinite_recurring_subflow"
+        ),
+        "self-evolution loop must use a persisted recurring loop primitive"
+    );
+    assert_eq!(
+        json["internal_loop"]["execution_shape"],
+        "ordinary_forge_workflow_internal_recurring_loop"
+    );
+    assert_eq!(
+        json["internal_loop"]["next_goal_decision"]["schema_version"],
+        "forge.self_evolution.next_goal_decision.v1"
+    );
+    assert_eq!(
+        json["internal_loop"]["next_goal_decision"]["selected_goal"],
+        "Make the Product/PM CLI-TUI the main entry point for human-guided product/workflow creation."
+    );
+    assert!(json["internal_loop"]["next_goal_decision"]["rationale"]
+        .as_str()
+        .unwrap()
+        .contains("business"));
+    assert!(
+        json["internal_loop"]["next_goal_decision"]["workflow_revision"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let inspect_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspect_json: Value = serde_json::from_slice(&inspect_output).unwrap();
+    let loop_node = inspect_json["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| {
+            node["expected_output"]
+                .as_str()
+                .is_some_and(|output| output.contains("next goal decision"))
+        })
+        .expect("self-evolution workflow should have a persisted loop_control node");
+    assert!(matches!(
+        loop_node["loop_control"]["kind"].as_str().unwrap(),
+        "while_until" | "infinite_recurring_subflow"
+    ));
+    assert_eq!(
+        loop_node["loop_control"]["subflow_mode"],
+        "ordinary_forge_workflow"
+    );
+    assert!(loop_node["expected_output"]
+        .as_str()
+        .unwrap()
+        .contains("next goal decision"));
+}
+
+#[test]
 fn self_run_defaults_to_opencode_gemini_codex_order() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

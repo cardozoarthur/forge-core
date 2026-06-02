@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.158 - 2026-06-02
+
+### Added
+
+- Self-evolution cycle 1: added `forge.self_evolution.loop.v1` report evidence so `forge self run` exposes the internal recurring workflow loop instead of relying only on an external process cycle.
+- Added durable `forge.self_evolution.next_goal_decision.v1` evidence with selected next goal, source, product/business rationale, alternatives, trade-offs, success metrics, backlog mutation and workflow revision.
+- Persisted the next-goal selection as a `ProductDecision` plus `self_evolution_next_goal_decision` workflow revision before executor prompt generation.
+
+### Changed
+
+- `forge self run --sleep-seconds` now defaults to `180`, matching the required about-three-minute rest between internal loop iterations.
+- Self-evolution prompt packets now include internal loop status, loop-control task, rest interval and next-goal decision evidence for executor replay.
+- Self-evolution loop normalization now adds a dedicated `while_until` self-evolution loop node even when the general planner creates other loop nodes.
+
+### Validation
+
+- RED observed first with `cargo test self_run_persists_internal_recurring_loop_status_and_next_goal_decision --test forge_cli_contract`: the self-run JSON lacked `internal_loop` evidence.
+- Targeted GREEN passed for `cargo test self_run_persists_internal_recurring_loop_status_and_next_goal_decision --test forge_cli_contract`.
+- Self-run regression contracts passed with `cargo test self_run_ --test forge_cli_contract`.
+
+### Safety
+
+- The change is limited to Forge-owned workflow state, CLI defaults, prompt/report serialization, tests and report artifacts.
+- No Docker, Kubernetes, Knative or external infrastructure resources are mutated.
+- This still does not complete the full 0.5 promotion condition; the next cycle should make PM/TUI decisions actively mutate backlog/tasks from the persisted decision artifact.
+
 ## 0.4.157 - 2026-06-02
 
 ### Added
