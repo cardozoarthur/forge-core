@@ -7842,6 +7842,129 @@ fn sync_persists_human_allowed_executor_policy() {
 }
 
 #[test]
+fn executor_quota_record_persists_observation_for_policy_reporting() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(temp.path().join(".codex")).unwrap();
+    fs::write(temp.path().join(".codex/config.toml"), "model = \"test\"\n").unwrap();
+    write_fake_cli(&bin, "codex");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "executors",
+            "--home",
+            temp.path().to_str().unwrap(),
+            "--executor-path",
+            bin.to_str().unwrap(),
+            "--allow",
+            "codex",
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let recorded = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "executor-quota",
+            "record",
+            "--executor",
+            "codex",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.5",
+            "--locality",
+            "non_local",
+            "--free-vs-paid",
+            "not_free_quota_bound",
+            "--remaining-quota",
+            "low_preserve_for_high_value_pm_reasoning",
+            "--rate-limit-risk",
+            "medium_high",
+            "--cost",
+            "quota_or_paid_usage",
+            "--latency",
+            "medium",
+            "--expected-quality",
+            "high",
+            "--suitability",
+            "high_for_product_business_decisions",
+            "--source",
+            "self_evolution_cycle_3",
+            "--observed-at",
+            "2026-06-02T00:00:00Z",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let recorded_json: Value = serde_json::from_slice(&recorded).unwrap();
+    assert_eq!(
+        recorded_json["schema_version"],
+        "forge.executor_quota_record.v1"
+    );
+    assert_eq!(recorded_json["status"], "executor_quota_recorded");
+    assert_eq!(recorded_json["observation"]["executor"], "codex");
+    assert_eq!(
+        recorded_json["observation"]["remaining_quota"],
+        "low_preserve_for_high_value_pm_reasoning"
+    );
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "executors",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["quota_policy"]["observed_quota_evidence"][0]["source"],
+        "self_evolution_cycle_3"
+    );
+    let codex_candidate = json["quota_policy"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["executor"] == "codex")
+        .unwrap();
+    assert_eq!(codex_candidate["model"], "gpt-5.5");
+    assert_eq!(
+        codex_candidate["remaining_quota"],
+        "low_preserve_for_high_value_pm_reasoning"
+    );
+    assert!(codex_candidate["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|evidence| {
+            evidence
+                .as_str()
+                .unwrap()
+                .contains("quota_observation:self_evolution_cycle_3")
+        }));
+}
+
+#[test]
 fn sync_enables_opencode_codex_bridge_when_both_are_human_authorized() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

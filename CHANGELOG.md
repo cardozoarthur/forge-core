@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.173 - 2026-06-02
+
+### Changed
+
+- Added `forge executor-quota record` so operators and self-evolution cycles can persist observed executor/model quota, rate-limit, cost, latency, quality and product-suitability evidence through the CLI.
+- `forge executors` quota-policy reporting now consumes CLI-recorded quota observations and applies them to matching provider/model candidates, making quota preservation evidence visible without internal test hooks.
+- Added CLI contract coverage proving recorded Codex quota evidence appears in both `observed_quota_evidence` and the matching quota-aware candidate.
+
+### Validation
+
+- Targeted coverage passed for `cargo test executor_quota_record_persists_observation_for_policy_reporting`.
+- Full required validation for this cycle is recorded in `docs/reports/forge-core-v0.4.173-report-2026-06-02.md`.
+
+### Safety
+
+- The change is scoped to Forge Core CLI quota evidence persistence, executor policy reporting, tests, version metadata and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should turn OpenCode/Gemini readiness repair goals into runnable validation/repair workflow tasks and continue PM/TUI entry-point work.
+
 ## 0.4.172 - 2026-06-02
 
 ### Changed

@@ -11,7 +11,9 @@ use forge_core::cluster::{
 };
 use forge_core::context::build_context_package_with_checkpoint;
 use forge_core::execution::run_simulated;
-use forge_core::executor::{load_executors, sync_executors, ExecutorSyncOptions};
+use forge_core::executor::{
+    load_executors, sync_executors, ExecutorQuotaObservation, ExecutorSyncOptions,
+};
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff;
 use forge_core::improve::generate_improvement;
@@ -169,6 +171,10 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
+    ExecutorQuota {
+        #[command(subcommand)]
+        command: ExecutorQuotaCommands,
+    },
     Runtimes {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
@@ -293,6 +299,40 @@ enum SyncCommands {
         deny: Vec<String>,
         #[arg(long)]
         no_prompt: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ExecutorQuotaCommands {
+    Record {
+        #[arg(long)]
+        executor: String,
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        model: String,
+        #[arg(long)]
+        locality: String,
+        #[arg(long = "free-vs-paid")]
+        free_vs_paid: String,
+        #[arg(long = "remaining-quota")]
+        remaining_quota: String,
+        #[arg(long = "rate-limit-risk")]
+        rate_limit_risk: String,
+        #[arg(long = "cost")]
+        monetary_or_token_cost: String,
+        #[arg(long)]
+        latency: String,
+        #[arg(long = "expected-quality")]
+        expected_quality: String,
+        #[arg(long)]
+        suitability: String,
+        #[arg(long)]
+        source: String,
+        #[arg(long = "observed-at")]
+        observed_at: Option<String>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -1447,6 +1487,55 @@ fn run() -> Result<i32> {
             print_response(output, &report)?;
             Ok(0)
         }
+        Commands::ExecutorQuota { command } => match command {
+            ExecutorQuotaCommands::Record {
+                executor,
+                provider,
+                model,
+                locality,
+                free_vs_paid,
+                remaining_quota,
+                rate_limit_risk,
+                monetary_or_token_cost,
+                latency,
+                expected_quality,
+                suitability,
+                source,
+                observed_at,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let observation = build_executor_quota_observation(
+                    executor,
+                    provider,
+                    model,
+                    locality,
+                    free_vs_paid,
+                    remaining_quota,
+                    rate_limit_risk,
+                    monetary_or_token_cost,
+                    latency,
+                    expected_quality,
+                    suitability,
+                    source,
+                    observed_at,
+                )?;
+                store.save_executor_quota(
+                    &observation.executor,
+                    &observation.provider,
+                    observation.model.as_deref().unwrap_or(""),
+                    &serde_json::to_value(&observation)?,
+                )?;
+                let response = serde_json::json!({
+                    "schema_version": "forge.executor_quota_record.v1",
+                    "status": "executor_quota_recorded",
+                    "observation": observation,
+                });
+                store.record_event("_system", "executor_quota_recorded", &response)?;
+                print_response(output, &response)?;
+                Ok(0)
+            }
+        },
         Commands::Runtimes { output } => {
             let store = ForgeStore::open(cli.store)?;
             let report = load_runtimes(&store)?;
@@ -2504,6 +2593,60 @@ fn print_response<T: Serialize>(format: OutputFormat, value: &T) -> Result<()> {
         OutputFormat::Human => println!("{}", serde_json::to_string_pretty(value)?),
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_executor_quota_observation(
+    executor: String,
+    provider: String,
+    model: String,
+    locality: String,
+    free_vs_paid: String,
+    remaining_quota: String,
+    rate_limit_risk: String,
+    monetary_or_token_cost: String,
+    latency: String,
+    expected_quality: String,
+    suitability: String,
+    source: String,
+    observed_at: Option<String>,
+) -> Result<ExecutorQuotaObservation> {
+    let executor = required_cli_value("executor", executor)?;
+    let provider = required_cli_value("provider", provider)?;
+    let model = required_cli_value("model", model)?;
+    let locality = required_cli_value("locality", locality)?;
+    let free_vs_paid = required_cli_value("free-vs-paid", free_vs_paid)?;
+    let remaining_quota = required_cli_value("remaining-quota", remaining_quota)?;
+    let rate_limit_risk = required_cli_value("rate-limit-risk", rate_limit_risk)?;
+    let monetary_or_token_cost = required_cli_value("cost", monetary_or_token_cost)?;
+    let latency = required_cli_value("latency", latency)?;
+    let expected_quality = required_cli_value("expected-quality", expected_quality)?;
+    let suitability = required_cli_value("suitability", suitability)?;
+    let source = required_cli_value("source", source)?;
+
+    Ok(ExecutorQuotaObservation {
+        executor,
+        provider,
+        model: Some(model),
+        local_vs_non_local: locality,
+        free_vs_paid_if_known: free_vs_paid,
+        remaining_quota,
+        rate_limit_risk,
+        monetary_or_token_cost,
+        latency,
+        expected_quality,
+        suitability,
+        source,
+        observed_at: observed_at.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+    })
+}
+
+fn required_cli_value(name: &str, value: String) -> Result<String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        anyhow::bail!("{name} must not be empty");
+    }
+    Ok(value)
 }
 
 fn read_mcp_input(input: Option<String>, input_file: Option<PathBuf>) -> Result<serde_json::Value> {
