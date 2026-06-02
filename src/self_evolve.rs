@@ -829,9 +829,15 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
         );
         let mut executor = requested_executor.clone();
         let mut executor_attempts = Vec::new();
-        let current_workflow = store
+        let mut current_workflow = store
             .load_workflow(&workflow.id)
             .unwrap_or_else(|_| workflow.clone());
+
+        ensure_executor_repair_goals(&mut current_workflow, &executor_policy);
+        if !options.dry_run {
+            let _ = store.save_workflow(&current_workflow);
+        }
+
         let prompt_packet = SelfEvolutionPromptPacket::new(SelfEvolutionPromptPacketParams {
             cycle,
             executor: &requested_executor,
@@ -1262,6 +1268,40 @@ impl PublicProjectUpdateReport {
             visibility: None,
             reason: Some(reason.to_string()),
         }
+    }
+}
+
+fn ensure_executor_repair_goals(workflow: &mut Workflow, policy: &SelfExecutorPolicyReport) {
+    if policy.active_repair_status == "stable" {
+        return;
+    }
+
+    for goal in &policy.repair_goals {
+        if workflow.tasks.iter().any(|task| task.title == *goal) {
+            continue;
+        }
+
+        let id = format!("repair-task-{:03}", workflow.tasks.len() + 1);
+        let dependency = if let Some(last) = workflow.tasks.last() {
+            last.id.clone()
+        } else {
+            "task-001".to_string()
+        };
+
+        let repair_task = task(
+            &id,
+            goal,
+            &[&dependency],
+            &[
+                "executor policy status",
+                "timeout evidence",
+                "probe failure report",
+            ],
+            Vec::new(),
+            "Repair successful",
+            (ExecutorKind::Ai, 0.001),
+        );
+        workflow.tasks.push(repair_task);
     }
 }
 
@@ -1788,17 +1828,19 @@ fn render_cycle_markdown_report(report: &SelfCycleReport) -> String {
     }
     output.push('\n');
     output
-        .push_str("| Executor | Provider | Model | Locality | Quota | Cost | Status | Reason |\n");
-    output.push_str("| --- | --- | --- | --- | --- | --- | --- | --- |\n");
+        .push_str("| Executor | Provider | Model | Locality | Quota | Cost | Quality | Suitability | Status | Reason |\n");
+    output.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for candidate in &report.executor_policy.candidates {
         output.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             markdown_cell(&candidate.executor),
             markdown_cell(&candidate.provider),
             markdown_cell(candidate.model.as_deref().unwrap_or("default")),
             markdown_cell(&candidate.local_vs_non_local),
-            markdown_cell(&candidate.quota_model),
+            markdown_cell(&candidate.remaining_quota),
             markdown_cell(&candidate.monetary_or_token_cost),
+            markdown_cell(&candidate.expected_quality),
+            markdown_cell(&candidate.suitability_for_product_business_reasoning),
             markdown_cell(&candidate.selection_status),
             markdown_cell(&candidate.reason),
         ));
@@ -1807,18 +1849,20 @@ fn render_cycle_markdown_report(report: &SelfCycleReport) -> String {
     if !report.executor_attempts.is_empty() {
         output.push_str("\n## Executor attempts\n\n");
         output
-            .push_str("| Executor | Provider | Model | Local | Quota | Cost | Status | Error |\n");
-        output.push_str("| --- | --- | --- | --- | --- | --- | --- | --- |\n");
+            .push_str("| Executor | Provider | Model | Local | Quota | Cost | Quality | Status | Reason | Error |\n");
+        output.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
         for attempt in &report.executor_attempts {
             output.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                 markdown_cell(&attempt.executor),
                 markdown_cell(attempt.provider.as_deref().unwrap_or("default")),
                 markdown_cell(attempt.model.as_deref().unwrap_or("default")),
                 attempt.local,
                 markdown_cell(&attempt.quota_model),
                 markdown_cell(&attempt.monetary_or_token_cost),
+                markdown_cell(&attempt.expected_quality),
                 markdown_cell(&attempt.status),
+                markdown_cell(&attempt.reason),
                 markdown_cell(attempt.error.as_deref().unwrap_or("none")),
             ));
         }
@@ -3720,5 +3764,70 @@ mod tests {
             .find(|candidate| candidate.executor == "gemini")
             .unwrap();
         assert_eq!(gemini.selection_status, "eligible_not_allowed");
+    }
+
+    #[test]
+    fn test_ensure_executor_repair_goals_persists_tasks() {
+        let (_temp, store) = test_store();
+        let timeout_report = SelfCycleReport {
+            cycle: 1,
+            requested_executor: "gemini".to_string(),
+            executor: "gemini".to_string(),
+            executor_fallbacks: Vec::new(),
+            executor_attempts: vec![SelfExecutorAttempt {
+                executor: "gemini".to_string(),
+                provider: Some("google".to_string()),
+                model: Some("gemini-2.5-pro".to_string()),
+                local: false,
+                quota_model: "quota_bound".to_string(),
+                cost_model: "paid".to_string(),
+                remaining_quota: "unknown_until_gemini_probe".to_string(),
+                rate_limit_risk: "medium".to_string(),
+                monetary_or_token_cost: "quota_or_paid_usage_if_configured".to_string(),
+                expected_quality: "high".to_string(),
+                fallback_risk: "interactive auth/model prompt".to_string(),
+                selection_tier: 20,
+                status: "failed".to_string(),
+                reason: "interactive timeout".to_string(),
+                error: Some(
+                    "executor `gemini` timed out after 180s (likely waiting for interactive completion)"
+                        .to_string(),
+                ),
+            }],
+            status: "failed".to_string(),
+            executor_policy: build_executor_policy(&store, "gemini", &[], &[]),
+            prompt_path: "p1.md".to_string(),
+            prompt_packet_version: "v2".to_string(),
+            prompt_sha256: "sha".to_string(),
+            validation_report_path: "v1.json".to_string(),
+            validation_report_sha256: "sha".to_string(),
+            report_path: "r1.json".to_string(),
+            markdown_report_path: "r1.md".to_string(),
+            validation_passed: false,
+            overhead_ledger: SelfOverheadLedger::empty(&SelfOperatingMode::Balanced),
+            decision_gate: SelfDecisionGateReport::evaluate("", &SelfOperatingMode::Balanced),
+            self_update: SelfUpdateReport::skipped_for(vec![], "test"),
+            committed: false,
+            commit: None,
+            public_project_update: PublicProjectUpdateReport::skipped(false, "test"),
+            publication: SelfEvolutionPublicationReport::empty(),
+        };
+
+        let policy = build_executor_policy(&store, "gemini", &[], &[timeout_report]);
+        let mut workflow = create_workflow(parse_intent("test goal"));
+        ensure_executor_repair_goals(&mut workflow, &policy);
+
+        assert!(workflow
+            .tasks
+            .iter()
+            .any(|t| t.title.contains("Urgent: Fix interactive timeout")));
+        assert!(workflow
+            .tasks
+            .iter()
+            .any(|t| t.title.contains("Gemini non-interactive repair")));
+        assert!(workflow
+            .tasks
+            .iter()
+            .any(|t| t.id.starts_with("repair-task-")));
     }
 }

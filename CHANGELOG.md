@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.167 - 2026-06-02
+
+### Changed
+
+- Self-evolution now persists executor repair goals as ordinary workflow tasks when the quota-aware executor policy reports timeout or non-interactive readiness repair needs.
+- Cycle Markdown reports now include expected quality, product/business suitability and executor-attempt reason columns so model/provider choices are visible without opening JSON.
+- Repair tasks depend on the current terminal workflow task, carry executor policy/probe evidence requirements and keep the self-evolution workflow in Forge-owned state instead of leaving repair guidance as report-only text.
+
+### Validation
+
+- Existing targeted coverage passed for `cargo test self_evolve::tests::test_ensure_executor_repair_goals_persists_tasks`.
+- Full required validation for this cycle is recorded in `docs/reports/forge-core-v0.4.167-report-2026-06-02.md`.
+
+### Safety
+
+- The change is scoped to Forge Core self-evolution executor policy persistence, report rendering, tests, version metadata and report artifacts.
+- No Docker, Kubernetes, Knative, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should make these repair tasks visible in `forge status`/`forge inspect` and attach validation gates for concrete OpenCode/Gemini repair probes.
+
 ## 0.4.166 - 2026-06-02
 
 ### Changed

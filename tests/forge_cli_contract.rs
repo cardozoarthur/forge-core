@@ -8813,10 +8813,13 @@ fn self_run_persists_markdown_executor_policy_report_for_human_review() {
     assert!(markdown.contains(
         "- Fallback order: opencode:google:google/gemini-2.5-pro:non_local:tier-10 -> gemini:google:gemini-2.5-pro:non_local:tier-21 -> codex:openai:default:non_local:tier-32 -> opencode:configured_cli:default:non_local:tier-35 -> opencode:ollama:ollama/qwen3:14b:local:tier-40"
     ));
-    assert!(markdown
-        .contains("| Executor | Provider | Model | Locality | Quota | Cost | Status | Reason |"));
+    assert!(markdown.contains(
+        "| Executor | Provider | Model | Locality | Quota | Cost | Quality | Suitability | Status | Reason |"
+    ));
     assert!(markdown.contains("| opencode | google | google/gemini-2.5-pro | non_local |"));
-    assert!(markdown.contains("| gemini | google | gemini-2.5-pro | non_local | quota_bound |"));
+    assert!(markdown.contains(
+        "| gemini | google | gemini-2.5-pro | non_local | unknown_until_gemini_probe | quota_or_paid_usage_if_configured |"
+    ));
     assert!(markdown.contains("Gemini non-interactive repair"));
     assert!(markdown.contains(
         "Use deterministic validation commands directly instead of spending Gemini/Codex quota."
