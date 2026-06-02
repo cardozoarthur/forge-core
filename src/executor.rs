@@ -56,9 +56,27 @@ pub struct ExecutorQuotaPolicyReport {
     pub schema_version: String,
     pub selection_principle: String,
     pub decision_factors: Vec<String>,
+    pub observed_quota_evidence: Vec<ExecutorQuotaObservation>,
     pub candidates: Vec<ExecutorQuotaPolicyCandidate>,
     pub skipped_to_preserve_quota: Vec<String>,
     pub repair_goals: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutorQuotaObservation {
+    pub executor: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub local_vs_non_local: String,
+    pub free_vs_paid_if_known: String,
+    pub remaining_quota: String,
+    pub rate_limit_risk: String,
+    pub monetary_or_token_cost: String,
+    pub latency: String,
+    pub expected_quality: String,
+    pub suitability: String,
+    pub source: String,
+    pub observed_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -133,7 +151,7 @@ pub fn sync_executors(
         executors.push(state);
     }
 
-    let report = build_report("synced", &options.home, executors);
+    let report = build_report("synced", &options.home, executors, store);
     store.record_event(
         "_system",
         "executors_synced",
@@ -148,13 +166,14 @@ pub fn load_executors(store: &ForgeStore) -> Result<ExecutorSyncReport> {
         .into_iter()
         .map(serde_json::from_value)
         .collect::<Result<Vec<ExecutorState>, _>>()?;
-    Ok(build_report("loaded", &store.base_dir(), states))
+    Ok(build_report("loaded", &store.base_dir(), states, store))
 }
 
 fn build_report(
     status: &str,
     home: &Path,
     mut executors: Vec<ExecutorState>,
+    store: &ForgeStore,
 ) -> ExecutorSyncReport {
     executors.sort_by(|left, right| left.id.cmp(&right.id));
     let usable = executors
@@ -169,7 +188,7 @@ fn build_report(
             && executor.decision_source == "pending_human_approval"
     });
     let integrations = build_integrations(&executors);
-    let quota_policy = build_quota_policy(&executors);
+    let quota_policy = build_quota_policy(&executors, store);
 
     ExecutorSyncReport {
         status: status.to_string(),
@@ -388,10 +407,15 @@ fn build_integrations(executors: &[ExecutorState]) -> Vec<ExecutorIntegration> {
     }]
 }
 
-fn build_quota_policy(executors: &[ExecutorState]) -> ExecutorQuotaPolicyReport {
+fn build_quota_policy(
+    executors: &[ExecutorState],
+    store: &ForgeStore,
+) -> ExecutorQuotaPolicyReport {
+    let observations = load_quota_observations(store);
     let mut candidates = vec![
         quota_candidate(
             executors,
+            &observations,
             "opencode",
             "configured_cli",
             None,
@@ -410,6 +434,7 @@ fn build_quota_policy(executors: &[ExecutorState]) -> ExecutorQuotaPolicyReport 
         ),
         quota_candidate(
             executors,
+            &observations,
             "gemini",
             "google",
             None,
@@ -428,6 +453,7 @@ fn build_quota_policy(executors: &[ExecutorState]) -> ExecutorQuotaPolicyReport 
         ),
         quota_candidate(
             executors,
+            &observations,
             "codex",
             "openai",
             None,
@@ -446,6 +472,7 @@ fn build_quota_policy(executors: &[ExecutorState]) -> ExecutorQuotaPolicyReport 
         ),
         quota_candidate(
             executors,
+            &observations,
             "ollama",
             "local_runtime",
             Some("configured_local_model".to_string()),
@@ -483,6 +510,7 @@ fn build_quota_policy(executors: &[ExecutorState]) -> ExecutorQuotaPolicyReport 
             "product_business_suitability".to_string(),
             "fallback_risk".to_string(),
         ],
+        observed_quota_evidence: observations,
         candidates,
         skipped_to_preserve_quota: vec![
             "Use deterministic command nodes for repeated validation, file inspection and low-value mechanical work before spending non-local quota.".to_string(),
@@ -499,6 +527,7 @@ fn build_quota_policy(executors: &[ExecutorState]) -> ExecutorQuotaPolicyReport 
 #[allow(clippy::too_many_arguments)]
 fn quota_candidate(
     executors: &[ExecutorState],
+    observations: &[ExecutorQuotaObservation],
     executor: &str,
     provider: &str,
     model: Option<String>,
@@ -523,23 +552,54 @@ fn quota_candidate(
         Some(_) => "skipped_not_allowed",
         None => "skipped_unknown_executor",
     };
-    let evidence = state
+    let observation =
+        matching_quota_observation(observations, executor, provider, model.as_deref());
+    let mut evidence = state
         .map(|state| state.config_evidence.clone())
         .unwrap_or_default();
+    if let Some(observation) = observation {
+        evidence.push(format!(
+            "quota_observation:{}:{}:{}:{}",
+            observation.source,
+            observation.remaining_quota,
+            observation.rate_limit_risk,
+            observation.observed_at
+        ));
+    }
 
     ExecutorQuotaPolicyCandidate {
         executor: executor.to_string(),
-        provider: provider.to_string(),
-        model,
-        local_vs_non_local: local_vs_non_local.to_string(),
-        free_vs_paid_if_known: free_vs_paid_if_known.to_string(),
+        provider: observation
+            .map(|observation| observation.provider.clone())
+            .unwrap_or_else(|| provider.to_string()),
+        model: observation
+            .and_then(|observation| observation.model.clone())
+            .or(model),
+        local_vs_non_local: observation
+            .map(|observation| observation.local_vs_non_local.clone())
+            .unwrap_or_else(|| local_vs_non_local.to_string()),
+        free_vs_paid_if_known: observation
+            .map(|observation| observation.free_vs_paid_if_known.clone())
+            .unwrap_or_else(|| free_vs_paid_if_known.to_string()),
         quota_model: quota_model.to_string(),
-        remaining_quota: remaining_quota.to_string(),
-        rate_limit_risk: rate_limit_risk.to_string(),
-        cost_model: cost_model.to_string(),
-        latency: latency.to_string(),
-        expected_quality: expected_quality.to_string(),
-        product_business_suitability: product_business_suitability.to_string(),
+        remaining_quota: observation
+            .map(|observation| observation.remaining_quota.clone())
+            .unwrap_or_else(|| remaining_quota.to_string()),
+        rate_limit_risk: observation
+            .map(|observation| observation.rate_limit_risk.clone())
+            .unwrap_or_else(|| rate_limit_risk.to_string()),
+        cost_model: observation
+            .map(|observation| observation.monetary_or_token_cost.clone())
+            .unwrap_or_else(|| cost_model.to_string()),
+        latency: observation
+            .map(|observation| observation.latency.clone())
+            .unwrap_or_else(|| latency.to_string()),
+        expected_quality: observation
+            .map(|observation| observation.expected_quality.clone())
+            .unwrap_or_else(|| expected_quality.to_string()),
+        product_business_suitability: observation
+            .map(|observation| observation.suitability.clone())
+            .unwrap_or_else(|| product_business_suitability.to_string()),
         fallback_risk: fallback_risk.to_string(),
         selection_tier,
         selection_status: selection_status.to_string(),
@@ -548,10 +608,105 @@ fn quota_candidate(
     }
 }
 
+fn load_quota_observations(store: &ForgeStore) -> Vec<ExecutorQuotaObservation> {
+    store
+        .load_executor_quotas()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect()
+}
+
+fn matching_quota_observation<'a>(
+    observations: &'a [ExecutorQuotaObservation],
+    executor: &str,
+    provider: &str,
+    model: Option<&str>,
+) -> Option<&'a ExecutorQuotaObservation> {
+    observations.iter().find(|observation| {
+        observation.executor == executor
+            && (observation.provider == provider || provider == "configured_cli")
+            && model
+                .map(|model| observation.model.as_deref() == Some(model))
+                .unwrap_or(true)
+    })
+}
+
 fn executor_is_allowed(executors: &[ExecutorState], id: &str) -> bool {
     executors
         .iter()
         .find(|executor| executor.id == id)
         .map(|executor| executor.allowed && executor.installed && executor.configured)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    #[test]
+    fn executor_report_surfaces_persisted_quota_observations() {
+        let temp = tempdir().unwrap();
+        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+
+        let codex_state = ExecutorState {
+            id: "codex".to_string(),
+            display_name: "Codex CLI".to_string(),
+            command: "codex".to_string(),
+            installed: true,
+            configured: true,
+            command_path: Some("/tmp/codex".to_string()),
+            config_evidence: vec!["test-config".to_string()],
+            allowed: true,
+            decision_source: "human_allow".to_string(),
+            synced_at: "2026-06-02T00:00:00Z".to_string(),
+        };
+        store
+            .save_executor_state("codex", &serde_json::to_value(codex_state).unwrap())
+            .unwrap();
+        store
+            .save_executor_quota(
+                "codex",
+                "openai",
+                "gpt-5.5",
+                &json!({
+                    "executor": "codex",
+                    "provider": "openai",
+                    "model": "gpt-5.5",
+                    "local_vs_non_local": "non_local",
+                    "free_vs_paid_if_known": "not_free_quota_bound",
+                    "remaining_quota": "preserve_for_high_value_pm_reasoning",
+                    "rate_limit_risk": "medium_high",
+                    "monetary_or_token_cost": "quota_or_paid_usage",
+                    "latency": "medium",
+                    "expected_quality": "high",
+                    "suitability": "high_for_product_business_decisions",
+                    "source": "self_evolution_cycle_5",
+                    "observed_at": "2026-06-02T00:00:00Z"
+                }),
+            )
+            .unwrap();
+
+        let report = load_executors(&store).unwrap();
+
+        assert_eq!(report.quota_policy.observed_quota_evidence.len(), 1);
+        let codex_candidate = report
+            .quota_policy
+            .candidates
+            .iter()
+            .find(|candidate| candidate.executor == "codex")
+            .unwrap();
+        assert_eq!(codex_candidate.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(
+            codex_candidate.remaining_quota,
+            "preserve_for_high_value_pm_reasoning"
+        );
+        assert_eq!(codex_candidate.rate_limit_risk, "medium_high");
+        assert!(codex_candidate
+            .evidence
+            .iter()
+            .any(|evidence| evidence.contains("quota_observation:self_evolution_cycle_5")));
+    }
 }

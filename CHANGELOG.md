@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.161 - 2026-06-02
+
+### Added
+
+- Self-evolution cycle 5: `forge executors` quota policy reports now include `observed_quota_evidence`, loaded from persisted executor quota observations.
+- Added `executor_quotas` SQLite persistence for executor/provider/model quota, cost, latency, quality and source evidence.
+- Executor quota candidates now merge matching persisted observations into visible model, remaining quota, rate-limit, cost, latency, expected quality, product/business suitability and evidence fields.
+
+### Validation
+
+- RED/targeted coverage added with `cargo test executor_report_surfaces_persisted_quota_observations`, proving persisted Codex quota evidence appears in the executor report and updates the candidate fields.
+- Full required validation for this cycle is recorded in `.forge/reports/self-evolution-cycle-5-quota-aware-executor-report.md`.
+
+### Safety
+
+- The change is scoped to Forge Core executor policy reporting and SQLite persistence.
+- No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should add live non-interactive probing for Gemini/OpenCode and native scheduled publication artifacts.
+
 ## 0.4.160 - 2026-06-02
 
 ### Changed

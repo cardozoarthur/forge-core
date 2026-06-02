@@ -113,6 +113,14 @@ impl ForgeStore {
                 data_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS executor_quotas (
+                executor TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (executor, provider, model)
+            );
             "#,
         )?;
         Ok(())
@@ -458,5 +466,37 @@ impl ForgeStore {
             nodes.push(serde_json::from_str(&row?)?);
         }
         Ok(nodes)
+    }
+
+    pub fn save_executor_quota(
+        &self,
+        executor: &str,
+        provider: &str,
+        model: &str,
+        data: &serde_json::Value,
+    ) -> Result<()> {
+        self.connection.execute(
+            r#"
+            INSERT INTO executor_quotas (executor, provider, model, data_json, updated_at)
+            VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+            ON CONFLICT(executor, provider, model) DO UPDATE SET
+                data_json=excluded.data_json,
+                updated_at=CURRENT_TIMESTAMP
+            "#,
+            params![executor, provider, model, serde_json::to_string(data)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_executor_quotas(&self) -> Result<Vec<serde_json::Value>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT data_json FROM executor_quotas ORDER BY updated_at DESC")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut quotas = Vec::new();
+        for row in rows {
+            quotas.push(serde_json::from_str(&row?)?);
+        }
+        Ok(quotas)
     }
 }
