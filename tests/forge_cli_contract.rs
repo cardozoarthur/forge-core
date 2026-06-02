@@ -19672,7 +19672,13 @@ fn find_slash_command<'a>(json: &'a Value, name: &str) -> &'a Value {
 fn write_fake_cli(bin: &Path, name: &str) {
     fs::create_dir_all(bin).unwrap();
     let path = bin.join(name);
-    fs::write(&path, "#!/usr/bin/env sh\nexit 0\n").unwrap();
+    let content = match name {
+        "opencode" => "#!/usr/bin/env sh\nif [ \"$1\" = \"models\" ]; then echo \"google/gemini-2.5-pro\nollama/qwen3:14b\"; else echo \"opencode version 0.1.0\"; fi\nexit 0\n",
+        "gemini" => "#!/usr/bin/env sh\necho \"gemini version 0.1.0\"\nexit 0\n",
+        "codex" => "#!/usr/bin/env sh\necho \"codex version 0.1.0\"\nexit 0\n",
+        _ => "#!/usr/bin/env sh\nexit 0\n",
+    };
+    fs::write(&path, content).unwrap();
 
     #[cfg(unix)]
     {

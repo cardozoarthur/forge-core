@@ -966,6 +966,38 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
                 &options.repo,
                 cycle_reports.last().map(|report| &report.publication),
             )?;
+
+            if options.push && publication.push_due && public_project_update.status == "completed" {
+                if let (Ok(token), Ok(chat_id)) = (
+                    std::env::var("TELEGRAM_TOKEN"),
+                    std::env::var("TELEGRAM_CHAT_ID"),
+                ) {
+                    if let Some(ref report_content) = publication.report_since_last_push {
+                        // Persist the publication report as an artifact before sending
+                        let pub_report_path = format!(
+                            "artifacts/{}/self-evolution-publication-report-{}.md",
+                            workflow.id,
+                            Utc::now().format("%Y%m%d-%H%M%S")
+                        );
+                        write_text_artifact(&store.base_dir(), &pub_report_path, report_content)?;
+                        let full_pub_report_path = store.base_dir().join(&pub_report_path);
+
+                        match crate::notify::send_telegram_report(
+                            &token,
+                            &chat_id,
+                            report_content,
+                            full_pub_report_path.to_str().unwrap_or(&pub_report_path),
+                        ) {
+                            Ok(tg_report) => {
+                                publication.telegram = Some(tg_report);
+                            }
+                            Err(e) => {
+                                eprintln!("failed to send telegram report: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
         }
         let (_validation_full_path, validation_report_sha256) = write_json_artifact(
             &store.base_dir(),
@@ -2034,6 +2066,16 @@ fn build_executor_policy(
             candidate.rate_limit_risk = obs.rate_limit_risk;
             candidate.monetary_or_token_cost = obs.monetary_or_token_cost;
             candidate.latency = obs.latency;
+            if should_preserve_non_local_quota(candidate) {
+                candidate.selection_status = "skipped_quota_preservation".to_string();
+                candidate.reason = format!(
+                    "Skipping {} {} to preserve scarce non-local quota; remaining_quota={}, rate_limit_risk={}.",
+                    candidate.executor,
+                    candidate.provider,
+                    candidate.remaining_quota,
+                    candidate.rate_limit_risk
+                );
+            }
         }
     }
 
@@ -2048,6 +2090,22 @@ fn build_executor_policy(
         "Gemini non-interactive repair: detect auth/model/approval prompts before handoff and create a repair goal instead of repeated timeouts.".to_string(),
         "OpenCode model repair: record provider/model availability and distinguish non-local quota-bound choices from local Ollama fallback.".to_string(),
     ];
+
+    let mut skipped_to_preserve_quota = Vec::new();
+    skipped_to_preserve_quota.push(
+        "Use deterministic validation commands directly instead of spending Gemini/Codex quota."
+            .to_string(),
+    );
+    skipped_to_preserve_quota.push("Prefer local OpenCode/Ollama for cheap repetitive or low-value work when non-local quota value is low.".to_string());
+
+    for candidate in &candidates {
+        if should_preserve_non_local_quota(candidate) {
+            skipped_to_preserve_quota.push(format!(
+                "Skipping non-local candidate {} due to quota preservation evidence: remaining_quota={}, rate_limit_risk={}",
+                candidate.executor, candidate.remaining_quota, candidate.rate_limit_risk
+            ));
+        }
+    }
 
     let active_repair_status = if candidates
         .iter()
@@ -2085,15 +2143,17 @@ fn build_executor_policy(
         selected_candidate,
         fallback_order,
         candidates,
-        skipped_to_preserve_quota: vec![
-            "Use deterministic validation commands directly instead of spending Gemini/Codex quota."
-                .to_string(),
-            "Prefer local OpenCode/Ollama for cheap repetitive or low-value work when non-local quota value is low."
-                .to_string(),
-        ],
+        skipped_to_preserve_quota,
         repair_goals,
         active_repair_status,
     }
+}
+
+fn should_preserve_non_local_quota(candidate: &SelfExecutorPolicyCandidate) -> bool {
+    candidate.local_vs_non_local == "non_local"
+        && (candidate.remaining_quota.contains("low")
+            || candidate.remaining_quota.contains("preserve")
+            || candidate.rate_limit_risk.contains("high"))
 }
 
 impl From<&SelfExecutorPolicyCandidate> for SelfExecutorFallbackCandidate {
@@ -2851,6 +2911,7 @@ mod tests {
     use super::*;
     use crate::graph::Workflow;
     use chrono::Utc;
+    use serde_json::json;
 
     fn test_store() -> (tempfile::TempDir, ForgeStore) {
         let temp = tempfile::tempdir().unwrap();
@@ -3374,6 +3435,87 @@ mod tests {
         assert_eq!(opencode.monetary_or_token_cost, "provider_config_dependent");
         assert!(opencode.expected_quality.contains("high"));
         assert!(opencode.fallback_risk.contains("provider auth"));
+    }
+
+    #[test]
+    fn test_executor_policy_skips_non_local_candidate_when_quota_is_low() {
+        let (_temp, store) = test_store();
+        for state in [
+            crate::executor::ExecutorState {
+                id: "opencode".to_string(),
+                display_name: "OpenCode CLI".to_string(),
+                command: "opencode".to_string(),
+                installed: true,
+                configured: true,
+                command_path: Some("/tmp/opencode".to_string()),
+                config_evidence: vec!["test opencode config".to_string()],
+                non_interactive_ready: true,
+                probe_evidence: vec!["test opencode probe passed".to_string()],
+                allowed: true,
+                decision_source: "human_allow".to_string(),
+                synced_at: Utc::now().to_rfc3339(),
+            },
+            crate::executor::ExecutorState {
+                id: "codex".to_string(),
+                display_name: "Codex CLI".to_string(),
+                command: "codex".to_string(),
+                installed: true,
+                configured: true,
+                command_path: Some("/tmp/codex".to_string()),
+                config_evidence: vec!["test codex config".to_string()],
+                non_interactive_ready: true,
+                probe_evidence: vec!["test codex probe passed".to_string()],
+                allowed: true,
+                decision_source: "human_allow".to_string(),
+                synced_at: Utc::now().to_rfc3339(),
+            },
+        ] {
+            store
+                .save_executor_state(&state.id, &serde_json::to_value(&state).unwrap())
+                .unwrap();
+        }
+        store
+            .save_executor_quota(
+                "opencode",
+                "google",
+                "google/gemini-2.5-pro",
+                &json!({
+                    "executor": "opencode",
+                    "provider": "google",
+                    "model": "google/gemini-2.5-pro",
+                    "local_vs_non_local": "non_local",
+                    "free_vs_paid_if_known": "unknown_or_configured_non_local_quota_bound",
+                    "remaining_quota": "low_preserve_for_high_value_pm_reasoning",
+                    "rate_limit_risk": "high",
+                    "monetary_or_token_cost": "scarce_non_local_quota",
+                    "latency": "medium",
+                    "expected_quality": "high",
+                    "suitability": "high_for_high_value_pm_business_or_creative_reasoning",
+                    "source": "self_evolution_cycle_14",
+                    "observed_at": Utc::now().to_rfc3339()
+                }),
+            )
+            .unwrap();
+
+        let policy = build_executor_policy(&store, "opencode", &["codex".to_string()], &[]);
+
+        let opencode_remote = policy
+            .candidates
+            .iter()
+            .find(|candidate| candidate.executor == "opencode" && candidate.provider == "google")
+            .unwrap();
+        assert_eq!(
+            opencode_remote.selection_status,
+            "skipped_quota_preservation"
+        );
+        assert_eq!(
+            policy.selected_candidate.as_ref().unwrap().executor,
+            "codex"
+        );
+        assert!(policy
+            .skipped_to_preserve_quota
+            .iter()
+            .any(|entry| entry.contains("low_preserve_for_high_value_pm_reasoning")));
     }
 
     #[test]

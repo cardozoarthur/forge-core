@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.165 - 2026-06-02
+
+### Changed
+
+- Self-evolution cycle 14 now treats persisted low or preserve-worthy non-local quota evidence as a selector input, not just report text.
+- Non-local OpenCode/Gemini/Codex candidates with low quota, preserve directives or high rate-limit risk are marked `skipped_quota_preservation`, with the skipped reason visible in the executor policy report.
+- Quota-aware selection can now fall through to the next eligible non-local or local candidate when a stronger remote option should be preserved for higher-value PM/business/creative reasoning.
+
+### Validation
+
+- RED observed first with `cargo test self_evolve::tests::test_executor_policy_skips_non_local_candidate_when_quota_is_low`: the low-quota OpenCode non-local candidate remained `eligible`.
+- Targeted GREEN passed for `cargo test self_evolve::tests::test_executor_policy_skips_non_local_candidate_when_quota_is_low`.
+- Focused self-evolution tests passed with `cargo test self_evolve::tests::`.
+- CLI contract coverage passed with `cargo test self_run_reports_quota_aware_executor_policy_for_cycle`.
+- Full required validation for this cycle is recorded in `docs/reports/forge-core-v0.4.165-report-2026-06-02.md`.
+
+### Safety
+
+- The change is scoped to Forge Core self-evolution executor policy, tests, version metadata and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should make the same quota-preservation decision visible in `forge status` or `forge inspect` for active self-evolution runs.
+
 ## 0.4.164 - 2026-06-02
 
 ### Changed

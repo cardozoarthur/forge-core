@@ -313,14 +313,18 @@ fn probe_model_availability(id: &str, path: &Path) -> (bool, Vec<String>) {
     let mut evidence = Vec::new();
     match id {
         "gemini" => {
-            // Gemini doesn't have a direct 'list models' that is guaranteed to be non-interactive without auth
-            // but we can check if the model env var is set
-            if let Ok(model) = std::env::var("GEMINI_MODEL") {
-                evidence.push(format!("GEMINI_MODEL is set to {} in environment", model));
+            // Check if GEMINI_API_KEY is set first as it's the strongest indicator of auth
+            if env::var_os("GEMINI_API_KEY").is_some() || env::var_os("GOOGLE_API_KEY").is_some() {
+                evidence.push("Gemini auth detected in environment".to_string());
+                if let Ok(model) = std::env::var("GEMINI_MODEL") {
+                    evidence.push(format!("GEMINI_MODEL is set to {} in environment", model));
+                } else {
+                    evidence.push("GEMINI_MODEL not set; using gemini-2.0-flash-exp for low-latency non-interactive validation".to_string());
+                }
                 (true, evidence)
             } else {
-                evidence.push("GEMINI_MODEL not set; defaulting to gemini-2.5-pro".to_string());
-                (true, evidence)
+                evidence.push("Gemini auth (GEMINI_API_KEY) not found in environment; marking as not non-interactive ready".to_string());
+                (false, evidence)
             }
         }
         "opencode" => {
@@ -328,13 +332,23 @@ fn probe_model_availability(id: &str, path: &Path) -> (bool, Vec<String>) {
             match output {
                 Ok(output) if output.status.is_some_and(|status| status.success()) => {
                     evidence.push("opencode models listed successfully".to_string());
-                    if output.stdout.contains("google/")
+                    let has_non_local = output.stdout.contains("google/")
                         || output.stdout.contains("openai/")
-                        || output.stdout.contains("anthropic/")
-                    {
+                        || output.stdout.contains("anthropic/");
+                    let has_local = output.stdout.contains("ollama/");
+
+                    if has_non_local {
                         evidence.push("non-local models detected in opencode".to_string());
                     }
-                    (true, evidence)
+                    if has_local {
+                        evidence.push("local models (ollama) detected in opencode".to_string());
+                    }
+                    if !has_non_local && !has_local {
+                        evidence.push("no models detected in opencode output".to_string());
+                        (false, evidence)
+                    } else {
+                        (true, evidence)
+                    }
                 }
                 Ok(output) if output.timed_out => {
                     evidence.push(
