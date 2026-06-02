@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.160 - 2026-06-02
+
+### Changed
+
+- Self-evolution cycle 3: executor policy selection now ranks high-value self-evolution candidates by quota-aware capability class before the requested executor order.
+- For self-evolution reports, eligible non-local capabilities are ordered as OpenCode non-local, Gemini non-local and Codex non-local before OpenCode local/Ollama, with the requested chain retained as decision context.
+- Updated the selection principle and quota-preservation wording so reports explicitly mention expected value and low-value work instead of treating fallback order as a static CLI preference.
+
+### Validation
+
+- RED observed first with `cargo test test_executor_policy_prefers_non_local_quota_aware_capabilities_for_self_evolution`: `codex` primary was tried before OpenCode/Gemini non-local candidates.
+- Targeted GREEN passed for the same test after the quota-aware selection tier changed.
+- Required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`, and `cargo build --release`.
+- CLI smoke passed for `forge plan --goal "Create a delivery platform" --output json` and `forge skill install --target codex --target opencode --output json --home /tmp/forge-skill-smoke`.
+- Workflow validation for `wf_dfa9a20f8ade43a69fb82cef22d0ba1a` remains blocked because persisted workflow tasks are still pending and must return to work before promotion.
+
+### Safety
+
+- The change is scoped to self-evolution executor policy ordering, tests, version metadata and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should add live provider probing/status evidence and concrete Gemini/OpenCode repair classification.
+- Default `cargo install --path . --force` was blocked by read-only `/home/arthur/.cargo`; local offline install succeeded with `CARGO_INSTALL_ROOT=/home/arthur/projects/forge-core/.forge/local-install cargo install --path . --force --locked --offline`.
+
 ## 0.4.159 - 2026-06-02
 
 ### Added

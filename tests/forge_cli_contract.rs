@@ -8511,13 +8511,32 @@ fn self_run_reports_quota_aware_executor_policy_for_cycle() {
     );
     assert_eq!(
         policy["selection_principle"],
-        "maximize useful progress under quota, cost, latency, quality and fallback risk constraints"
+        "maximize useful progress under expected value, quota, cost, latency, quality and fallback risk constraints"
     );
     assert_eq!(
         policy["requested_chain"],
         serde_json::json!(["opencode", "gemini", "codex"])
     );
     let candidates = policy["candidates"].as_array().unwrap();
+    let ordered: Vec<_> = candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate["executor"].as_str().unwrap(),
+                candidate["provider"].as_str().unwrap(),
+                candidate["local_vs_non_local"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ordered,
+        vec![
+            ("opencode", "configured_cli", "non_local"),
+            ("gemini", "google", "non_local"),
+            ("codex", "openai", "non_local"),
+            ("opencode", "ollama", "local"),
+        ]
+    );
     assert!(candidates.iter().any(|candidate| {
         candidate["executor"] == "gemini"
             && candidate["local_vs_non_local"] == "non_local"

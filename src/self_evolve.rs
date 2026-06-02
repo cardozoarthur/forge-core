@@ -1598,14 +1598,14 @@ fn build_executor_policy(
     SelfExecutorPolicyReport {
         schema_version: "forge.self_evolution.executor_policy.v1".to_string(),
         selection_principle:
-            "maximize useful progress under quota, cost, latency, quality and fallback risk constraints"
+            "maximize useful progress under expected value, quota, cost, latency, quality and fallback risk constraints"
                 .to_string(),
         requested_chain,
         candidates,
         skipped_to_preserve_quota: vec![
             "Use deterministic validation commands directly instead of spending Gemini/Codex quota."
                 .to_string(),
-            "Prefer local OpenCode/Ollama for cheap repetitive work when non-local quota value is low."
+            "Prefer local OpenCode/Ollama for cheap repetitive or low-value work when non-local quota value is low."
                 .to_string(),
         ],
         repair_goals: vec![
@@ -1636,6 +1636,10 @@ fn requested_rank(chain: &[String], executor: &str) -> u32 {
         .position(|candidate| candidate == executor)
         .map(|rank| rank as u32)
         .unwrap_or(99)
+}
+
+fn quota_aware_selection_tier(chain: &[String], executor: &str, capability_rank: u32) -> u32 {
+    capability_rank * 10 + requested_rank(chain, executor).min(9)
 }
 
 fn opencode_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
@@ -1675,7 +1679,7 @@ fn opencode_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate
         suitability_for_product_business_reasoning: "high_for_high_value_pm_business_or_creative_reasoning".to_string(),
         fallback_risk: "may fail when provider auth, quota or model configuration is missing".to_string(),
         non_interactive_requirement: "must run through opencode run without model/auth prompts".to_string(),
-        selection_tier: requested_rank(chain, "opencode") * 10 + 1,
+        selection_tier: quota_aware_selection_tier(chain, "opencode", 1),
         selection_status: "eligible".to_string(),
         reason: "OpenCode non-local provider path is first choice when expected value justifies quota or configured free/non-local capacity.".to_string(),
     }
@@ -1700,7 +1704,7 @@ fn gemini_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
         suitability_for_product_business_reasoning: "high_for_product_pm_and_business_decision_tasks".to_string(),
         fallback_risk: "interactive auth, approval or model selection must be classified as configuration failure".to_string(),
         non_interactive_requirement: "Gemini CLI must not wait for approval, model selection or auth prompts.".to_string(),
-        selection_tier: requested_rank(chain, "gemini") * 10 + 2,
+        selection_tier: quota_aware_selection_tier(chain, "gemini", 2),
         selection_status: "eligible".to_string(),
         reason: "Gemini is a non-local quota-bound capability for high-value reasoning when non-interactive mode works.".to_string(),
     }
@@ -1722,7 +1726,7 @@ fn codex_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
         suitability_for_product_business_reasoning: "high_as_reliable_fallback_for_complex_reasoning".to_string(),
         fallback_risk: "may consume scarce non-local quota and should be reserved for work where value justifies it".to_string(),
         non_interactive_requirement: "codex exec must run with approval disabled and workspace-write sandbox.".to_string(),
-        selection_tier: requested_rank(chain, "codex") * 10 + 3,
+        selection_tier: quota_aware_selection_tier(chain, "codex", 3),
         selection_status: "eligible".to_string(),
         reason: "Codex is a reliable non-local quota-bound fallback when expected value justifies quota.".to_string(),
     }
@@ -1747,7 +1751,7 @@ fn opencode_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
         suitability_for_product_business_reasoning: "medium_for_repetitive_or_low_value_work_low_for_hard_pm_strategy".to_string(),
         fallback_risk: "local model may be weaker or unavailable and should not displace high-value non-local reasoning when quota is justified".to_string(),
         non_interactive_requirement: "opencode must run with explicit Ollama model and no interactive provider prompt.".to_string(),
-        selection_tier: requested_rank(chain, "opencode") * 10 + 40,
+        selection_tier: quota_aware_selection_tier(chain, "opencode", 4),
         selection_status: "eligible".to_string(),
         reason: "OpenCode local/Ollama is efficient when quotas are low, work is cheap or privacy/locality matters.".to_string(),
     }
@@ -2680,6 +2684,38 @@ mod tests {
         ];
         let resolved = executor_fallback_chain_for_requested("gemini", &executors, &[]);
         assert_eq!(resolved, vec!["opencode", "codex"]);
+    }
+
+    #[test]
+    fn test_executor_policy_prefers_non_local_quota_aware_capabilities_for_self_evolution() {
+        let policy =
+            build_executor_policy("codex", &["opencode".to_string(), "gemini".to_string()]);
+        let ordered: Vec<_> = policy
+            .candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.executor.as_str(),
+                    candidate.provider.as_str(),
+                    candidate.local_vs_non_local.as_str(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            ordered,
+            vec![
+                ("opencode", "configured_cli", "non_local"),
+                ("gemini", "google", "non_local"),
+                ("codex", "openai", "non_local"),
+                ("opencode", "ollama", "local"),
+            ]
+        );
+        assert!(policy.selection_principle.contains("expected value"));
+        assert!(policy
+            .skipped_to_preserve_quota
+            .iter()
+            .any(|entry| entry.contains("low-value")));
     }
 
     #[test]
