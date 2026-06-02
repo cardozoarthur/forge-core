@@ -78,6 +78,7 @@ pub struct SelfCycleReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub executor_attempts: Vec<SelfExecutorAttempt>,
     pub status: String,
+    pub executor_policy: SelfExecutorPolicyReport,
     pub prompt_path: String,
     pub prompt_packet_version: String,
     pub prompt_sha256: String,
@@ -96,7 +97,14 @@ pub struct SelfCycleReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct SelfExecutorAttempt {
     pub executor: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub local: bool,
+    pub quota_model: String,
+    pub cost_model: String,
+    pub selection_tier: u32,
     pub status: String,
+    pub reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -105,6 +113,49 @@ struct SelfExecutorExecution {
     executor: String,
     status: String,
     attempts: Vec<SelfExecutorAttempt>,
+}
+
+#[derive(Debug, Clone)]
+struct SelfExecutorStrategy {
+    executor: String,
+    provider: Option<String>,
+    model: Option<String>,
+    local: bool,
+    quota_model: String,
+    cost_model: String,
+    selection_tier: u32,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SelfExecutorPolicyReport {
+    pub schema_version: String,
+    pub selection_principle: String,
+    pub requested_chain: Vec<String>,
+    pub candidates: Vec<SelfExecutorPolicyCandidate>,
+    pub skipped_to_preserve_quota: Vec<String>,
+    pub repair_goals: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SelfExecutorPolicyCandidate {
+    pub executor: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub local_vs_non_local: String,
+    pub free_vs_paid_if_known: String,
+    pub quota_model: String,
+    pub remaining_quota: String,
+    pub rate_limit_risk: String,
+    pub monetary_or_token_cost: String,
+    pub latency: String,
+    pub expected_quality: String,
+    pub suitability_for_product_business_reasoning: String,
+    pub fallback_risk: String,
+    pub non_interactive_requirement: String,
+    pub selection_tier: u32,
+    pub selection_status: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -585,6 +636,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             &executors,
             &options.fallback_executors,
         );
+        let executor_policy = build_executor_policy(&requested_executor, &cycle_fallback_executors);
         let mut executor = requested_executor.clone();
         let mut executor_attempts = Vec::new();
         let current_workflow = store
@@ -727,6 +779,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             executor_fallbacks: cycle_fallback_executors,
             executor_attempts,
             status,
+            executor_policy,
             prompt_path: prompt_path.clone(),
             prompt_packet_version: prompt_packet.version,
             prompt_sha256,
@@ -1493,6 +1546,213 @@ fn write_text_artifact(base_dir: &Path, relative_path: &str, content: &str) -> R
     Ok(())
 }
 
+fn select_executor_strategies(
+    primary_executor: &str,
+    fallback_executors: &[String],
+) -> Vec<SelfExecutorStrategy> {
+    build_executor_policy(primary_executor, fallback_executors)
+        .candidates
+        .into_iter()
+        .filter(|candidate| candidate.selection_status == "eligible")
+        .map(|candidate| SelfExecutorStrategy {
+            executor: candidate.executor,
+            provider: Some(candidate.provider).filter(|provider| provider != "configured_cli"),
+            model: candidate.model,
+            local: candidate.local_vs_non_local == "local",
+            quota_model: candidate.quota_model,
+            cost_model: candidate.free_vs_paid_if_known,
+            selection_tier: candidate.selection_tier,
+            reason: candidate.reason,
+        })
+        .collect()
+}
+
+fn build_executor_policy(
+    primary_executor: &str,
+    fallback_executors: &[String],
+) -> SelfExecutorPolicyReport {
+    let requested_chain = normalize_executor_chain(primary_executor, fallback_executors);
+    let mut candidates = Vec::new();
+
+    if requested_chain
+        .iter()
+        .any(|executor| executor == "opencode")
+    {
+        candidates.push(opencode_non_local_candidate(&requested_chain));
+    }
+    if requested_chain.iter().any(|executor| executor == "gemini") {
+        candidates.push(gemini_non_local_candidate(&requested_chain));
+    }
+    if requested_chain.iter().any(|executor| executor == "codex") {
+        candidates.push(codex_non_local_candidate(&requested_chain));
+    }
+    if requested_chain
+        .iter()
+        .any(|executor| executor == "opencode")
+    {
+        candidates.push(opencode_local_candidate(&requested_chain));
+    }
+
+    candidates.sort_by_key(|candidate| candidate.selection_tier);
+
+    SelfExecutorPolicyReport {
+        schema_version: "forge.self_evolution.executor_policy.v1".to_string(),
+        selection_principle:
+            "maximize useful progress under quota, cost, latency, quality and fallback risk constraints"
+                .to_string(),
+        requested_chain,
+        candidates,
+        skipped_to_preserve_quota: vec![
+            "Use deterministic validation commands directly instead of spending Gemini/Codex quota."
+                .to_string(),
+            "Prefer local OpenCode/Ollama for cheap repetitive work when non-local quota value is low."
+                .to_string(),
+        ],
+        repair_goals: vec![
+            "Gemini non-interactive repair: detect auth/model/approval prompts before handoff and create a repair goal instead of repeated timeouts."
+                .to_string(),
+            "OpenCode model repair: record provider/model availability and distinguish non-local quota-bound choices from local Ollama fallback."
+                .to_string(),
+        ],
+    }
+}
+
+fn normalize_executor_chain(primary_executor: &str, fallback_executors: &[String]) -> Vec<String> {
+    let mut chain = Vec::new();
+    for executor in
+        std::iter::once(primary_executor.to_string()).chain(fallback_executors.iter().cloned())
+    {
+        let executor = executor.trim().to_lowercase();
+        if !executor.is_empty() && !chain.iter().any(|existing| existing == &executor) {
+            chain.push(executor);
+        }
+    }
+    chain
+}
+
+fn requested_rank(chain: &[String], executor: &str) -> u32 {
+    chain
+        .iter()
+        .position(|candidate| candidate == executor)
+        .map(|rank| rank as u32)
+        .unwrap_or(99)
+}
+
+fn opencode_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
+    let model = std::env::var("OPENCODE_MODEL")
+        .ok()
+        .or_else(|| {
+            std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .map(|_| "anthropic/claude-3-7-sonnet-20250219".to_string())
+        })
+        .or_else(|| {
+            std::env::var("OPENAI_API_KEY")
+                .ok()
+                .map(|_| "openai/gpt-4o".to_string())
+        })
+        .or_else(|| {
+            std::env::var("GEMINI_API_KEY")
+                .ok()
+                .map(|_| "gemini/gemini-2.5-pro".to_string())
+        });
+    let provider = model
+        .as_deref()
+        .and_then(|model| model.split('/').next())
+        .unwrap_or("configured_cli");
+    SelfExecutorPolicyCandidate {
+        executor: "opencode".to_string(),
+        provider: provider.to_string(),
+        model,
+        local_vs_non_local: "non_local".to_string(),
+        free_vs_paid_if_known: "unknown_or_configured_free_non_local".to_string(),
+        quota_model: "quota_or_rate_limit_bound".to_string(),
+        remaining_quota: "unknown_until_provider_probe".to_string(),
+        rate_limit_risk: "medium".to_string(),
+        monetary_or_token_cost: "provider_configured_or_unknown".to_string(),
+        latency: "medium".to_string(),
+        expected_quality: "high_when_configured_provider_is_strong".to_string(),
+        suitability_for_product_business_reasoning: "high_for_high_value_pm_business_or_creative_reasoning".to_string(),
+        fallback_risk: "may fail when provider auth, quota or model configuration is missing".to_string(),
+        non_interactive_requirement: "must run through opencode run without model/auth prompts".to_string(),
+        selection_tier: requested_rank(chain, "opencode") * 10 + 1,
+        selection_status: "eligible".to_string(),
+        reason: "OpenCode non-local provider path is first choice when expected value justifies quota or configured free/non-local capacity.".to_string(),
+    }
+}
+
+fn gemini_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
+    let model = std::env::var("GEMINI_MODEL")
+        .ok()
+        .or_else(|| Some("gemini-2.5-pro".to_string()));
+    SelfExecutorPolicyCandidate {
+        executor: "gemini".to_string(),
+        provider: "google".to_string(),
+        model,
+        local_vs_non_local: "non_local".to_string(),
+        free_vs_paid_if_known: "not_free_quota_bound".to_string(),
+        quota_model: "quota_bound".to_string(),
+        remaining_quota: "unknown_until_gemini_probe".to_string(),
+        rate_limit_risk: "medium".to_string(),
+        monetary_or_token_cost: "quota_or_paid_usage_if_configured".to_string(),
+        latency: "medium".to_string(),
+        expected_quality: "high".to_string(),
+        suitability_for_product_business_reasoning: "high_for_product_pm_and_business_decision_tasks".to_string(),
+        fallback_risk: "interactive auth, approval or model selection must be classified as configuration failure".to_string(),
+        non_interactive_requirement: "Gemini CLI must not wait for approval, model selection or auth prompts.".to_string(),
+        selection_tier: requested_rank(chain, "gemini") * 10 + 2,
+        selection_status: "eligible".to_string(),
+        reason: "Gemini is a non-local quota-bound capability for high-value reasoning when non-interactive mode works.".to_string(),
+    }
+}
+
+fn codex_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
+    SelfExecutorPolicyCandidate {
+        executor: "codex".to_string(),
+        provider: "openai".to_string(),
+        model: None,
+        local_vs_non_local: "non_local".to_string(),
+        free_vs_paid_if_known: "not_free_quota_bound".to_string(),
+        quota_model: "quota_bound".to_string(),
+        remaining_quota: "unknown_until_codex_runtime".to_string(),
+        rate_limit_risk: "medium".to_string(),
+        monetary_or_token_cost: "quota_or_paid_usage".to_string(),
+        latency: "medium".to_string(),
+        expected_quality: "high".to_string(),
+        suitability_for_product_business_reasoning: "high_as_reliable_fallback_for_complex_reasoning".to_string(),
+        fallback_risk: "may consume scarce non-local quota and should be reserved for work where value justifies it".to_string(),
+        non_interactive_requirement: "codex exec must run with approval disabled and workspace-write sandbox.".to_string(),
+        selection_tier: requested_rank(chain, "codex") * 10 + 3,
+        selection_status: "eligible".to_string(),
+        reason: "Codex is a reliable non-local quota-bound fallback when expected value justifies quota.".to_string(),
+    }
+}
+
+fn opencode_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
+    SelfExecutorPolicyCandidate {
+        executor: "opencode".to_string(),
+        provider: "ollama".to_string(),
+        model: Some(
+            std::env::var("OPENCODE_LOCAL_MODEL")
+                .unwrap_or_else(|_| "ollama/qwen3:14b".to_string()),
+        ),
+        local_vs_non_local: "local".to_string(),
+        free_vs_paid_if_known: "local_runtime_no_remote_token_cost".to_string(),
+        quota_model: "local_capacity_bound".to_string(),
+        remaining_quota: "bounded_by_local_runtime_capacity".to_string(),
+        rate_limit_risk: "low_remote_rate_limit_risk".to_string(),
+        monetary_or_token_cost: "local_compute_cost".to_string(),
+        latency: "variable".to_string(),
+        expected_quality: "medium".to_string(),
+        suitability_for_product_business_reasoning: "medium_for_repetitive_or_low_value_work_low_for_hard_pm_strategy".to_string(),
+        fallback_risk: "local model may be weaker or unavailable and should not displace high-value non-local reasoning when quota is justified".to_string(),
+        non_interactive_requirement: "opencode must run with explicit Ollama model and no interactive provider prompt.".to_string(),
+        selection_tier: requested_rank(chain, "opencode") * 10 + 40,
+        selection_status: "eligible".to_string(),
+        reason: "OpenCode local/Ollama is efficient when quotas are low, work is cheap or privacy/locality matters.".to_string(),
+    }
+}
+
 fn execute_cycle_with_fallback(
     repo: &Path,
     primary_executor: &str,
@@ -1500,35 +1760,52 @@ fn execute_cycle_with_fallback(
     prompt: &str,
 ) -> Result<SelfExecutorExecution> {
     let mut attempts = Vec::new();
-    let primary = primary_executor.trim().to_string();
-    let mut candidates = vec![primary.clone()];
-    candidates.extend(normalize_self_executor_fallbacks(
-        &[primary],
-        fallback_executors,
-    ));
+    let strategies = select_executor_strategies(primary_executor, fallback_executors);
     let mut errors = Vec::new();
 
-    for executor in candidates {
-        match execute_cycle(repo, &executor, prompt) {
+    if strategies.is_empty() {
+        bail!(
+            "no suitable executor strategy found for {} with fallbacks {}",
+            primary_executor,
+            fallback_executors.join(", ")
+        );
+    }
+
+    for strategy in strategies {
+        match execute_cycle(repo, &strategy, prompt) {
             Ok(status) => {
                 attempts.push(SelfExecutorAttempt {
-                    executor: executor.clone(),
+                    executor: strategy.executor.clone(),
+                    provider: strategy.provider.clone(),
+                    model: strategy.model.clone(),
+                    local: strategy.local,
+                    quota_model: strategy.quota_model.clone(),
+                    cost_model: strategy.cost_model.clone(),
+                    selection_tier: strategy.selection_tier,
                     status: "completed".to_string(),
+                    reason: strategy.reason.clone(),
                     error: None,
                 });
                 return Ok(SelfExecutorExecution {
-                    executor,
+                    executor: strategy.executor,
                     status,
                     attempts,
                 });
             }
             Err(error) => {
-                let error = error.to_string();
-                errors.push(format!("{executor}: {error}"));
+                let error_msg = error.to_string();
+                errors.push(format!("{}: {}", strategy.executor, error_msg));
                 attempts.push(SelfExecutorAttempt {
-                    executor,
+                    executor: strategy.executor.clone(),
+                    provider: strategy.provider.clone(),
+                    model: strategy.model.clone(),
+                    local: strategy.local,
+                    quota_model: strategy.quota_model.clone(),
+                    cost_model: strategy.cost_model.clone(),
+                    selection_tier: strategy.selection_tier,
                     status: "failed".to_string(),
-                    error: Some(error),
+                    reason: strategy.reason.clone(),
+                    error: Some(error_msg),
                 });
             }
         }
@@ -1537,8 +1814,8 @@ fn execute_cycle_with_fallback(
     bail!("all self-evolution executors failed: {}", errors.join("; "))
 }
 
-fn execute_cycle(repo: &Path, executor: &str, prompt: &str) -> Result<String> {
-    match executor {
+fn execute_cycle(repo: &Path, strategy: &SelfExecutorStrategy, prompt: &str) -> Result<String> {
+    match strategy.executor.as_str() {
         "codex" => {
             let output = execute_command_capture(
                 "codex",
@@ -1576,18 +1853,9 @@ fn execute_cycle(repo: &Path, executor: &str, prompt: &str) -> Result<String> {
                 "--dangerously-skip-permissions".to_string(),
             ];
 
-            if let Ok(model) = std::env::var("OPENCODE_MODEL") {
+            if let Some(model) = &strategy.model {
                 args.push("--model".to_string());
-                args.push(model);
-            } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-                args.push("--model".to_string());
-                args.push("anthropic/claude-3-7-sonnet-20250219".to_string());
-            } else if std::env::var("OPENAI_API_KEY").is_ok() {
-                args.push("--model".to_string());
-                args.push("openai/gpt-4o".to_string());
-            } else if std::env::var("GEMINI_API_KEY").is_ok() {
-                args.push("--model".to_string());
-                args.push("gemini/gemini-2.5-pro".to_string());
+                args.push(model.clone());
             }
 
             args.push(prompt.to_string());
@@ -1619,18 +1887,9 @@ fn execute_cycle(repo: &Path, executor: &str, prompt: &str) -> Result<String> {
                 "text".to_string(),
             ];
 
-            if let Ok(model) = std::env::var("GEMINI_MODEL") {
+            if let Some(model) = &strategy.model {
                 args.push("--model".to_string());
-                args.push(model);
-            } else if std::env::var("GEMINI_API_KEY").is_ok() {
-                args.push("--model".to_string());
-                args.push("gemini-2.5-pro".to_string());
-            } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-                args.push("--model".to_string());
-                args.push("claude-3-7-sonnet-20250219".to_string());
-            } else if std::env::var("OPENAI_API_KEY").is_ok() {
-                args.push("--model".to_string());
-                args.push("gpt-4o".to_string());
+                args.push(model.clone());
             }
 
             let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -2098,6 +2357,7 @@ mod tests {
             executor_fallbacks: Vec::new(),
             executor_attempts: Vec::new(),
             status: "completed".to_string(),
+            executor_policy: build_executor_policy("test", &[]),
             prompt_path: "p1.md".to_string(),
             prompt_packet_version: "v1".to_string(),
             prompt_sha256: "a".to_string(),
@@ -2135,6 +2395,7 @@ mod tests {
             executor_fallbacks: Vec::new(),
             executor_attempts: Vec::new(),
             status: "completed".to_string(),
+            executor_policy: build_executor_policy("test", &[]),
             prompt_path: "p2.md".to_string(),
             prompt_packet_version: "v1".to_string(),
             prompt_sha256: "c".to_string(),

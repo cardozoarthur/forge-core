@@ -8468,6 +8468,84 @@ fn self_run_falls_back_to_gemini_before_codex_if_previous_executor_fails() {
 }
 
 #[test]
+fn self_run_reports_quota_aware_executor_policy_for_cycle() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("README.md"), "# Repo\n").unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "self",
+            "run",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--until",
+            "2999-01-01T00:00:00-03:00",
+            "--max-cycles",
+            "1",
+            "--executor",
+            "opencode",
+            "--fallback-executor",
+            "gemini",
+            "--fallback-executor",
+            "codex",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let policy = &json["cycle_reports"][0]["executor_policy"];
+    assert_eq!(
+        policy["schema_version"],
+        "forge.self_evolution.executor_policy.v1"
+    );
+    assert_eq!(
+        policy["selection_principle"],
+        "maximize useful progress under quota, cost, latency, quality and fallback risk constraints"
+    );
+    assert_eq!(
+        policy["requested_chain"],
+        serde_json::json!(["opencode", "gemini", "codex"])
+    );
+    let candidates = policy["candidates"].as_array().unwrap();
+    assert!(candidates.iter().any(|candidate| {
+        candidate["executor"] == "gemini"
+            && candidate["local_vs_non_local"] == "non_local"
+            && candidate["quota_model"] == "quota_bound"
+            && candidate["non_interactive_requirement"]
+                .as_str()
+                .unwrap()
+                .contains("must not wait for approval")
+    }));
+    assert!(candidates.iter().any(|candidate| {
+        candidate["executor"] == "codex"
+            && candidate["local_vs_non_local"] == "non_local"
+            && candidate["free_vs_paid_if_known"] == "not_free_quota_bound"
+    }));
+    assert!(candidates.iter().any(|candidate| {
+        candidate["executor"] == "opencode"
+            && candidate["provider"] == "ollama"
+            && candidate["local_vs_non_local"] == "local"
+            && candidate["selection_tier"].as_u64().unwrap() > 3
+    }));
+    assert!(policy["repair_goals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|goal| goal.as_str().unwrap().contains("Gemini non-interactive")));
+}
+
+#[test]
 fn self_run_prompt_packet_is_versioned_and_checksummed_for_executor_replay() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

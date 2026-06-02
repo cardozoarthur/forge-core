@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.159 - 2026-06-02
+
+### Added
+
+- Self-evolution cycle 2: added `forge.self_evolution.executor_policy.v1` to every self-run cycle report.
+- The policy report exposes the requested executor chain, candidate provider/model choices, local vs non-local classification, quota model, cost assumptions, rate-limit risk, expected quality, latency, product/business suitability, fallback risk and non-interactive requirements.
+- Added repair-goal evidence for Gemini non-interactive detection and OpenCode provider/model classification so executor timeouts become explicit self-evolution work instead of repeated silent waste.
+
+### Changed
+
+- Self-evolution executor fallback now uses the same quota-aware policy data that appears in the cycle report.
+- OpenCode local/Ollama is represented as an efficient local-capacity option rather than a blanket second fallback, while Gemini and Codex are explicitly reported as non-local quota-bound capabilities rather than "free" paths.
+
+### Validation
+
+- RED observed first with `cargo test self_run_reports_quota_aware_executor_policy_for_cycle -- --nocapture`: the self-run JSON lacked `executor_policy`.
+- Targeted GREEN passed for `cargo test self_run_reports_quota_aware_executor_policy_for_cycle -- --nocapture`.
+- Self-run regression contracts passed with `cargo test self_run_ -- --nocapture`.
+
+### Safety
+
+- The change is limited to Forge Core executor policy/reporting, tests, version metadata and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should connect quota-aware policy to live executor probing/status and scheduled publication artifacts.
+
 ## 0.4.158 - 2026-06-02
 
 ### Added
