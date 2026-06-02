@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.162 - 2026-06-02
+
+### Changed
+
+- Self-evolution executor policy now reads persisted quota observations from the Forge store before selecting fallback strategies.
+- OpenCode non-local choices are split into a configured no-cost/free path and a paid-or-unknown provider path, making the fallback order visible as OpenCode free/configured non-local, Gemini non-local quota-bound, Codex non-local quota-bound, OpenCode paid/unknown non-local, then OpenCode local/Ollama.
+- Self-evolution attempt reports preserve quota/cost/latency evidence from policy candidates so operator-facing reports explain why an executor/model was chosen or skipped.
+
+### Validation
+
+- RED observed first with `cargo test self_run_reports_quota_aware_executor_policy_for_cycle -- --nocapture`: the partial implementation failed to compile because candidate functions and store propagation were incomplete.
+- Targeted GREEN passed for `cargo test self_run_reports_quota_aware_executor_policy_for_cycle -- --nocapture`.
+- Focused policy coverage passed for `cargo test executor_policy -- --nocapture` and `cargo test test_executor_strategy_preserves_quota_cost_fields_for_attempt_reports -- --nocapture`.
+- Full required validation passed: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` and `cargo build --release`.
+- CLI smoke passed for `forge plan --goal "Create a delivery platform" --output json` and `forge skill install --target codex --target opencode --output json --home /tmp/forge-skill-smoke-v04162-2`.
+
+### Safety
+
+- The change is scoped to Forge Core executor policy/reporting, tests, version metadata and report artifacts.
+- No Docker, Kubernetes, Knative, Telegram send, model installation or external infrastructure mutation is performed.
+- This still does not complete the full v0.5 promotion condition; the next cycle should add live non-interactive probing for Gemini/OpenCode and native scheduled publication artifacts.
+
 ## 0.4.161 - 2026-06-02
 
 ### Added

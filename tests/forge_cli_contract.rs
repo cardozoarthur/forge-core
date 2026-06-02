@@ -8568,6 +8568,7 @@ fn self_run_reports_quota_aware_executor_policy_for_cycle() {
             ("opencode", "google", "non_local"),
             ("gemini", "google", "non_local"),
             ("codex", "openai", "non_local"),
+            ("opencode", "configured_cli", "non_local"),
             ("opencode", "ollama", "local"),
         ]
     );

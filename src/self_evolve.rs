@@ -663,6 +663,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
             &options.fallback_executors,
         );
         let executor_policy = build_executor_policy(
+            store,
             &requested_executor,
             &cycle_fallback_executors,
             &cycle_reports,
@@ -733,6 +734,7 @@ pub fn run_self_evolution(store: &ForgeStore, options: SelfRunOptions) -> Result
                 let _ = store.save_workflow(&wf);
             }
             let execution = match execute_cycle_with_fallback(
+                store,
                 &options.repo,
                 &requested_executor,
                 &cycle_fallback_executors,
@@ -1681,33 +1683,40 @@ fn write_text_artifact(base_dir: &Path, relative_path: &str, content: &str) -> R
 }
 
 fn select_executor_strategies(
+    store: &ForgeStore,
     primary_executor: &str,
     fallback_executors: &[String],
     previous_reports: &[SelfCycleReport],
 ) -> Vec<SelfExecutorStrategy> {
-    build_executor_policy(primary_executor, fallback_executors, previous_reports)
-        .candidates
-        .into_iter()
-        .filter(|candidate| candidate.selection_status == "eligible")
-        .map(|candidate| SelfExecutorStrategy {
-            executor: candidate.executor,
-            provider: Some(candidate.provider).filter(|provider| provider != "configured_cli"),
-            model: candidate.model,
-            local: candidate.local_vs_non_local == "local",
-            quota_model: candidate.quota_model,
-            cost_model: candidate.free_vs_paid_if_known,
-            remaining_quota: candidate.remaining_quota,
-            rate_limit_risk: candidate.rate_limit_risk,
-            monetary_or_token_cost: candidate.monetary_or_token_cost,
-            expected_quality: candidate.expected_quality,
-            fallback_risk: candidate.fallback_risk,
-            selection_tier: candidate.selection_tier,
-            reason: candidate.reason,
-        })
-        .collect()
+    build_executor_policy(
+        store,
+        primary_executor,
+        fallback_executors,
+        previous_reports,
+    )
+    .candidates
+    .into_iter()
+    .filter(|candidate| candidate.selection_status == "eligible")
+    .map(|candidate| SelfExecutorStrategy {
+        executor: candidate.executor,
+        provider: Some(candidate.provider).filter(|provider| provider != "configured_cli"),
+        model: candidate.model,
+        local: candidate.local_vs_non_local == "local",
+        quota_model: candidate.quota_model,
+        cost_model: candidate.free_vs_paid_if_known,
+        remaining_quota: candidate.remaining_quota,
+        rate_limit_risk: candidate.rate_limit_risk,
+        monetary_or_token_cost: candidate.monetary_or_token_cost,
+        expected_quality: candidate.expected_quality,
+        fallback_risk: candidate.fallback_risk,
+        selection_tier: candidate.selection_tier,
+        reason: candidate.reason,
+    })
+    .collect()
 }
 
 fn build_executor_policy(
+    store: &ForgeStore,
     primary_executor: &str,
     fallback_executors: &[String],
     previous_reports: &[SelfCycleReport],
@@ -1719,13 +1728,19 @@ fn build_executor_policy(
         .iter()
         .any(|executor| executor == "opencode")
     {
-        candidates.push(opencode_non_local_candidate(&requested_chain));
+        candidates.push(opencode_free_non_local_candidate(&requested_chain));
     }
     if requested_chain.iter().any(|executor| executor == "gemini") {
         candidates.push(gemini_non_local_candidate(&requested_chain));
     }
     if requested_chain.iter().any(|executor| executor == "codex") {
         candidates.push(codex_non_local_candidate(&requested_chain));
+    }
+    if requested_chain
+        .iter()
+        .any(|executor| executor == "opencode")
+    {
+        candidates.push(opencode_paid_non_local_candidate(&requested_chain));
     }
     if requested_chain
         .iter()
@@ -1755,6 +1770,32 @@ fn build_executor_policy(
                     }
                 }
             }
+        }
+    }
+
+    // Augment with persisted quota observations from store
+    let observations = store.load_executor_quotas().unwrap_or_default();
+    for candidate in &mut candidates {
+        let matching = observations.iter().find_map(|v| {
+            let obs: crate::executor::ExecutorQuotaObservation =
+                serde_json::from_value(v.clone()).ok()?;
+            if obs.executor == candidate.executor
+                && (obs.provider == candidate.provider || candidate.provider == "configured_cli")
+            {
+                Some(obs)
+            } else {
+                None
+            }
+        });
+        if let Some(obs) = matching {
+            candidate.capability_evidence.push(format!(
+                "quota_observation:{}:{}:{}:{}",
+                obs.source, obs.remaining_quota, obs.rate_limit_risk, obs.observed_at
+            ));
+            candidate.remaining_quota = obs.remaining_quota;
+            candidate.rate_limit_risk = obs.rate_limit_risk;
+            candidate.monetary_or_token_cost = obs.monetary_or_token_cost;
+            candidate.latency = obs.latency;
         }
     }
 
@@ -1835,20 +1876,9 @@ fn quota_aware_selection_tier(chain: &[String], executor: &str, capability_rank:
     capability_rank * 10 + requested_rank(chain, executor).min(9)
 }
 
-fn opencode_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
-    let model = std::env::var("OPENCODE_MODEL")
+fn opencode_free_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
+    let model = std::env::var("OPENCODE_FREE_MODEL")
         .ok()
-        .or_else(|| {
-            std::env::var("ANTHROPIC_API_KEY")
-                .ok()
-                .map(|_| "anthropic/claude-3-7-sonnet-20250219".to_string())
-        })
-        .or_else(|| {
-            std::env::var("OPENAI_API_KEY")
-                .ok()
-                .map(|_| "openai/gpt-4o".to_string())
-        })
-        .or_else(|| std::env::var("OPENCODE_FREE_MODEL").ok())
         .or_else(|| Some("google/gemini-2.5-pro".to_string()));
     let provider = model
         .as_deref()
@@ -1863,7 +1893,7 @@ fn opencode_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate
         quota_model: "quota_or_rate_limit_bound".to_string(),
         remaining_quota: "unknown_until_provider_probe".to_string(),
         rate_limit_risk: "medium".to_string(),
-        monetary_or_token_cost: "provider_configured_or_unknown".to_string(),
+        monetary_or_token_cost: "provider_configured_no_cost".to_string(),
         latency: "medium".to_string(),
         expected_quality: "high_when_configured_provider_is_strong".to_string(),
         suitability_for_product_business_reasoning: "high_for_high_value_pm_business_or_creative_reasoning".to_string(),
@@ -1871,7 +1901,7 @@ fn opencode_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate
         non_interactive_requirement: "must run through opencode run without model/auth prompts".to_string(),
         selection_tier: quota_aware_selection_tier(chain, "opencode", 1),
         selection_status: "eligible".to_string(),
-        reason: "OpenCode non-local provider path is first choice when expected value justifies quota or configured free/non-local capacity.".to_string(),
+        reason: "OpenCode non-local free/configured provider path is first choice when expected value justifies configured no-cost capacity.".to_string(),
         capability_evidence: vec![
             "Supports --model override".to_string(),
             "Non-interactive --dangerously-skip-permissions mode available".to_string(),
@@ -1934,6 +1964,53 @@ fn codex_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
     }
 }
 
+fn opencode_paid_non_local_candidate(_chain: &[String]) -> SelfExecutorPolicyCandidate {
+    let model = std::env::var("OPENCODE_MODEL")
+        .ok()
+        .or_else(|| {
+            std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .map(|_| "anthropic/claude-3-7-sonnet-20250219".to_string())
+        })
+        .or_else(|| {
+            std::env::var("OPENAI_API_KEY")
+                .ok()
+                .map(|_| "openai/gpt-4o".to_string())
+        });
+    let provider = model
+        .as_deref()
+        .and_then(|model| model.split('/').next())
+        .unwrap_or("configured_cli");
+    SelfExecutorPolicyCandidate {
+        executor: "opencode".to_string(),
+        provider: provider.to_string(),
+        model,
+        local_vs_non_local: "non_local".to_string(),
+        free_vs_paid_if_known: "unknown_or_paid".to_string(),
+        quota_model: "quota_or_rate_limit_bound".to_string(),
+        remaining_quota: "unknown_until_provider_probe".to_string(),
+        rate_limit_risk: "medium".to_string(),
+        monetary_or_token_cost: "provider_config_dependent".to_string(),
+        latency: "medium".to_string(),
+        expected_quality: "medium_high_when_configured_provider_is_strong".to_string(),
+        suitability_for_product_business_reasoning:
+            "medium_high_for_product_and_code_when_configured".to_string(),
+        fallback_risk:
+            "may consume paid quota or fail when provider auth/model configuration is missing"
+                .to_string(),
+        non_interactive_requirement:
+            "must run through opencode run with explicit provider/model and no auth prompts"
+                .to_string(),
+        selection_tier: 35,
+        selection_status: "eligible".to_string(),
+        reason: "OpenCode non-local paid-or-unknown provider path is used after configured no-cost options and stronger non-local fallbacks are unsuitable.".to_string(),
+        capability_evidence: vec![
+            "Supports --model override".to_string(),
+            "Requires provider/model classification before handoff".to_string(),
+        ],
+    }
+}
+
 fn opencode_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
     SelfExecutorPolicyCandidate {
         executor: "opencode".to_string(),
@@ -1964,6 +2041,7 @@ fn opencode_local_candidate(chain: &[String]) -> SelfExecutorPolicyCandidate {
 }
 
 fn execute_cycle_with_fallback(
+    store: &ForgeStore,
     repo: &Path,
     primary_executor: &str,
     fallback_executors: &[String],
@@ -1971,8 +2049,12 @@ fn execute_cycle_with_fallback(
     prompt: &str,
 ) -> Result<SelfExecutorExecution> {
     let mut attempts = Vec::new();
-    let strategies =
-        select_executor_strategies(primary_executor, fallback_executors, previous_reports);
+    let strategies = select_executor_strategies(
+        store,
+        primary_executor,
+        fallback_executors,
+        previous_reports,
+    );
     let mut errors = Vec::new();
 
     if strategies.is_empty() {
@@ -2461,6 +2543,12 @@ mod tests {
     use crate::graph::Workflow;
     use chrono::Utc;
 
+    fn test_store() -> (tempfile::TempDir, ForgeStore) {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        (temp, store)
+    }
+
     fn test_internal_loop_report() -> SelfEvolutionLoopReport {
         SelfEvolutionLoopReport {
             schema_version: "forge.self_evolution.loop.v1".to_string(),
@@ -2573,6 +2661,7 @@ mod tests {
 
     #[test]
     fn test_overhead_ledger_aggregate() {
+        let (_temp, store) = test_store();
         let r1 = SelfCycleReport {
             cycle: 1,
             requested_executor: "test".to_string(),
@@ -2580,7 +2669,7 @@ mod tests {
             executor_fallbacks: Vec::new(),
             executor_attempts: Vec::new(),
             status: "completed".to_string(),
-            executor_policy: build_executor_policy("test", &[], &[]),
+            executor_policy: build_executor_policy(&store, "test", &[], &[]),
             prompt_path: "p1.md".to_string(),
             prompt_packet_version: "v1".to_string(),
             prompt_sha256: "a".to_string(),
@@ -2619,7 +2708,7 @@ mod tests {
             executor_fallbacks: Vec::new(),
             executor_attempts: Vec::new(),
             status: "completed".to_string(),
-            executor_policy: build_executor_policy("test", &[], &[]),
+            executor_policy: build_executor_policy(&store, "test", &[], &[]),
             prompt_path: "p2.md".to_string(),
             prompt_packet_version: "v1".to_string(),
             prompt_sha256: "c".to_string(),
@@ -2909,7 +2998,9 @@ mod tests {
 
     #[test]
     fn test_executor_policy_prefers_non_local_quota_aware_capabilities_for_self_evolution() {
+        let (_temp, store) = test_store();
         let policy = build_executor_policy(
+            &store,
             "codex",
             &["opencode".to_string(), "gemini".to_string()],
             &[],
@@ -2933,6 +3024,7 @@ mod tests {
                 ("opencode", "google", "non_local"),
                 ("gemini", "google", "non_local"),
                 ("codex", "openai", "non_local"),
+                ("opencode", "configured_cli", "non_local"),
                 ("opencode", "ollama", "local"),
             ]
         );
@@ -2953,7 +3045,9 @@ mod tests {
 
     #[test]
     fn test_executor_strategy_preserves_quota_cost_fields_for_attempt_reports() {
+        let (_temp, store) = test_store();
         let strategies = select_executor_strategies(
+            &store,
             "codex",
             &["opencode".to_string(), "gemini".to_string()],
             &[],
@@ -2968,7 +3062,7 @@ mod tests {
         assert_eq!(opencode.rate_limit_risk, "medium");
         assert_eq!(
             opencode.monetary_or_token_cost,
-            "provider_configured_or_unknown"
+            "provider_configured_no_cost"
         );
         assert!(opencode.expected_quality.contains("high"));
         assert!(opencode.fallback_risk.contains("provider auth"));
@@ -3001,6 +3095,7 @@ mod tests {
 
     #[test]
     fn test_executor_policy_detects_timeout_and_requires_repair() {
+        let (_temp, store) = test_store();
         let timeout_report = SelfCycleReport {
             cycle: 1,
             requested_executor: "gemini".to_string(),
@@ -3024,7 +3119,7 @@ mod tests {
                 error: Some("executor `gemini` timed out after 180s (likely waiting for interactive completion)".to_string()),
             }],
             status: "failed".to_string(),
-            executor_policy: build_executor_policy("gemini", &[], &[]),
+            executor_policy: build_executor_policy(&store, "gemini", &[], &[]),
             prompt_path: "p1.md".to_string(),
             prompt_packet_version: "v2".to_string(),
             prompt_sha256: "sha".to_string(),
@@ -3041,7 +3136,7 @@ mod tests {
             public_project_update: PublicProjectUpdateReport::skipped(false, "test"),
         };
 
-        let policy = build_executor_policy("gemini", &[], &[timeout_report]);
+        let policy = build_executor_policy(&store, "gemini", &[], &[timeout_report]);
 
         assert_eq!(
             policy.active_repair_status,
