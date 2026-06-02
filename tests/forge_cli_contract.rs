@@ -7735,6 +7735,18 @@ fn sync_persists_human_allowed_executor_policy() {
         .find(|candidate| candidate["executor"] == "opencode")
         .unwrap();
     assert_eq!(
+        opencode_candidate["free_vs_paid_if_known"],
+        "unknown_or_configured_non_local_quota_bound"
+    );
+    assert_eq!(
+        opencode_candidate["cost_model"],
+        "provider_config_dependent"
+    );
+    assert!(!opencode_candidate["reason"]
+        .as_str()
+        .unwrap()
+        .contains("free"));
+    assert_eq!(
         opencode_candidate["selection_status"],
         "skipped_not_allowed"
     );

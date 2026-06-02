@@ -1966,11 +1966,11 @@ fn opencode_free_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCand
         provider: provider.to_string(),
         model,
         local_vs_non_local: "non_local".to_string(),
-        free_vs_paid_if_known: "unknown_or_configured_free_non_local".to_string(),
+        free_vs_paid_if_known: "unknown_or_configured_non_local_quota_bound".to_string(),
         quota_model: "quota_or_rate_limit_bound".to_string(),
         remaining_quota: "unknown_until_provider_probe".to_string(),
         rate_limit_risk: "medium".to_string(),
-        monetary_or_token_cost: "provider_configured_no_cost".to_string(),
+        monetary_or_token_cost: "provider_config_dependent".to_string(),
         latency: "medium".to_string(),
         expected_quality: "high_when_configured_provider_is_strong".to_string(),
         suitability_for_product_business_reasoning: "high_for_high_value_pm_business_or_creative_reasoning".to_string(),
@@ -1978,7 +1978,7 @@ fn opencode_free_non_local_candidate(chain: &[String]) -> SelfExecutorPolicyCand
         non_interactive_requirement: "must run through opencode run without model/auth prompts".to_string(),
         selection_tier: quota_aware_selection_tier(chain, "opencode", 1),
         selection_status: "eligible".to_string(),
-        reason: "OpenCode non-local free/configured provider path is first choice when expected value justifies configured no-cost capacity.".to_string(),
+        reason: "OpenCode non-local configured provider path is first choice when expected value justifies quota or cost.".to_string(),
         capability_evidence: vec![
             "Supports --model override".to_string(),
             "Non-interactive --dangerously-skip-permissions mode available".to_string(),
@@ -3137,10 +3137,7 @@ mod tests {
 
         assert_eq!(opencode.remaining_quota, "unknown_until_provider_probe");
         assert_eq!(opencode.rate_limit_risk, "medium");
-        assert_eq!(
-            opencode.monetary_or_token_cost,
-            "provider_configured_no_cost"
-        );
+        assert_eq!(opencode.monetary_or_token_cost, "provider_config_dependent");
         assert!(opencode.expected_quality.contains("high"));
         assert!(opencode.fallback_risk.contains("provider auth"));
     }
