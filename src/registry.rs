@@ -8,6 +8,9 @@ use crate::graph::{
     AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, TaskStatus, Workflow,
 };
 use crate::interaction::{summarize_human_interactions, HumanInteractionSummary};
+use crate::outcome::{
+    assess_workflow_outcome_metadata, OutcomeRegistrySummary, OutcomeStatusReport,
+};
 use crate::request::{build_run_activity, RunRecord};
 use crate::schedule::{summarize_loops, summarize_schedules, LoopSummary, ScheduleSummary};
 use crate::storage::ForgeStore;
@@ -71,6 +74,7 @@ pub struct WorkflowRegistrySummary {
     pub context_actions: RegistryContextActionSummary,
     pub context_quality: RegistryContextQualitySummary,
     pub human_interaction: HumanInteractionSummary,
+    pub outcome: OutcomeRegistrySummary,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,6 +101,7 @@ pub struct WorkflowRegistryRow {
     pub schedule_summary: ScheduleSummary,
     pub loop_summary: LoopSummary,
     pub human_interaction_summary: HumanInteractionSummary,
+    pub outcome_status: OutcomeStatusReport,
     pub quality_action: RegistryQualityAction,
     pub reusable_subflows: Vec<ReusableSubflowRef>,
     pub created_at: DateTime<Utc>,
@@ -373,6 +378,12 @@ pub fn list_workflows_with_filters(
                 add_human_interaction_summary(&mut total, &row.human_interaction_summary);
                 total
             });
+    let outcome = rows
+        .iter()
+        .fold(OutcomeRegistrySummary::empty(), |mut total, row| {
+            total.add(&row.outcome_status);
+            total
+        });
     let summary = WorkflowRegistrySummary {
         total: rows.len(),
         running,
@@ -384,6 +395,7 @@ pub fn list_workflows_with_filters(
         context_actions,
         context_quality,
         human_interaction,
+        outcome,
     };
 
     Ok(WorkflowRegistryReport {
@@ -772,6 +784,7 @@ fn registry_row(
     let schedule_summary = summarize_schedules(&workflow.tasks);
     let loop_summary = summarize_loops(&workflow.tasks);
     let human_interaction_summary = summarize_human_interactions(&workflow.tasks);
+    let outcome_status = assess_workflow_outcome_metadata(workflow);
     let run_activity = RegistryRunActivitySummary::from_runs(runs);
 
     WorkflowRegistryRow {
@@ -797,6 +810,7 @@ fn registry_row(
         schedule_summary,
         loop_summary,
         human_interaction_summary,
+        outcome_status,
         quality_action,
         reusable_subflows,
         created_at: workflow.created_at,

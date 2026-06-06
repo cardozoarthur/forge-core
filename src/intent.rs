@@ -47,6 +47,14 @@ pub fn parse_intent(goal: &str) -> IntentSpec {
         deliverables.push("Markdown and PDF Goal reports".to_string());
         deliverables.push("Telegram delivery record".to_string());
     }
+    if requires_final_user_outcome(&lower) {
+        deliverables.push("verified user-facing final outcome".to_string());
+    }
+    if requires_visual_workspace(&lower) {
+        deliverables.push("collaborative AI and human whiteboard".to_string());
+        deliverables.push("design token system".to_string());
+        deliverables.push("component, page, wireframe and flow artifacts".to_string());
+    }
 
     let mut risks = vec![
         "ambiguous objective can create non-atomic tasks".to_string(),
@@ -110,6 +118,15 @@ pub fn parse_intent(goal: &str) -> IntentSpec {
                 constraints.push("deterministic code handles stable repeated work".to_string());
                 constraints.push("AI is reserved for judgment and summarization".to_string());
             }
+            if requires_visual_workspace(&lower) {
+                constraints.push(
+                    "visual artifacts remain Forge-owned workflow state before external export"
+                        .to_string(),
+                );
+                constraints.push(
+                    "human and AI collaboration events are auditable in the workflow".to_string(),
+                );
+            }
             constraints
         },
         deliverables,
@@ -133,4 +150,26 @@ fn requires_daily_goal_research(lower_goal: &str) -> bool {
         || lower_goal.contains("daily goal")
         || lower_goal.contains("goal research workflow"))
         && (lower_goal.contains("goal") || lower_goal.contains("goals"))
+}
+
+fn requires_final_user_outcome(lower_goal: &str) -> bool {
+    lower_goal.contains("resultado final")
+        || lower_goal.contains("resultados finais")
+        || lower_goal.contains("final result")
+        || lower_goal.contains("final workflow result")
+        || lower_goal.contains("entrega final")
+        || lower_goal.contains("deliver final")
+        || lower_goal.contains("final outcome")
+}
+
+fn requires_visual_workspace(lower_goal: &str) -> bool {
+    lower_goal.contains("visual")
+        || lower_goal.contains("whiteboard")
+        || lower_goal.contains("figma")
+        || lower_goal.contains("wireframe")
+        || lower_goal.contains("tokens")
+        || lower_goal.contains("componentes")
+        || lower_goal.contains("components")
+        || lower_goal.contains("design system")
+        || lower_goal.contains("sistema de design")
 }

@@ -16386,6 +16386,31 @@ fn request_step_auto_promotes_ready_deterministic_task_and_advances_drive() {
     let status_json: Value = serde_json::from_slice(&status).unwrap();
     assert_eq!(status_json["task_summary"]["completed"], 1);
     assert_eq!(status_json["artifact_count"], 1);
+    assert_eq!(
+        status_json["outcome_status"]["schema_version"],
+        "forge.outcome_status.v1"
+    );
+    assert_eq!(
+        status_json["outcome_status"]["status"],
+        "needs_user_delivery_evidence"
+    );
+    assert_eq!(
+        status_json["outcome_status"]["action"],
+        "produce_user_facing_deliverables"
+    );
+    assert!(
+        status_json["outcome_status"]["final_completion_audit_required"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(status_json["outcome_status"]["deliverables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |deliverable| deliverable["name"] == "verified user-facing final outcome"
+                && deliverable["kind"] == "user_facing"
+        ));
 
     let mcp_tools = forge()
         .args(["mcp", "tools", "--output", "json"])
@@ -16699,6 +16724,62 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
     let started_json: Value = serde_json::from_slice(&started).unwrap();
     let workflow_id = started_json["workflow_id"].as_str().unwrap();
 
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "attach-creative",
+            "--workflow",
+            workflow_id,
+            "--title",
+            "Mapa colaborativo AI Humano",
+            "--kind",
+            "whiteboard",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "attach-creative",
+            "--workflow",
+            workflow_id,
+            "--title",
+            "Componente de tarefa visual",
+            "--kind",
+            "component",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "set-tokens",
+            "--workflow",
+            workflow_id,
+            "--name",
+            "Forge Ops Visual Tokens",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
     let snapshot = forge()
         .args([
             "--store",
@@ -16738,6 +16819,33 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
         .unwrap()
         .iter()
         .any(|action| action["id"] == "modifier_apply" && action["mutates_workflow"] == true));
+    assert_eq!(
+        snapshot_json["registry"]["summary"]["outcome"]["schema_version"],
+        "forge.outcome_registry_summary.v1"
+    );
+    let visual_workflow = snapshot_json["visual_workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workflow| workflow["workflow_id"] == workflow_id)
+        .unwrap();
+    assert!(visual_workflow["tasks"].as_array().unwrap().len() >= 8);
+    assert_eq!(
+        visual_workflow["design_surface"]["schema_version"],
+        "forge.ops.design_surface.v1"
+    );
+    assert_eq!(visual_workflow["design_surface"]["whiteboard_count"], 1);
+    assert_eq!(visual_workflow["design_surface"]["component_count"], 1);
+    assert_eq!(
+        visual_workflow["design_surface"]["token_collection_present"],
+        true
+    );
+    assert!(
+        visual_workflow["design_surface"]["token_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 
     let store_handle = forge_core::storage::ForgeStore::open(&store).unwrap();
     let html_response = forge_core::ops::handle_ops_http_request(
@@ -16750,6 +16858,8 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
     assert!(html.contains("Forge Ops"));
     assert!(html.contains(workflow_id));
     assert!(html.contains("Lane modificadora"));
+    assert!(html.contains("Visualização operacional"));
+    assert!(html.contains("whiteboards: 1"));
 
     let proposed_goal = "Objetivo proposto pela lane modificadora";
     let propose_goal_request = format!(
@@ -17314,6 +17424,22 @@ fn request_drive_requires_final_completion_audit_for_explicit_final_criteria() {
     let status_json: Value = serde_json::from_slice(&status).unwrap();
     assert_eq!(status_json["status"], "running");
     assert_eq!(status_json["workflow_status"], "running");
+    assert_eq!(
+        status_json["outcome_status"]["schema_version"],
+        "forge.outcome_status.v1"
+    );
+    assert_eq!(
+        status_json["outcome_status"]["status"],
+        "needs_final_outcome_audit"
+    );
+    assert_eq!(
+        status_json["outcome_status"]["action"],
+        "attach_final_completion_audit"
+    );
+    assert_eq!(
+        status_json["outcome_status"]["final_completion_audit_required"],
+        true
+    );
 
     let audit_path = temp.path().join("final-completion-audit.json");
     fs::write(
@@ -17381,10 +17507,97 @@ fn request_drive_requires_final_completion_audit_for_explicit_final_criteria() {
     let completed_json: Value = serde_json::from_slice(&completed).unwrap();
     assert_eq!(completed_json["status"], "complete");
     assert_eq!(completed_json["action"], "none");
+    assert_eq!(
+        completed_json["outcome_status"]["status"],
+        "final_outcome_verified"
+    );
+    assert_eq!(
+        completed_json["outcome_status"]["final_completion_audit_passed"],
+        true
+    );
     assert!(completed_json["reason"]
         .as_str()
         .unwrap()
         .contains("final completion audit passed"));
+}
+
+#[test]
+fn request_drive_requires_final_audit_for_user_facing_deliverables() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Create a visual Forge whiteboard with design tokens, wireframes and final outcome dashboard",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+
+    set_all_task_statuses_in_stored_workflow(&store, workflow_id, "completed");
+
+    let driven = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "drive",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "300",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let driven_json: Value = serde_json::from_slice(&driven).unwrap();
+    assert_eq!(driven_json["schema_version"], "forge.request_drive.v1");
+    assert_eq!(driven_json["status"], "ready_for_handoff");
+    assert_eq!(driven_json["action"], "start_handoff");
+    assert_eq!(
+        driven_json["handoff_task"]["title"],
+        "Audit final completion criteria"
+    );
+    assert_eq!(
+        driven_json["outcome_status"]["schema_version"],
+        "forge.outcome_status.v1"
+    );
+    assert_eq!(
+        driven_json["outcome_status"]["status"],
+        "needs_user_delivery_evidence"
+    );
+    assert_eq!(
+        driven_json["outcome_status"]["final_completion_audit_required"],
+        true
+    );
+    assert!(driven_json["outcome_status"]["deliverables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |deliverable| deliverable["name"] == "collaborative AI and human whiteboard"
+                && deliverable["kind"] == "user_facing"
+        ));
 }
 
 #[test]

@@ -10,10 +10,13 @@
 - Added `forge request complete-task` and MCP `forge.run.complete_task` so AI/mixed executors can close a ready task with a replayable execution trace, validated response and immediate next-action drive.
 - Added `forge ops snapshot` and `forge ops serve` as a local assisted-operations web surface for workflow visibility plus real-time drive, step, complete-task, update-goal and task/node update actions.
 - Added an ops modifier lane to the assisted-operations snapshot and web console so a separate strategic AI or human can create pending goal/task-node proposals and apply them as live, revisioned Forge workflow mutations while execution continues.
+- Added `forge.outcome_status.v1` to request status/drive and registry summaries so Forge distinguishes support-only artifacts from user-facing final deliverables and blocks completion for user-facing deliverables until final audit evidence exists.
+- Added `visual_workflows` and `forge.ops.design_surface.v1` to the ops snapshot and web console, rendering workflow tasks, subtasks, dependencies and the Forge-owned creative workspace summary for whiteboards, screens, components, documents, design tokens and collaboration events.
 
 ### Validation
 
 - Targeted coverage passed for `cargo test ops_snapshot_and_local_http_allow_assisted_workflow_operation`.
+- Targeted coverage passed for `cargo test request_drive_requires_final --test forge_cli_contract`.
 - Targeted coverage passed for `cargo test request_step_auto_promotes_ready_deterministic_task_and_advances_drive --test forge_cli_contract -- --nocapture`.
 - Targeted coverage passed for `cargo test cloud_ --test forge_cli_contract -- --nocapture`.
 - Regression coverage passed for `cargo test credential_vault --test forge_cli_contract -- --nocapture`.

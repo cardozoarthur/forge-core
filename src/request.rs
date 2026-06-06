@@ -10,6 +10,11 @@ use crate::graph::{
     WorkflowRevision,
 };
 use crate::intent::parse_intent;
+use crate::outcome::{
+    assess_workflow_outcome, is_final_completion_audit_artifact,
+    workflow_has_explicit_final_criteria, workflow_requires_final_outcome_audit,
+    OutcomeStatusReport, FINAL_COMPLETION_AUDIT_KIND,
+};
 use crate::registry::{
     attach_reuse_candidates_as_child_subflows, find_reuse_candidates, WorkflowReuseCandidate,
 };
@@ -22,7 +27,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-const FINAL_COMPLETION_AUDIT_KIND: &str = "final_completion_audit";
 const COMPLETION_AUDIT_HANDOFF_CONTEXT_BUDGET: usize = 4096;
 const REWORK_HANDOFF_CONTEXT_BUDGET: usize = 4096;
 
@@ -110,6 +114,7 @@ pub struct RequestStatusReport {
     pub checkpoint_count: usize,
     pub latest_checkpoint: Option<TaskCheckpoint>,
     pub task_summary: TaskStatusSummary,
+    pub outcome_status: OutcomeStatusReport,
     pub activity: RunActivity,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub executor_fallbacks: Vec<String>,
@@ -155,6 +160,7 @@ pub struct RequestDriveReport {
     pub origin: String,
     pub activity: RunActivity,
     pub task_summary: TaskStatusSummary,
+    pub outcome_status: OutcomeStatusReport,
     pub checkpoint_count: usize,
     pub latest_checkpoint: Option<TaskCheckpoint>,
     pub rework: Option<RequestDriveRework>,
@@ -833,6 +839,7 @@ pub fn drive_request(
         request_drive_context_budget(&workflow),
         &checkpoints,
     )?;
+    let mut outcome_status = request_outcome_status(store, &workflow)?;
 
     if let Some(rework) = latest_open_rework(store, &workflow)? {
         let next_command = vec![
@@ -862,6 +869,7 @@ pub fn drive_request(
             origin: origin.to_string(),
             activity: heartbeat.activity,
             task_summary,
+            outcome_status,
             checkpoint_count: checkpoints.len(),
             latest_checkpoint,
             rework: Some(rework),
@@ -885,6 +893,7 @@ pub fn drive_request(
                     request_drive_context_budget(&workflow),
                     &checkpoints,
                 )?;
+                outcome_status = request_outcome_status(store, &workflow)?;
             } else {
                 let next_command = vec![
                     "forge".to_string(),
@@ -922,6 +931,7 @@ pub fn drive_request(
                     origin: origin.to_string(),
                     activity: heartbeat.activity,
                     task_summary,
+                    outcome_status,
                     checkpoint_count: checkpoints.len(),
                     latest_checkpoint,
                     rework: None,
@@ -972,11 +982,12 @@ pub fn drive_request(
             status: "complete".to_string(),
             action: "none".to_string(),
             run_id: completed_run.run_id,
-            workflow_id: completed_workflow.id,
+            workflow_id: completed_workflow.id.clone(),
             executor: executor.to_string(),
             origin: origin.to_string(),
             activity,
             task_summary,
+            outcome_status: request_outcome_status(store, &completed_workflow)?,
             checkpoint_count: checkpoints.len(),
             latest_checkpoint,
             rework: None,
@@ -1017,6 +1028,7 @@ pub fn drive_request(
             origin: origin.to_string(),
             activity: heartbeat.activity,
             task_summary,
+            outcome_status,
             checkpoint_count: checkpoints.len(),
             latest_checkpoint,
             rework: None,
@@ -1039,6 +1051,7 @@ pub fn drive_request(
         origin: origin.to_string(),
         activity: heartbeat.activity,
         task_summary,
+        outcome_status,
         checkpoint_count: checkpoints.len(),
         latest_checkpoint,
         rework: None,
@@ -1901,6 +1914,7 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
     let run = load_run_record(store, run_id)?;
     let workflow = store.load_workflow(&run.workflow_id)?;
     let task_summary = summarize_tasks(&workflow);
+    let outcome_status = request_outcome_status(store, &workflow)?;
     let latest_validation_evidence = load_latest_validation_evidence(store, &workflow.id)?;
     let latest_executor_policy = load_latest_executor_policy_summary(store, &workflow.id)?;
     let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
@@ -1927,6 +1941,7 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
         checkpoint_count: checkpoints.len(),
         latest_checkpoint,
         task_summary,
+        outcome_status,
         activity,
         executor_fallbacks: run.executor_fallbacks,
         executor_switch_count: run.executor_switches.len(),
@@ -1937,6 +1952,15 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
         created_at: run.created_at,
         updated_at: run.updated_at,
     })
+}
+
+fn request_outcome_status(store: &ForgeStore, workflow: &Workflow) -> Result<OutcomeStatusReport> {
+    let final_completion_audit_block_reason = final_completion_audit_block_reason(store, workflow)?;
+    Ok(assess_workflow_outcome(
+        workflow,
+        true,
+        final_completion_audit_block_reason.as_deref(),
+    ))
 }
 
 fn latest_actionable_checkpoint(
@@ -2080,8 +2104,13 @@ fn final_completion_audit_block_reason(
         .rev()
         .find(|artifact| is_final_completion_audit_artifact(artifact))
     else {
+        let reason = if workflow_has_explicit_final_criteria(workflow) {
+            "Workflow goal declares explicit final criteria"
+        } else {
+            "Workflow intent declares user-facing deliverables"
+        };
         return Ok(Some(format!(
-            "Workflow goal declares explicit final criteria; attach a final completion audit artifact with kind `{FINAL_COMPLETION_AUDIT_KIND}` before marking the run complete."
+            "{reason}; attach a final completion audit artifact with kind `{FINAL_COMPLETION_AUDIT_KIND}` before marking the run complete."
         )));
     };
 
@@ -2152,37 +2181,7 @@ fn final_completion_audit_block_reason(
 }
 
 fn workflow_requires_final_completion_audit(workflow: &Workflow) -> bool {
-    let mut text = workflow.goal.clone();
-    if let Some(initial_goal) = &workflow.initial_goal {
-        text.push(' ');
-        text.push_str(initial_goal);
-    }
-    let normalized = text.to_lowercase();
-    [
-        "critério final",
-        "criterio final",
-        "workflow só termina",
-        "workflow so termina",
-        "só termina quando",
-        "so termina quando",
-        "stopping rule",
-        "definition of done",
-        "only complete when",
-        "only completes when",
-        "only finish when",
-        "only finishes when",
-        "must only complete when",
-    ]
-    .iter()
-    .any(|needle| normalized.contains(needle))
-}
-
-fn is_final_completion_audit_artifact(artifact: &crate::graph::ArtifactRecord) -> bool {
-    let normalized_kind = artifact.kind.to_lowercase().replace('-', "_");
-    let normalized_path = artifact.path.to_lowercase().replace('-', "_");
-    normalized_kind == FINAL_COMPLETION_AUDIT_KIND
-        || normalized_kind == "completion_audit"
-        || normalized_path.contains("final_completion_audit")
+    workflow_requires_final_outcome_audit(workflow)
 }
 
 fn json_array_len(payload: &serde_json::Value, key: &str) -> usize {
@@ -2477,6 +2476,7 @@ fn build_agent_handoff_contract(
                 "workflow_status".to_string(),
                 "workflow_revision".to_string(),
                 "task_summary".to_string(),
+                "outcome_status".to_string(),
                 "handoff_summary".to_string(),
                 "latest_executor_policy".to_string(),
                 "latest_validation_evidence".to_string(),

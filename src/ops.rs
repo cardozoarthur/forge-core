@@ -7,6 +7,7 @@ use crate::request::{
 };
 use crate::storage::ForgeStore;
 use crate::workflow::{update_workflow_goal, update_workflow_task, WorkflowTaskUpdateInput};
+use crate::{graph::TaskStatus, ir::CreativeArtifactKind};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,7 @@ pub struct OpsSnapshot {
     pub mode: OpsMode,
     pub registry: WorkflowRegistryReport,
     pub modifier_lane: OpsModifierLane,
+    pub visual_workflows: Vec<OpsWorkflowVisual>,
     pub actions: Vec<OpsActionSpec>,
 }
 
@@ -54,6 +56,51 @@ pub struct OpsActionSpec {
     pub path: String,
     pub description: String,
     pub mutates_workflow: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsWorkflowVisual {
+    pub workflow_id: String,
+    pub goal: String,
+    pub status: String,
+    pub design_surface: OpsDesignSurface,
+    pub tasks: Vec<OpsTaskVisual>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsTaskVisual {
+    pub task_id: String,
+    pub title: String,
+    pub status: String,
+    pub executor: String,
+    pub dependencies: Vec<String>,
+    pub expected_output: String,
+    pub subtasks: Vec<OpsSubtaskVisual>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsSubtaskVisual {
+    pub subtask_id: String,
+    pub title: String,
+    pub status: String,
+    pub definition_of_done: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsDesignSurface {
+    pub schema_version: String,
+    pub creative_artifact_count: usize,
+    pub whiteboard_count: usize,
+    pub screen_count: usize,
+    pub component_count: usize,
+    pub document_count: usize,
+    pub slide_deck_count: usize,
+    pub token_collection_present: bool,
+    pub token_count: usize,
+    pub token_mode_count: usize,
+    pub active_presence_count: usize,
+    pub comment_count: usize,
+    pub patch_event_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -150,6 +197,7 @@ pub fn build_ops_snapshot(store: &ForgeStore) -> Result<OpsSnapshot> {
         WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
     )?;
     let modifier_lane = load_modifier_lane(store)?;
+    let visual_workflows = build_visual_workflows(store)?;
     Ok(OpsSnapshot {
         status: "ok".to_string(),
         schema_version: OPS_SNAPSHOT_SCHEMA_VERSION.to_string(),
@@ -168,8 +216,111 @@ pub fn build_ops_snapshot(store: &ForgeStore) -> Result<OpsSnapshot> {
         },
         registry,
         modifier_lane,
+        visual_workflows,
         actions: ops_actions(),
     })
+}
+
+fn build_visual_workflows(store: &ForgeStore) -> Result<Vec<OpsWorkflowVisual>> {
+    let mut workflows = store
+        .load_workflows()?
+        .into_iter()
+        .map(|workflow| {
+            let design_surface = summarize_design_surface(&workflow);
+            let tasks = workflow
+                .tasks
+                .iter()
+                .map(|task| OpsTaskVisual {
+                    task_id: task.id.clone(),
+                    title: task.title.clone(),
+                    status: task_status(&task.status),
+                    executor: format!("{:?}", task.executor).to_lowercase(),
+                    dependencies: task.dependencies.clone(),
+                    expected_output: task.expected_output.clone(),
+                    subtasks: task
+                        .work_item
+                        .subtasks
+                        .iter()
+                        .map(|subtask| OpsSubtaskVisual {
+                            subtask_id: subtask.id.clone(),
+                            title: subtask.title.clone(),
+                            status: task_status(&subtask.status),
+                            definition_of_done: subtask.definition_of_done.clone(),
+                        })
+                        .collect(),
+                })
+                .collect();
+            OpsWorkflowVisual {
+                workflow_id: workflow.id,
+                goal: workflow.goal,
+                status: workflow.status,
+                design_surface,
+                tasks,
+            }
+        })
+        .collect::<Vec<_>>();
+    workflows.sort_by(|left, right| left.workflow_id.cmp(&right.workflow_id));
+    Ok(workflows)
+}
+
+fn summarize_design_surface(workflow: &crate::graph::Workflow) -> OpsDesignSurface {
+    let mut whiteboard_count = 0;
+    let mut screen_count = 0;
+    let mut component_count = 0;
+    let mut document_count = 0;
+    let mut slide_deck_count = 0;
+    let mut active_presence_count = 0;
+    let mut comment_count = 0;
+    let mut patch_event_count = 0;
+
+    for artifact in &workflow.creative_artifacts {
+        match &artifact.kind {
+            CreativeArtifactKind::Whiteboard => whiteboard_count += 1,
+            CreativeArtifactKind::Screen => screen_count += 1,
+            CreativeArtifactKind::Component => component_count += 1,
+            CreativeArtifactKind::Document => document_count += 1,
+            CreativeArtifactKind::SlideDeck => slide_deck_count += 1,
+        }
+        let collaboration = artifact.collaboration.summary();
+        active_presence_count += collaboration.active_presence_count;
+        comment_count += collaboration.comment_count;
+        patch_event_count += collaboration.patch_event_count;
+    }
+
+    OpsDesignSurface {
+        schema_version: "forge.ops.design_surface.v1".to_string(),
+        creative_artifact_count: workflow.creative_artifacts.len(),
+        whiteboard_count,
+        screen_count,
+        component_count,
+        document_count,
+        slide_deck_count,
+        token_collection_present: workflow.token_collection.is_some(),
+        token_count: workflow
+            .token_collection
+            .as_ref()
+            .map(|tokens| tokens.tokens.len())
+            .unwrap_or(0),
+        token_mode_count: workflow
+            .token_collection
+            .as_ref()
+            .map(|tokens| tokens.modes.len())
+            .unwrap_or(0),
+        active_presence_count,
+        comment_count,
+        patch_event_count,
+    }
+}
+
+fn task_status(status: &TaskStatus) -> String {
+    match status {
+        TaskStatus::Pending => "pending",
+        TaskStatus::Running => "running",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Blocked => "blocked",
+        TaskStatus::Failed => "failed",
+    }
+    .to_string()
 }
 
 pub fn load_modifier_lane(store: &ForgeStore) -> Result<OpsModifierLane> {
@@ -624,7 +775,7 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
             workflow.run_ids.join(", ")
         };
         rows.push_str(&format!(
-            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}/{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}/{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             escape_html(&workflow.workflow_id),
             escape_html(&workflow.workflow_status),
             escape_html(&workflow.lifecycle_state),
@@ -632,8 +783,58 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
             workflow.task_summary.total,
             workflow.active_run_count,
             escape_html(&run_ids),
+            escape_html(&workflow.outcome_status.status),
             escape_html(&truncate(&workflow.current_goal, 120)),
         ));
+    }
+    let mut visual_sections = String::new();
+    for workflow in &snapshot.visual_workflows {
+        let design = &workflow.design_surface;
+        let mut task_cards = String::new();
+        for task in &workflow.tasks {
+            let dependency_text = if task.dependencies.is_empty() {
+                "sem dependências".to_string()
+            } else {
+                task.dependencies.join(", ")
+            };
+            let mut subtasks = String::new();
+            for subtask in &task.subtasks {
+                subtasks.push_str(&format!(
+                    "<li><span class=\"badge\">{}</span> {} <small>{}</small></li>",
+                    escape_html(&subtask.status),
+                    escape_html(&subtask.title),
+                    escape_html(&truncate(&subtask.definition_of_done.join("; "), 120)),
+                ));
+            }
+            if subtasks.is_empty() {
+                subtasks.push_str("<li><small>Sem subtarefas registradas.</small></li>");
+            }
+            task_cards.push_str(&format!(
+                "<article class=\"task-card\"><div class=\"task-head\"><strong>{}</strong><span class=\"badge status-{}\">{}</span></div><p>{}</p><div class=\"task-meta\"><span>{}</span><span>{}</span></div><ul>{}</ul></article>",
+                escape_html(&task.title),
+                escape_html(&task.status),
+                escape_html(&task.status),
+                escape_html(&truncate(&task.expected_output, 160)),
+                escape_html(&task.executor),
+                escape_html(&dependency_text),
+                subtasks,
+            ));
+        }
+        visual_sections.push_str(&format!(
+            "<section class=\"workflow-visual\"><h3><code>{}</code></h3><p>{}</p><div class=\"design-strip\"><span>whiteboards: {}</span><span>telas: {}</span><span>componentes: {}</span><span>docs: {}</span><span>tokens: {}</span><span>colaboração: {} comentários</span></div><div class=\"task-board\">{}</div></section>",
+            escape_html(&workflow.workflow_id),
+            escape_html(&truncate(&workflow.goal, 180)),
+            design.whiteboard_count,
+            design.screen_count,
+            design.component_count,
+            design.document_count + design.slide_deck_count,
+            design.token_count,
+            design.comment_count,
+            task_cards,
+        ));
+    }
+    if visual_sections.is_empty() {
+        visual_sections.push_str("<p>Nenhum workflow visual disponível.</p>");
     }
     let mut proposal_rows = String::new();
     for proposal in &snapshot.modifier_lane.proposals {
@@ -679,6 +880,19 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
     .summary {{ display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0; }}
     .pill {{ background: white; border: 1px solid #d9deea; border-radius: 999px; padding: 8px 12px; }}
     .section-note {{ max-width: 900px; color: #4b5563; }}
+    .workflow-visual {{ margin: 16px 0 24px; padding: 16px; background: white; border: 1px solid #d9deea; border-radius: 8px; }}
+    .workflow-visual h3 {{ margin: 0 0 8px; font-size: 15px; }}
+    .task-board {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 12px; }}
+    .task-card {{ border: 1px solid #d9deea; border-radius: 8px; padding: 12px; background: #fbfcfe; }}
+    .task-card p {{ margin: 8px 0; color: #4b5563; }}
+    .task-card ul {{ margin: 8px 0 0; padding-left: 18px; }}
+    .task-head, .task-meta, .design-strip {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
+    .task-head {{ justify-content: space-between; }}
+    .task-meta, .design-strip {{ color: #5f6b7a; font-size: 12px; }}
+    .badge {{ display: inline-block; border: 1px solid #cbd3df; border-radius: 999px; padding: 2px 7px; font-size: 12px; background: #fff; }}
+    .status-completed {{ background: #e8f5ee; border-color: #a9dbc0; }}
+    .status-running {{ background: #fff7df; border-color: #ead37e; }}
+    .status-blocked, .status-failed {{ background: #ffeceb; border-color: #f0b2ad; }}
   </style>
 </head>
 <body>
@@ -693,9 +907,12 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
   </div>
   <h2>Workflows</h2>
   <table>
-    <thead><tr><th>Workflow</th><th>Status</th><th>Lifecycle</th><th>Tasks</th><th>Active runs</th><th>Runs</th><th>Goal</th></tr></thead>
+    <thead><tr><th>Workflow</th><th>Status</th><th>Lifecycle</th><th>Tasks</th><th>Active runs</th><th>Runs</th><th>Outcome</th><th>Goal</th></tr></thead>
     <tbody>{}</tbody>
   </table>
+  <h2>Visualização operacional</h2>
+  <p class="section-note">Tarefas e subtarefas em formato visual, com resumo do workspace criativo para whiteboard, telas, componentes, páginas, tokens e colaboração humano+IA.</p>
+  {}
   <h2>Lane modificadora</h2>
   <p class="section-note">Trilha separada para uma IA estratégica ou operador humano propor mudanças de objetivo e nodes sem interromper a operação.</p>
   <table>
@@ -770,6 +987,7 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
         snapshot.mode.local_only_by_default,
         snapshot.modifier_lane.pending_count,
         rows,
+        visual_sections,
         proposal_rows
     )
 }
