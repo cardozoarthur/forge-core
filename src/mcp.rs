@@ -1,6 +1,10 @@
 use crate::artifact::{hex_sha256, list_workflow_artifacts, ListedArtifact};
 use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{build_context_package_with_checkpoint, DEFAULT_CONTEXT_BUDGET};
+use crate::credential_vault::{
+    run_describe as run_credential_vault_describe, run_records as run_credential_vault_records,
+    CREDENTIAL_VAULT_COMMAND_SCHEMA,
+};
 use crate::handoff::build_task_handoff;
 use crate::inspection::inspect_workflow_with_focus;
 use crate::interaction::{
@@ -428,6 +432,13 @@ struct PatchRevertInput {
     origin: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CredentialVaultInput {
+    contract: String,
+    data: String,
+    vault_bin: Option<String>,
+}
+
 pub fn mcp_tools_manifest() -> McpToolsManifest {
     McpToolsManifest {
         status: "mcp_tools_loaded".to_string(),
@@ -503,6 +514,58 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "json",
                 ],
                 ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.credential_vault.describe",
+                "Describe Credential Vault Contract",
+                "Inspect credential-vault contract metadata without resolving or printing secret values.",
+                object_schema(
+                    &[
+                        ("contract", "string", "path to visible credential-vault contract YAML"),
+                        ("data", "string", "path to encrypted credential-vault data YAML"),
+                        ("vault_bin", "string", "optional credential-vault binary path"),
+                    ],
+                    &["contract", "data"],
+                ),
+                CREDENTIAL_VAULT_COMMAND_SCHEMA,
+                &[
+                    "forge",
+                    "credential-vault",
+                    "describe",
+                    "--contract",
+                    "<contract>",
+                    "--data",
+                    "<data>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.credential_vault.records",
+                "List Credential Vault Records",
+                "List credential-vault records and fields with secret markers, without resolving secret values.",
+                object_schema(
+                    &[
+                        ("contract", "string", "path to visible credential-vault contract YAML"),
+                        ("data", "string", "path to encrypted credential-vault data YAML"),
+                        ("vault_bin", "string", "optional credential-vault binary path"),
+                    ],
+                    &["contract", "data"],
+                ),
+                CREDENTIAL_VAULT_COMMAND_SCHEMA,
+                &[
+                    "forge",
+                    "credential-vault",
+                    "records",
+                    "--contract",
+                    "<contract>",
+                    "--data",
+                    "<data>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
             ),
             tool(
                 "forge.schedule.create_daily_goal_research",
@@ -1288,6 +1351,22 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 store,
                 &input.input,
                 input.origin.as_deref().unwrap_or("mcp"),
+            )?)?
+        }
+        "forge.credential_vault.describe" => {
+            let input: CredentialVaultInput = parse_input(input)?;
+            serde_json::to_value(run_credential_vault_describe(
+                input.vault_bin.as_deref().map(PathBuf::from).as_deref(),
+                &PathBuf::from(input.contract),
+                &PathBuf::from(input.data),
+            )?)?
+        }
+        "forge.credential_vault.records" => {
+            let input: CredentialVaultInput = parse_input(input)?;
+            serde_json::to_value(run_credential_vault_records(
+                input.vault_bin.as_deref().map(PathBuf::from).as_deref(),
+                &PathBuf::from(input.contract),
+                &PathBuf::from(input.data),
             )?)?
         }
         "forge.schedule.create_daily_goal_research" => {

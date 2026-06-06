@@ -3,6 +3,7 @@ pub mod artifact;
 pub mod checkpoint;
 pub mod cluster;
 pub mod context;
+pub mod credential_vault;
 pub mod execution;
 pub mod executor;
 pub mod graph;

@@ -47,6 +47,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 - Create scheduled Goal research through `forge.schedule.create_daily_goal_research`; inspect/list/summarize/mutate schedules through `forge.schedule.list`, `forge.schedule.summary`, `forge.schedule.loop_summary`, `forge.schedule.worker_status`, `forge.workflow.inspect`, `forge.loop.inspect` and `forge.schedule.update`.
 - Use `forge.schedule.update` or `forge schedule update --next-run-at <RFC3339>` for explicit due timestamp mutation, `forge.schedule.run_due` for one workflow, and `forge.schedule.scan_due` when Forge should scan all scheduled workflows, lease due nodes locally and record idle scale-to-zero decisions. Paused/stopped loop nodes must not advance.
 - Use `forge schedule worker-status` or `forge.schedule.worker_status` to inspect next wakeup, scale-to-zero, bounded worker-pool capacity, cancellation safe points and backpressure before relying on tmux/systemd sleeps.
+- Use `forge.credential_vault.describe` and `forge.credential_vault.records` to inspect local credential-vault contracts without resolving secrets. Use `forge credential-vault exec --contract <contract> --data <data> --record <record> -- <command>` when an executor needs credentials injected into a child process.
 - Inspect or route work through `forge.workflow.inspect`, `forge.context.request`, `forge.task.handoff`, `forge.patch.plan`, `forge.patch.apply`, `forge.patch.revert`, `forge.workflow.attach_artifact`, `forge.workflow.update_goal`, `forge.validation.status` and `forge.artifact.fetch`.
 - In the interactive `forge` REPL, use `/context --workflow <id> --task <task-id> --budget 1200 --strict` for bounded context inspection and `/handoff --workflow <id> --task <task-id> --executor codex` only after approving lease acquisition.
 - Use `forge patch plan` or MCP tool `forge.patch.plan` before agent file editing to create a bounded patch plan with repo-relative target paths, file snapshots, permission gates, diff-review commands, validation commands and a Forge artifact; this command does not apply changes.
@@ -67,6 +68,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 - When Codex/OpenCode use Forge as a skill, they should not wait for long work inline. They should start a request, return `run_id`, and let Forge continue asynchronously.
 - Do not expose full project history to a task when `forge context` can produce bounded local context.
 - Treat model providers as interchangeable execution resources and keep non-AI steps independent from live model calls.
+- Do not resolve or print credential-vault secret values. Prefer `forge credential-vault exec` so secrets only enter the child process environment.
 - A notification step can generate an email payload with final workflow costs when that was part of the user's objective.
 - Keep self-improvement controlled: experiment, benchmark, compare, then promote only after validation.
 
@@ -94,6 +96,9 @@ forge request list --output json
 forge request list --status accepted --output json
 forge request list --status needs_attention --output json
 forge request cancel --run <run-id> --origin codex --output json
+forge credential-vault records --contract /path/to/vault.contract.yaml --data /path/to/vault.data.yaml --output json
+forge credential-vault exec --contract /path/to/vault.contract.yaml --data /path/to/vault.data.yaml --record login -- command-that-needs-secrets
+forge mcp call forge.credential_vault.describe --input '{"contract":"/path/to/vault.contract.yaml","data":"/path/to/vault.data.yaml"}' --output json
 forge sync all --home "$HOME" --allow codex --allow opencode --output json
 forge executors --output json
 forge runtimes --output json

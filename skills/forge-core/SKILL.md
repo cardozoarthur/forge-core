@@ -39,6 +39,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 - Use `forge.schedule.update` or `forge schedule update --next-run-at <RFC3339>` for explicit due timestamp mutation, `forge.schedule.run_due` for one workflow, and `forge.schedule.scan_due` when Forge should scan all scheduled workflows, lease due nodes locally and record idle scale-to-zero decisions. With `max_workers > 1`, the parallel scanner still reconciles idle workflows and includes a `forge.worker_pool.v1` execution report. Paused/stopped loop nodes must not advance. If cron work is stale, read `missed_run_reconciliation` plus list/inspect schedule summaries before deciding whether a run was skipped, caught up or executed once.
 - Use `forge.schedule.worker_status` or `forge schedule worker-status --max-workers <n>` before scheduler handoff when concurrency matters. Its `worker_pool.assignment_plan` is deterministic and separates due workflows that fit the bounded worker pool from queued work under backpressure.
 - Use `forge.interaction.create_choice`, `forge.interaction.create_form`, `forge.interaction.answer`, `forge.interaction.expire` and `forge.interaction.list` for agent-facing human approval/form bridges. These MCP tools must be preferred over ad hoc chat decisions when a workflow is paused on a human interaction node.
+- Use `forge.credential_vault.describe` and `forge.credential_vault.records` to inspect local credential-vault contracts without resolving secrets. Use `forge credential-vault exec --contract <contract> --data <data> --record <record> -- <command>` when an executor needs credentials injected into a child process.
 - Inspect or route work through `forge.workflow.inspect`, `forge.context.request`, `forge.task.handoff`, `forge.patch.plan`, `forge.patch.apply`, `forge.patch.revert`, `forge.workflow.attach_artifact`, `forge.workflow.update_goal`, `forge.validation.status` and `forge.artifact.fetch`.
 - In the interactive `forge` REPL, use `/context --workflow <id> --task <task-id> --budget 1200 --strict` for bounded context inspection and `/handoff --workflow <id> --task <task-id> --executor codex` only after approving lease acquisition.
 - Use `forge patch plan` or MCP tool `forge.patch.plan` before agent file editing to create a bounded patch plan with repo-relative target paths, file snapshots, permission gates, diff-review commands, validation commands and a Forge artifact; this command does not apply changes.
@@ -59,6 +60,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 - When Codex/OpenCode use Forge as a skill, they should not wait for long work inline. They should start a request, return `run_id`, and let Forge continue asynchronously.
 - Do not expose full project history to a task when `forge context` can produce bounded local context.
 - Treat model providers as interchangeable execution resources and keep non-AI steps independent from live model calls.
+- Do not resolve or print credential-vault secret values. Prefer `forge credential-vault exec` so secrets only enter the child process environment.
 - A notification step can generate an email payload with final workflow costs when that was part of the user's objective.
 - Keep self-improvement controlled: experiment, benchmark, compare, then promote only after validation.
 
@@ -74,6 +76,9 @@ forge request resume --run <run-id> --origin codex --output json
 forge request list --status stale --output json
 forge request recover-stale --run <run-id> --origin codex --output json
 forge mcp tools --output json
+forge credential-vault records --contract /path/to/vault.contract.yaml --data /path/to/vault.data.yaml --output json
+forge credential-vault exec --contract /path/to/vault.contract.yaml --data /path/to/vault.data.yaml --record login -- command-that-needs-secrets
+forge mcp call forge.credential_vault.describe --input '{"contract":"/path/to/vault.contract.yaml","data":"/path/to/vault.data.yaml"}' --output json
 forge mcp call forge.interactive.home --output json
 forge mcp call forge.interactive.slash_commands --output json
 forge mcp call forge.interactive.route --input '{"input":"What is the current Forge status?","origin":"codex"}' --output json

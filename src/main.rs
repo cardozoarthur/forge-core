@@ -10,6 +10,11 @@ use forge_core::cluster::{
     place_task_on_cluster, register_cluster_node, ClusterNodeInput,
 };
 use forge_core::context::build_context_package_with_checkpoint;
+use forge_core::credential_vault::{
+    run_describe as run_credential_vault_describe, run_exec as run_credential_vault_exec,
+    run_key_init as run_credential_vault_key_init, run_panel as run_credential_vault_panel,
+    run_records as run_credential_vault_records,
+};
 use forge_core::execution::run_simulated;
 use forge_core::executor::{
     load_executors, sync_executors, ExecutorQuotaObservation, ExecutorSyncOptions,
@@ -227,6 +232,10 @@ enum Commands {
         #[command(subcommand)]
         command: PatchCommands,
     },
+    CredentialVault {
+        #[command(subcommand)]
+        command: CredentialVaultCommands,
+    },
     #[command(name = "self")]
     SelfRun {
         #[command(subcommand)]
@@ -355,6 +364,66 @@ enum RuntimeCommands {
         allow_external: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CredentialVaultCommands {
+    KeyInit {
+        #[arg(long = "vault-bin")]
+        vault_bin: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Describe {
+        #[arg(long = "vault-bin")]
+        vault_bin: Option<PathBuf>,
+        #[arg(long)]
+        contract: PathBuf,
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Records {
+        #[arg(long = "vault-bin")]
+        vault_bin: Option<PathBuf>,
+        #[arg(long)]
+        contract: PathBuf,
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Panel {
+        #[arg(long = "vault-bin")]
+        vault_bin: Option<PathBuf>,
+        #[arg(long)]
+        contract: PathBuf,
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long)]
+        open: bool,
+        #[arg(long = "timeout-seconds")]
+        timeout_seconds: Option<u64>,
+        #[arg(long = "no-cli-fallback")]
+        no_cli_fallback: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Exec {
+        #[arg(long = "vault-bin")]
+        vault_bin: Option<PathBuf>,
+        #[arg(long)]
+        contract: PathBuf,
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long)]
+        record: String,
+        #[arg(long = "env")]
+        env_mappings: Vec<String>,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
     },
 }
 
@@ -2543,6 +2612,68 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(0)
             }
+        },
+        Commands::CredentialVault { command } => match command {
+            CredentialVaultCommands::KeyInit { vault_bin, output } => {
+                let report = run_credential_vault_key_init(vault_bin.as_deref())?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            CredentialVaultCommands::Describe {
+                vault_bin,
+                contract,
+                data,
+                output,
+            } => {
+                let report = run_credential_vault_describe(vault_bin.as_deref(), &contract, &data)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            CredentialVaultCommands::Records {
+                vault_bin,
+                contract,
+                data,
+                output,
+            } => {
+                let report = run_credential_vault_records(vault_bin.as_deref(), &contract, &data)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            CredentialVaultCommands::Panel {
+                vault_bin,
+                contract,
+                data,
+                open,
+                timeout_seconds,
+                no_cli_fallback,
+                output,
+            } => {
+                let report = run_credential_vault_panel(
+                    vault_bin.as_deref(),
+                    &contract,
+                    &data,
+                    open,
+                    timeout_seconds,
+                    no_cli_fallback,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            CredentialVaultCommands::Exec {
+                vault_bin,
+                contract,
+                data,
+                record,
+                env_mappings,
+                command,
+            } => run_credential_vault_exec(
+                vault_bin.as_deref(),
+                &contract,
+                &data,
+                &record,
+                &env_mappings,
+                &command,
+            ),
         },
         Commands::SelfRun { command } => match command {
             SelfCommands::Run {

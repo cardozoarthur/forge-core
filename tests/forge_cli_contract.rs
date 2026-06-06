@@ -31,6 +31,231 @@ fn write_fake_executor(bin_dir: &Path, name: &str, body: &str) {
     fs::set_permissions(&executor_path, perms).unwrap();
 }
 
+#[cfg(unix)]
+fn write_fake_credential_vault(bin_dir: &Path) -> std::path::PathBuf {
+    let script_path = bin_dir.join("credential-vault");
+    fs::write(
+        &script_path,
+        r#"#!/bin/sh
+printf '%s\n' "$@" > "$FORGE_FAKE_CREDENTIAL_VAULT_ARGS"
+case "$1" in
+  describe)
+    printf '{"vault":{"id":"test-vault"},"records":[]}\n'
+    ;;
+  records)
+    printf 'forum_login\tProjeto FiscalProvider Login\n  auth.email\temail\n  auth.password\tpassword secret\n'
+    ;;
+  exec)
+    printf 'child executed through credential-vault\n'
+    ;;
+  panel)
+    printf 'http://127.0.0.1:41234/?token=fake-token\n'
+    ;;
+  key-init)
+    printf 'exists /tmp/master.key\n'
+    ;;
+  *)
+    printf 'unexpected action: %s\n' "$1" >&2
+    exit 2
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&script_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script_path, perms).unwrap();
+    script_path
+}
+
+#[cfg(unix)]
+fn write_credential_vault_contract(path: &Path) {
+    fs::write(
+        path,
+        r#"version: 1
+vault:
+  id: fiscal_providerlib-forum
+  title: Projeto FiscalProvider Forum Vault
+records:
+  forum_login:
+    title: Projeto FiscalProvider Login
+    fields:
+      - id: email
+        path: auth.email
+        label: Email
+        kind: email
+        usage:
+          terminal_env: FiscalProvider_FORUM_EMAIL
+      - id: password
+        path: auth.password
+        label: Senha
+        kind: password
+        secret: true
+        usage:
+          terminal_env: FiscalProvider_FORUM_PASSWORD
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn credential_vault_records_wraps_secret_free_contract_metadata() {
+    let temp = tempdir().unwrap();
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let vault_bin = write_fake_credential_vault(&bin_dir);
+    let args_file = temp.path().join("credential-vault.args");
+    let contract = temp.path().join("fiscal_provider.contract.yaml");
+    let data = temp.path().join("fiscal_provider.data.yaml");
+    write_credential_vault_contract(&contract);
+
+    let output = forge()
+        .env("FORGE_CREDENTIAL_VAULT_BIN", &vault_bin)
+        .env("FORGE_FAKE_CREDENTIAL_VAULT_ARGS", &args_file)
+        .args([
+            "credential-vault",
+            "records",
+            "--contract",
+            contract.to_str().unwrap(),
+            "--data",
+            data.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.credential_vault.command.v1");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["action"], "records");
+    assert_eq!(json["secret_exposed"], false);
+    assert!(json["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("auth.password\tpassword secret"));
+
+    let args = fs::read_to_string(args_file).unwrap();
+    assert!(args.starts_with("records\n"));
+    assert!(args.contains("--contract\n"));
+    assert!(args.contains("--data\n"));
+}
+
+#[test]
+#[cfg(unix)]
+fn credential_vault_exec_uses_contract_terminal_env_without_printing_secret_values() {
+    let temp = tempdir().unwrap();
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let vault_bin = write_fake_credential_vault(&bin_dir);
+    let args_file = temp.path().join("credential-vault.args");
+    let contract = temp.path().join("fiscal_provider.contract.yaml");
+    let data = temp.path().join("fiscal_provider.data.yaml");
+    write_credential_vault_contract(&contract);
+
+    let output = forge()
+        .env("FORGE_CREDENTIAL_VAULT_BIN", &vault_bin)
+        .env("FORGE_FAKE_CREDENTIAL_VAULT_ARGS", &args_file)
+        .args([
+            "credential-vault",
+            "exec",
+            "--contract",
+            contract.to_str().unwrap(),
+            "--data",
+            data.to_str().unwrap(),
+            "--record",
+            "forum_login",
+            "--",
+            "node",
+            "download-fiscal_providerlib.mjs",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert!(String::from_utf8(output)
+        .unwrap()
+        .contains("child executed through credential-vault"));
+
+    let args = fs::read_to_string(args_file).unwrap();
+    assert!(args.starts_with("exec\n"));
+    assert!(args.contains("FiscalProvider_FORUM_EMAIL=auth.email\n"));
+    assert!(args.contains("FiscalProvider_FORUM_PASSWORD=auth.password\n"));
+    assert!(args.contains("--\nnode\ndownload-fiscal_providerlib.mjs\n"));
+    assert!(
+        !args.contains("super-secret"),
+        "Forge should only pass env mappings, never resolved secret values"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn mcp_exposes_credential_vault_records_and_safe_describe_call() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let vault_bin = write_fake_credential_vault(&bin_dir);
+    let args_file = temp.path().join("credential-vault.args");
+    let contract = temp.path().join("fiscal_provider.contract.yaml");
+    let data = temp.path().join("fiscal_provider.data.yaml");
+    write_credential_vault_contract(&contract);
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.credential_vault.records"
+            && tool["output_schema"] == "forge.credential_vault.command.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == false
+    }));
+
+    let input = serde_json::json!({
+        "contract": contract,
+        "data": data
+    })
+    .to_string();
+    let call = forge()
+        .env("FORGE_CREDENTIAL_VAULT_BIN", &vault_bin)
+        .env("FORGE_FAKE_CREDENTIAL_VAULT_ARGS", &args_file)
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.credential_vault.describe"])
+        .arg("--input")
+        .arg(input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&call).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(
+        json["result"]["schema_version"],
+        "forge.credential_vault.command.v1"
+    );
+    assert_eq!(json["result"]["action"], "describe");
+    assert_eq!(json["result"]["secret_exposed"], false);
+    assert!(json["result"]["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("test-vault"));
+}
+
 #[test]
 fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
     let temp = tempdir().unwrap();
