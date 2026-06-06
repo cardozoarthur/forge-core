@@ -30,9 +30,9 @@ use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
 use crate::request::{
-    cancel_request, drive_request, heartbeat_request, list_requests, load_request_status,
-    recover_stale_request, resume_async_request, start_async_request, step_request,
-    switch_request_executor, RequestExecutorSwitchInput,
+    cancel_request, complete_ready_task, drive_request, heartbeat_request, list_requests,
+    load_request_status, recover_stale_request, resume_async_request, start_async_request,
+    step_request, switch_request_executor, RequestExecutorSwitchInput, RequestTaskCompletionInput,
 };
 use crate::schedule::{
     aggregate_summary, build_schedule_worker_status, create_daily_goal_research_workflow,
@@ -213,6 +213,23 @@ struct RunDriveInput {
 struct RunStepInput {
     run_id: String,
     executor: Option<String>,
+    ttl_seconds: Option<u64>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunCompleteTaskInput {
+    run_id: String,
+    task_id: String,
+    executor: Option<String>,
+    summary: String,
+    #[serde(default)]
+    artifacts: Vec<String>,
+    evidence_command: Option<String>,
+    evidence_summary: Option<String>,
+    estimated_usd: Option<f64>,
+    tokens_in: Option<i64>,
+    tokens_out: Option<i64>,
     ttl_seconds: Option<u64>,
     origin: Option<String>,
 }
@@ -891,6 +908,28 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &["run_id"]),
                 "forge.request_step.v1",
                 &["forge", "request", "step", "--run", "<run-id>", "--executor", "<executor>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.run.complete_task",
+                "Complete Ready Task With Evidence",
+                "Record executor evidence for the current ready handoff task, generate a replayable execution trace, validate the executor response, promote the task and drive the next action.",
+                object_schema(&[
+                    ("run_id", "string", "run id"),
+                    ("task_id", "string", "ready task id to complete"),
+                    ("executor", "string", "codex|opencode|skill|mcp|custom executor id"),
+                    ("summary", "string", "executor result summary without secrets"),
+                    ("artifacts", "array", "optional local artifact paths to attach"),
+                    ("evidence_command", "string", "optional command or gate that produced passing evidence"),
+                    ("evidence_summary", "string", "optional passing evidence summary"),
+                    ("estimated_usd", "number", "non-negative estimated executor cost"),
+                    ("tokens_in", "integer", "non-negative input token count"),
+                    ("tokens_out", "integer", "non-negative output token count"),
+                    ("ttl_seconds", "integer", "heartbeat freshness TTL"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["run_id", "task_id", "summary"]),
+                "forge.request_task_completion.v1",
+                &["forge", "request", "complete-task", "--run", "<run-id>", "--task", "<task-id>", "--summary", "<summary>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -1703,6 +1742,33 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.executor.as_deref().unwrap_or("mcp"),
                 input.ttl_seconds.unwrap_or(300),
                 &origin,
+            )?)?
+        }
+        "forge.run.complete_task" => {
+            let input: RunCompleteTaskInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            let executor = input.executor.unwrap_or_else(|| "mcp".to_string());
+            let artifacts = input
+                .artifacts
+                .iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
+            serde_json::to_value(complete_ready_task(
+                store,
+                &input.run_id,
+                RequestTaskCompletionInput {
+                    task_id: &input.task_id,
+                    executor: &executor,
+                    summary: &input.summary,
+                    artifact_paths: &artifacts,
+                    evidence_command: input.evidence_command.as_deref(),
+                    evidence_summary: input.evidence_summary.as_deref(),
+                    estimated_usd: input.estimated_usd.unwrap_or(0.0),
+                    tokens_in: input.tokens_in.unwrap_or(0),
+                    tokens_out: input.tokens_out.unwrap_or(0),
+                    ttl_seconds: input.ttl_seconds.unwrap_or(300),
+                    origin: &origin,
+                },
             )?)?
         }
         "forge.run.switch_executor" => {

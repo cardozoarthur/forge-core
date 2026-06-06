@@ -55,9 +55,9 @@ use forge_core::registry::{
     WorkflowRegistryFilters,
 };
 use forge_core::request::{
-    cancel_request, drive_request, heartbeat_request, list_requests, load_request_status,
-    recover_stale_request, resume_async_request, start_async_request, step_request,
-    switch_request_executor, RequestExecutorSwitchInput,
+    cancel_request, complete_ready_task, drive_request, heartbeat_request, list_requests,
+    load_request_status, recover_stale_request, resume_async_request, start_async_request,
+    step_request, switch_request_executor, RequestExecutorSwitchInput, RequestTaskCompletionInput,
 };
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
@@ -934,6 +934,34 @@ enum RequestCommands {
         run_id: String,
         #[arg(long, default_value = "forge_cli")]
         executor: String,
+        #[arg(long = "ttl-seconds", default_value_t = 300)]
+        ttl_seconds: u64,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    CompleteTask {
+        #[arg(long = "run")]
+        run_id: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long, default_value = "forge_cli")]
+        executor: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long = "artifact")]
+        artifacts: Vec<PathBuf>,
+        #[arg(long = "evidence-command")]
+        evidence_command: Option<String>,
+        #[arg(long = "evidence-summary")]
+        evidence_summary: Option<String>,
+        #[arg(long = "estimated-usd", default_value_t = 0.0)]
+        estimated_usd: f64,
+        #[arg(long = "tokens-in", default_value_t = 0)]
+        tokens_in: i64,
+        #[arg(long = "tokens-out", default_value_t = 0)]
+        tokens_out: i64,
         #[arg(long = "ttl-seconds", default_value_t = 300)]
         ttl_seconds: u64,
         #[arg(long, default_value = "forge_cli")]
@@ -2369,6 +2397,48 @@ fn run() -> Result<i32> {
                 } else {
                     0
                 };
+                print_response(output, &report)?;
+                Ok(exit_code)
+            }
+            RequestCommands::CompleteTask {
+                run_id,
+                task,
+                executor,
+                summary,
+                artifacts,
+                evidence_command,
+                evidence_summary,
+                estimated_usd,
+                tokens_in,
+                tokens_out,
+                ttl_seconds,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = complete_ready_task(
+                    &store,
+                    &run_id,
+                    RequestTaskCompletionInput {
+                        task_id: &task,
+                        executor: &executor,
+                        summary: &summary,
+                        artifact_paths: &artifacts,
+                        evidence_command: evidence_command.as_deref(),
+                        evidence_summary: evidence_summary.as_deref(),
+                        estimated_usd,
+                        tokens_in,
+                        tokens_out,
+                        ttl_seconds,
+                        origin: &origin,
+                    },
+                )?;
+                let exit_code =
+                    if matches!(report.status.as_str(), "not_ready" | "validation_failed") {
+                        1
+                    } else {
+                        0
+                    };
                 print_response(output, &report)?;
                 Ok(exit_code)
             }

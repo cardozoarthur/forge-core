@@ -256,6 +256,7 @@ forge mcp call forge.run.start --input '{"goal":"Improve Forge Core","origin":"c
 forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json
 forge mcp call forge.run.resume --input '{"run_id":"<run-id>","origin":"opencode"}' --output json
 forge mcp call forge.run.step --input '{"run_id":"<run-id>","executor":"codex","ttl_seconds":300,"origin":"codex"}' --output json
+forge mcp call forge.run.complete_task --input '{"run_id":"<run-id>","task_id":"<task-id>","executor":"codex","summary":"executor finished the ready task with passing evidence","origin":"codex"}' --output json
 forge mcp call forge.run.switch_executor --input '{"run_id":"<run-id>","executor":"opencode","fallback_executors":["codex"],"summary":"take over without stopping workflow","origin":"codex"}' --output json
 forge mcp call forge.workflow.inspect --input '{"workflow_id":"<workflow-id>","verbose":true}' --output json
 forge mcp call forge.context.request --input '{"workflow_id":"<workflow-id>","task_id":"task-001","budget":1200}' --output json
@@ -272,6 +273,7 @@ forge mcp call forge.artifact.fetch --input '{"workflow_id":"<workflow-id>","pat
 
 The MCP call surface is a stable local adapter layer over the existing Forge CLI and SQLite state. It does not introduce a second source of truth: mutations still flow through Forge-owned workflow, schedule and artifact APIs, validation remains explicit, and artifact reads are bounded to Forge-owned artifact refs.
 `forge request step` and `forge.run.step` let agents advance one ready deterministic task through the same executor-response validation path used by manual handoff responses. AI tasks and tasks with explicit external validation commands still require an executor handoff; Forge does not fake them.
+`forge request complete-task` and `forge.run.complete_task` give executors a direct closeout path for ready AI or mixed handoff work: Forge records a replayable execution trace, builds the executor response, validates passing evidence, promotes the task and immediately drives the next action.
 AWS operations are exposed through `forge aws check`, `forge aws inventory`, `forge aws raw` and matching MCP tools. They delegate to `~/plugins/aws-ops/scripts/aws-ops`, use the project workspace AWS credential-vault defaults and keep secret resolution plus mutation gating outside Forge.
 The registry-level `execution_policy` summary uses schema `forge.registry_execution_policy.v1` and aggregates AI, mixed, deterministic, no-AI, model-call-required, model-call-avoided, local-code and reusable local-code route counts for both the filtered global summary and every workflow row.
 The registry also includes compact `context_handoff`, `context_actions` and `context_quality` projections for every workflow and for the filtered global summary, so operators can see ready tasks, missing-context blockers, dependency blockers, routing quality pressure and the workflow-level `quality_action` recommendation without inspecting each task individually.

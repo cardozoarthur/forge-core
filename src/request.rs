@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const FINAL_COMPLETION_AUDIT_KIND: &str = "final_completion_audit";
@@ -204,6 +204,41 @@ pub struct RequestStepReport {
     pub activity: RunActivity,
     pub stepped_task: Option<RequestDriveTask>,
     pub output_artifact: Option<ArtifactAttachReport>,
+    pub response_artifact_path: Option<String>,
+    pub validation: Option<ExecutorResponseValidationReport>,
+    pub drive_before: RequestDriveReport,
+    pub drive_after: Option<RequestDriveReport>,
+    pub reason: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestTaskCompletionInput<'a> {
+    pub task_id: &'a str,
+    pub executor: &'a str,
+    pub summary: &'a str,
+    pub artifact_paths: &'a [PathBuf],
+    pub evidence_command: Option<&'a str>,
+    pub evidence_summary: Option<&'a str>,
+    pub estimated_usd: f64,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub ttl_seconds: u64,
+    pub origin: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RequestTaskCompletionReport {
+    pub schema_version: String,
+    pub status: String,
+    pub action: String,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub executor: String,
+    pub origin: String,
+    pub trace_artifact: Option<ArtifactAttachReport>,
+    pub attached_artifacts: Vec<ArtifactAttachReport>,
     pub response_artifact_path: Option<String>,
     pub validation: Option<ExecutorResponseValidationReport>,
     pub drive_before: RequestDriveReport,
@@ -1166,6 +1201,206 @@ pub fn step_request(
     })
 }
 
+pub fn complete_ready_task(
+    store: &ForgeStore,
+    run_id: &str,
+    input: RequestTaskCompletionInput<'_>,
+) -> Result<RequestTaskCompletionReport> {
+    if input.summary.trim().is_empty() {
+        anyhow::bail!("request task completion summary is required");
+    }
+
+    let drive_before = drive_request(
+        store,
+        run_id,
+        input.executor,
+        input.ttl_seconds,
+        input.origin,
+    )?;
+    let run = load_run_record(store, run_id)?;
+    let workflow = store.load_workflow(&run.workflow_id)?;
+    let updated_at = drive_before.updated_at;
+    let Some(handoff_task) = drive_before.handoff_task.clone() else {
+        return Ok(RequestTaskCompletionReport {
+            schema_version: "forge.request_task_completion.v1".to_string(),
+            status: "not_ready".to_string(),
+            action: "drive_request".to_string(),
+            run_id: run.run_id,
+            workflow_id: workflow.id,
+            task_id: input.task_id.to_string(),
+            executor: input.executor.to_string(),
+            origin: input.origin.to_string(),
+            trace_artifact: None,
+            attached_artifacts: Vec::new(),
+            response_artifact_path: None,
+            validation: None,
+            drive_before,
+            drive_after: None,
+            reason: "request drive did not return a ready handoff task".to_string(),
+            updated_at,
+        });
+    };
+
+    if handoff_task.task_id != input.task_id {
+        return Ok(RequestTaskCompletionReport {
+            schema_version: "forge.request_task_completion.v1".to_string(),
+            status: "not_ready".to_string(),
+            action: "drive_request".to_string(),
+            run_id: run.run_id,
+            workflow_id: workflow.id,
+            task_id: input.task_id.to_string(),
+            executor: input.executor.to_string(),
+            origin: input.origin.to_string(),
+            trace_artifact: None,
+            attached_artifacts: Vec::new(),
+            response_artifact_path: None,
+            validation: None,
+            drive_before,
+            drive_after: None,
+            reason: format!(
+                "ready handoff task is {}, not {}",
+                handoff_task.task_id, input.task_id
+            ),
+            updated_at,
+        });
+    }
+
+    let task = workflow
+        .tasks
+        .iter()
+        .find(|task| task.id == input.task_id)
+        .with_context(|| {
+            format!(
+                "request drive selected task {} but it is missing from workflow {}",
+                input.task_id, workflow.id
+            )
+        })?;
+
+    let mut attached_artifacts = Vec::new();
+    for artifact_path in input.artifact_paths {
+        attached_artifacts.push(crate::workflow::attach_workflow_artifact(
+            store,
+            &workflow.id,
+            artifact_path,
+            "executor_output",
+            input.origin,
+        )?);
+    }
+
+    let generated_at = Utc::now();
+    let timestamp = generated_at.format("%Y%m%dT%H%M%SZ");
+    let trace_payload = build_execution_trace_payload(ExecutionTracePayloadInput {
+        workflow: &workflow,
+        task,
+        handoff_task: &handoff_task,
+        run_id,
+        completion: &input,
+        attached_artifacts: &attached_artifacts,
+        drive_before: &drive_before,
+        generated_at,
+    });
+    let trace_relative_path = format!(
+        "artifacts/{}/execution-trace-{}-{}.json",
+        workflow.id, task.id, timestamp
+    );
+    let (trace_path, _) =
+        write_json_artifact(&store.base_dir(), &trace_relative_path, &trace_payload)?;
+    let trace_artifact = crate::workflow::attach_workflow_artifact(
+        store,
+        &workflow.id,
+        &trace_path,
+        "execution_trace",
+        input.origin,
+    )?;
+
+    let mut response_artifacts = Vec::with_capacity(attached_artifacts.len() + 1);
+    response_artifacts.push(trace_artifact.artifact.path.clone());
+    response_artifacts.extend(
+        attached_artifacts
+            .iter()
+            .map(|artifact| artifact.artifact.path.clone()),
+    );
+
+    let evidence_command = input.evidence_command.map(str::to_string).unwrap_or_else(|| {
+        format!(
+            "forge request complete-task --run {run_id} --task {} --executor {} --summary <executor-summary> --output json",
+            input.task_id, input.executor
+        )
+    });
+    let evidence_summary = input
+        .evidence_summary
+        .filter(|summary| !summary.trim().is_empty())
+        .unwrap_or(input.summary);
+    let response_payload = serde_json::json!({
+        "schema_version": "forge.executor_response.v1",
+        "task_id": task.id,
+        "status": "completed",
+        "artifacts": response_artifacts,
+        "trace_ref": trace_artifact.artifact.path,
+        "cost": {
+            "estimated_usd": input.estimated_usd,
+            "tokens_in": input.tokens_in,
+            "tokens_out": input.tokens_out
+        },
+        "validation_evidence": [
+            {
+                "command": evidence_command,
+                "exit_code": 0,
+                "summary": evidence_summary
+            }
+        ]
+    });
+    let response_relative_path = format!(
+        "artifacts/{}/executor-response-{}-{}.json",
+        workflow.id, task.id, timestamp
+    );
+    let (response_path, _) = write_json_artifact(
+        &store.base_dir(),
+        &response_relative_path,
+        &response_payload,
+    )?;
+    let validation =
+        validate_executor_response_file(store, &workflow.id, &task.id, response_path.as_path())?;
+    let drive_after = if validation.accepted {
+        Some(drive_request(
+            store,
+            run_id,
+            input.executor,
+            input.ttl_seconds,
+            input.origin,
+        )?)
+    } else {
+        None
+    };
+
+    Ok(RequestTaskCompletionReport {
+        schema_version: "forge.request_task_completion.v1".to_string(),
+        status: if validation.accepted {
+            "completed".to_string()
+        } else {
+            "validation_failed".to_string()
+        },
+        action: if validation.accepted {
+            "promoted_task_and_drove_next_action".to_string()
+        } else {
+            "inspect_validation".to_string()
+        },
+        run_id: run.run_id,
+        workflow_id: workflow.id,
+        task_id: input.task_id.to_string(),
+        executor: input.executor.to_string(),
+        origin: input.origin.to_string(),
+        trace_artifact: Some(trace_artifact),
+        attached_artifacts,
+        response_artifact_path: Some(response_relative_path),
+        validation: Some(validation),
+        drive_before,
+        drive_after,
+        reason: "Forge recorded executor evidence, generated a replayable execution trace, validated the response, and drove the run forward.".to_string(),
+        updated_at: Utc::now(),
+    })
+}
+
 fn is_auto_steppable_task(task: &AtomicTask) -> bool {
     matches!(
         task.executor,
@@ -1264,6 +1499,76 @@ fn build_auto_step_output_payload(
             "edge_count": graph_edges.len(),
             "nodes": graph_nodes,
             "edges": graph_edges
+        }
+    })
+}
+
+struct ExecutionTracePayloadInput<'a> {
+    workflow: &'a Workflow,
+    task: &'a AtomicTask,
+    handoff_task: &'a RequestDriveTask,
+    run_id: &'a str,
+    completion: &'a RequestTaskCompletionInput<'a>,
+    attached_artifacts: &'a [ArtifactAttachReport],
+    drive_before: &'a RequestDriveReport,
+    generated_at: DateTime<Utc>,
+}
+
+fn build_execution_trace_payload(input: ExecutionTracePayloadInput<'_>) -> serde_json::Value {
+    let workflow = input.workflow;
+    let task = input.task;
+    let handoff_task = input.handoff_task;
+    let completion = input.completion;
+    let drive_before = input.drive_before;
+    serde_json::json!({
+        "schema_version": "forge.execution_trace.v1",
+        "run_id": input.run_id,
+        "workflow_id": workflow.id,
+        "workflow_revision": workflow.revisions.last().map(|revision| revision.revision).unwrap_or(0),
+        "task_id": task.id,
+        "task_title": task.title,
+        "task_executor": task.executor,
+        "selected_executor": completion.executor,
+        "origin": completion.origin,
+        "generated_at": input.generated_at,
+        "summary": completion.summary,
+        "expected_output": task.expected_output,
+        "goal": task.goal,
+        "handoff": {
+            "status": handoff_task.handoff_status,
+            "context_sha256": handoff_task.context_sha256,
+            "context_routing_cache_key": handoff_task.context_routing_cache_key
+        },
+        "drive_before": {
+            "status": drive_before.status,
+            "action": drive_before.action,
+            "reason": drive_before.reason,
+            "task_summary": drive_before.task_summary
+        },
+        "dependencies": task.dependencies,
+        "validation_rules": task.validation_rules,
+        "executor_cost": {
+            "estimated_usd": completion.estimated_usd,
+            "tokens_in": completion.tokens_in,
+            "tokens_out": completion.tokens_out
+        },
+        "attached_artifacts": input.attached_artifacts.iter().map(|artifact| {
+            serde_json::json!({
+                "kind": artifact.artifact.kind,
+                "path": artifact.artifact.path,
+                "sha256": artifact.artifact.sha256,
+                "bytes": artifact.artifact.bytes
+            })
+        }).collect::<Vec<_>>(),
+        "replay": {
+            "status_command": ["forge", "request", "status", "--run", input.run_id, "--output", "json"],
+            "drive_command": ["forge", "request", "drive", "--run", input.run_id, "--executor", completion.executor, "--output", "json"],
+            "response_path_kind": "executor_response"
+        },
+        "completion_policy": {
+            "uses_executor_response_validation": true,
+            "trace_is_replayable": true,
+            "forge_promotes_only_after_validation": true
         }
     })
 }

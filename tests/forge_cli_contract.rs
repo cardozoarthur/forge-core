@@ -16459,6 +16459,221 @@ fn request_step_auto_promotes_ready_deterministic_task_and_advances_drive() {
 }
 
 #[test]
+fn request_complete_task_records_trace_validates_and_drives_next_action() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Complete a mixed executor task with recorded evidence",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "step",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let completed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "complete-task",
+            "--run",
+            run_id,
+            "--task",
+            "task-002",
+            "--executor",
+            "codex",
+            "--summary",
+            "Codex extracted requirements and recorded a replayable trace.",
+            "--evidence-command",
+            "codex executor evidence",
+            "--evidence-summary",
+            "requirements trace is present and retryable",
+            "--tokens-in",
+            "12",
+            "--tokens-out",
+            "34",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let completed_json: Value = serde_json::from_slice(&completed).unwrap();
+    assert_eq!(
+        completed_json["schema_version"],
+        "forge.request_task_completion.v1"
+    );
+    assert_eq!(completed_json["status"], "completed");
+    assert_eq!(
+        completed_json["action"],
+        "promoted_task_and_drove_next_action"
+    );
+    assert_eq!(completed_json["task_id"], "task-002");
+    assert_eq!(
+        completed_json["trace_artifact"]["artifact"]["kind"],
+        "execution_trace"
+    );
+    assert_eq!(completed_json["validation"]["accepted"], true);
+    assert_eq!(
+        completed_json["validation"]["validation_summary"]["passing"],
+        1
+    );
+    assert_eq!(completed_json["drive_after"]["status"], "ready_for_handoff");
+    assert_eq!(
+        completed_json["drive_after"]["handoff_task"]["task_id"],
+        "task-003"
+    );
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status_json["task_summary"]["completed"], 2);
+    assert_eq!(status_json["artifact_count"], 2);
+
+    let mcp_tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&mcp_tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.run.complete_task"
+            && tool["output_schema"] == "forge.request_task_completion.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == true
+    }));
+    assert!(forge_core::skill::SKILL_MD.contains("forge request complete-task"));
+    assert!(forge_core::skill::SKILL_MD.contains("forge.run.complete_task"));
+
+    let mcp_started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "MCP should complete ready tasks with evidence",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_started_json: Value = serde_json::from_slice(&mcp_started).unwrap();
+    let mcp_run_id = mcp_started_json["run_id"].as_str().unwrap();
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "step",
+            "--run",
+            mcp_run_id,
+            "--executor",
+            "codex",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let input = serde_json::json!({
+        "run_id": mcp_run_id,
+        "task_id": "task-002",
+        "executor": "codex",
+        "summary": "MCP executor recorded task evidence.",
+        "evidence_command": "mcp completion gate",
+        "evidence_summary": "mcp completion evidence passed",
+        "origin": "mcp"
+    })
+    .to_string();
+    let mcp_complete = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.run.complete_task",
+            "--input",
+            &input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_complete_json: Value = serde_json::from_slice(&mcp_complete).unwrap();
+    assert_eq!(mcp_complete_json["status"], "ok");
+    assert_eq!(mcp_complete_json["tool_name"], "forge.run.complete_task");
+    assert_eq!(mcp_complete_json["result"]["status"], "completed");
+    assert_eq!(mcp_complete_json["result"]["task_id"], "task-002");
+    assert_eq!(
+        mcp_complete_json["result"]["drive_after"]["handoff_task"]["task_id"],
+        "task-003"
+    );
+}
+
+#[test]
 fn request_drive_surfaces_needs_retry_as_rework_instead_of_blind_handoff() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
