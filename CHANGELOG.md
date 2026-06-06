@@ -6,9 +6,11 @@
 
 - Added `forge aws check`, `forge aws inventory` and `forge aws raw`, delegating to the local `aws-ops` plugin and its AWS credential-vault defaults.
 - Added MCP tools `forge.aws.check`, `forge.aws.inventory` and `forge.aws.raw` so agents can validate, observe and run guarded AWS CLI commands through Forge without resolving secrets.
+- Added `forge request step` and MCP `forge.run.step` so Forge can auto-promote one ready deterministic task through executor-response validation instead of stopping at a handoff instruction.
 
 ### Validation
 
+- Targeted coverage passed for `cargo test request_step_auto_promotes_ready_deterministic_task_and_advances_drive --test forge_cli_contract -- --nocapture`.
 - Targeted coverage passed for `cargo test cloud_ --test forge_cli_contract -- --nocapture`.
 - Regression coverage passed for `cargo test credential_vault --test forge_cli_contract -- --nocapture`.
 - Live smoke passed for `forge aws check --output json`, `forge aws inventory --regions us-east-1,sa-east-1 --output json`, `forge mcp call forge.aws.check --input '{}' --output json` and `forge aws raw --output json -- sts get-caller-identity`.

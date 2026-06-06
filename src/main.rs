@@ -56,8 +56,8 @@ use forge_core::registry::{
 };
 use forge_core::request::{
     cancel_request, drive_request, heartbeat_request, list_requests, load_request_status,
-    recover_stale_request, resume_async_request, start_async_request, switch_request_executor,
-    RequestExecutorSwitchInput,
+    recover_stale_request, resume_async_request, start_async_request, step_request,
+    switch_request_executor, RequestExecutorSwitchInput,
 };
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
@@ -918,6 +918,18 @@ enum RequestCommands {
         output: OutputFormat,
     },
     Drive {
+        #[arg(long = "run")]
+        run_id: String,
+        #[arg(long, default_value = "forge_cli")]
+        executor: String,
+        #[arg(long = "ttl-seconds", default_value_t = 300)]
+        ttl_seconds: u64,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Step {
         #[arg(long = "run")]
         run_id: String,
         #[arg(long, default_value = "forge_cli")]
@@ -2342,6 +2354,23 @@ fn run() -> Result<i32> {
                 let report = drive_request(&store, &run_id, &executor, ttl_seconds, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
+            }
+            RequestCommands::Step {
+                run_id,
+                executor,
+                ttl_seconds,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = step_request(&store, &run_id, &executor, ttl_seconds, &origin)?;
+                let exit_code = if report.status == "validation_failed" {
+                    1
+                } else {
+                    0
+                };
+                print_response(output, &report)?;
+                Ok(exit_code)
             }
             RequestCommands::List { status, output } => {
                 let store = ForgeStore::open(cli.store)?;

@@ -16296,6 +16296,169 @@ fn request_heartbeat_marks_async_run_active_and_surfaces_it_in_status_list_and_i
 }
 
 #[test]
+fn request_step_auto_promotes_ready_deterministic_task_and_advances_drive() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Turn a user request into final workflow results with deterministic stepping",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+
+    let stepped = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "step",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "300",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stepped_json: Value = serde_json::from_slice(&stepped).unwrap();
+    assert_eq!(stepped_json["schema_version"], "forge.request_step.v1");
+    assert_eq!(stepped_json["status"], "stepped");
+    assert_eq!(stepped_json["action"], "auto_promoted_task");
+    assert_eq!(stepped_json["stepped_task"]["task_id"], "task-001");
+    assert_eq!(
+        stepped_json["output_artifact"]["status"],
+        "artifact_attached"
+    );
+    assert_eq!(
+        stepped_json["output_artifact"]["artifact"]["kind"],
+        "auto_step_output"
+    );
+    assert_eq!(stepped_json["validation"]["accepted"], true);
+    assert_eq!(
+        stepped_json["validation"]["validation_summary"]["passing"],
+        1
+    );
+    assert_eq!(stepped_json["drive_after"]["status"], "ready_for_handoff");
+    assert_eq!(
+        stepped_json["drive_after"]["handoff_task"]["task_id"],
+        "task-002"
+    );
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status_json["task_summary"]["completed"], 1);
+    assert_eq!(status_json["artifact_count"], 1);
+
+    let mcp_tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&mcp_tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.run.step"
+            && tool["output_schema"] == "forge.request_step.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == true
+    }));
+    assert!(forge_core::skill::SKILL_MD.contains("forge request step"));
+    assert!(forge_core::skill::SKILL_MD.contains("forge.run.step"));
+
+    let mcp_started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "MCP should step deterministic tasks through Forge",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_started_json: Value = serde_json::from_slice(&mcp_started).unwrap();
+    let mcp_run_id = mcp_started_json["run_id"].as_str().unwrap();
+    let input = serde_json::json!({
+        "run_id": mcp_run_id,
+        "executor": "codex",
+        "ttl_seconds": 300,
+        "origin": "mcp"
+    })
+    .to_string();
+    let mcp_step = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.run.step",
+            "--input",
+            &input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_step_json: Value = serde_json::from_slice(&mcp_step).unwrap();
+    assert_eq!(mcp_step_json["status"], "ok");
+    assert_eq!(mcp_step_json["tool_name"], "forge.run.step");
+    assert_eq!(mcp_step_json["result"]["status"], "stepped");
+    assert_eq!(
+        mcp_step_json["result"]["stepped_task"]["task_id"],
+        "task-001"
+    );
+}
+
+#[test]
 fn request_drive_surfaces_needs_retry_as_rework_instead_of_blind_handoff() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

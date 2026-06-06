@@ -1,4 +1,5 @@
-use crate::artifact::list_workflow_artifacts;
+use crate::adapter::{validate_executor_response_file, ExecutorResponseValidationReport};
+use crate::artifact::{list_workflow_artifacts, write_json_artifact};
 use crate::checkpoint::{load_workflow_checkpoints, TaskCheckpoint};
 use crate::context::{
     build_context_handoff_summary, ContextHandoffSummary, ContextHandoffTask,
@@ -13,6 +14,7 @@ use crate::registry::{
     attach_reuse_candidates_as_child_subflows, find_reuse_candidates, WorkflowReuseCandidate,
 };
 use crate::storage::ForgeStore;
+use crate::workflow::ArtifactAttachReport;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -188,6 +190,26 @@ pub struct RequestDriveBlockedTask {
     pub title: String,
     pub handoff_status: String,
     pub blocking_refs: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RequestStepReport {
+    pub schema_version: String,
+    pub status: String,
+    pub action: String,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub executor: String,
+    pub origin: String,
+    pub activity: RunActivity,
+    pub stepped_task: Option<RequestDriveTask>,
+    pub output_artifact: Option<ArtifactAttachReport>,
+    pub response_artifact_path: Option<String>,
+    pub validation: Option<ExecutorResponseValidationReport>,
+    pub drive_before: RequestDriveReport,
+    pub drive_after: Option<RequestDriveReport>,
+    pub reason: String,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -998,6 +1020,251 @@ pub fn drive_request(
         ],
         reason: "No pending task is currently ready for handoff.".to_string(),
         updated_at: heartbeat.updated_at,
+    })
+}
+
+pub fn step_request(
+    store: &ForgeStore,
+    run_id: &str,
+    executor: &str,
+    ttl_seconds: u64,
+    origin: &str,
+) -> Result<RequestStepReport> {
+    let drive_before = drive_request(store, run_id, executor, ttl_seconds, origin)?;
+    let run = load_run_record(store, run_id)?;
+    let workflow = store.load_workflow(&run.workflow_id)?;
+    let activity = drive_before.activity.clone();
+    let updated_at = drive_before.updated_at;
+    let Some(stepped_task) = drive_before.handoff_task.clone() else {
+        return Ok(RequestStepReport {
+            schema_version: "forge.request_step.v1".to_string(),
+            status: "skipped".to_string(),
+            action: "none".to_string(),
+            run_id: run.run_id,
+            workflow_id: workflow.id,
+            executor: executor.to_string(),
+            origin: origin.to_string(),
+            activity,
+            stepped_task: None,
+            output_artifact: None,
+            response_artifact_path: None,
+            validation: None,
+            drive_before,
+            drive_after: None,
+            reason: "request drive did not return a ready handoff task".to_string(),
+            updated_at,
+        });
+    };
+
+    let task = workflow
+        .tasks
+        .iter()
+        .find(|task| task.id == stepped_task.task_id)
+        .with_context(|| {
+            format!(
+                "request drive selected task {} but it is missing from workflow {}",
+                stepped_task.task_id, workflow.id
+            )
+        })?;
+
+    if !is_auto_steppable_task(task) {
+        return Ok(RequestStepReport {
+            schema_version: "forge.request_step.v1".to_string(),
+            status: "handoff_required".to_string(),
+            action: "start_handoff".to_string(),
+            run_id: run.run_id,
+            workflow_id: workflow.id,
+            executor: executor.to_string(),
+            origin: origin.to_string(),
+            activity,
+            stepped_task: Some(stepped_task),
+            output_artifact: None,
+            response_artifact_path: None,
+            validation: None,
+            drive_before,
+            drive_after: None,
+            reason: "ready task requires an external executor or explicit validation command; Forge will not fake execution".to_string(),
+            updated_at,
+        });
+    }
+
+    let generated_at = Utc::now();
+    let timestamp = generated_at.format("%Y%m%dT%H%M%SZ");
+    let output_payload =
+        build_auto_step_output_payload(&workflow, task, executor, origin, generated_at);
+    let output_relative_path = format!(
+        "artifacts/{}/auto-step-output-{}-{}.json",
+        workflow.id, task.id, timestamp
+    );
+    let (output_path, _) =
+        write_json_artifact(&store.base_dir(), &output_relative_path, &output_payload)?;
+    let output_artifact = crate::workflow::attach_workflow_artifact(
+        store,
+        &workflow.id,
+        &output_path,
+        "auto_step_output",
+        origin,
+    )?;
+
+    let response_payload = serde_json::json!({
+        "schema_version": "forge.executor_response.v1",
+        "task_id": task.id,
+        "status": "completed",
+        "artifacts": [output_artifact.artifact.path.clone()],
+        "trace_ref": format!("{run_id}/{}", task.id),
+        "cost": {
+            "estimated_usd": 0.0,
+            "tokens_in": 0,
+            "tokens_out": 0
+        },
+        "validation_evidence": [
+            {
+                "command": format!("forge request step --run {run_id} --executor {executor} --ttl-seconds {}", ttl_seconds.max(1)),
+                "exit_code": 0,
+                "summary": format!("Forge auto-stepped deterministic task {} and attached replayable output artifact {}.", task.id, output_artifact.artifact.path)
+            }
+        ]
+    });
+    let response_relative_path = format!(
+        "artifacts/{}/auto-step-response-{}-{}.json",
+        workflow.id, task.id, timestamp
+    );
+    let (response_path, _) = write_json_artifact(
+        &store.base_dir(),
+        &response_relative_path,
+        &response_payload,
+    )?;
+    let validation =
+        validate_executor_response_file(store, &workflow.id, &task.id, response_path.as_path())?;
+    let drive_after = drive_request(store, run_id, executor, ttl_seconds, origin)?;
+
+    Ok(RequestStepReport {
+        schema_version: "forge.request_step.v1".to_string(),
+        status: if validation.accepted {
+            "stepped".to_string()
+        } else {
+            "validation_failed".to_string()
+        },
+        action: if validation.accepted {
+            "auto_promoted_task".to_string()
+        } else {
+            "inspect_validation".to_string()
+        },
+        run_id: run.run_id,
+        workflow_id: workflow.id,
+        executor: executor.to_string(),
+        origin: origin.to_string(),
+        activity: drive_after.activity.clone(),
+        stepped_task: Some(stepped_task),
+        output_artifact: Some(output_artifact),
+        response_artifact_path: Some(response_relative_path),
+        validation: Some(validation),
+        drive_before,
+        drive_after: Some(drive_after),
+        reason: "Forge executed a deterministic ready task through the normal executor-response validation path.".to_string(),
+        updated_at: Utc::now(),
+    })
+}
+
+fn is_auto_steppable_task(task: &AtomicTask) -> bool {
+    matches!(
+        task.executor,
+        ExecutorKind::Command | ExecutorKind::Wait | ExecutorKind::Notification
+    ) && task
+        .validation_rules
+        .iter()
+        .all(|rule| rule.command.as_deref().unwrap_or("").trim().is_empty())
+}
+
+fn build_auto_step_output_payload(
+    workflow: &Workflow,
+    task: &AtomicTask,
+    executor: &str,
+    origin: &str,
+    generated_at: DateTime<Utc>,
+) -> serde_json::Value {
+    let known_task_ids = workflow
+        .tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<Vec<_>>();
+    let missing_dependencies = task
+        .dependencies
+        .iter()
+        .filter(|dependency| !known_task_ids.iter().any(|id| id == dependency))
+        .cloned()
+        .collect::<Vec<_>>();
+    let completed_dependencies = task
+        .dependencies
+        .iter()
+        .filter(|dependency| {
+            workflow.tasks.iter().any(|candidate| {
+                &candidate.id == *dependency && candidate.status == TaskStatus::Completed
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let graph_nodes = workflow
+        .tasks
+        .iter()
+        .map(|node| {
+            serde_json::json!({
+                "id": node.id,
+                "title": node.title,
+                "dependencies": node.dependencies,
+                "executor": node.executor,
+                "status": node.status,
+                "expected_output": node.expected_output
+            })
+        })
+        .collect::<Vec<_>>();
+    let graph_edges = workflow
+        .tasks
+        .iter()
+        .flat_map(|node| {
+            node.dependencies.iter().map(move |dependency| {
+                serde_json::json!({
+                    "from": dependency,
+                    "to": node.id
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema_version": "forge.auto_step_output.v1",
+        "workflow_id": workflow.id,
+        "workflow_revision": workflow.revisions.last().map(|revision| revision.revision).unwrap_or(0),
+        "task_id": task.id,
+        "title": task.title,
+        "goal": task.goal,
+        "expected_output": task.expected_output,
+        "executor": executor,
+        "origin": origin,
+        "generated_at": generated_at,
+        "auto_step_policy": {
+            "only_deterministic_tasks": true,
+            "external_commands_allowed": false,
+            "promotion_path": "executor_response_validation"
+        },
+        "dependency_evidence": {
+            "dependencies": task.dependencies,
+            "completed_dependencies": completed_dependencies,
+            "missing_dependencies": missing_dependencies
+        },
+        "validation_rules": task.validation_rules,
+        "artifact_refs": workflow.artifacts.iter().map(|artifact| {
+            serde_json::json!({
+                "kind": artifact.kind,
+                "path": artifact.path,
+                "sha256": artifact.sha256
+            })
+        }).collect::<Vec<_>>(),
+        "atomic_task_graph": {
+            "node_count": graph_nodes.len(),
+            "edge_count": graph_edges.len(),
+            "nodes": graph_nodes,
+            "edges": graph_edges
+        }
     })
 }
 

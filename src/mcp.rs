@@ -31,8 +31,8 @@ use crate::registry::{
 };
 use crate::request::{
     cancel_request, drive_request, heartbeat_request, list_requests, load_request_status,
-    recover_stale_request, resume_async_request, start_async_request, switch_request_executor,
-    RequestExecutorSwitchInput,
+    recover_stale_request, resume_async_request, start_async_request, step_request,
+    switch_request_executor, RequestExecutorSwitchInput,
 };
 use crate::schedule::{
     aggregate_summary, build_schedule_worker_status, create_daily_goal_research_workflow,
@@ -203,6 +203,14 @@ struct RunHeartbeatInput {
 
 #[derive(Debug, Deserialize)]
 struct RunDriveInput {
+    run_id: String,
+    executor: Option<String>,
+    ttl_seconds: Option<u64>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunStepInput {
     run_id: String,
     executor: Option<String>,
     ttl_seconds: Option<u64>,
@@ -869,6 +877,20 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &["run_id"]),
                 "forge.request_drive.v1",
                 &["forge", "request", "drive", "--run", "<run-id>", "--executor", "<executor>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.run.step",
+                "Step Ready Deterministic Task",
+                "Drive a run and auto-promote one ready deterministic task through Forge's normal executor-response validation path; AI and external-command tasks still return handoff_required.",
+                object_schema(&[
+                    ("run_id", "string", "run id"),
+                    ("executor", "string", "codex|opencode|skill|mcp|custom executor id"),
+                    ("ttl_seconds", "integer", "heartbeat freshness TTL"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["run_id"]),
+                "forge.request_step.v1",
+                &["forge", "request", "step", "--run", "<run-id>", "--executor", "<executor>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -1665,6 +1687,17 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let input: RunDriveInput = parse_input(input)?;
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(drive_request(
+                store,
+                &input.run_id,
+                input.executor.as_deref().unwrap_or("mcp"),
+                input.ttl_seconds.unwrap_or(300),
+                &origin,
+            )?)?
+        }
+        "forge.run.step" => {
+            let input: RunStepInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(step_request(
                 store,
                 &input.run_id,
                 input.executor.as_deref().unwrap_or("mcp"),
