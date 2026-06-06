@@ -263,11 +263,14 @@ forge mcp call forge.schedule.create_daily_goal_research --input '{"goals":["hac
 forge mcp call forge.schedule.summary --output json
 forge mcp call forge.schedule.loop_summary --output json
 forge mcp call forge.loop.inspect --input '{"workflow_id":"<workflow-id>"}' --output json
+forge mcp call forge.aws.check --input '{}' --output json
+forge mcp call forge.aws.inventory --input '{"regions":"us-east-1,sa-east-1"}' --output json
 forge mcp call forge.workflow.attach_artifact --input '{"workflow_id":"<workflow-id>","path":"./report.md","kind":"report","origin":"codex"}' --output json
 forge mcp call forge.artifact.fetch --input '{"workflow_id":"<workflow-id>","path":"artifacts/<workflow-id>/attached-report-report.md","max_bytes":4096}' --output json
 ```
 
 The MCP call surface is a stable local adapter layer over the existing Forge CLI and SQLite state. It does not introduce a second source of truth: mutations still flow through Forge-owned workflow, schedule and artifact APIs, validation remains explicit, and artifact reads are bounded to Forge-owned artifact refs.
+AWS operations are exposed through `forge aws check`, `forge aws inventory`, `forge aws raw` and matching MCP tools. They delegate to `~/plugins/aws-ops/scripts/aws-ops`, use the project workspace AWS credential-vault defaults and keep secret resolution plus mutation gating outside Forge.
 The registry-level `execution_policy` summary uses schema `forge.registry_execution_policy.v1` and aggregates AI, mixed, deterministic, no-AI, model-call-required, model-call-avoided, local-code and reusable local-code route counts for both the filtered global summary and every workflow row.
 The registry also includes compact `context_handoff`, `context_actions` and `context_quality` projections for every workflow and for the filtered global summary, so operators can see ready tasks, missing-context blockers, dependency blockers, routing quality pressure and the workflow-level `quality_action` recommendation without inspecting each task individually.
 `forge plan` and `forge request start` report `reuse_candidates` when the registry already contains a compatible reusable deterministic subflow, and persist the best attachable candidate per requested task as a proposed child subflow before duplicating local Python/Node.js work.

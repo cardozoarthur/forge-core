@@ -1,4 +1,8 @@
 use crate::artifact::{hex_sha256, list_workflow_artifacts, ListedArtifact};
+use crate::aws_ops::{
+    run_check as run_aws_ops_check, run_inventory as run_aws_ops_inventory,
+    run_raw as run_aws_ops_raw, AWS_OPS_COMMAND_SCHEMA,
+};
 use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{build_context_package_with_checkpoint, DEFAULT_CONTEXT_BUDGET};
 use crate::credential_vault::{
@@ -26,8 +30,9 @@ use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
 use crate::request::{
-    cancel_request, heartbeat_request, list_requests, load_request_status, recover_stale_request,
-    resume_async_request, start_async_request, switch_request_executor, RequestExecutorSwitchInput,
+    cancel_request, drive_request, heartbeat_request, list_requests, load_request_status,
+    recover_stale_request, resume_async_request, start_async_request, switch_request_executor,
+    RequestExecutorSwitchInput,
 };
 use crate::schedule::{
     aggregate_summary, build_schedule_worker_status, create_daily_goal_research_workflow,
@@ -193,6 +198,14 @@ struct RunHeartbeatInput {
     summary: Option<String>,
     ttl_seconds: Option<u64>,
     pid: Option<u32>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunDriveInput {
+    run_id: String,
+    executor: Option<String>,
+    ttl_seconds: Option<u64>,
     origin: Option<String>,
 }
 
@@ -439,6 +452,33 @@ struct CredentialVaultInput {
     vault_bin: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AwsCheckInput {
+    aws_ops_bin: Option<String>,
+    vault_contract: Option<String>,
+    vault_data: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AwsInventoryInput {
+    aws_ops_bin: Option<String>,
+    vault_contract: Option<String>,
+    vault_data: Option<String>,
+    regions: Option<String>,
+    all_regions: Option<bool>,
+    full: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AwsRawInput {
+    aws_ops_bin: Option<String>,
+    vault_contract: Option<String>,
+    vault_data: Option<String>,
+    allow_mutation: Option<bool>,
+    reason: Option<String>,
+    aws_args: Vec<String>,
+}
+
 pub fn mcp_tools_manifest() -> McpToolsManifest {
     McpToolsManifest {
         status: "mcp_tools_loaded".to_string(),
@@ -566,6 +606,60 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "json",
                 ],
                 ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.aws.check",
+                "Check AWS Identity",
+                "Validate the configured AWS Ops vault by running aws sts get-caller-identity through the guarded aws-ops wrapper without printing secrets.",
+                object_schema(
+                    &[
+                        ("aws_ops_bin", "string", "optional aws-ops wrapper path"),
+                        ("vault_contract", "string", "optional AWS credential-vault contract path"),
+                        ("vault_data", "string", "optional encrypted AWS credential-vault data path"),
+                    ],
+                    &[],
+                ),
+                AWS_OPS_COMMAND_SCHEMA,
+                &["forge", "aws", "check", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.aws.inventory",
+                "Inventory AWS Account",
+                "Run a read-only inventory for common AWS services through aws-ops and the AWS credential vault.",
+                object_schema(
+                    &[
+                        ("aws_ops_bin", "string", "optional aws-ops wrapper path"),
+                        ("vault_contract", "string", "optional AWS credential-vault contract path"),
+                        ("vault_data", "string", "optional encrypted AWS credential-vault data path"),
+                        ("regions", "string", "comma-separated regions such as us-east-1,sa-east-1"),
+                        ("all_regions", "boolean", "discover and inventory all enabled EC2 regions"),
+                        ("full", "boolean", "include full AWS JSON payloads instead of compact previews"),
+                    ],
+                    &[],
+                ),
+                AWS_OPS_COMMAND_SCHEMA,
+                &["forge", "aws", "inventory", "--regions", "<regions>", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.aws.raw",
+                "Run Guarded AWS Command",
+                "Run a direct AWS CLI command through aws-ops. Read-only commands are allowed; non-read-only commands require allow_mutation=true and a concrete reason.",
+                object_schema(
+                    &[
+                        ("aws_ops_bin", "string", "optional aws-ops wrapper path"),
+                        ("vault_contract", "string", "optional AWS credential-vault contract path"),
+                        ("vault_data", "string", "optional encrypted AWS credential-vault data path"),
+                        ("allow_mutation", "boolean", "must be true for non-read-only AWS commands"),
+                        ("reason", "string", "required by aws-ops for mutation"),
+                        ("aws_args", "array", "AWS CLI arguments, for example [\"sts\",\"get-caller-identity\"]"),
+                    ],
+                    &["aws_args"],
+                ),
+                AWS_OPS_COMMAND_SCHEMA,
+                &["forge", "aws", "raw", "--", "<aws-args>"],
+                ToolFlags::new(true, true),
             ),
             tool(
                 "forge.schedule.create_daily_goal_research",
@@ -761,6 +855,20 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &["run_id"]),
                 "forge.request_heartbeat.v1",
                 &["forge", "request", "heartbeat", "--run", "<run-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.run.drive",
+                "Drive Async Forge Run",
+                "Refresh the run heartbeat and return the next safe executor action, prioritizing accepted needs_retry responses before blind handoff.",
+                object_schema(&[
+                    ("run_id", "string", "run id"),
+                    ("executor", "string", "codex|opencode|skill|mcp|custom executor id"),
+                    ("ttl_seconds", "integer", "heartbeat freshness TTL"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["run_id"]),
+                "forge.request_drive.v1",
+                &["forge", "request", "drive", "--run", "<run-id>", "--executor", "<executor>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -1369,6 +1477,48 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &PathBuf::from(input.data),
             )?)?
         }
+        "forge.aws.check" => {
+            let input: AwsCheckInput = parse_input(input)?;
+            serde_json::to_value(run_aws_ops_check(
+                input.aws_ops_bin.as_deref().map(PathBuf::from).as_deref(),
+                input
+                    .vault_contract
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .as_deref(),
+                input.vault_data.as_deref().map(PathBuf::from).as_deref(),
+            )?)?
+        }
+        "forge.aws.inventory" => {
+            let input: AwsInventoryInput = parse_input(input)?;
+            serde_json::to_value(run_aws_ops_inventory(
+                input.aws_ops_bin.as_deref().map(PathBuf::from).as_deref(),
+                input
+                    .vault_contract
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .as_deref(),
+                input.vault_data.as_deref().map(PathBuf::from).as_deref(),
+                input.regions.as_deref(),
+                input.all_regions.unwrap_or(false),
+                input.full.unwrap_or(false),
+            )?)?
+        }
+        "forge.aws.raw" => {
+            let input: AwsRawInput = parse_input(input)?;
+            serde_json::to_value(run_aws_ops_raw(
+                input.aws_ops_bin.as_deref().map(PathBuf::from).as_deref(),
+                input
+                    .vault_contract
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .as_deref(),
+                input.vault_data.as_deref().map(PathBuf::from).as_deref(),
+                input.allow_mutation.unwrap_or(false),
+                input.reason.as_deref(),
+                &input.aws_args,
+            )?)?
+        }
         "forge.schedule.create_daily_goal_research" => {
             let input: DailyGoalResearchInput = parse_input(input)?;
             let timezone = input
@@ -1508,6 +1658,17 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.summary.as_deref().unwrap_or("executor heartbeat"),
                 input.ttl_seconds.unwrap_or(300),
                 input.pid,
+                &origin,
+            )?)?
+        }
+        "forge.run.drive" => {
+            let input: RunDriveInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(drive_request(
+                store,
+                &input.run_id,
+                input.executor.as_deref().unwrap_or("mcp"),
+                input.ttl_seconds.unwrap_or(300),
                 &origin,
             )?)?
         }

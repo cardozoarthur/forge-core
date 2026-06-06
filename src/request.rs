@@ -1,9 +1,13 @@
 use crate::artifact::list_workflow_artifacts;
 use crate::checkpoint::{load_workflow_checkpoints, TaskCheckpoint};
 use crate::context::{
-    build_context_handoff_summary, ContextHandoffSummary, DEFAULT_CONTEXT_BUDGET,
+    build_context_handoff_summary, ContextHandoffSummary, ContextHandoffTask,
+    DEFAULT_CONTEXT_BUDGET,
 };
-use crate::graph::{create_workflow, TaskStatus, Workflow};
+use crate::graph::{
+    create_workflow, task, AtomicTask, ExecutorKind, TaskStatus, ValidationRule, Workflow,
+    WorkflowRevision,
+};
 use crate::intent::parse_intent;
 use crate::registry::{
     attach_reuse_candidates_as_child_subflows, find_reuse_candidates, WorkflowReuseCandidate,
@@ -15,6 +19,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use uuid::Uuid;
+
+const FINAL_COMPLETION_AUDIT_KIND: &str = "final_completion_audit";
+const COMPLETION_AUDIT_HANDOFF_CONTEXT_BUDGET: usize = 4096;
+const REWORK_HANDOFF_CONTEXT_BUDGET: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
@@ -132,6 +140,54 @@ pub struct RequestHeartbeatReport {
     pub origin: String,
     pub activity: RunActivity,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestDriveReport {
+    pub schema_version: String,
+    pub status: String,
+    pub action: String,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub executor: String,
+    pub origin: String,
+    pub activity: RunActivity,
+    pub task_summary: TaskStatusSummary,
+    pub checkpoint_count: usize,
+    pub latest_checkpoint: Option<TaskCheckpoint>,
+    pub rework: Option<RequestDriveRework>,
+    pub handoff_task: Option<RequestDriveTask>,
+    pub blocked_tasks: Vec<RequestDriveBlockedTask>,
+    pub next_command: Vec<String>,
+    pub reason: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestDriveRework {
+    pub task_id: String,
+    pub response_status: String,
+    pub response_sha256: Option<String>,
+    pub revision: Option<u64>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestDriveTask {
+    pub task_id: String,
+    pub title: String,
+    pub executor: String,
+    pub handoff_status: String,
+    pub context_sha256: String,
+    pub context_routing_cache_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestDriveBlockedTask {
+    pub task_id: String,
+    pub title: String,
+    pub handoff_status: String,
+    pub blocking_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -694,6 +750,343 @@ pub fn heartbeat_request(
     })
 }
 
+pub fn drive_request(
+    store: &ForgeStore,
+    run_id: &str,
+    executor: &str,
+    ttl_seconds: u64,
+    origin: &str,
+) -> Result<RequestDriveReport> {
+    let heartbeat = heartbeat_request(
+        store,
+        run_id,
+        executor,
+        "forge drive evaluating next runnable action",
+        ttl_seconds,
+        None,
+        origin,
+    )?;
+    let run = load_run_record(store, run_id)?;
+    let mut workflow = store.load_workflow(&run.workflow_id)?;
+    let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
+    let latest_checkpoint = latest_actionable_checkpoint(&workflow, &checkpoints);
+    let mut task_summary = summarize_tasks(&workflow);
+    let mut handoff_summary = build_context_handoff_summary(
+        &workflow,
+        request_drive_context_budget(&workflow),
+        &checkpoints,
+    )?;
+
+    if let Some(rework) = latest_open_rework(store, &workflow)? {
+        let next_command = vec![
+            "forge".to_string(),
+            "task".to_string(),
+            "handoff".to_string(),
+            "--workflow".to_string(),
+            workflow.id.clone(),
+            "--task".to_string(),
+            rework.task_id.clone(),
+            "--executor".to_string(),
+            executor.to_string(),
+            "--ttl-seconds".to_string(),
+            ttl_seconds.max(1).to_string(),
+            "--budget".to_string(),
+            REWORK_HANDOFF_CONTEXT_BUDGET.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ];
+        return Ok(RequestDriveReport {
+            schema_version: "forge.request_drive.v1".to_string(),
+            status: "rework_required".to_string(),
+            action: "rework_task".to_string(),
+            run_id: run.run_id,
+            workflow_id: workflow.id,
+            executor: executor.to_string(),
+            origin: origin.to_string(),
+            activity: heartbeat.activity,
+            task_summary,
+            checkpoint_count: checkpoints.len(),
+            latest_checkpoint,
+            rework: Some(rework),
+            handoff_task: None,
+            blocked_tasks: drive_blocked_tasks(&handoff_summary.tasks),
+            next_command,
+            reason: "Latest accepted executor response requested retry; rework must be handled before blind forward progress.".to_string(),
+            updated_at: heartbeat.updated_at,
+        });
+    }
+
+    if task_summary.completed == task_summary.total && task_summary.total > 0 {
+        if let Some(reason) = final_completion_audit_block_reason(store, &workflow)? {
+            if let Some(updated_workflow) =
+                ensure_final_completion_audit_task(store, &workflow, origin, &reason)?
+            {
+                workflow = updated_workflow;
+                task_summary = summarize_tasks(&workflow);
+                handoff_summary = build_context_handoff_summary(
+                    &workflow,
+                    request_drive_context_budget(&workflow),
+                    &checkpoints,
+                )?;
+            } else {
+                let next_command = vec![
+                    "forge".to_string(),
+                    "workflow".to_string(),
+                    "attach-artifact".to_string(),
+                    "--workflow".to_string(),
+                    workflow.id.clone(),
+                    "--path".to_string(),
+                    "<final-completion-audit.json>".to_string(),
+                    "--kind".to_string(),
+                    FINAL_COMPLETION_AUDIT_KIND.to_string(),
+                    "--origin".to_string(),
+                    origin.to_string(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ];
+                store.record_event(
+                    &workflow.id,
+                    "completion_audit_required",
+                    &serde_json::json!({
+                        "run_id": run.run_id.clone(),
+                        "origin": origin,
+                        "reason": reason.clone(),
+                        "required_artifact_kind": FINAL_COMPLETION_AUDIT_KIND,
+                        "updated_at": heartbeat.updated_at,
+                    }),
+                )?;
+                return Ok(RequestDriveReport {
+                    schema_version: "forge.request_drive.v1".to_string(),
+                    status: "completion_audit_required".to_string(),
+                    action: "attach_final_completion_audit".to_string(),
+                    run_id: run.run_id,
+                    workflow_id: workflow.id,
+                    executor: executor.to_string(),
+                    origin: origin.to_string(),
+                    activity: heartbeat.activity,
+                    task_summary,
+                    checkpoint_count: checkpoints.len(),
+                    latest_checkpoint,
+                    rework: None,
+                    handoff_task: None,
+                    blocked_tasks: Vec::new(),
+                    next_command,
+                    reason,
+                    updated_at: heartbeat.updated_at,
+                });
+            }
+        }
+    }
+
+    if task_summary.completed == task_summary.total && task_summary.total > 0 {
+        let completed_at = Utc::now();
+        let mut completed_run = run.clone();
+        let previous_status = completed_run.status.clone();
+        completed_run.status = "completed".to_string();
+        completed_run.updated_at = completed_at;
+        save_run_record(store, &completed_run)?;
+
+        let mut completed_workflow = workflow.clone();
+        let previous_workflow_status = completed_workflow.status.clone();
+        completed_workflow.status = "completed".to_string();
+        store.save_workflow(&completed_workflow)?;
+
+        store.record_event(
+            &completed_workflow.id,
+            "async_request_completed",
+            &serde_json::json!({
+                "run_id": completed_run.run_id.clone(),
+                "origin": origin,
+                "previous_status": previous_status,
+                "new_status": completed_run.status.clone(),
+                "previous_workflow_status": previous_workflow_status,
+                "new_workflow_status": completed_workflow.status.clone(),
+                "completed_at": completed_at,
+            }),
+        )?;
+        let activity = build_run_activity_at(&completed_run, completed_at);
+        let completion_reason = if workflow_requires_final_completion_audit(&completed_workflow) {
+            "All workflow tasks are completed and final completion audit passed.".to_string()
+        } else {
+            "All workflow tasks are completed.".to_string()
+        };
+        return Ok(RequestDriveReport {
+            schema_version: "forge.request_drive.v1".to_string(),
+            status: "complete".to_string(),
+            action: "none".to_string(),
+            run_id: completed_run.run_id,
+            workflow_id: completed_workflow.id,
+            executor: executor.to_string(),
+            origin: origin.to_string(),
+            activity,
+            task_summary,
+            checkpoint_count: checkpoints.len(),
+            latest_checkpoint,
+            rework: None,
+            handoff_task: None,
+            blocked_tasks: Vec::new(),
+            next_command: Vec::new(),
+            reason: completion_reason,
+            updated_at: completed_at,
+        });
+    }
+
+    if let Some(task) = next_pending_handoff_task(&workflow, &handoff_summary.tasks) {
+        let handoff_budget = handoff_context_budget_for_task(&workflow, &task.task_id);
+        let next_command = vec![
+            "forge".to_string(),
+            "task".to_string(),
+            "handoff".to_string(),
+            "--workflow".to_string(),
+            workflow.id.clone(),
+            "--task".to_string(),
+            task.task_id.clone(),
+            "--executor".to_string(),
+            executor.to_string(),
+            "--ttl-seconds".to_string(),
+            ttl_seconds.max(1).to_string(),
+            "--budget".to_string(),
+            handoff_budget.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ];
+        return Ok(RequestDriveReport {
+            schema_version: "forge.request_drive.v1".to_string(),
+            status: "ready_for_handoff".to_string(),
+            action: "start_handoff".to_string(),
+            run_id: run.run_id,
+            workflow_id: workflow.id,
+            executor: executor.to_string(),
+            origin: origin.to_string(),
+            activity: heartbeat.activity,
+            task_summary,
+            checkpoint_count: checkpoints.len(),
+            latest_checkpoint,
+            rework: None,
+            handoff_task: Some(task),
+            blocked_tasks: drive_blocked_tasks(&handoff_summary.tasks),
+            next_command,
+            reason: "A pending task has ready context and dependencies; start executor handoff."
+                .to_string(),
+            updated_at: heartbeat.updated_at,
+        });
+    }
+
+    Ok(RequestDriveReport {
+        schema_version: "forge.request_drive.v1".to_string(),
+        status: "blocked".to_string(),
+        action: "wait_or_repair_dependencies".to_string(),
+        run_id: run.run_id,
+        workflow_id: workflow.id,
+        executor: executor.to_string(),
+        origin: origin.to_string(),
+        activity: heartbeat.activity,
+        task_summary,
+        checkpoint_count: checkpoints.len(),
+        latest_checkpoint,
+        rework: None,
+        handoff_task: None,
+        blocked_tasks: drive_blocked_tasks(&handoff_summary.tasks),
+        next_command: vec![
+            "forge".to_string(),
+            "request".to_string(),
+            "status".to_string(),
+            "--run".to_string(),
+            run_id.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        reason: "No pending task is currently ready for handoff.".to_string(),
+        updated_at: heartbeat.updated_at,
+    })
+}
+
+fn latest_open_rework(
+    store: &ForgeStore,
+    workflow: &Workflow,
+) -> Result<Option<RequestDriveRework>> {
+    let events = store.load_workflow_events(&workflow.id)?;
+    for event in events.into_iter().rev() {
+        if event.kind != "executor_response_promoted" {
+            continue;
+        }
+        let response_status = event
+            .data
+            .get("response_status")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if response_status != "needs_retry" {
+            return Ok(None);
+        }
+        let task_id = event
+            .data
+            .get("task_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if task_id.is_empty() {
+            continue;
+        }
+        let task_is_completed = workflow
+            .tasks
+            .iter()
+            .any(|task| task.id == task_id && task.status == TaskStatus::Completed);
+        if task_is_completed {
+            return Ok(None);
+        }
+        return Ok(Some(RequestDriveRework {
+            task_id: task_id.to_string(),
+            response_status: response_status.to_string(),
+            response_sha256: event
+                .data
+                .get("response_sha256")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            revision: event.data.get("revision").and_then(|value| value.as_u64()),
+            summary: format!(
+                "Task {task_id} has an accepted needs_retry executor response recorded at {}.",
+                event.created_at
+            ),
+        }));
+    }
+    Ok(None)
+}
+
+fn next_pending_handoff_task(
+    workflow: &Workflow,
+    handoff_tasks: &[ContextHandoffTask],
+) -> Option<RequestDriveTask> {
+    handoff_tasks.iter().find_map(|handoff| {
+        let task = workflow
+            .tasks
+            .iter()
+            .find(|task| task.id == handoff.task_id)?;
+        if task.status != TaskStatus::Pending || !handoff.handoff_ready {
+            return None;
+        }
+        Some(RequestDriveTask {
+            task_id: handoff.task_id.clone(),
+            title: handoff.title.clone(),
+            executor: handoff.executor.clone(),
+            handoff_status: handoff.handoff_status.clone(),
+            context_sha256: handoff.context_sha256.clone(),
+            context_routing_cache_key: None,
+        })
+    })
+}
+
+fn drive_blocked_tasks(handoff_tasks: &[ContextHandoffTask]) -> Vec<RequestDriveBlockedTask> {
+    handoff_tasks
+        .iter()
+        .filter(|task| !task.handoff_ready)
+        .map(|task| RequestDriveBlockedTask {
+            task_id: task.task_id.clone(),
+            title: task.title.clone(),
+            handoff_status: task.handoff_status.clone(),
+            blocking_refs: task.blocking_refs.clone(),
+        })
+        .collect()
+}
+
 pub fn switch_request_executor(
     store: &ForgeStore,
     run_id: &str,
@@ -820,9 +1213,6 @@ pub fn build_run_activity(run: &RunRecord) -> RunActivity {
 }
 
 fn build_run_activity_at(run: &RunRecord, now: DateTime<Utc>) -> RunActivity {
-    let seconds_until_stale = run
-        .heartbeat_expires_at
-        .map(|expires_at| (expires_at - now).num_seconds());
     let process_alive = run.executor_pid.and_then(process_alive);
     let process_status = match (run.executor_pid, process_alive) {
         (None, _) => "not_recorded",
@@ -846,6 +1236,12 @@ fn build_run_activity_at(run: &RunRecord, now: DateTime<Utc>) -> RunActivity {
         "not_running"
     };
     let active = run.status == "running" && matches!(heartbeat_status, "fresh" | "process_alive");
+    let seconds_until_stale = if run.status == "running" {
+        run.heartbeat_expires_at
+            .map(|expires_at| (expires_at - now).num_seconds())
+    } else {
+        None
+    };
     let recovery = recovery_recommendation(run, heartbeat_status);
     RunActivity {
         schema_version: "forge.run_activity.v1".to_string(),
@@ -936,7 +1332,7 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
     let latest_validation_evidence = load_latest_validation_evidence(store, &workflow.id)?;
     let latest_executor_policy = load_latest_executor_policy_summary(store, &workflow.id)?;
     let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
-    let latest_checkpoint = checkpoints.last().cloned();
+    let latest_checkpoint = latest_actionable_checkpoint(&workflow, &checkpoints);
     let handoff_summary =
         build_context_handoff_summary(&workflow, DEFAULT_CONTEXT_BUDGET, &checkpoints)?;
     let workflow_revision = workflow
@@ -969,6 +1365,260 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
         created_at: run.created_at,
         updated_at: run.updated_at,
     })
+}
+
+fn latest_actionable_checkpoint(
+    workflow: &Workflow,
+    checkpoints: &[TaskCheckpoint],
+) -> Option<TaskCheckpoint> {
+    let task_summary = summarize_tasks(workflow);
+    if task_summary.total > 0 && task_summary.completed == task_summary.total {
+        return None;
+    }
+
+    checkpoints
+        .iter()
+        .rev()
+        .find(|checkpoint| {
+            workflow
+                .tasks
+                .iter()
+                .find(|task| task.id == checkpoint.task_id)
+                .map(|task| task.status != TaskStatus::Completed)
+                .unwrap_or(true)
+        })
+        .cloned()
+}
+
+fn request_drive_context_budget(workflow: &Workflow) -> usize {
+    if workflow
+        .tasks
+        .iter()
+        .any(|task| task.status == TaskStatus::Pending && is_final_completion_audit_task(task))
+    {
+        COMPLETION_AUDIT_HANDOFF_CONTEXT_BUDGET
+    } else {
+        DEFAULT_CONTEXT_BUDGET
+    }
+}
+
+fn handoff_context_budget_for_task(workflow: &Workflow, task_id: &str) -> usize {
+    workflow
+        .tasks
+        .iter()
+        .find(|task| task.id == task_id)
+        .filter(|task| is_final_completion_audit_task(task))
+        .map(|_| COMPLETION_AUDIT_HANDOFF_CONTEXT_BUDGET)
+        .unwrap_or(DEFAULT_CONTEXT_BUDGET)
+}
+
+fn ensure_final_completion_audit_task(
+    store: &ForgeStore,
+    workflow: &Workflow,
+    origin: &str,
+    block_reason: &str,
+) -> Result<Option<Workflow>> {
+    if final_completion_audit_task_exists(workflow) {
+        return Ok(None);
+    }
+
+    let mut updated = workflow.clone();
+    let task_id = format!("task-{:03}", updated.tasks.len() + 1);
+    let dependency_ids: Vec<String> = updated.tasks.iter().map(|task| task.id.clone()).collect();
+    let dependency_refs: Vec<&str> = dependency_ids.iter().map(String::as_str).collect();
+    let mut audit_task = task(
+        &task_id,
+        "Audit final completion criteria",
+        &dependency_refs,
+        &[
+            "workflow goal and final criteria",
+            "all attached artifacts and validation evidence",
+            "repository, CI, cloud, Telegram and interface evidence",
+            "open gaps that should become rework instead of false completion",
+        ],
+        vec![ValidationRule {
+            kind: "artifact".to_string(),
+            command: Some(format!(
+                "forge workflow attach-artifact --workflow {} --path <final-completion-audit.json> --kind {FINAL_COMPLETION_AUDIT_KIND} --output json",
+                updated.id
+            )),
+            expected: "Attach a JSON final completion audit with status passed, goal_fully_satisfied true, non-empty evidence and no open_items or missing_criteria."
+                .to_string(),
+        }],
+        "a Forge-attached final_completion_audit JSON artifact or a needs_retry response listing the exact missing final criteria",
+        (ExecutorKind::Ai, 0.35),
+    );
+    audit_task.goal = format!(
+        "Audit the explicit final criteria before completion. {block_reason} Inspect Forge artifacts and the target repositories. If any final criterion lacks evidence, return needs_retry with exact missing work; only attach `{FINAL_COMPLETION_AUDIT_KIND}` when every criterion is proven."
+    );
+    updated.tasks.push(audit_task);
+    updated.status = "running".to_string();
+    let revision = updated
+        .revisions
+        .last()
+        .map(|revision| revision.revision + 1)
+        .unwrap_or(1);
+    updated.revisions.push(WorkflowRevision {
+        revision,
+        origin: origin.to_string(),
+        change_type: "completion_audit_task_added".to_string(),
+        summary: format!(
+            "added {task_id} to audit explicit final completion criteria before closing the run"
+        ),
+        created_at: Utc::now(),
+    });
+    store.save_workflow(&updated)?;
+    store.record_event(
+        &updated.id,
+        "completion_audit_task_added",
+        &serde_json::json!({
+            "origin": origin,
+            "task_id": task_id,
+            "reason": block_reason,
+            "required_artifact_kind": FINAL_COMPLETION_AUDIT_KIND,
+            "revision": revision,
+        }),
+    )?;
+    Ok(Some(updated))
+}
+
+fn final_completion_audit_task_exists(workflow: &Workflow) -> bool {
+    workflow.tasks.iter().any(is_final_completion_audit_task)
+}
+
+fn is_final_completion_audit_task(task: &AtomicTask) -> bool {
+    let title = task.title.to_lowercase();
+    let expected_output = task.expected_output.to_lowercase();
+    title.contains("final completion")
+        || expected_output.contains(FINAL_COMPLETION_AUDIT_KIND)
+        || expected_output.contains("final_completion_audit")
+}
+
+fn final_completion_audit_block_reason(
+    store: &ForgeStore,
+    workflow: &Workflow,
+) -> Result<Option<String>> {
+    if !workflow_requires_final_completion_audit(workflow) {
+        return Ok(None);
+    }
+
+    let Some(artifact) = workflow
+        .artifacts
+        .iter()
+        .rev()
+        .find(|artifact| is_final_completion_audit_artifact(artifact))
+    else {
+        return Ok(Some(format!(
+            "Workflow goal declares explicit final criteria; attach a final completion audit artifact with kind `{FINAL_COMPLETION_AUDIT_KIND}` before marking the run complete."
+        )));
+    };
+
+    let artifact_path = store.base_dir().join(&artifact.path);
+    let bytes = match fs::read(&artifact_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Ok(Some(format!(
+                "Final completion audit artifact {} could not be read: {error}",
+                artifact.path
+            )));
+        }
+    };
+    let payload: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return Ok(Some(format!(
+                "Final completion audit artifact {} is not valid JSON: {error}",
+                artifact.path
+            )));
+        }
+    };
+
+    let status = payload
+        .get("status")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    if !matches!(status, "passed" | "complete" | "completed") {
+        return Ok(Some(format!(
+            "Final completion audit artifact {} must have status `passed`, `complete` or `completed`.",
+            artifact.path
+        )));
+    }
+
+    if payload
+        .get("goal_fully_satisfied")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+    {
+        return Ok(Some(format!(
+            "Final completion audit artifact {} must set `goal_fully_satisfied` to true.",
+            artifact.path
+        )));
+    }
+
+    let evidence_count = payload
+        .get("evidence")
+        .and_then(|value| value.as_array())
+        .map(|evidence| evidence.len())
+        .unwrap_or(0);
+    if evidence_count == 0 {
+        return Ok(Some(format!(
+            "Final completion audit artifact {} must include non-empty `evidence`.",
+            artifact.path
+        )));
+    }
+
+    let open_items = json_array_len(&payload, "open_items");
+    let missing_criteria = json_array_len(&payload, "missing_criteria");
+    if open_items > 0 || missing_criteria > 0 {
+        return Ok(Some(format!(
+            "Final completion audit artifact {} still lists open items or missing criteria.",
+            artifact.path
+        )));
+    }
+
+    Ok(None)
+}
+
+fn workflow_requires_final_completion_audit(workflow: &Workflow) -> bool {
+    let mut text = workflow.goal.clone();
+    if let Some(initial_goal) = &workflow.initial_goal {
+        text.push(' ');
+        text.push_str(initial_goal);
+    }
+    let normalized = text.to_lowercase();
+    [
+        "critério final",
+        "criterio final",
+        "workflow só termina",
+        "workflow so termina",
+        "só termina quando",
+        "so termina quando",
+        "stopping rule",
+        "definition of done",
+        "only complete when",
+        "only completes when",
+        "only finish when",
+        "only finishes when",
+        "must only complete when",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn is_final_completion_audit_artifact(artifact: &crate::graph::ArtifactRecord) -> bool {
+    let normalized_kind = artifact.kind.to_lowercase().replace('-', "_");
+    let normalized_path = artifact.path.to_lowercase().replace('-', "_");
+    normalized_kind == FINAL_COMPLETION_AUDIT_KIND
+        || normalized_kind == "completion_audit"
+        || normalized_path.contains("final_completion_audit")
+}
+
+fn json_array_len(payload: &serde_json::Value, key: &str) -> usize {
+    payload
+        .get(key)
+        .and_then(|value| value.as_array())
+        .map(|items| items.len())
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Serialize)]

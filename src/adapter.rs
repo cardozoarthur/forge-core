@@ -1,5 +1,5 @@
 use crate::artifact::hex_sha256;
-use crate::graph::{TaskStatus, Workflow, WorkflowRevision};
+use crate::graph::{task, ExecutorKind, TaskStatus, ValidationRule, Workflow, WorkflowRevision};
 use crate::storage::ForgeStore;
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -25,6 +25,8 @@ pub struct ExecutorResponse {
     pub cost: ExecutorResponseCost,
     #[serde(default)]
     pub validation_evidence: Vec<ExecutorValidationEvidence>,
+    #[serde(default)]
+    pub rework_items: Vec<ExecutorReworkItem>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -45,6 +47,20 @@ pub struct ExecutorValidationEvidence {
     pub exit_code: i32,
     #[serde(default)]
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutorReworkItem {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub goal: String,
+    #[serde(default)]
+    pub context_requirements: Vec<String>,
+    #[serde(default)]
+    pub expected_output: String,
+    #[serde(default)]
+    pub validation_rules: Vec<ValidationRule>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,7 +121,7 @@ pub fn validate_executor_response_file(
         &serde_json::to_value(&report)?,
     )?;
     if report.accepted {
-        let revision = promote_validated_task(&mut workflow, task_id, &response);
+        let promotion = promote_validated_task(&mut workflow, task_id, &response);
         store.save_workflow(&workflow)?;
         store.record_event(
             workflow_id,
@@ -114,45 +130,76 @@ pub fn validate_executor_response_file(
                 "task_id": task_id,
                 "response_status": response.status,
                 "response_sha256": response_sha256,
-                "revision": revision
+                "revision": promotion.revision,
+                "generated_rework_task_ids": promotion.generated_rework_task_ids
             }),
         )?;
     }
     Ok(report)
 }
 
+struct PromotionResult {
+    revision: u64,
+    generated_rework_task_ids: Vec<String>,
+}
+
 fn promote_validated_task(
     workflow: &mut Workflow,
     task_id: &str,
     response: &ExecutorResponse,
-) -> u64 {
+) -> PromotionResult {
     let previous_workflow_status = workflow.status.clone();
-    let Some(task) = workflow.tasks.iter_mut().find(|task| task.id == task_id) else {
-        return latest_revision(workflow);
+    let Some(task_index) = workflow.tasks.iter().position(|task| task.id == task_id) else {
+        return PromotionResult {
+            revision: latest_revision(workflow),
+            generated_rework_task_ids: Vec::new(),
+        };
     };
-    let previous_task_status = task_status_slug(&task.status);
-    match response.status.as_str() {
-        "completed" => {
-            task.status = TaskStatus::Completed;
-            task.work_item.backlog_state = "done".to_string();
-            task.work_item.goal_validation.definitively_ready = true;
-            for subtask in &mut task.work_item.subtasks {
-                subtask.status = TaskStatus::Completed;
+    let previous_task_status = task_status_slug(&workflow.tasks[task_index].status);
+    let base_dependencies = workflow.tasks[task_index].dependencies.clone();
+    let expands_needs_retry = response.status == "needs_retry" && !response.rework_items.is_empty();
+
+    {
+        let task = &mut workflow.tasks[task_index];
+        match response.status.as_str() {
+            "completed" => {
+                task.status = TaskStatus::Completed;
+                task.work_item.backlog_state = "done".to_string();
+                task.work_item.goal_validation.definitively_ready = true;
+                for subtask in &mut task.work_item.subtasks {
+                    subtask.status = TaskStatus::Completed;
+                }
             }
+            "failed" => {
+                task.status = TaskStatus::Failed;
+                task.work_item.backlog_state = "blocked".to_string();
+                task.work_item.goal_validation.definitively_ready = false;
+            }
+            "needs_retry" => {
+                if expands_needs_retry {
+                    task.status = TaskStatus::Completed;
+                    task.work_item.backlog_state = "done".to_string();
+                    task.work_item.goal_validation.definitively_ready = true;
+                    for subtask in &mut task.work_item.subtasks {
+                        subtask.status = TaskStatus::Completed;
+                    }
+                } else {
+                    task.status = TaskStatus::Pending;
+                    task.work_item.backlog_state = "ready".to_string();
+                    task.work_item.goal_validation.definitively_ready = false;
+                }
+            }
+            _ => {}
         }
-        "failed" => {
-            task.status = TaskStatus::Failed;
-            task.work_item.backlog_state = "blocked".to_string();
-            task.work_item.goal_validation.definitively_ready = false;
-        }
-        "needs_retry" => {
-            task.status = TaskStatus::Pending;
-            task.work_item.backlog_state = "ready".to_string();
-            task.work_item.goal_validation.definitively_ready = false;
-        }
-        _ => {}
     }
-    let new_task_status = task_status_slug(&task.status);
+
+    let mut generated_rework_task_ids = Vec::new();
+    if expands_needs_retry {
+        generated_rework_task_ids =
+            append_rework_items_as_tasks(workflow, &base_dependencies, &response.rework_items);
+    }
+
+    let new_task_status = task_status_slug(&workflow.tasks[task_index].status);
 
     if workflow
         .tasks
@@ -174,15 +221,79 @@ fn promote_validated_task(
         workflow.status = "running".to_string();
     }
 
-    push_revision(
+    let mut summary = format!(
+        "validated executor response promoted task {task_id} from {previous_task_status} to {new_task_status}; workflow status changed from {previous_workflow_status} to {}",
+        workflow.status
+    );
+    if !generated_rework_task_ids.is_empty() {
+        summary.push_str(&format!(
+            "; generated rework tasks {}",
+            generated_rework_task_ids.join(", ")
+        ));
+    }
+
+    let revision = push_revision(
         &mut workflow.revisions,
         "executor_response",
         "executor_response_promoted",
-        &format!(
-            "validated executor response promoted task {task_id} from {previous_task_status} to {new_task_status}; workflow status changed from {previous_workflow_status} to {}",
-            workflow.status
-        ),
-    )
+        &summary,
+    );
+    PromotionResult {
+        revision,
+        generated_rework_task_ids,
+    }
+}
+
+fn append_rework_items_as_tasks(
+    workflow: &mut Workflow,
+    base_dependencies: &[String],
+    rework_items: &[ExecutorReworkItem],
+) -> Vec<String> {
+    let dependency_refs = base_dependencies
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut generated_task_ids = Vec::new();
+    for item in rework_items {
+        let task_id = format!("task-{:03}", workflow.tasks.len() + 1);
+        let context_requirements = if item.context_requirements.is_empty() {
+            vec!["executor needs_retry evidence".to_string()]
+        } else {
+            item.context_requirements.clone()
+        };
+        let context_refs = context_requirements
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let validation_rules = if item.validation_rules.is_empty() {
+            vec![ValidationRule {
+                kind: "evidence".to_string(),
+                command: None,
+                expected: "Attach executor response with validation evidence for this rework item."
+                    .to_string(),
+            }]
+        } else {
+            item.validation_rules.clone()
+        };
+        let expected_output = if item.expected_output.trim().is_empty() {
+            item.goal.as_str()
+        } else {
+            item.expected_output.as_str()
+        };
+        let mut generated_task = task(
+            &task_id,
+            item.title.trim(),
+            &dependency_refs,
+            &context_refs,
+            validation_rules,
+            expected_output,
+            (ExecutorKind::Ai, 0.25),
+        );
+        generated_task.goal = item.goal.trim().to_string();
+        workflow.tasks.push(generated_task);
+        generated_task_ids.push(task_id);
+    }
+    generated_task_ids
 }
 
 fn latest_revision(workflow: &Workflow) -> u64 {
@@ -293,6 +404,30 @@ pub fn validate_executor_response(
                 "validation_command_required",
                 format!("validation_evidence[{index}].command"),
                 "validation evidence must name the command or gate that ran",
+            ));
+        }
+    }
+
+    for (index, item) in response.rework_items.iter().enumerate() {
+        if response.status != "needs_retry" {
+            violations.push(violation(
+                "rework_items_require_needs_retry",
+                format!("rework_items[{index}]"),
+                "structured rework items are only valid with status needs_retry",
+            ));
+        }
+        if item.title.trim().is_empty() {
+            violations.push(violation(
+                "rework_item_title_required",
+                format!("rework_items[{index}].title"),
+                "rework items must include a task title",
+            ));
+        }
+        if item.goal.trim().is_empty() {
+            violations.push(violation(
+                "rework_item_goal_required",
+                format!("rework_items[{index}].goal"),
+                "rework items must include an executable goal",
             ));
         }
     }

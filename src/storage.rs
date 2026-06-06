@@ -19,6 +19,13 @@ pub struct TaskLeaseWrite<'a> {
     pub data: &'a serde_json::Value,
 }
 
+#[derive(Debug, Clone)]
+pub struct StoreEvent {
+    pub kind: String,
+    pub data: serde_json::Value,
+    pub created_at: String,
+}
+
 impl ForgeStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
@@ -184,6 +191,34 @@ impl ForgeStore {
             params![workflow_id, kind, serde_json::to_string(data)?],
         )?;
         Ok(())
+    }
+
+    pub fn load_workflow_events(&self, workflow_id: &str) -> Result<Vec<StoreEvent>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT kind, data_json, created_at
+            FROM events
+            WHERE workflow_id = ?1
+            ORDER BY id ASC
+            "#,
+        )?;
+        let rows = statement.query_map(params![workflow_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut events = Vec::new();
+        for row in rows {
+            let (kind, data_json, created_at) = row?;
+            events.push(StoreEvent {
+                kind,
+                data: serde_json::from_str(&data_json)?,
+                created_at,
+            });
+        }
+        Ok(events)
     }
 
     pub fn save_executor_state(&self, id: &str, data: &serde_json::Value) -> Result<()> {

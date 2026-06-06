@@ -69,6 +69,37 @@ esac
 }
 
 #[cfg(unix)]
+fn write_fake_aws_ops(bin_dir: &Path) -> std::path::PathBuf {
+    let script_path = bin_dir.join("aws-ops");
+    fs::write(
+        &script_path,
+        r#"#!/bin/sh
+printf '%s\n' "$@" > "$FORGE_FAKE_AWS_OPS_ARGS"
+case "$*" in
+  *" check")
+    printf '{"schema_version":"aws-ops.check.v1","status":"ok","identity":{"data":{"Account":"123456789012","Arn":"arn:aws:iam::123456789012:user/AgentCode"}}}\n'
+    ;;
+  *" inventory"*)
+    printf '{"schema_version":"aws-ops.inventory.v1","status":"ok","error_count":0,"regions":["us-east-1"]}\n'
+    ;;
+  *" raw"*)
+    printf '{"schema_version":"aws-ops.raw.v1","status":"ok","command":["sts","get-caller-identity"]}\n'
+    ;;
+  *)
+    printf 'unexpected aws-ops args: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&script_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script_path, perms).unwrap();
+    script_path
+}
+
+#[cfg(unix)]
 fn write_credential_vault_contract(path: &Path) {
     fs::write(
         path,
@@ -96,6 +127,97 @@ records:
 "#,
     )
     .unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn aws_check_uses_aws_ops_vault_defaults_without_exposing_secrets() {
+    let temp = tempdir().unwrap();
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let aws_ops_bin = write_fake_aws_ops(&bin_dir);
+    let args_file = temp.path().join("aws-ops.args");
+    let contract = temp.path().join("aws.contract.yaml");
+    let data = temp.path().join("aws.data.yaml");
+    fs::write(&contract, "version: 1\nrecords: {}\n").unwrap();
+
+    let output = forge()
+        .env("FORGE_FAKE_AWS_OPS_ARGS", &args_file)
+        .args([
+            "aws",
+            "check",
+            "--aws-ops-bin",
+            aws_ops_bin.to_str().unwrap(),
+            "--vault-contract",
+            contract.to_str().unwrap(),
+            "--vault-data",
+            data.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.aws_ops.command.v1");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["action"], "check");
+    assert_eq!(json["secret_exposed"], false);
+    assert!(json["stdout"].as_str().unwrap().contains("AgentCode"));
+
+    let args = fs::read_to_string(args_file).unwrap();
+    assert!(args.starts_with("--vault-contract\n"));
+    assert!(args.contains("--vault-data\n"));
+    assert!(args.ends_with("check\n"));
+    assert!(!args.contains("AWS_SECRET_ACCESS_KEY"));
+}
+
+#[test]
+#[cfg(unix)]
+fn aws_raw_delegates_mutation_gate_to_aws_ops_wrapper() {
+    let temp = tempdir().unwrap();
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let aws_ops_bin = write_fake_aws_ops(&bin_dir);
+    let args_file = temp.path().join("aws-ops.args");
+
+    let output = forge()
+        .env("FORGE_FAKE_AWS_OPS_ARGS", &args_file)
+        .args([
+            "aws",
+            "raw",
+            "--aws-ops-bin",
+            aws_ops_bin.to_str().unwrap(),
+            "--allow-mutation",
+            "--reason",
+            "user requested creating repository for deployment",
+            "--output",
+            "json",
+            "--",
+            "ecr",
+            "create-repository",
+            "--repository-name",
+            "demo",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.aws_ops.command.v1");
+    assert_eq!(json["action"], "raw");
+    assert_eq!(json["secret_exposed"], false);
+
+    let args = fs::read_to_string(args_file).unwrap();
+    assert!(args.contains("raw\n"));
+    assert!(args.contains("--allow-mutation\n"));
+    assert!(args.contains("user requested creating repository for deployment\n"));
+    assert!(args.contains("ecr\ncreate-repository\n"));
 }
 
 #[test]
@@ -254,6 +376,74 @@ fn mcp_exposes_credential_vault_records_and_safe_describe_call() {
         .as_str()
         .unwrap()
         .contains("test-vault"));
+}
+
+#[test]
+#[cfg(unix)]
+fn mcp_exposes_aws_ops_check_and_calls_wrapper_without_secrets() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let aws_ops_bin = write_fake_aws_ops(&bin_dir);
+    let args_file = temp.path().join("aws-ops.args");
+    let contract = temp.path().join("aws.contract.yaml");
+    let data = temp.path().join("aws.data.yaml");
+    fs::write(&contract, "version: 1\nrecords: {}\n").unwrap();
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.aws.check"
+            && tool["output_schema"] == "forge.aws_ops.command.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == false
+    }));
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.aws.raw"
+            && tool["output_schema"] == "forge.aws_ops.command.v1"
+            && tool["mutates_workflow"] == true
+    }));
+
+    let input = serde_json::json!({
+        "aws_ops_bin": aws_ops_bin,
+        "vault_contract": contract,
+        "vault_data": data
+    })
+    .to_string();
+    let call = forge()
+        .env("FORGE_FAKE_AWS_OPS_ARGS", &args_file)
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.aws.check"])
+        .arg("--input")
+        .arg(input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&call).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["result"]["schema_version"], "forge.aws_ops.command.v1");
+    assert_eq!(json["result"]["action"], "check");
+    assert_eq!(json["result"]["secret_exposed"], false);
+    assert!(json["result"]["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("123456789012"));
+
+    let args = fs::read_to_string(args_file).unwrap();
+    assert!(args.contains("check\n"));
+    assert!(!args.contains("secret"));
 }
 
 #[test]
@@ -12569,6 +12759,302 @@ fn context_package_includes_latest_checkpoint_and_marks_stale_after_goal_mutatio
 }
 
 #[test]
+fn rework_handoff_preserves_failure_summary_and_artifact_manifest_for_delivery() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Migrate project workspace Rust repositories and validate final delivery",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let validate_task = find_task(planned_json["tasks"].as_array().unwrap(), "Validate build");
+    let task_id = validate_task["id"].as_str().unwrap();
+
+    let report_path = temp.path().join("task-006-validation-report.json");
+    fs::write(
+        &report_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "digital_directive.validation_report.v1",
+            "status": "blocked_no_code_to_validate",
+            "required_rework": [
+                "Clonar ou inicializar os 19 repositórios alvo.",
+                "Criar README, Cargo.toml e src/lib.rs por repositório.",
+                "Rodar cargo fmt, clippy e test antes de marcar completo."
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "attach-artifact",
+            "--workflow",
+            workflow_id,
+            "--path",
+            report_path.to_str().unwrap(),
+            "--kind",
+            "report-task-006-validation-report",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    for index in 0..8 {
+        let extra_report = temp
+            .path()
+            .join(format!("task-006-validation-report-extra-{index}.json"));
+        fs::write(
+            &extra_report,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": "digital_directive.validation_report.v1",
+                "status": "blocked_no_code_to_validate",
+                "index": index,
+                "required_rework": "Criar crates Rust reais antes de validar."
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "workflow",
+                "attach-artifact",
+                "--workflow",
+                workflow_id,
+                "--path",
+                extra_report.to_str().unwrap(),
+                "--kind",
+                "report-task-006-validation-report",
+                "--origin",
+                "codex",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    let baseline_context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let baseline_context: Value = serde_json::from_slice(&baseline_context_output).unwrap();
+    let workflow_revision = baseline_context["workflow_revision"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "checkpoint",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "codex",
+            "--state",
+            "needs_retry",
+            "--summary",
+            "Validação bloqueada: 19 repos privados existem, mas estão vazios e sem Cargo.toml.",
+            "--context-sha256",
+            baseline_context["context_sha256"].as_str().unwrap(),
+            "--context-routing-cache-key",
+            baseline_context["routing_fingerprint"]["cache_key"]
+                .as_str()
+                .unwrap(),
+            "--workflow-revision",
+            workflow_revision.as_str(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let rework_context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rework_context: Value = serde_json::from_slice(&rework_context_output).unwrap();
+    let content = rework_context["content"].as_str().unwrap();
+
+    assert_eq!(rework_context["latest_checkpoint"]["state"], "needs_retry");
+    assert!(
+        rework_context["effective_budget"].as_u64().unwrap() >= 1200,
+        "rework context must not be capped to the tiny deterministic budget"
+    );
+    assert!(
+        rework_context["included_sections"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("artifacts".to_string())),
+        "rework context should expose attached reports so executors can fix the real blocker"
+    );
+    assert!(content.contains("State: needs_retry"));
+    assert!(content.contains("Summary: Validação bloqueada: 19 repos privados existem"));
+    assert!(content.contains("attached-report-task-006-validation-report"));
+}
+
+#[test]
+fn artifact_manifest_command_context_requires_artifact_section_under_default_handoff_budget() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Migrate project workspace Rust repositories and validate final delivery",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let artifact_task = find_task(
+        planned_json["tasks"].as_array().unwrap(),
+        "Integrate artifacts",
+    );
+    let task_id = artifact_task["id"].as_str().unwrap();
+
+    let manifest_path = temp.path().join("task-007-artifact-manifest.json");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "digital_directive.artifact_manifest.v1",
+            "artifact_count": 20,
+            "artifacts": [
+                {
+                    "path": "artifacts/wf_demo/attached-report-task-006-bootstrap.md",
+                    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "bytes": 1705
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "attach-artifact",
+            "--workflow",
+            workflow_id,
+            "--path",
+            manifest_path.to_str().unwrap(),
+            "--kind",
+            "manifest-task-007-artifacts",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+    let content = context["content"].as_str().unwrap();
+
+    assert_eq!(context["executor_profile"]["id"], "no_ai_artifact_manifest");
+    assert_eq!(context["effective_budget"], 1200);
+    assert!(context["executor_profile"]["required_sections"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("artifacts".to_string())));
+    assert!(context["included_sections"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("artifacts".to_string())));
+    assert!(context["missing_required_sections"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(content.contains("attached-manifest-task-007-artifacts"));
+}
+
+#[test]
 fn list_loads_legacy_workflows_without_async_policy_or_revisions() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -15374,6 +15860,30 @@ fn set_task_status_in_stored_workflow(
         .unwrap();
 }
 
+fn set_all_task_statuses_in_stored_workflow(store: &Path, workflow_id: &str, status: &str) {
+    let connection = Connection::open(store).unwrap();
+    let data_json: String = connection
+        .query_row(
+            "SELECT data_json FROM workflows WHERE id = ?1",
+            [workflow_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut workflow: Value = serde_json::from_str(&data_json).unwrap();
+    for task in workflow["tasks"].as_array_mut().unwrap() {
+        task.as_object_mut()
+            .unwrap()
+            .insert("status".to_string(), Value::String(status.to_string()));
+    }
+    let patched = serde_json::to_string(&workflow).unwrap();
+    connection
+        .execute(
+            "UPDATE workflows SET data_json = ?1 WHERE id = ?2",
+            (&patched, workflow_id),
+        )
+        .unwrap();
+}
+
 #[test]
 fn request_list_lists_all_requests_without_filter() {
     let temp = tempdir().unwrap();
@@ -15786,6 +16296,697 @@ fn request_heartbeat_marks_async_run_active_and_surfaces_it_in_status_list_and_i
 }
 
 #[test]
+fn request_drive_surfaces_needs_retry_as_rework_instead_of_blind_handoff() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Drive run after executor asks for retry",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+    let task_id = started_json["handoff_contract"]["artifact_refs"][0]
+        .as_str()
+        .unwrap_or("task-001");
+    let task_id = if task_id.starts_with("task-") {
+        task_id
+    } else {
+        "task-001"
+    };
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "heartbeat",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--summary",
+            "executor is active before needs_retry",
+            "--ttl-seconds",
+            "300",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let response_path = temp.path().join("needs-retry-response.json");
+    fs::write(
+        &response_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "forge.executor_response.v1",
+            "task_id": task_id,
+            "status": "needs_retry",
+            "artifacts": ["artifacts/rework-report.json"],
+            "trace_ref": "traces/task-needs-retry.jsonl",
+            "cost": {
+                "estimated_usd": 0.0,
+                "tokens_in": 0,
+                "tokens_out": 0
+            },
+            "validation_evidence": [
+                {
+                    "command": "inspect repo state",
+                    "exit_code": 0,
+                    "summary": "repo is not ready for validation"
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "validate-response",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--response",
+            response_path.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let driven = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "drive",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "300",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let driven_json: Value = serde_json::from_slice(&driven).unwrap();
+    assert_eq!(driven_json["schema_version"], "forge.request_drive.v1");
+    assert_eq!(driven_json["status"], "rework_required");
+    assert_eq!(driven_json["run_id"], run_id);
+    assert_eq!(driven_json["workflow_id"], workflow_id);
+    assert_eq!(driven_json["action"], "rework_task");
+    assert_eq!(driven_json["rework"]["task_id"], task_id);
+    assert_eq!(driven_json["rework"]["response_status"], "needs_retry");
+    assert_eq!(
+        driven_json["activity"]["heartbeat_status"], "fresh",
+        "drive must also keep the active run heartbeat fresh"
+    );
+    assert!(driven_json["next_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("handoff".to_string())));
+}
+
+#[test]
+fn request_drive_persists_completed_run_and_hides_resolved_retry_checkpoint() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Finish run state when every task is already validated",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "heartbeat",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--summary",
+            "executor was active before final validation",
+            "--ttl-seconds",
+            "300",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+    let workflow_revision = context["workflow_revision"].as_u64().unwrap().to_string();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "checkpoint",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--executor",
+            "codex",
+            "--state",
+            "needs_retry",
+            "--summary",
+            "Temporary validation retry that is later resolved",
+            "--context-sha256",
+            context["context_sha256"].as_str().unwrap(),
+            "--workflow-revision",
+            workflow_revision.as_str(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    set_all_task_statuses_in_stored_workflow(&store, workflow_id, "completed");
+
+    let driven = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "drive",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "300",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let driven_json: Value = serde_json::from_slice(&driven).unwrap();
+    assert_eq!(driven_json["schema_version"], "forge.request_drive.v1");
+    assert_eq!(driven_json["status"], "complete");
+    assert_eq!(driven_json["action"], "none");
+    assert_eq!(driven_json["task_summary"]["pending"], 0);
+    assert_eq!(
+        driven_json["task_summary"]["completed"],
+        driven_json["task_summary"]["total"]
+    );
+    assert_eq!(driven_json["activity"]["active"], false);
+    assert_eq!(driven_json["activity"]["heartbeat_status"], "inactive");
+    assert_eq!(driven_json["activity"]["seconds_until_stale"], Value::Null);
+    assert_eq!(driven_json["latest_checkpoint"], Value::Null);
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status_json["status"], "completed");
+    assert_eq!(status_json["workflow_status"], "completed");
+    assert_eq!(status_json["activity"]["active"], false);
+    assert_eq!(status_json["activity"]["heartbeat_status"], "inactive");
+    assert_eq!(status_json["activity"]["seconds_until_stale"], Value::Null);
+    assert_eq!(status_json["latest_checkpoint"], Value::Null);
+
+    let running = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "list",
+            "--status",
+            "running",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let running_json: Value = serde_json::from_slice(&running).unwrap();
+    assert_eq!(running_json["total"], 0);
+
+    let completed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "list",
+            "--status",
+            "completed",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let completed_json: Value = serde_json::from_slice(&completed).unwrap();
+    assert_eq!(completed_json["total"], 1);
+    assert_eq!(completed_json["runs"][0]["run_id"], run_id);
+}
+
+#[test]
+fn request_drive_requires_final_completion_audit_for_explicit_final_criteria() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Migrate production services. Critério Final: o workflow só termina quando deployment, notification and server/client evidence are verified.",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+
+    set_all_task_statuses_in_stored_workflow(&store, workflow_id, "completed");
+
+    let driven = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "drive",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "300",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let driven_json: Value = serde_json::from_slice(&driven).unwrap();
+    assert_eq!(driven_json["schema_version"], "forge.request_drive.v1");
+    assert_eq!(driven_json["status"], "ready_for_handoff");
+    assert_eq!(driven_json["action"], "start_handoff");
+    assert_eq!(
+        driven_json["handoff_task"]["title"],
+        "Audit final completion criteria"
+    );
+    let audit_task_id = driven_json["handoff_task"]["task_id"].as_str().unwrap();
+    assert_eq!(driven_json["task_summary"]["pending"], 1);
+    assert_eq!(
+        driven_json["task_summary"]["completed"].as_u64().unwrap() + 1,
+        driven_json["task_summary"]["total"].as_u64().unwrap()
+    );
+    assert!(driven_json["reason"]
+        .as_str()
+        .unwrap()
+        .contains("A pending task has ready context"));
+    assert!(driven_json["next_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("handoff".to_string())));
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status_json["status"], "running");
+    assert_eq!(status_json["workflow_status"], "running");
+
+    let audit_path = temp.path().join("final-completion-audit.json");
+    fs::write(
+        &audit_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "forge.final_completion_audit.v1",
+            "status": "passed",
+            "goal_fully_satisfied": true,
+            "evidence": [
+                {
+                    "criterion": "deployment, notification and server/client evidence are verified",
+                    "status": "passed",
+                    "artifact_refs": ["artifacts/evidence.json"],
+                    "summary": "All explicit final criteria have passing evidence."
+                }
+            ],
+            "open_items": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "attach-artifact",
+            "--workflow",
+            workflow_id,
+            "--path",
+            audit_path.to_str().unwrap(),
+            "--kind",
+            "final_completion_audit",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    set_task_status_in_stored_workflow(&store, workflow_id, audit_task_id, "completed");
+
+    let completed = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "drive",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "300",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let completed_json: Value = serde_json::from_slice(&completed).unwrap();
+    assert_eq!(completed_json["status"], "complete");
+    assert_eq!(completed_json["action"], "none");
+    assert!(completed_json["reason"]
+        .as_str()
+        .unwrap()
+        .contains("final completion audit passed"));
+}
+
+#[test]
+fn needs_retry_response_with_rework_items_expands_into_runnable_tasks() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Migrate production services. Critério Final: o workflow só termina quando integration contracts and deployment evidence are verified.",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+
+    set_all_task_statuses_in_stored_workflow(&store, workflow_id, "completed");
+
+    let driven = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "drive",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "300",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let driven_json: Value = serde_json::from_slice(&driven).unwrap();
+    let audit_task_id = driven_json["handoff_task"]["task_id"].as_str().unwrap();
+    assert_eq!(
+        driven_json["handoff_task"]["title"],
+        "Audit final completion criteria"
+    );
+
+    let response_path = temp.path().join("audit-needs-rework.json");
+    fs::write(
+        &response_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "forge.executor_response.v1",
+            "task_id": audit_task_id,
+            "status": "needs_retry",
+            "artifacts": ["artifacts/final-audit.md"],
+            "trace_ref": "artifacts/final-audit.md#missing-work",
+            "cost": {
+                "estimated_usd": 0.0,
+                "tokens_in": 0,
+                "tokens_out": 0
+            },
+            "validation_evidence": [
+                {
+                    "command": "inspect final criteria",
+                    "exit_code": 0,
+                    "summary": "integration contracts and deployment evidence are still missing"
+                }
+            ],
+            "rework_items": [
+                {
+                    "title": "Implement integration outcome contracts",
+                    "goal": "Create interface lifecycle contracts with validation evidence.",
+                    "context_requirements": [
+                        "domain integration module",
+                        "integration SDK",
+                        "final audit missing criteria"
+                    ],
+                    "expected_output": "integration lifecycle contracts with passing validation",
+                    "validation_rules": [
+                        {
+                            "kind": "command",
+                            "command": "cargo test --all-features",
+                            "expected": "tests pass"
+                        }
+                    ]
+                },
+                {
+                    "title": "Prepare deployment descriptors",
+                    "goal": "Create deploy descriptors or deploy_pending evidence for each service.",
+                    "expected_output": "deployment evidence per service"
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let validation = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "validate-response",
+            "--workflow",
+            workflow_id,
+            "--task",
+            audit_task_id,
+            "--response",
+            response_path.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let validation_json: Value = serde_json::from_slice(&validation).unwrap();
+    assert_eq!(validation_json["status"], "accepted");
+    assert_eq!(validation_json["response_status"], "needs_retry");
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "status",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status_json["tasks"].as_array().unwrap().len(), 11);
+    let audit_task = status_json["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == audit_task_id)
+        .unwrap();
+    assert_eq!(audit_task["status"], "completed");
+    let generated_task = status_json["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["title"] == "Implement integration outcome contracts")
+        .unwrap();
+    assert_eq!(generated_task["status"], "pending");
+
+    let next = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "drive",
+            "--run",
+            run_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "300",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let next_json: Value = serde_json::from_slice(&next).unwrap();
+    assert_eq!(next_json["status"], "ready_for_handoff");
+    assert_eq!(
+        next_json["handoff_task"]["title"],
+        "Implement integration outcome contracts"
+    );
+}
+
+#[test]
 fn request_switch_executor_hot_swaps_agent_without_stopping_run_or_losing_directives() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -16128,6 +17329,146 @@ fn mcp_run_heartbeat_tool_keeps_agent_handoff_observable() {
     assert_eq!(heartbeat_json["result"]["status"], "running");
     assert_eq!(heartbeat_json["result"]["activity"]["active"], true);
     assert_eq!(heartbeat_json["result"]["activity"]["executor"], "opencode");
+}
+
+#[test]
+fn mcp_run_drive_tool_surfaces_rework_and_next_command() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.run.drive"
+            && tool["output_schema"] == "forge.request_drive.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == true
+    }));
+
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge request drive"),
+        "the packaged skill must teach executors to drive active runs instead of only polling"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.run.drive"),
+        "the packaged skill must expose the MCP drive tool"
+    );
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "MCP drive rework test",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+    let task_id = "task-001";
+
+    let response_path = temp.path().join("mcp-needs-retry-response.json");
+    fs::write(
+        &response_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "forge.executor_response.v1",
+            "task_id": task_id,
+            "status": "needs_retry",
+            "artifacts": ["artifacts/rework-report.json"],
+            "trace_ref": "traces/task-needs-retry.jsonl",
+            "cost": {
+                "estimated_usd": 0.0,
+                "tokens_in": 0,
+                "tokens_out": 0
+            },
+            "validation_evidence": [
+                {
+                    "command": "inspect repo state",
+                    "exit_code": 0,
+                    "summary": "repo is not ready for validation"
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "validate-response",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--response",
+            response_path.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let input = serde_json::json!({
+        "run_id": run_id,
+        "executor": "codex",
+        "ttl_seconds": 300,
+        "origin": "mcp"
+    })
+    .to_string();
+    let driven = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.run.drive",
+            "--input",
+            &input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let driven_json: Value = serde_json::from_slice(&driven).unwrap();
+    assert_eq!(driven_json["status"], "ok");
+    assert_eq!(driven_json["tool_name"], "forge.run.drive");
+    assert_eq!(
+        driven_json["result"]["schema_version"],
+        "forge.request_drive.v1"
+    );
+    assert_eq!(driven_json["result"]["status"], "rework_required");
+    assert_eq!(driven_json["result"]["action"], "rework_task");
+    assert_eq!(driven_json["result"]["rework"]["task_id"], task_id);
+    assert_eq!(
+        driven_json["result"]["activity"]["heartbeat_status"],
+        "fresh"
+    );
+    assert!(driven_json["result"]["next_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("handoff".to_string())));
 }
 
 #[test]

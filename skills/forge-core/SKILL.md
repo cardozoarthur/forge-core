@@ -31,6 +31,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 - Inspect the no-argument interactive dashboard through `forge.interactive.home`, discover slash commands through `forge.interactive.slash_commands`, and route conversational input through `forge.interactive.route` when an agent needs the same command/chat classification as the TUI without launching a local terminal.
 - For async handoff, call `forge mcp call forge.run.start --input '{"goal":"<objective>","origin":"codex"}' --output json`, return `result.run_id` quickly, and let Forge remain the source of truth.
 - While an executor is alive, refresh observability with `forge request heartbeat --run <run-id> --executor codex --summary "<short progress>" --ttl-seconds 300 --pid <executor-pid> --origin codex --output json` or `forge.run.heartbeat`; this keeps `forge request status`, `forge request list` and `forge inspect` honest about active self-runs, including long runs whose heartbeat TTL expires while the recorded process is still alive.
+- Before polling passively or starting another task handoff, call `forge request drive --run <run-id> --executor codex --ttl-seconds 300 --origin codex --output json` or `forge.run.drive`; it refreshes the heartbeat and returns `rework_required`, `ready_for_handoff`, `complete` or `blocked` with the next safe command.
 - If the current executor is about to hit a model limit, becomes unavailable, or should hand off work, use `forge request switch-executor --run <run-id> --executor opencode --summary "<takeover summary>" --origin codex --output json` or `forge.run.switch_executor`. This hot-swap preserves the same `run_id`, workflow id, checkpoints, artifacts and explicit user directives; it does not require shutting the workflow down.
 - If a heartbeat becomes stale, use `forge request recover-stale --run <run-id> --origin codex --output json` or `forge.run.recover_stale` to move the run to `needs_attention` without losing workflow/run lineage.
 - Poll later with `forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json`.
@@ -40,6 +41,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 - Use `forge.schedule.worker_status` or `forge schedule worker-status --max-workers <n>` before scheduler handoff when concurrency matters. Its `worker_pool.assignment_plan` is deterministic and separates due workflows that fit the bounded worker pool from queued work under backpressure.
 - Use `forge.interaction.create_choice`, `forge.interaction.create_form`, `forge.interaction.answer`, `forge.interaction.expire` and `forge.interaction.list` for agent-facing human approval/form bridges. These MCP tools must be preferred over ad hoc chat decisions when a workflow is paused on a human interaction node.
 - Use `forge.credential_vault.describe` and `forge.credential_vault.records` to inspect local credential-vault contracts without resolving secrets. Use `forge credential-vault exec --contract <contract> --data <data> --record <record> -- <command>` when an executor needs credentials injected into a child process.
+- Use `forge aws check`, `forge aws inventory` and MCP tools `forge.aws.check`, `forge.aws.inventory`, `forge.aws.raw` when a workflow needs the project workspace AWS API account. These commands delegate to `~/plugins/aws-ops/scripts/aws-ops`, use the AWS credential-vault defaults and keep mutation gating in the aws-ops wrapper.
 - Inspect or route work through `forge.workflow.inspect`, `forge.context.request`, `forge.task.handoff`, `forge.patch.plan`, `forge.patch.apply`, `forge.patch.revert`, `forge.workflow.attach_artifact`, `forge.workflow.update_goal`, `forge.validation.status` and `forge.artifact.fetch`.
 - In the interactive `forge` REPL, use `/context --workflow <id> --task <task-id> --budget 1200 --strict` for bounded context inspection and `/handoff --workflow <id> --task <task-id> --executor codex` only after approving lease acquisition.
 - Use `forge patch plan` or MCP tool `forge.patch.plan` before agent file editing to create a bounded patch plan with repo-relative target paths, file snapshots, permission gates, diff-review commands, validation commands and a Forge artifact; this command does not apply changes.
@@ -70,6 +72,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 forge plan --goal "Create a delivery platform" --output json
 forge request start --goal "Improve Forge Core" --origin codex --output json
 forge request heartbeat --run <run-id> --executor codex --summary "executor applying bounded patch" --ttl-seconds 300 --pid <executor-pid> --origin codex --output json
+forge request drive --run <run-id> --executor codex --ttl-seconds 300 --origin codex --output json
 forge request switch-executor --run <run-id> --executor opencode --summary "codex limit approaching; opencode continuing from Forge state" --origin codex --output json
 forge request status --run <run-id> --output json
 forge request resume --run <run-id> --origin codex --output json
@@ -79,11 +82,17 @@ forge mcp tools --output json
 forge credential-vault records --contract /path/to/vault.contract.yaml --data /path/to/vault.data.yaml --output json
 forge credential-vault exec --contract /path/to/vault.contract.yaml --data /path/to/vault.data.yaml --record login -- command-that-needs-secrets
 forge mcp call forge.credential_vault.describe --input '{"contract":"/path/to/vault.contract.yaml","data":"/path/to/vault.data.yaml"}' --output json
+forge aws check --output json
+forge aws inventory --regions us-east-1,sa-east-1 --output json
+forge aws raw -- sts get-caller-identity
+forge mcp call forge.aws.check --input '{}' --output json
+forge mcp call forge.aws.inventory --input '{"regions":"us-east-1,sa-east-1"}' --output json
 forge mcp call forge.interactive.home --output json
 forge mcp call forge.interactive.slash_commands --output json
 forge mcp call forge.interactive.route --input '{"input":"What is the current Forge status?","origin":"codex"}' --output json
 forge mcp call forge.run.start --input '{"goal":"Improve Forge Core","origin":"codex"}' --output json
 forge mcp call forge.run.heartbeat --input '{"run_id":"<run-id>","executor":"codex","summary":"executor alive","ttl_seconds":300,"origin":"codex"}' --output json
+forge mcp call forge.run.drive --input '{"run_id":"<run-id>","executor":"codex","ttl_seconds":300,"origin":"codex"}' --output json
 forge mcp call forge.run.switch_executor --input '{"run_id":"<run-id>","executor":"opencode","summary":"take over without stopping workflow","origin":"codex"}' --output json
 forge mcp call forge.run.recover_stale --input '{"run_id":"<run-id>","origin":"codex"}' --output json
 forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json

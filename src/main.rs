@@ -2,6 +2,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use forge_core::adapter::validate_executor_response_file;
 use forge_core::artifact::list_workflow_artifacts;
+use forge_core::aws_ops::{
+    run_check as run_aws_ops_check, run_inventory as run_aws_ops_inventory,
+    run_raw as run_aws_ops_raw,
+};
 use forge_core::checkpoint::{
     load_latest_task_checkpoint, record_task_checkpoint, TaskCheckpointRequest,
 };
@@ -51,8 +55,9 @@ use forge_core::registry::{
     WorkflowRegistryFilters,
 };
 use forge_core::request::{
-    cancel_request, heartbeat_request, list_requests, load_request_status, recover_stale_request,
-    resume_async_request, start_async_request, switch_request_executor, RequestExecutorSwitchInput,
+    cancel_request, drive_request, heartbeat_request, list_requests, load_request_status,
+    recover_stale_request, resume_async_request, start_async_request, switch_request_executor,
+    RequestExecutorSwitchInput,
 };
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
@@ -231,6 +236,10 @@ enum Commands {
     Patch {
         #[command(subcommand)]
         command: PatchCommands,
+    },
+    Aws {
+        #[command(subcommand)]
+        command: AwsCommands,
     },
     CredentialVault {
         #[command(subcommand)]
@@ -424,6 +433,52 @@ enum CredentialVaultCommands {
         env_mappings: Vec<String>,
         #[arg(last = true, required = true)]
         command: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AwsCommands {
+    Check {
+        #[arg(long = "aws-ops-bin")]
+        aws_ops_bin: Option<PathBuf>,
+        #[arg(long = "vault-contract")]
+        vault_contract: Option<PathBuf>,
+        #[arg(long = "vault-data")]
+        vault_data: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Inventory {
+        #[arg(long = "aws-ops-bin")]
+        aws_ops_bin: Option<PathBuf>,
+        #[arg(long = "vault-contract")]
+        vault_contract: Option<PathBuf>,
+        #[arg(long = "vault-data")]
+        vault_data: Option<PathBuf>,
+        #[arg(long)]
+        regions: Option<String>,
+        #[arg(long = "all-regions")]
+        all_regions: bool,
+        #[arg(long)]
+        full: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Raw {
+        #[arg(long = "aws-ops-bin")]
+        aws_ops_bin: Option<PathBuf>,
+        #[arg(long = "vault-contract")]
+        vault_contract: Option<PathBuf>,
+        #[arg(long = "vault-data")]
+        vault_data: Option<PathBuf>,
+        #[arg(long = "allow-mutation")]
+        allow_mutation: bool,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+        #[arg(last = true, required = true)]
+        aws_args: Vec<String>,
     },
 }
 
@@ -859,6 +914,18 @@ enum RequestCommands {
     Status {
         #[arg(long = "run")]
         run_id: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Drive {
+        #[arg(long = "run")]
+        run_id: String,
+        #[arg(long, default_value = "forge_cli")]
+        executor: String,
+        #[arg(long = "ttl-seconds", default_value_t = 300)]
+        ttl_seconds: u64,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -2264,6 +2331,18 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(0)
             }
+            RequestCommands::Drive {
+                run_id,
+                executor,
+                ttl_seconds,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = drive_request(&store, &run_id, &executor, ttl_seconds, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
             RequestCommands::List { status, output } => {
                 let store = ForgeStore::open(cli.store)?;
                 let report = list_requests(&store, status.as_deref())?;
@@ -2612,6 +2691,62 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(0)
             }
+        },
+        Commands::Aws { command } => match command {
+            AwsCommands::Check {
+                aws_ops_bin,
+                vault_contract,
+                vault_data,
+                output,
+            } => {
+                let report = run_aws_ops_check(
+                    aws_ops_bin.as_deref(),
+                    vault_contract.as_deref(),
+                    vault_data.as_deref(),
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AwsCommands::Inventory {
+                aws_ops_bin,
+                vault_contract,
+                vault_data,
+                regions,
+                all_regions,
+                full,
+                output,
+            } => {
+                let report = run_aws_ops_inventory(
+                    aws_ops_bin.as_deref(),
+                    vault_contract.as_deref(),
+                    vault_data.as_deref(),
+                    regions.as_deref(),
+                    all_regions,
+                    full,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AwsCommands::Raw {
+                aws_ops_bin,
+                vault_contract,
+                vault_data,
+                allow_mutation,
+                reason,
+                output,
+                aws_args,
+            } => run_aws_ops_raw(
+                aws_ops_bin.as_deref(),
+                vault_contract.as_deref(),
+                vault_data.as_deref(),
+                allow_mutation,
+                reason.as_deref(),
+                &aws_args,
+            )
+            .map(|report| {
+                print_response(output, &report)?;
+                Ok(0)
+            })?,
         },
         Commands::CredentialVault { command } => match command {
             CredentialVaultCommands::KeyInit { vault_bin, output } => {

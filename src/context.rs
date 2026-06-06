@@ -1,8 +1,8 @@
 use crate::artifact::hex_sha256;
 use crate::checkpoint::TaskCheckpoint;
 use crate::graph::{
-    AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind, PersonaRoutingSpec, TaskStatus,
-    Workflow,
+    ArtifactRecord, AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind,
+    PersonaRoutingSpec, TaskStatus, Workflow,
 };
 use anyhow::{bail, Result};
 use serde::Serialize;
@@ -36,10 +36,14 @@ const ROUTING_POLICY: &str =
 const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
 pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
+const ARTIFACT_MANIFEST_CONTEXT_BUDGET: usize = DEFAULT_CONTEXT_BUDGET;
+const FINAL_COMPLETION_AUDIT_CONTEXT_BUDGET: usize = REWORK_CONTEXT_BUDGET;
+const REWORK_CONTEXT_BUDGET: usize = 4096;
 const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
 const ALL_CONTEXT_SECTIONS: &[&str] = &[
     "local_objective",
     "workflow_goal",
+    "artifacts",
     "persona_routing",
     "execution_policy",
     "child_subflows",
@@ -53,6 +57,7 @@ const ALL_CONTEXT_SECTIONS: &[&str] = &[
 const NO_AI_CONTEXT_SECTIONS: &[&str] = &[
     "local_objective",
     "workflow_goal",
+    "artifacts",
     "execution_policy",
     "child_subflows",
     "checkpoint",
@@ -63,6 +68,7 @@ const NO_AI_CONTEXT_SECTIONS: &[&str] = &[
 const NOTIFICATION_CONTEXT_SECTIONS: &[&str] = &[
     "local_objective",
     "workflow_goal",
+    "artifacts",
     "persona_routing",
     "execution_policy",
     "child_subflows",
@@ -85,12 +91,36 @@ const NO_AI_REQUIRED_CONTEXT_SECTIONS: &[&str] = &[
     "context_requirements",
     "validation_rules",
 ];
+const REWORK_REQUIRED_CONTEXT_SECTIONS: &[&str] = &[
+    "local_objective",
+    "execution_policy",
+    "checkpoint",
+    "artifacts",
+    "context_requirements",
+    "validation_rules",
+];
+const ARTIFACT_MANIFEST_REQUIRED_CONTEXT_SECTIONS: &[&str] = &[
+    "local_objective",
+    "artifacts",
+    "execution_policy",
+    "context_requirements",
+    "validation_rules",
+];
 const NOTIFICATION_REQUIRED_CONTEXT_SECTIONS: &[&str] = &[
     "local_objective",
     "persona_routing",
     "execution_policy",
     "context_requirements",
     "validation_rules",
+];
+const FINAL_COMPLETION_AUDIT_REQUIRED_CONTEXT_SECTIONS: &[&str] = &[
+    "local_objective",
+    "workflow_goal",
+    "artifacts",
+    "execution_policy",
+    "context_requirements",
+    "validation_rules",
+    "dependencies",
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -1022,7 +1052,7 @@ pub fn build_context_package_with_checkpoint(
         );
     }
 
-    let profile = executor_context_profile(task);
+    let profile = executor_context_profile(task, latest_checkpoint.as_ref());
     let effective_budget = profile
         .max_context_bytes
         .map(|max_bytes| budget.min(max_bytes))
@@ -1091,6 +1121,12 @@ pub fn build_context_package_with_checkpoint(
                 workflow_revision,
                 workflow.artifacts.len()
             ),
+        },
+        ContextShardCandidate {
+            section: "artifacts",
+            source: "artifact_manifest",
+            priority: priority_for_profile(&profile, "artifacts", 93),
+            content: render_artifacts_context(&workflow.artifacts, &task.id),
         },
         ContextShardCandidate {
             section: "persona_routing",
@@ -3279,6 +3315,46 @@ fn render_dependencies_context(
     format!("{}\n", lines.join("\n"))
 }
 
+fn render_artifacts_context(artifacts: &[ArtifactRecord], task_id: &str) -> String {
+    if artifacts.is_empty() {
+        return String::new();
+    }
+
+    let mut relevant = artifacts
+        .iter()
+        .filter(|artifact| {
+            artifact.path.contains(task_id)
+                || artifact.kind.contains(task_id)
+                || artifact.kind.contains("report")
+                || artifact.kind.contains("evidence")
+        })
+        .collect::<Vec<_>>();
+    if relevant.is_empty() {
+        relevant = artifacts.iter().collect();
+    }
+    relevant.sort_by(|left, right| {
+        let left_report = left.kind.contains("report") || left.path.contains("report");
+        let right_report = right.kind.contains("report") || right.path.contains("report");
+        right_report
+            .cmp(&left_report)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
+    let mut lines = vec![format!(
+        "Artifacts available for task {task_id}: {} total, {} relevant",
+        artifacts.len(),
+        relevant.len()
+    )];
+    for artifact in relevant.into_iter().take(12) {
+        lines.push(format!(
+            "- [{}] {} sha256:{}",
+            artifact.kind, artifact.path, artifact.sha256
+        ));
+    }
+
+    format!("{}\n", lines.join("\n"))
+}
+
 fn render_checkpoint_context(checkpoint: &TaskCheckpoint, resume_status: &str) -> String {
     format!(
         "Latest checkpoint: {}\nTask: {}\nExecutor: {}\nState: {}\nWorkflow revision: {}\nContext sha256: {}\nResume status: {}\nSummary: {}\n",
@@ -3336,10 +3412,73 @@ fn summarize_shard(content: &str) -> String {
 }
 
 fn compress_shard(candidate: &ContextShardCandidate, summary: &str) -> String {
+    if candidate.section == "checkpoint" {
+        let state = candidate
+            .content
+            .lines()
+            .find(|line| line.starts_with("State:"))
+            .unwrap_or("State: unknown");
+        let summary_line = candidate
+            .content
+            .lines()
+            .find(|line| line.starts_with("Summary:"))
+            .unwrap_or(summary);
+        if state != "State: unknown" || summary_line != summary {
+            return format!("[compressed checkpoint]\n{state}; {summary_line}\n");
+        }
+    }
+
+    if candidate.section == "artifacts" {
+        let mut lines = candidate.content.lines();
+        let header = lines.next().unwrap_or(summary);
+        let first_artifact = lines
+            .find(|line| line.starts_with("- "))
+            .unwrap_or("No artifact path selected");
+        return format!("[compressed artifacts]\n{header}\n{first_artifact}\n");
+    }
+
     format!("[compressed {}]\n{}\n", candidate.section, summary)
 }
 
-fn executor_context_profile(task: &AtomicTask) -> ExecutorContextProfile {
+fn executor_context_profile(
+    task: &AtomicTask,
+    latest_checkpoint: Option<&TaskCheckpoint>,
+) -> ExecutorContextProfile {
+    if latest_checkpoint.is_some_and(is_rework_checkpoint) {
+        return ExecutorContextProfile {
+            id: "no_ai_rework",
+            reasoning_allowed: false,
+            deterministic: true,
+            max_context_bytes: Some(REWORK_CONTEXT_BUDGET),
+            allowed_sections: ALL_CONTEXT_SECTIONS,
+            required_sections: REWORK_REQUIRED_CONTEXT_SECTIONS,
+        };
+    }
+
+    if task_requires_final_completion_audit_context(task) {
+        return ExecutorContextProfile {
+            id: "final_completion_audit",
+            reasoning_allowed: true,
+            deterministic: false,
+            max_context_bytes: Some(FINAL_COMPLETION_AUDIT_CONTEXT_BUDGET),
+            allowed_sections: ALL_CONTEXT_SECTIONS,
+            required_sections: FINAL_COMPLETION_AUDIT_REQUIRED_CONTEXT_SECTIONS,
+        };
+    }
+
+    if matches!(task.executor, ExecutorKind::Command | ExecutorKind::Wait)
+        && task_requires_artifact_context(task)
+    {
+        return ExecutorContextProfile {
+            id: "no_ai_artifact_manifest",
+            reasoning_allowed: false,
+            deterministic: true,
+            max_context_bytes: Some(ARTIFACT_MANIFEST_CONTEXT_BUDGET),
+            allowed_sections: NO_AI_CONTEXT_SECTIONS,
+            required_sections: ARTIFACT_MANIFEST_REQUIRED_CONTEXT_SECTIONS,
+        };
+    }
+
     match task.executor {
         ExecutorKind::Command | ExecutorKind::Wait => ExecutorContextProfile {
             id: "no_ai_deterministic",
@@ -3374,6 +3513,32 @@ fn executor_context_profile(task: &AtomicTask) -> ExecutorContextProfile {
             required_sections: REASONING_REQUIRED_CONTEXT_SECTIONS,
         },
     }
+}
+
+fn is_rework_checkpoint(checkpoint: &TaskCheckpoint) -> bool {
+    matches!(checkpoint.state.as_str(), "needs_retry" | "failed")
+}
+
+fn task_requires_artifact_context(task: &AtomicTask) -> bool {
+    let mut text = format!("{} {} {}", task.title, task.goal, task.expected_output);
+    if !task.context_requirements.is_empty() {
+        text.push(' ');
+        text.push_str(&task.context_requirements.join(" "));
+    }
+    let text = text.to_ascii_lowercase();
+    (text.contains("artifact") && text.contains("manifest"))
+        || text.contains("artifact outputs")
+        || text.contains("artifact output")
+}
+
+fn task_requires_final_completion_audit_context(task: &AtomicTask) -> bool {
+    let mut text = format!("{} {} {}", task.title, task.goal, task.expected_output);
+    if !task.context_requirements.is_empty() {
+        text.push(' ');
+        text.push_str(&task.context_requirements.join(" "));
+    }
+    let text = text.to_lowercase().replace('-', "_");
+    text.contains("final_completion_audit") || text.contains("audit final completion criteria")
 }
 
 impl ExecutorContextProfile {
@@ -3429,12 +3594,37 @@ fn priority_for_profile(
             "local_objective" => 100,
             "persona_routing" => 96,
             "execution_policy" => 94,
+            "artifacts" => 93,
             "child_subflows" => 92,
             "checkpoint" => 92,
             "validation_rules" => 90,
             "workflow_goal" => 85,
             "context_requirements" => 80,
             "dependencies" => 70,
+            _ => default_priority,
+        },
+        "no_ai_rework" => match section {
+            "local_objective" => 100,
+            "checkpoint" => 99,
+            "artifacts" => 98,
+            "execution_policy" => 97,
+            "validation_rules" => 96,
+            "context_requirements" => 95,
+            "workflow_goal" => 94,
+            "dependencies" => 90,
+            "child_subflows" => 85,
+            _ => default_priority,
+        },
+        "no_ai_artifact_manifest" => match section {
+            "local_objective" => 100,
+            "artifacts" => 99,
+            "execution_policy" => 98,
+            "validation_rules" => 97,
+            "context_requirements" => 96,
+            "workflow_goal" => 90,
+            "dependencies" => 85,
+            "child_subflows" => 80,
+            "checkpoint" => 80,
             _ => default_priority,
         },
         _ => default_priority,

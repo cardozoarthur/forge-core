@@ -1,5 +1,6 @@
 pub mod adapter;
 pub mod artifact;
+pub mod aws_ops;
 pub mod checkpoint;
 pub mod cluster;
 pub mod context;

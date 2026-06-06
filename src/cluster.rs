@@ -1019,7 +1019,7 @@ fn has_software(node: &ClusterNode, software: &str) -> bool {
 fn trusted_for_placement(trust_level: &str) -> bool {
     matches!(
         trust_level,
-        "local" | "trusted" | "trusted_lan" | "trusted-lan"
+        "local" | "trusted" | "trusted_lan" | "trusted-lan" | "trusted_lan_or_local"
     )
 }
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added `forge aws check`, `forge aws inventory` and `forge aws raw`, delegating to the local `aws-ops` plugin and its AWS credential-vault defaults.
+- Added MCP tools `forge.aws.check`, `forge.aws.inventory` and `forge.aws.raw` so agents can validate, observe and run guarded AWS CLI commands through Forge without resolving secrets.
+
+### Validation
+
+- Targeted coverage passed for `cargo test cloud_ --test forge_cli_contract -- --nocapture`.
+- Regression coverage passed for `cargo test credential_vault --test forge_cli_contract -- --nocapture`.
+- Live smoke passed for `forge aws check --output json`, `forge aws inventory --regions us-east-1,sa-east-1 --output json`, `forge mcp call forge.aws.check --input '{}' --output json` and `forge aws raw --output json -- sts get-caller-identity`.
+
 ## 0.4.177 - 2026-06-02
 
 ### Changed
