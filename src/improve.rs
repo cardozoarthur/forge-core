@@ -818,6 +818,23 @@ fn suggested_commands(
             ]);
         }
     }
+    if has_reason(reasons, "missing_final_outcome_audit")
+        && workflow_ready_for_final_audit_command(workflow)
+    {
+        commands.push(vec![
+            "forge".to_string(),
+            "request".to_string(),
+            "ensure-final-audit".to_string(),
+            "--workflow".to_string(),
+            workflow.id.clone(),
+            "--executor".to_string(),
+            "codex".to_string(),
+            "--origin".to_string(),
+            "forge_cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]);
+    }
     commands.push(vec![
         "forge".to_string(),
         "improve".to_string(),
@@ -853,6 +870,35 @@ fn latest_driveable_run(runs: &[RunRecord]) -> Option<&RunRecord> {
             )
         })
         .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
+}
+
+fn workflow_ready_for_final_audit_command(workflow: &Workflow) -> bool {
+    if let Some(audit_task) = workflow
+        .tasks
+        .iter()
+        .find(|task| looks_like_final_completion_audit_task(task))
+    {
+        return audit_task.dependencies.iter().all(|dependency| {
+            workflow
+                .tasks
+                .iter()
+                .any(|task| task.id == *dependency && task.status == TaskStatus::Completed)
+        });
+    }
+
+    !workflow.tasks.is_empty()
+        && workflow
+            .tasks
+            .iter()
+            .all(|task| task.status == TaskStatus::Completed)
+}
+
+fn looks_like_final_completion_audit_task(task: &crate::graph::AtomicTask) -> bool {
+    let title = task.title.to_lowercase();
+    let expected_output = task.expected_output.to_lowercase();
+    title.contains("final completion")
+        || expected_output.contains("final_completion_audit")
+        || expected_output.contains("final completion audit")
 }
 
 pub fn generate_improvement(

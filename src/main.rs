@@ -57,9 +57,9 @@ use forge_core::registry::{
 };
 use forge_core::request::{
     cancel_request, complete_ready_task, create_final_delivery_package, drive_request,
-    heartbeat_request, list_requests, load_request_status, recover_stale_request,
-    resume_async_request, start_async_request, step_request, switch_request_executor,
-    RequestExecutorSwitchInput, RequestTaskCompletionInput,
+    ensure_final_audit, heartbeat_request, list_requests, load_request_status,
+    recover_stale_request, resume_async_request, start_async_request, step_request,
+    switch_request_executor, RequestExecutorSwitchInput, RequestTaskCompletionInput,
 };
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
@@ -994,6 +994,16 @@ enum RequestCommands {
     FinalPackage {
         #[arg(long = "run")]
         run_id: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    EnsureFinalAudit {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long, default_value = "forge_cli")]
+        executor: String,
         #[arg(long, default_value = "forge_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -2504,6 +2514,17 @@ fn run() -> Result<i32> {
             } => {
                 let store = ForgeStore::open(cli.store)?;
                 let report = create_final_delivery_package(&store, &run_id, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            RequestCommands::EnsureFinalAudit {
+                workflow,
+                executor,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = ensure_final_audit(&store, &workflow, &executor, &origin)?;
                 print_response(output, &report)?;
                 Ok(0)
             }

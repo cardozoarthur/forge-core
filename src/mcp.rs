@@ -32,9 +32,9 @@ use crate::registry::{
 };
 use crate::request::{
     cancel_request, complete_ready_task, create_final_delivery_package, drive_request,
-    heartbeat_request, list_requests, load_request_status, recover_stale_request,
-    resume_async_request, start_async_request, step_request, switch_request_executor,
-    RequestExecutorSwitchInput, RequestTaskCompletionInput,
+    ensure_final_audit, heartbeat_request, list_requests, load_request_status,
+    recover_stale_request, resume_async_request, start_async_request, step_request,
+    switch_request_executor, RequestExecutorSwitchInput, RequestTaskCompletionInput,
 };
 use crate::schedule::{
     aggregate_summary, build_schedule_worker_status, create_daily_goal_research_workflow,
@@ -238,6 +238,13 @@ struct RunCompleteTaskInput {
     tokens_in: Option<i64>,
     tokens_out: Option<i64>,
     ttl_seconds: Option<u64>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EnsureFinalAuditInput {
+    workflow_id: String,
+    executor: Option<String>,
     origin: Option<String>,
 }
 
@@ -961,6 +968,19 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &["run_id"]),
                 "forge.request_final_delivery_package.v1",
                 &["forge", "request", "final-package", "--run", "<run-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.workflow.ensure_final_audit",
+                "Ensure Final Completion Audit",
+                "Create or surface the final completion audit task for a workflow so user-facing deliverables cannot be mistaken for complete without audited evidence.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("executor", "string", "codex|opencode|skill|mcp|custom executor id"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id"]),
+                "forge.request_final_audit.v1",
+                &["forge", "request", "ensure-final-audit", "--workflow", "<workflow-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -1815,6 +1835,17 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(create_final_delivery_package(
                 store,
                 &input.run_id,
+                &origin,
+            )?)?
+        }
+        "forge.workflow.ensure_final_audit" => {
+            let input: EnsureFinalAuditInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            let executor = input.executor.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(ensure_final_audit(
+                store,
+                &input.workflow_id,
+                &executor,
                 &origin,
             )?)?
         }

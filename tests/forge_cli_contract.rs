@@ -18020,6 +18020,349 @@ fn request_drive_requires_final_completion_audit_for_explicit_final_criteria() {
 }
 
 #[test]
+fn request_ensure_final_audit_creates_audit_task_without_driving_a_run() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Deliver final workflow result for a partner demo with final criteria verified.",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+    set_all_task_statuses_in_stored_workflow(&store, workflow_id, "completed");
+    set_workflow_status_in_stored_workflow(&store, workflow_id, "completed");
+
+    let ensured = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "ensure-final-audit",
+            "--workflow",
+            workflow_id,
+            "--executor",
+            "codex",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ensured_json: Value = serde_json::from_slice(&ensured).unwrap();
+    assert_eq!(
+        ensured_json["schema_version"],
+        "forge.request_final_audit.v1"
+    );
+    assert_eq!(ensured_json["status"], "final_audit_task_created");
+    assert_eq!(ensured_json["action"], "handoff_final_completion_audit");
+    assert_eq!(ensured_json["audit_task_created"], true);
+    let audit_task_id = ensured_json["audit_task_id"].as_str().unwrap();
+    assert_eq!(ensured_json["task_summary"]["pending"], 1);
+    assert!(ensured_json["next_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("handoff".to_string())));
+    assert!(ensured_json["next_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(audit_task_id.to_string())));
+
+    let repeated = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "ensure-final-audit",
+            "--workflow",
+            workflow_id,
+            "--executor",
+            "codex",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let repeated_json: Value = serde_json::from_slice(&repeated).unwrap();
+    assert_eq!(repeated_json["status"], "final_audit_task_ready");
+    assert_eq!(repeated_json["audit_task_created"], false);
+    assert_eq!(repeated_json["audit_task_id"], audit_task_id);
+
+    let mcp_tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_tools_json: Value = serde_json::from_slice(&mcp_tools).unwrap();
+    assert!(mcp_tools_json["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| {
+            tool["name"] == "forge.workflow.ensure_final_audit"
+                && tool["output_schema"] == "forge.request_final_audit.v1"
+                && tool["mutates_workflow"] == true
+        }));
+
+    let mcp_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "executor": "codex",
+        "origin": "mcp"
+    })
+    .to_string();
+    let mcp_ensured = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.workflow.ensure_final_audit",
+            "--input",
+            &mcp_input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_ensured_json: Value = serde_json::from_slice(&mcp_ensured).unwrap();
+    assert_eq!(mcp_ensured_json["status"], "ok");
+    assert_eq!(
+        mcp_ensured_json["tool_name"],
+        "forge.workflow.ensure_final_audit"
+    );
+    assert_eq!(
+        mcp_ensured_json["result"]["status"],
+        "final_audit_task_ready"
+    );
+}
+
+#[test]
+fn request_ensure_final_audit_waits_for_incomplete_workflow() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Deliver final workflow result for a partner demo with final criteria verified.",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+
+    let ensured = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "ensure-final-audit",
+            "--workflow",
+            workflow_id,
+            "--executor",
+            "codex",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ensured_json: Value = serde_json::from_slice(&ensured).unwrap();
+    assert_eq!(
+        ensured_json["status"],
+        "final_audit_waiting_for_workflow_completion"
+    );
+    assert_eq!(ensured_json["action"], "continue_workflow");
+    assert_eq!(ensured_json["audit_task_created"], false);
+    assert_eq!(ensured_json["audit_task_id"], Value::Null);
+    assert!(ensured_json["next_command"].as_array().unwrap().is_empty());
+
+    let inspected = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected_json: Value = serde_json::from_slice(&inspected).unwrap();
+    assert!(!inspected_json["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| {
+            node["title"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Audit final completion criteria")
+        }));
+}
+
+#[test]
+fn improve_candidates_suggest_final_audit_for_completed_workflow_without_active_run() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Deliver final workflow result for a partner demo with final outcome evidence.",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+    set_all_task_statuses_in_stored_workflow(&store, workflow_id, "completed");
+    set_workflow_status_in_stored_workflow(&store, workflow_id, "completed");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "cancel",
+            "--run",
+            run_id,
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let outcome_path = temp.path().join("verified-user-facing-outcome.md");
+    fs::write(
+        &outcome_path,
+        "# Verified User-Facing Outcome\n\nPartner demo evidence is attached.",
+    )
+    .unwrap();
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "attach-artifact",
+            "--workflow",
+            workflow_id,
+            "--path",
+            outcome_path.to_str().unwrap(),
+            "--kind",
+            "report",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let top = &report["candidates"][0];
+    assert_eq!(top["workflow_id"], workflow_id);
+    assert!(top["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "missing_final_outcome_audit"));
+    assert!(top["suggested_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| {
+            command.as_array().unwrap()
+                == &vec![
+                    Value::String("forge".to_string()),
+                    Value::String("request".to_string()),
+                    Value::String("ensure-final-audit".to_string()),
+                    Value::String("--workflow".to_string()),
+                    Value::String(workflow_id.to_string()),
+                    Value::String("--executor".to_string()),
+                    Value::String("codex".to_string()),
+                    Value::String("--origin".to_string()),
+                    Value::String("forge_cli".to_string()),
+                    Value::String("--output".to_string()),
+                    Value::String("json".to_string()),
+                ]
+        }));
+}
+
+#[test]
 fn request_drive_requires_final_audit_for_user_facing_deliverables() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

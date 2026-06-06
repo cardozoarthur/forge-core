@@ -277,6 +277,22 @@ pub struct RequestFinalDeliveryPackageReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct RequestFinalAuditReport {
+    pub schema_version: String,
+    pub status: String,
+    pub action: String,
+    pub workflow_id: String,
+    pub origin: String,
+    pub task_summary: TaskStatusSummary,
+    pub outcome_status: OutcomeStatusReport,
+    pub audit_task_id: Option<String>,
+    pub audit_task_created: bool,
+    pub next_command: Vec<String>,
+    pub reason: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RequestExecutorSwitchReport {
     pub status: String,
     pub schema_version: String,
@@ -1577,6 +1593,113 @@ pub fn create_final_delivery_package(
     })
 }
 
+pub fn ensure_final_audit(
+    store: &ForgeStore,
+    workflow_id: &str,
+    executor: &str,
+    origin: &str,
+) -> Result<RequestFinalAuditReport> {
+    let workflow = store.load_workflow(workflow_id)?;
+    let updated_at = Utc::now();
+    let Some(block_reason) = final_completion_audit_block_reason(store, &workflow)? else {
+        return Ok(RequestFinalAuditReport {
+            schema_version: "forge.request_final_audit.v1".to_string(),
+            status: "final_audit_satisfied".to_string(),
+            action: "none".to_string(),
+            workflow_id: workflow.id.clone(),
+            origin: origin.to_string(),
+            task_summary: summarize_tasks(&workflow),
+            outcome_status: request_outcome_status(store, &workflow)?,
+            audit_task_id: final_completion_audit_task_id(&workflow),
+            audit_task_created: false,
+            next_command: Vec::new(),
+            reason: "Final completion audit is already satisfied or not required.".to_string(),
+            updated_at,
+        });
+    };
+
+    let existing_audit_task_id = final_completion_audit_task_id(&workflow);
+    if existing_audit_task_id.is_none() && !non_audit_tasks_completed(&workflow) {
+        return Ok(RequestFinalAuditReport {
+            schema_version: "forge.request_final_audit.v1".to_string(),
+            status: "final_audit_waiting_for_workflow_completion".to_string(),
+            action: "continue_workflow".to_string(),
+            workflow_id: workflow.id.clone(),
+            origin: origin.to_string(),
+            task_summary: summarize_tasks(&workflow),
+            outcome_status: request_outcome_status(store, &workflow)?,
+            audit_task_id: None,
+            audit_task_created: false,
+            next_command: Vec::new(),
+            reason: format!(
+                "Final completion audit waits until all non-audit workflow tasks are complete. {block_reason}"
+            ),
+            updated_at,
+        });
+    }
+
+    let maybe_updated =
+        ensure_final_completion_audit_task(store, &workflow, origin, &block_reason)?;
+    let active_workflow = maybe_updated.as_ref().unwrap_or(&workflow);
+    let audit_task_id = final_completion_audit_task_id(active_workflow);
+    let next_command = if let Some(task_id) = audit_task_id.as_deref() {
+        let audit_task_is_completed = active_workflow
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .map(|task| task.status == TaskStatus::Completed)
+            .unwrap_or(false);
+        if audit_task_is_completed {
+            final_completion_audit_attach_command(&active_workflow.id, origin)
+        } else if final_completion_audit_dependencies_completed(active_workflow, task_id) {
+            final_completion_audit_handoff_command(
+                &active_workflow.id,
+                task_id,
+                executor,
+                COMPLETION_AUDIT_HANDOFF_CONTEXT_BUDGET,
+            )
+        } else {
+            Vec::new()
+        }
+    } else {
+        final_completion_audit_attach_command(&active_workflow.id, origin)
+    };
+    let audit_waits_for_dependencies = audit_task_id.as_deref().is_some_and(|task_id| {
+        !final_completion_audit_dependencies_completed(active_workflow, task_id)
+    });
+    let status = if audit_waits_for_dependencies {
+        "final_audit_waiting_for_dependencies"
+    } else if maybe_updated.is_some() {
+        "final_audit_task_created"
+    } else if audit_task_id.is_some() {
+        "final_audit_task_ready"
+    } else {
+        "final_audit_artifact_required"
+    };
+    let action = if audit_waits_for_dependencies {
+        "complete_prerequisites"
+    } else if audit_task_id.is_some() {
+        "handoff_final_completion_audit"
+    } else {
+        "attach_final_completion_audit"
+    };
+
+    Ok(RequestFinalAuditReport {
+        schema_version: "forge.request_final_audit.v1".to_string(),
+        status: status.to_string(),
+        action: action.to_string(),
+        workflow_id: active_workflow.id.clone(),
+        origin: origin.to_string(),
+        task_summary: summarize_tasks(active_workflow),
+        outcome_status: request_outcome_status(store, active_workflow)?,
+        audit_task_id,
+        audit_task_created: maybe_updated.is_some(),
+        next_command,
+        reason: block_reason,
+        updated_at,
+    })
+}
+
 fn final_delivery_readiness(
     outcome_status: &OutcomeStatusReport,
     task_summary: &TaskStatusSummary,
@@ -2506,12 +2629,81 @@ fn final_completion_audit_task_exists(workflow: &Workflow) -> bool {
     workflow.tasks.iter().any(is_final_completion_audit_task)
 }
 
+fn final_completion_audit_task_id(workflow: &Workflow) -> Option<String> {
+    workflow
+        .tasks
+        .iter()
+        .find(|task| is_final_completion_audit_task(task))
+        .map(|task| task.id.clone())
+}
+
+fn non_audit_tasks_completed(workflow: &Workflow) -> bool {
+    workflow
+        .tasks
+        .iter()
+        .filter(|task| !is_final_completion_audit_task(task))
+        .all(|task| task.status == TaskStatus::Completed)
+}
+
+fn final_completion_audit_dependencies_completed(workflow: &Workflow, task_id: &str) -> bool {
+    let Some(audit_task) = workflow.tasks.iter().find(|task| task.id == task_id) else {
+        return false;
+    };
+    audit_task.dependencies.iter().all(|dependency| {
+        workflow
+            .tasks
+            .iter()
+            .any(|task| task.id == *dependency && task.status == TaskStatus::Completed)
+    })
+}
+
 fn is_final_completion_audit_task(task: &AtomicTask) -> bool {
     let title = task.title.to_lowercase();
     let expected_output = task.expected_output.to_lowercase();
     title.contains("final completion")
         || expected_output.contains(FINAL_COMPLETION_AUDIT_KIND)
         || expected_output.contains("final_completion_audit")
+}
+
+fn final_completion_audit_handoff_command(
+    workflow_id: &str,
+    task_id: &str,
+    executor: &str,
+    budget: usize,
+) -> Vec<String> {
+    vec![
+        "forge".to_string(),
+        "task".to_string(),
+        "handoff".to_string(),
+        "--workflow".to_string(),
+        workflow_id.to_string(),
+        "--task".to_string(),
+        task_id.to_string(),
+        "--executor".to_string(),
+        executor.to_string(),
+        "--budget".to_string(),
+        budget.to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]
+}
+
+fn final_completion_audit_attach_command(workflow_id: &str, origin: &str) -> Vec<String> {
+    vec![
+        "forge".to_string(),
+        "workflow".to_string(),
+        "attach-artifact".to_string(),
+        "--workflow".to_string(),
+        workflow_id.to_string(),
+        "--path".to_string(),
+        "<final-completion-audit.json>".to_string(),
+        "--kind".to_string(),
+        FINAL_COMPLETION_AUDIT_KIND.to_string(),
+        "--origin".to_string(),
+        origin.to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]
 }
 
 fn final_completion_audit_block_reason(
