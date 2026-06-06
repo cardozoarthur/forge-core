@@ -43,7 +43,7 @@ case "$1" in
     printf '{"vault":{"id":"test-vault"},"records":[]}\n'
     ;;
   records)
-    printf 'forum_login\tProjeto FiscalProvider Login\n  auth.email\temail\n  auth.password\tpassword secret\n'
+    printf 'forum_login\tPortal Fiscal Login\n  auth.email\temail\n  auth.password\tpassword secret\n'
     ;;
   exec)
     printf 'child executed through credential-vault\n'
@@ -74,25 +74,25 @@ fn write_credential_vault_contract(path: &Path) {
         path,
         r#"version: 1
 vault:
-  id: fiscal_providerlib-forum
-  title: Projeto FiscalProvider Forum Vault
+  id: fiscal-vendor-portal
+  title: Portal Fiscal Vault
 records:
   forum_login:
-    title: Projeto FiscalProvider Login
+    title: Portal Fiscal Login
     fields:
       - id: email
         path: auth.email
         label: Email
         kind: email
         usage:
-          terminal_env: FiscalProvider_FORUM_EMAIL
+          terminal_env: FISCAL_PORTAL_EMAIL
       - id: password
         path: auth.password
         label: Senha
         kind: password
         secret: true
         usage:
-          terminal_env: FiscalProvider_FORUM_PASSWORD
+          terminal_env: FISCAL_PORTAL_PASSWORD
 "#,
     )
     .unwrap();
@@ -106,8 +106,8 @@ fn credential_vault_records_wraps_secret_free_contract_metadata() {
     fs::create_dir_all(&bin_dir).unwrap();
     let vault_bin = write_fake_credential_vault(&bin_dir);
     let args_file = temp.path().join("credential-vault.args");
-    let contract = temp.path().join("fiscal_provider.contract.yaml");
-    let data = temp.path().join("fiscal_provider.data.yaml");
+    let contract = temp.path().join("fiscal.contract.yaml");
+    let data = temp.path().join("fiscal.data.yaml");
     write_credential_vault_contract(&contract);
 
     let output = forge()
@@ -153,8 +153,8 @@ fn credential_vault_exec_uses_contract_terminal_env_without_printing_secret_valu
     fs::create_dir_all(&bin_dir).unwrap();
     let vault_bin = write_fake_credential_vault(&bin_dir);
     let args_file = temp.path().join("credential-vault.args");
-    let contract = temp.path().join("fiscal_provider.contract.yaml");
-    let data = temp.path().join("fiscal_provider.data.yaml");
+    let contract = temp.path().join("fiscal.contract.yaml");
+    let data = temp.path().join("fiscal.data.yaml");
     write_credential_vault_contract(&contract);
 
     let output = forge()
@@ -171,7 +171,7 @@ fn credential_vault_exec_uses_contract_terminal_env_without_printing_secret_valu
             "forum_login",
             "--",
             "node",
-            "download-fiscal_providerlib.mjs",
+            "download-fiscal-sdk.mjs",
         ])
         .assert()
         .success()
@@ -185,9 +185,9 @@ fn credential_vault_exec_uses_contract_terminal_env_without_printing_secret_valu
 
     let args = fs::read_to_string(args_file).unwrap();
     assert!(args.starts_with("exec\n"));
-    assert!(args.contains("FiscalProvider_FORUM_EMAIL=auth.email\n"));
-    assert!(args.contains("FiscalProvider_FORUM_PASSWORD=auth.password\n"));
-    assert!(args.contains("--\nnode\ndownload-fiscal_providerlib.mjs\n"));
+    assert!(args.contains("FISCAL_PORTAL_EMAIL=auth.email\n"));
+    assert!(args.contains("FISCAL_PORTAL_PASSWORD=auth.password\n"));
+    assert!(args.contains("--\nnode\ndownload-fiscal-sdk.mjs\n"));
     assert!(
         !args.contains("super-secret"),
         "Forge should only pass env mappings, never resolved secret values"
@@ -203,8 +203,8 @@ fn mcp_exposes_credential_vault_records_and_safe_describe_call() {
     fs::create_dir_all(&bin_dir).unwrap();
     let vault_bin = write_fake_credential_vault(&bin_dir);
     let args_file = temp.path().join("credential-vault.args");
-    let contract = temp.path().join("fiscal_provider.contract.yaml");
-    let data = temp.path().join("fiscal_provider.data.yaml");
+    let contract = temp.path().join("fiscal.contract.yaml");
+    let data = temp.path().join("fiscal.data.yaml");
     write_credential_vault_contract(&contract);
 
     let tools = forge()
