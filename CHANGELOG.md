@@ -12,6 +12,7 @@
 - Added an ops modifier lane to the assisted-operations snapshot and web console so a separate strategic AI or human can create pending goal/task-node proposals and apply them as live, revisioned Forge workflow mutations while execution continues.
 - Added `forge.outcome_status.v1` to request status/drive and registry summaries so Forge distinguishes support-only artifacts from user-facing final deliverables and blocks completion for user-facing deliverables until final audit evidence exists.
 - Added `visual_workflows` and `forge.ops.design_surface.v1` to the ops snapshot and web console, rendering workflow tasks, subtasks, dependencies and the Forge-owned creative workspace summary for whiteboards, screens, components, documents, design tokens and collaboration events.
+- Added visual workspace POST actions to the ops web console for creating whiteboards/screens/wireframes/flows/components/documents, creating token collections, patching design tokens and recording human+AI collaboration events.
 
 ### Validation
 

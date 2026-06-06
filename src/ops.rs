@@ -6,8 +6,19 @@ use crate::request::{
     complete_ready_task, drive_request, step_request, RequestTaskCompletionInput,
 };
 use crate::storage::ForgeStore;
-use crate::workflow::{update_workflow_goal, update_workflow_task, WorkflowTaskUpdateInput};
-use crate::{graph::TaskStatus, ir::CreativeArtifactKind};
+use crate::{
+    graph::TaskStatus,
+    ir::{
+        ir_schema_version, ComponentSpec, CreativeArtifact, CreativeArtifactKind, DesignToken,
+        DocumentSpec, ScreenSpec, SemanticAlias, SlideDeckSpec, TokenCollection, TokenType,
+        WhiteboardSpec,
+    },
+    workflow::{
+        attach_creative_artifact, patch_workflow_token, record_creative_collaboration_event,
+        set_workflow_token_collection, update_workflow_goal, update_workflow_task,
+        CreativeCollaborationEventRequest, WorkflowTaskUpdateInput,
+    },
+};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -101,6 +112,27 @@ pub struct OpsDesignSurface {
     pub active_presence_count: usize,
     pub comment_count: usize,
     pub patch_event_count: usize,
+    pub artifacts: Vec<OpsCreativeArtifactVisual>,
+    pub tokens: Vec<OpsDesignTokenVisual>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsCreativeArtifactVisual {
+    pub artifact_id: String,
+    pub title: String,
+    pub kind: String,
+    pub updated_at: DateTime<Utc>,
+    pub active_presence_count: usize,
+    pub comment_count: usize,
+    pub patch_event_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsDesignTokenVisual {
+    pub name: String,
+    pub value: String,
+    pub token_type: String,
+    pub group: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -272,6 +304,7 @@ fn summarize_design_surface(workflow: &crate::graph::Workflow) -> OpsDesignSurfa
     let mut active_presence_count = 0;
     let mut comment_count = 0;
     let mut patch_event_count = 0;
+    let mut artifacts = Vec::new();
 
     for artifact in &workflow.creative_artifacts {
         match &artifact.kind {
@@ -285,7 +318,41 @@ fn summarize_design_surface(workflow: &crate::graph::Workflow) -> OpsDesignSurfa
         active_presence_count += collaboration.active_presence_count;
         comment_count += collaboration.comment_count;
         patch_event_count += collaboration.patch_event_count;
+        artifacts.push(OpsCreativeArtifactVisual {
+            artifact_id: artifact.id.clone(),
+            title: artifact.title.clone(),
+            kind: creative_kind_label(&artifact.kind).to_string(),
+            updated_at: artifact.updated_at,
+            active_presence_count: collaboration.active_presence_count,
+            comment_count: collaboration.comment_count,
+            patch_event_count: collaboration.patch_event_count,
+        });
     }
+    artifacts.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then(left.title.cmp(&right.title))
+            .then(left.artifact_id.cmp(&right.artifact_id))
+    });
+
+    let tokens = workflow
+        .token_collection
+        .as_ref()
+        .map(|collection| {
+            let mut tokens = collection
+                .tokens
+                .iter()
+                .map(|token| OpsDesignTokenVisual {
+                    name: token.name.clone(),
+                    value: token.value.clone(),
+                    token_type: token.token_type.as_str().to_string(),
+                    group: token.group.clone(),
+                })
+                .collect::<Vec<_>>();
+            tokens.sort_by(|left, right| left.name.cmp(&right.name));
+            tokens
+        })
+        .unwrap_or_default();
 
     OpsDesignSurface {
         schema_version: "forge.ops.design_surface.v1".to_string(),
@@ -309,6 +376,18 @@ fn summarize_design_surface(workflow: &crate::graph::Workflow) -> OpsDesignSurfa
         active_presence_count,
         comment_count,
         patch_event_count,
+        artifacts,
+        tokens,
+    }
+}
+
+fn creative_kind_label(kind: &CreativeArtifactKind) -> &'static str {
+    match kind {
+        CreativeArtifactKind::Screen => "screen",
+        CreativeArtifactKind::Whiteboard => "whiteboard",
+        CreativeArtifactKind::Document => "document",
+        CreativeArtifactKind::SlideDeck => "slide_deck",
+        CreativeArtifactKind::Component => "component",
     }
 }
 
@@ -532,6 +611,164 @@ pub fn apply_modifier_proposal(
     })
 }
 
+fn build_ops_creative_artifact(kind: &str, title: &str, origin: &str) -> Result<CreativeArtifact> {
+    let title = clean_required(title, "title")?;
+    let normalized = kind.trim().to_ascii_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        "screen" | "page" | "wireframe" | "flow" => Ok(CreativeArtifact::new_screen(
+            &title,
+            ScreenSpec {
+                schema_version: ir_schema_version(),
+                width_px: 1440,
+                height_px: 900,
+                background: "#ffffff".to_string(),
+                breakpoints: Vec::new(),
+                elements: Vec::new(),
+                interactions: Vec::new(),
+            },
+        )),
+        "whiteboard" | "board" | "canvas" => Ok(CreativeArtifact::new_whiteboard(
+            &title,
+            WhiteboardSpec {
+                schema_version: ir_schema_version(),
+                width_px: 1920,
+                height_px: 1080,
+                background: "#f8fafc".to_string(),
+                layers: Vec::new(),
+                sticky_notes: Vec::new(),
+                drawings: Vec::new(),
+                text_blocks: Vec::new(),
+                images: Vec::new(),
+            },
+        )),
+        "document" | "doc" | "page_doc" => Ok(CreativeArtifact::new_document(
+            &title,
+            DocumentSpec {
+                schema_version: ir_schema_version(),
+                title: title.clone(),
+                author: origin.to_string(),
+                front_matter: BTreeMap::new(),
+                sections: Vec::new(),
+            },
+        )),
+        "slide_deck" | "slides" | "deck" => Ok(CreativeArtifact::new_slide_deck(
+            &title,
+            SlideDeckSpec {
+                schema_version: ir_schema_version(),
+                title: title.clone(),
+                theme: "forge-ops".to_string(),
+                slides: Vec::new(),
+            },
+        )),
+        "component" | "component_manifest" => Ok(CreativeArtifact::new_component(
+            &title,
+            ComponentSpec {
+                schema_version: ir_schema_version(),
+                name: title.clone(),
+                description: "Componente do sistema visual Forge Ops".to_string(),
+                props: Vec::new(),
+                variants: Vec::new(),
+                states: Vec::new(),
+                slots: Vec::new(),
+                token_dependencies: Vec::new(),
+                code_template: None,
+            },
+        )),
+        other => bail!(
+            "unknown visual artifact kind: {other}; expected one of: screen, page, wireframe, flow, whiteboard, document, slide_deck, component"
+        ),
+    }
+}
+
+fn build_ops_token_collection(name: &str) -> TokenCollection {
+    let collection_name =
+        clean_optional(Some(name)).unwrap_or_else(|| "Forge Ops Design System".to_string());
+    TokenCollection {
+        schema_version: ir_schema_version(),
+        name: collection_name.clone(),
+        description: format!("Design tokens for {collection_name}"),
+        tokens: vec![
+            ops_design_token(
+                "color.primary",
+                "#1f6feb",
+                TokenType::Color,
+                "Cor principal da interface operacional",
+                "color",
+            ),
+            ops_design_token(
+                "color.surface",
+                "#ffffff",
+                TokenType::Color,
+                "Superfície base de painéis e cards",
+                "color",
+            ),
+            ops_design_token(
+                "color.text",
+                "#18212f",
+                TokenType::Color,
+                "Texto primário de leitura",
+                "color",
+            ),
+            ops_design_token(
+                "spacing.md",
+                "16px",
+                TokenType::Spacing,
+                "Espaçamento médio de layout",
+                "spacing",
+            ),
+            ops_design_token(
+                "radius.card",
+                "8px",
+                TokenType::BorderRadius,
+                "Raio padrão de cards e painéis",
+                "radius",
+            ),
+            ops_design_token(
+                "typography.body",
+                "system-ui",
+                TokenType::FontFamily,
+                "Fonte principal de produto",
+                "typography",
+            ),
+        ],
+        semantic_aliases: vec![
+            SemanticAlias {
+                name: "semantic.brand".to_string(),
+                resolves_to: "color.primary".to_string(),
+                description: format!("Marca operacional de {collection_name}"),
+            },
+            SemanticAlias {
+                name: "semantic.surface".to_string(),
+                resolves_to: "color.surface".to_string(),
+                description: "Superfície padrão da UI".to_string(),
+            },
+            SemanticAlias {
+                name: "semantic.body".to_string(),
+                resolves_to: "color.text".to_string(),
+                description: "Texto padrão da UI".to_string(),
+            },
+        ],
+        modes: Vec::new(),
+    }
+}
+
+fn ops_design_token(
+    name: &str,
+    value: &str,
+    token_type: TokenType,
+    description: &str,
+    group: &str,
+) -> DesignToken {
+    DesignToken {
+        name: name.to_string(),
+        value: value.to_string(),
+        token_type,
+        description: description.to_string(),
+        group: group.to_string(),
+        extensions: BTreeMap::new(),
+    }
+}
+
 pub fn serve_ops_console(store_path: PathBuf, host: &str, port: u16) -> Result<OpsServeReport> {
     let listener = TcpListener::bind((host, port))
         .with_context(|| format!("failed to bind Forge ops server on {host}:{port}"))?;
@@ -659,6 +896,103 @@ fn route_ops_http_request(store: &ForgeStore, request: &str) -> Result<OpsHttpRe
                 },
             )?;
             action_response("update_task", &report)
+        }
+        ("POST", "/api/visual/create-artifact") => {
+            let workflow_id = parsed.required("workflow_id")?;
+            let kind = parsed.required("kind")?;
+            let title = parsed.required("title")?;
+            let origin = parsed
+                .params
+                .get("origin")
+                .map(String::as_str)
+                .unwrap_or("ops-web");
+            let artifact = build_ops_creative_artifact(kind, title, origin)?;
+            let report = attach_creative_artifact(store, workflow_id, artifact, origin)?;
+            action_response("visual_create_artifact", &report)
+        }
+        ("POST", "/api/visual/set-tokens") => {
+            let workflow_id = parsed.required("workflow_id")?;
+            let name = parsed
+                .params
+                .get("name")
+                .map(String::as_str)
+                .unwrap_or("Forge Ops Design System");
+            let origin = parsed
+                .params
+                .get("origin")
+                .map(String::as_str)
+                .unwrap_or("ops-web");
+            let report = set_workflow_token_collection(
+                store,
+                workflow_id,
+                build_ops_token_collection(name),
+                origin,
+            )?;
+            action_response("visual_set_tokens", &report)
+        }
+        ("POST", "/api/visual/patch-token") => {
+            let workflow_id = parsed.required("workflow_id")?;
+            let token_name = parsed.required("token_name")?;
+            let value = parsed.required("value")?;
+            let origin = parsed
+                .params
+                .get("origin")
+                .map(String::as_str)
+                .unwrap_or("ops-web");
+            let report = patch_workflow_token(store, workflow_id, token_name, value, origin)?;
+            action_response("visual_patch_token", &report)
+        }
+        ("POST", "/api/visual/collaboration-event") => {
+            let workflow_id = parsed.required("workflow_id")?;
+            let artifact_id = parsed.required("artifact_id")?;
+            let event_kind = parsed
+                .params
+                .get("event_kind")
+                .or_else(|| parsed.params.get("kind"))
+                .map(String::as_str)
+                .unwrap_or("comment");
+            let actor = parsed
+                .params
+                .get("actor")
+                .map(String::as_str)
+                .unwrap_or("human");
+            let summary = parsed.required("summary")?;
+            let target = parsed
+                .params
+                .get("target")
+                .map(String::as_str)
+                .unwrap_or("canvas");
+            let selections = parsed
+                .params
+                .get("selection")
+                .map(|selection| {
+                    selection
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let origin = parsed
+                .params
+                .get("origin")
+                .map(String::as_str)
+                .unwrap_or("ops-web");
+            let report = record_creative_collaboration_event(
+                store,
+                CreativeCollaborationEventRequest {
+                    workflow_id: workflow_id.to_string(),
+                    artifact_id: artifact_id.to_string(),
+                    event_kind: event_kind.to_string(),
+                    actor: actor.to_string(),
+                    summary: summary.to_string(),
+                    target: target.to_string(),
+                    selections,
+                    origin: origin.to_string(),
+                },
+            )?;
+            action_response("visual_collaboration_event", &report)
         }
         ("POST", "/api/modifier/propose-goal") => {
             let workflow_id = parsed.required("workflow_id")?;
@@ -790,6 +1124,33 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
     let mut visual_sections = String::new();
     for workflow in &snapshot.visual_workflows {
         let design = &workflow.design_surface;
+        let mut artifact_items = String::new();
+        for artifact in &design.artifacts {
+            artifact_items.push_str(&format!(
+                "<li><code>{}</code> <strong>{}</strong> <span class=\"badge\">{}</span> <small>{} presença, {} comentários, {} patches</small></li>",
+                escape_html(&artifact.artifact_id),
+                escape_html(&artifact.title),
+                escape_html(&artifact.kind),
+                artifact.active_presence_count,
+                artifact.comment_count,
+                artifact.patch_event_count,
+            ));
+        }
+        if artifact_items.is_empty() {
+            artifact_items.push_str("<li><small>Nenhum artefato visual criado.</small></li>");
+        }
+        let mut token_items = String::new();
+        for token in &design.tokens {
+            token_items.push_str(&format!(
+                "<li><code>{}</code> = <strong>{}</strong> <span class=\"badge\">{}</span></li>",
+                escape_html(&token.name),
+                escape_html(&token.value),
+                escape_html(&token.token_type),
+            ));
+        }
+        if token_items.is_empty() {
+            token_items.push_str("<li><small>Nenhuma coleção de tokens criada.</small></li>");
+        }
         let mut task_cards = String::new();
         for task in &workflow.tasks {
             let dependency_text = if task.dependencies.is_empty() {
@@ -821,7 +1182,7 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
             ));
         }
         visual_sections.push_str(&format!(
-            "<section class=\"workflow-visual\"><h3><code>{}</code></h3><p>{}</p><div class=\"design-strip\"><span>whiteboards: {}</span><span>telas: {}</span><span>componentes: {}</span><span>docs: {}</span><span>tokens: {}</span><span>colaboração: {} comentários</span></div><div class=\"task-board\">{}</div></section>",
+            r##"<section class="workflow-visual"><h3><code>{}</code></h3><p>{}</p><div class="design-strip"><span>whiteboards: {}</span><span>telas/wireframes/fluxos: {}</span><span>componentes: {}</span><span>docs: {}</span><span>tokens: {}</span><span>colaboração: {} comentários</span></div><div class="visual-panels"><div><h4>Artefatos visuais</h4><ul class="compact-list">{}</ul></div><div><h4>Tokens</h4><ul class="compact-list">{}</ul></div></div><div class="visual-actions"><form method="post" action="/api/visual/create-artifact"><input type="hidden" name="workflow_id" value="{}"><label>Criar artefato visual</label><select name="kind"><option value="whiteboard">Whiteboard</option><option value="screen">Tela</option><option value="wireframe">Wireframe</option><option value="flow">Fluxo</option><option value="component">Componente</option><option value="document">Documento</option><option value="slide_deck">Slides</option></select><input name="title" placeholder="Título do artefato"><input name="origin" value="ops-web"><button type="submit">Criar artefato visual</button></form><form method="post" action="/api/visual/set-tokens"><input type="hidden" name="workflow_id" value="{}"><label>Sistema de design</label><input name="name" value="Forge Ops Design System"><input name="origin" value="ops-web"><button type="submit">Criar tokens base</button></form><form method="post" action="/api/visual/patch-token"><input type="hidden" name="workflow_id" value="{}"><label>Atualizar token</label><input name="token_name" placeholder="color.primary"><input name="value" placeholder="#1f6feb"><input name="origin" value="ops-web"><button type="submit">Atualizar token</button></form><form method="post" action="/api/visual/collaboration-event"><input type="hidden" name="workflow_id" value="{}"><label>Registrar colaboração</label><input name="artifact_id" placeholder="artifact_id"><select name="event_kind"><option value="comment">Comentário</option><option value="presence">Presença</option><option value="patch">Patch</option><option value="conflict">Conflito</option><option value="rollback">Rollback</option></select><input name="actor" value="human"><input name="target" value="canvas"><input name="selection" placeholder="seleção opcional"><textarea name="summary" placeholder="Comentário, instrução de patch ou observação"></textarea><input name="origin" value="ops-web"><button type="submit">Registrar colaboração</button></form></div><div class="task-board">{}</div></section>"##,
             escape_html(&workflow.workflow_id),
             escape_html(&truncate(&workflow.goal, 180)),
             design.whiteboard_count,
@@ -830,6 +1191,12 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
             design.document_count + design.slide_deck_count,
             design.token_count,
             design.comment_count,
+            artifact_items,
+            token_items,
+            escape_html(&workflow.workflow_id),
+            escape_html(&workflow.workflow_id),
+            escape_html(&workflow.workflow_id),
+            escape_html(&workflow.workflow_id),
             task_cards,
         ));
     }
@@ -875,13 +1242,19 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
     th {{ background: #eef2f7; }}
     code {{ font-size: 12px; }}
     form {{ display: grid; gap: 8px; max-width: 760px; margin: 12px 0; }}
-    input, textarea, button {{ font: inherit; padding: 8px 10px; border: 1px solid #cbd3df; border-radius: 6px; }}
+    input, textarea, select, button {{ font: inherit; padding: 8px 10px; border: 1px solid #cbd3df; border-radius: 6px; }}
     button {{ width: fit-content; background: #1f6feb; color: white; border-color: #1f6feb; cursor: pointer; }}
+    label {{ font-size: 12px; font-weight: 650; color: #344054; }}
     .summary {{ display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0; }}
     .pill {{ background: white; border: 1px solid #d9deea; border-radius: 999px; padding: 8px 12px; }}
     .section-note {{ max-width: 900px; color: #4b5563; }}
     .workflow-visual {{ margin: 16px 0 24px; padding: 16px; background: white; border: 1px solid #d9deea; border-radius: 8px; }}
     .workflow-visual h3 {{ margin: 0 0 8px; font-size: 15px; }}
+    .workflow-visual h4 {{ margin: 0 0 8px; font-size: 13px; }}
+    .visual-panels, .visual-actions {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 12px; }}
+    .visual-panels > div, .visual-actions form {{ border: 1px solid #e0e5ef; border-radius: 8px; padding: 12px; background: #fbfcfe; }}
+    .compact-list {{ margin: 0; padding-left: 18px; }}
+    .compact-list li {{ margin: 4px 0; }}
     .task-board {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 12px; }}
     .task-card {{ border: 1px solid #d9deea; border-radius: 8px; padding: 12px; background: #fbfcfe; }}
     .task-card p {{ margin: 8px 0; color: #4b5563; }}
@@ -1135,7 +1508,7 @@ fn truncate(input: &str, max_chars: usize) -> String {
 fn clean_required(input: &str, field: &str) -> Result<String> {
     let value = input.trim();
     if value.is_empty() {
-        bail!("missing required modifier proposal field `{field}`");
+        bail!("missing required field `{field}`");
     }
     Ok(value.to_string())
 }
@@ -1189,6 +1562,34 @@ fn ops_actions() -> Vec<OpsActionSpec> {
             "POST",
             "/api/workflow/update-task",
             "Mutate a workflow task/node title, goal or expected output while processing is live.",
+            true,
+        ),
+        action(
+            "visual_create_artifact",
+            "POST",
+            "/api/visual/create-artifact",
+            "Create a Forge-owned visual artifact such as a whiteboard, screen, wireframe, flow, component, document or slide deck.",
+            true,
+        ),
+        action(
+            "visual_set_tokens",
+            "POST",
+            "/api/visual/set-tokens",
+            "Create or replace the workflow design-token collection from the visual ops console.",
+            true,
+        ),
+        action(
+            "visual_patch_token",
+            "POST",
+            "/api/visual/patch-token",
+            "Patch one workflow design token and persist a bounded token change revision.",
+            true,
+        ),
+        action(
+            "visual_collaboration_event",
+            "POST",
+            "/api/visual/collaboration-event",
+            "Record human or AI presence, comments, patches, conflicts or rollbacks on a visual artifact.",
             true,
         ),
         action(

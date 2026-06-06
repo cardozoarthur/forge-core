@@ -16724,61 +16724,66 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
     let started_json: Value = serde_json::from_slice(&started).unwrap();
     let workflow_id = started_json["workflow_id"].as_str().unwrap();
 
-    forge()
-        .args([
-            "--store",
-            store.to_str().unwrap(),
-            "workflow",
-            "attach-creative",
-            "--workflow",
-            workflow_id,
-            "--title",
-            "Mapa colaborativo AI Humano",
-            "--kind",
-            "whiteboard",
-            "--origin",
-            "codex",
-            "--output",
-            "json",
-        ])
-        .assert()
-        .success();
-    forge()
-        .args([
-            "--store",
-            store.to_str().unwrap(),
-            "workflow",
-            "attach-creative",
-            "--workflow",
-            workflow_id,
-            "--title",
-            "Componente de tarefa visual",
-            "--kind",
-            "component",
-            "--origin",
-            "codex",
-            "--output",
-            "json",
-        ])
-        .assert()
-        .success();
-    forge()
-        .args([
-            "--store",
-            store.to_str().unwrap(),
-            "workflow",
-            "set-tokens",
-            "--workflow",
-            workflow_id,
-            "--name",
-            "Forge Ops Visual Tokens",
-            "--origin",
-            "codex",
-            "--output",
-            "json",
-        ])
-        .assert()
-        .success();
+    let store_handle = forge_core::storage::ForgeStore::open(&store).unwrap();
+    let create_whiteboard_request = format!(
+        "POST /api/visual/create-artifact HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nworkflow_id={workflow_id}&kind=whiteboard&title=Mapa+colaborativo+AI+Humano&origin=ops-web"
+    );
+    let create_whiteboard_response =
+        forge_core::ops::handle_ops_http_request(&store_handle, &create_whiteboard_request);
+    assert_eq!(create_whiteboard_response.status_code, 200);
+    let create_whiteboard_json: Value =
+        serde_json::from_slice(&create_whiteboard_response.body).unwrap();
+    assert_eq!(create_whiteboard_json["action"], "visual_create_artifact");
+    assert_eq!(
+        create_whiteboard_json["result"]["status"],
+        "creative_artifact_attached"
+    );
+    let whiteboard_id = create_whiteboard_json["result"]["artifact"]["id"]
+        .as_str()
+        .unwrap();
+
+    let create_component_request = format!(
+        "POST /api/visual/create-artifact HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nworkflow_id={workflow_id}&kind=component&title=Componente+de+tarefa+visual&origin=ops-web"
+    );
+    let create_component_response =
+        forge_core::ops::handle_ops_http_request(&store_handle, &create_component_request);
+    assert_eq!(create_component_response.status_code, 200);
+    let create_component_json: Value =
+        serde_json::from_slice(&create_component_response.body).unwrap();
+    assert_eq!(create_component_json["action"], "visual_create_artifact");
+
+    let set_tokens_request = format!(
+        "POST /api/visual/set-tokens HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nworkflow_id={workflow_id}&name=Forge+Ops+Visual+Tokens&origin=ops-web"
+    );
+    let set_tokens_response =
+        forge_core::ops::handle_ops_http_request(&store_handle, &set_tokens_request);
+    assert_eq!(set_tokens_response.status_code, 200);
+    let set_tokens_json: Value = serde_json::from_slice(&set_tokens_response.body).unwrap();
+    assert_eq!(set_tokens_json["action"], "visual_set_tokens");
+    assert_eq!(set_tokens_json["result"]["status"], "token_collection_set");
+
+    let collaboration_request = format!(
+        "POST /api/visual/collaboration-event HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nworkflow_id={workflow_id}&artifact_id={whiteboard_id}&event_kind=comment&actor=human%3Aarthur&target=canvas&summary=Comentario+humano+no+whiteboard&origin=ops-web"
+    );
+    let collaboration_response =
+        forge_core::ops::handle_ops_http_request(&store_handle, &collaboration_request);
+    assert_eq!(collaboration_response.status_code, 200);
+    let collaboration_json: Value = serde_json::from_slice(&collaboration_response.body).unwrap();
+    assert_eq!(collaboration_json["action"], "visual_collaboration_event");
+    assert_eq!(
+        collaboration_json["result"]["status"],
+        "creative_collaboration_event_recorded"
+    );
+
+    let patch_token_request = format!(
+        "POST /api/visual/patch-token HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nworkflow_id={workflow_id}&token_name=color.primary&value=%230F172A&origin=ops-web"
+    );
+    let patch_token_response =
+        forge_core::ops::handle_ops_http_request(&store_handle, &patch_token_request);
+    assert_eq!(patch_token_response.status_code, 200);
+    let patch_token_json: Value = serde_json::from_slice(&patch_token_response.body).unwrap();
+    assert_eq!(patch_token_json["action"], "visual_patch_token");
+    assert_eq!(patch_token_json["result"]["status"], "token_patched");
 
     let snapshot = forge()
         .args([
@@ -16819,6 +16824,18 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
         .unwrap()
         .iter()
         .any(|action| action["id"] == "modifier_apply" && action["mutates_workflow"] == true));
+    assert!(snapshot_json["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |action| action["id"] == "visual_create_artifact" && action["mutates_workflow"] == true
+        ));
+    assert!(snapshot_json["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["id"] == "visual_patch_token" && action["mutates_workflow"] == true));
     assert_eq!(
         snapshot_json["registry"]["summary"]["outcome"]["schema_version"],
         "forge.outcome_registry_summary.v1"
@@ -16840,14 +16857,26 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
         visual_workflow["design_surface"]["token_collection_present"],
         true
     );
+    assert_eq!(visual_workflow["design_surface"]["comment_count"], 1);
     assert!(
         visual_workflow["design_surface"]["token_count"]
             .as_u64()
             .unwrap()
             > 0
     );
+    assert!(visual_workflow["design_surface"]["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|artifact| artifact["artifact_id"] == whiteboard_id
+            && artifact["kind"] == "whiteboard"
+            && artifact["comment_count"] == 1));
+    assert!(visual_workflow["design_surface"]["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|token| token["name"] == "color.primary" && token["value"] == "#0F172A"));
 
-    let store_handle = forge_core::storage::ForgeStore::open(&store).unwrap();
     let html_response = forge_core::ops::handle_ops_http_request(
         &store_handle,
         "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -16860,6 +16889,9 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
     assert!(html.contains("Lane modificadora"));
     assert!(html.contains("Visualização operacional"));
     assert!(html.contains("whiteboards: 1"));
+    assert!(html.contains("Criar artefato visual"));
+    assert!(html.contains("Registrar colaboração"));
+    assert!(html.contains("Atualizar token"));
 
     let proposed_goal = "Objetivo proposto pela lane modificadora";
     let propose_goal_request = format!(
