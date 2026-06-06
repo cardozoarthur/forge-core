@@ -7506,6 +7506,73 @@ fn improve_candidates_rank_live_workflows_with_logs_and_parallel_opportunities()
 }
 
 #[test]
+fn improve_candidates_do_not_count_final_audit_as_avoidable_ai_cost() {
+    use forge_core::graph::{self, ExecutorKind};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Deliver final workflow result with verified user-facing evidence",
+    ));
+    workflow.status = "running".to_string();
+    workflow.tasks = vec![
+        graph::task(
+            "task-extract",
+            "Extract requirements",
+            &[],
+            &[],
+            vec![],
+            "requirements JSON",
+            (ExecutorKind::Ai, 0.02),
+        ),
+        graph::task(
+            "task-audit",
+            "Audit final completion criteria",
+            &["task-extract"],
+            &[],
+            vec![],
+            "final_completion_audit JSON proving user-facing result",
+            (ExecutorKind::Ai, 0.35),
+        ),
+    ];
+    store.save_workflow(&workflow).unwrap();
+    drop(store);
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let top = &report["candidates"][0];
+    assert_eq!(top["workflow_id"], workflow.id);
+    assert_eq!(
+        top["cost_efficiency"]["repetitive_or_deterministic_ai_task_count"],
+        1
+    );
+    assert_eq!(
+        top["cost_efficiency"]["repetitive_or_deterministic_ai_task_ids"],
+        serde_json::json!(["task-extract"])
+    );
+    assert_eq!(top["cost_efficiency"]["avoidable_estimated_cost_usd"], 0.02);
+    assert_eq!(
+        top["cost_efficiency"]["avoidable_estimated_cost_average_usd"],
+        0.02
+    );
+}
+
+#[test]
 fn improve_candidates_suggest_final_package_for_completed_workflow_with_legacy_run() {
     use forge_core::graph::{self, ExecutorKind, TaskStatus};
     use forge_core::request::{create_run_record, save_run_record};

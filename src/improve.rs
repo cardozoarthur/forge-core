@@ -591,6 +591,10 @@ fn build_cost_efficiency_report(
 }
 
 fn looks_repetitive_or_deterministic_ai_task(task: &crate::graph::AtomicTask) -> bool {
+    if looks_like_final_completion_audit_task(task) && !task.execution_policy.deterministic {
+        return false;
+    }
+
     let text = format!("{} {} {}", task.title, task.goal, task.expected_output).to_lowercase();
     let deterministic_keywords = [
         "repeated",
