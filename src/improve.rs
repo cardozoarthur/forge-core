@@ -110,6 +110,9 @@ pub struct CostEfficiencyReport {
     pub observed_ai_cost_total_usd: Option<f64>,
     pub observed_ai_cost_average_usd: Option<f64>,
     pub avoidable_estimated_cost_usd: f64,
+    pub avoidable_estimated_cost_average_usd: f64,
+    pub avoidable_observed_cost_total_usd: Option<f64>,
+    pub avoidable_observed_cost_average_usd: Option<f64>,
     pub recommendation: String,
 }
 
@@ -353,9 +356,9 @@ fn build_improvement_candidate(
                 .min(5) as i64
                 * 5),
             format!(
-                "{} AI task(s) look repetitive or deterministic; average estimated AI cost is ${:.6} and avoidable estimated cost is ${:.6}.",
+                "{} AI task(s) look repetitive or deterministic; average avoidable estimated AI cost per execution is ${:.6} and avoidable estimated cost is ${:.6}.",
                 cost_efficiency.repetitive_or_deterministic_ai_task_count,
-                cost_efficiency.estimated_ai_cost_average_usd,
+                cost_efficiency.avoidable_estimated_cost_average_usd,
                 cost_efficiency.avoidable_estimated_cost_usd
             ),
         );
@@ -417,6 +420,8 @@ fn build_improvement_candidate(
         return Ok(None);
     }
 
+    let suggested_commands = suggested_commands(workflow, runs, &reasons, &parallelization);
+
     Ok(Some(OrchestratorImprovementCandidate {
         workflow_id: workflow.id.clone(),
         goal: workflow.goal.clone(),
@@ -431,7 +436,7 @@ fn build_improvement_candidate(
         outcome_status,
         active_runs: run_evidence,
         latest_events,
-        suggested_commands: suggested_commands(workflow, runs),
+        suggested_commands,
     }))
 }
 
@@ -530,6 +535,8 @@ fn build_cost_efficiency_report(
         .iter()
         .map(|task| task.cost.estimated_cost_usd)
         .sum::<f64>();
+    let avoidable_estimated_cost_average_usd =
+        average_cost(avoidable_estimated_cost_usd, repetitive_ai_tasks.len());
     let observed_costs = events
         .iter()
         .filter_map(observed_ai_cost_from_event)
@@ -538,6 +545,21 @@ fn build_cost_efficiency_report(
         (!observed_costs.is_empty()).then(|| observed_costs.iter().sum());
     let observed_ai_cost_average_usd =
         observed_ai_cost_total_usd.map(|total| average_cost(total, observed_costs.len()));
+    let repetitive_task_ids = repetitive_ai_tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let avoidable_observed_costs = events
+        .iter()
+        .filter(|event| {
+            event_task_id(event).is_some_and(|task_id| repetitive_task_ids.contains(task_id))
+        })
+        .filter_map(observed_ai_cost_from_event)
+        .collect::<Vec<_>>();
+    let avoidable_observed_cost_total_usd =
+        (!avoidable_observed_costs.is_empty()).then(|| avoidable_observed_costs.iter().sum());
+    let avoidable_observed_cost_average_usd = avoidable_observed_cost_total_usd
+        .map(|total| average_cost(total, avoidable_observed_costs.len()));
     let recommendation = if repetitive_ai_tasks.is_empty() {
         "keep_current_executor_mix".to_string()
     } else {
@@ -561,6 +583,9 @@ fn build_cost_efficiency_report(
         observed_ai_cost_total_usd,
         observed_ai_cost_average_usd,
         avoidable_estimated_cost_usd,
+        avoidable_estimated_cost_average_usd,
+        avoidable_observed_cost_total_usd,
+        avoidable_observed_cost_average_usd,
         recommendation,
     }
 }
@@ -612,6 +637,10 @@ fn observed_ai_cost_from_event(event: &crate::storage::StoreEvent) -> Option<f64
         })
         .and_then(|value| value.as_f64())
         .filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+fn event_task_id(event: &crate::storage::StoreEvent) -> Option<&str> {
+    event.data.get("task_id").and_then(|value| value.as_str())
 }
 
 fn average_cost(total: f64, count: usize) -> f64 {
@@ -722,7 +751,12 @@ fn recommended_action(reasons: &[ImprovementCandidateReason]) -> String {
     .to_string()
 }
 
-fn suggested_commands(workflow: &Workflow, runs: &[RunRecord]) -> Vec<Vec<String>> {
+fn suggested_commands(
+    workflow: &Workflow,
+    runs: &[RunRecord],
+    reasons: &[ImprovementCandidateReason],
+    parallelization: &ParallelizationOpportunityReport,
+) -> Vec<Vec<String>> {
     let mut commands = Vec::new();
     for run in runs {
         let activity = build_run_activity(run);
@@ -748,6 +782,42 @@ fn suggested_commands(workflow: &Workflow, runs: &[RunRecord]) -> Vec<Vec<String
             ]);
         }
     }
+    if has_reason(reasons, "completed_without_final_package") {
+        if let Some(run) = latest_run_with_status(runs, "completed").or_else(|| latest_run(runs)) {
+            commands.push(vec![
+                "forge".to_string(),
+                "request".to_string(),
+                "final-package".to_string(),
+                "--run".to_string(),
+                run.run_id.clone(),
+                "--origin".to_string(),
+                "forge_cli".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]);
+        }
+    }
+    if parallelization.ready_parallel_task_count > 0 || has_reason(reasons, "rework_loop_signal") {
+        if let Some(run) = latest_driveable_run(runs) {
+            commands.push(vec![
+                "forge".to_string(),
+                "request".to_string(),
+                "drive".to_string(),
+                "--run".to_string(),
+                run.run_id.clone(),
+                "--executor".to_string(),
+                run.active_executor
+                    .clone()
+                    .unwrap_or_else(|| "codex".to_string()),
+                "--ttl-seconds".to_string(),
+                "300".to_string(),
+                "--origin".to_string(),
+                "forge_cli".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]);
+        }
+    }
     commands.push(vec![
         "forge".to_string(),
         "improve".to_string(),
@@ -757,6 +827,32 @@ fn suggested_commands(workflow: &Workflow, runs: &[RunRecord]) -> Vec<Vec<String
         "json".to_string(),
     ]);
     commands
+}
+
+fn has_reason(reasons: &[ImprovementCandidateReason], code: &str) -> bool {
+    reasons.iter().any(|reason| reason.code == code)
+}
+
+fn latest_run_with_status<'a>(runs: &'a [RunRecord], status: &str) -> Option<&'a RunRecord> {
+    runs.iter()
+        .filter(|run| run.status == status)
+        .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
+}
+
+fn latest_run(runs: &[RunRecord]) -> Option<&RunRecord> {
+    runs.iter()
+        .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
+}
+
+fn latest_driveable_run(runs: &[RunRecord]) -> Option<&RunRecord> {
+    runs.iter()
+        .filter(|run| {
+            matches!(
+                run.status.as_str(),
+                "planned" | "accepted" | "resumed" | "running"
+            )
+        })
+        .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
 }
 
 pub fn generate_improvement(

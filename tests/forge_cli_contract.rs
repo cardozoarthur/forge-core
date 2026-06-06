@@ -7461,7 +7461,15 @@ fn improve_candidates_rank_live_workflows_with_logs_and_parallel_opportunities()
         5.0 / 3.0
     );
     assert_eq!(top["cost_efficiency"]["avoidable_estimated_cost_usd"], 4.0);
+    assert_eq!(
+        top["cost_efficiency"]["avoidable_estimated_cost_average_usd"],
+        2.0
+    );
     assert_eq!(top["cost_efficiency"]["observed_ai_cost_average_usd"], 0.42);
+    assert_eq!(
+        top["cost_efficiency"]["avoidable_observed_cost_average_usd"],
+        0.42
+    );
     assert!(top["reasons"]
         .as_array()
         .unwrap()
@@ -7495,6 +7503,78 @@ fn improve_candidates_rank_live_workflows_with_logs_and_parallel_opportunities()
         mcp_report["result"]["candidates"][0]["workflow_id"],
         workflow.id
     );
+}
+
+#[test]
+fn improve_candidates_suggest_final_package_for_completed_workflow_with_legacy_run() {
+    use forge_core::graph::{self, ExecutorKind, TaskStatus};
+    use forge_core::request::{create_run_record, save_run_record};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Deliver a partner-ready demo package with final evidence",
+    ));
+    workflow.status = "completed".to_string();
+    workflow.tasks = vec![graph::task(
+        "task-demo",
+        "Build demo package",
+        &[],
+        &[],
+        vec![],
+        "partner-ready demo package",
+        (ExecutorKind::Ai, 1.0),
+    )];
+    workflow.tasks[0].status = TaskStatus::Completed;
+    store.save_workflow(&workflow).unwrap();
+
+    let mut run = create_run_record(&workflow, "codex", "cancelled");
+    run.status = "cancelled".to_string();
+    save_run_record(&store, &run).unwrap();
+    drop(store);
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let top = &report["candidates"][0];
+    assert_eq!(top["workflow_id"], workflow.id);
+    assert!(top["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "completed_without_final_package"));
+    assert!(top["suggested_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| {
+            command.as_array().unwrap()
+                == &vec![
+                    Value::String("forge".to_string()),
+                    Value::String("request".to_string()),
+                    Value::String("final-package".to_string()),
+                    Value::String("--run".to_string()),
+                    Value::String(run.run_id.clone()),
+                    Value::String("--origin".to_string()),
+                    Value::String("forge_cli".to_string()),
+                    Value::String("--output".to_string()),
+                    Value::String("json".to_string()),
+                ]
+        }));
 }
 
 #[test]
