@@ -25,7 +25,7 @@ use forge_core::executor::{
 };
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff;
-use forge_core::improve::generate_improvement;
+use forge_core::improve::{generate_improvement, rank_improvement_candidates};
 use forge_core::inspection::inspect_workflow_with_focus;
 use forge_core::intent::parse_intent;
 use forge_core::interaction::{
@@ -158,8 +158,10 @@ enum Commands {
         output: OutputFormat,
     },
     Improve {
+        #[command(subcommand)]
+        command: Option<ImproveCommands>,
         #[arg(long)]
-        workflow: String,
+        workflow: Option<String>,
         #[arg(long)]
         target_version: Option<String>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -1083,6 +1085,16 @@ enum McpCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum ImproveCommands {
+    Candidates {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum InteractiveCommands {
     Home {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -1537,15 +1549,30 @@ fn run() -> Result<i32> {
             Ok(exit_code)
         }
         Commands::Improve {
+            command,
             workflow,
             target_version,
             output,
         } => {
             let store = ForgeStore::open(cli.store)?;
-            let workflow = store.load_workflow(&workflow)?;
-            let proposal = generate_improvement(&store, &workflow, target_version)?;
-            print_response(output, &proposal)?;
-            Ok(0)
+            match command {
+                Some(ImproveCommands::Candidates { limit, output }) => {
+                    let report = rank_improvement_candidates(&store, limit)?;
+                    print_response(output, &report)?;
+                    Ok(0)
+                }
+                None => {
+                    let Some(workflow) = workflow else {
+                        anyhow::bail!(
+                            "`forge improve` requires --workflow or a subcommand such as `candidates`"
+                        );
+                    };
+                    let workflow = store.load_workflow(&workflow)?;
+                    let proposal = generate_improvement(&store, &workflow, target_version)?;
+                    print_response(output, &proposal)?;
+                    Ok(0)
+                }
+            }
         }
         Commands::Artifacts { workflow, output } => {
             let store = ForgeStore::open(cli.store)?;

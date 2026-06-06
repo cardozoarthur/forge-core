@@ -7344,6 +7344,265 @@ fn improve_creates_controlled_experiment_and_never_promotes_without_validation()
 }
 
 #[test]
+fn improve_candidates_rank_live_workflows_with_logs_and_parallel_opportunities() {
+    use chrono::{Duration, Utc};
+    use forge_core::graph::{self, ExecutorKind};
+    use forge_core::request::{create_run_record, save_run_record};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Deliver a partner demo with independent backend and frontend tracks",
+    ));
+    workflow.status = "running".to_string();
+    workflow.tasks = vec![
+        graph::task(
+            "task-api",
+            "Calculate daily cost report",
+            &[],
+            &[],
+            vec![],
+            "deterministic cost JSON",
+            (ExecutorKind::Ai, 2.0),
+        ),
+        graph::task(
+            "task-ui",
+            "Calculate weekly cost report",
+            &[],
+            &[],
+            vec![],
+            "deterministic cost JSON",
+            (ExecutorKind::Ai, 2.0),
+        ),
+        graph::task(
+            "task-demo",
+            "Assemble partner demo",
+            &["task-api", "task-ui"],
+            &[],
+            vec![],
+            "partner-ready demo package",
+            (ExecutorKind::Ai, 1.0),
+        ),
+    ];
+    store.save_workflow(&workflow).unwrap();
+
+    let mut run = create_run_record(&workflow, "codex", "running");
+    run.active_executor = Some("codex".to_string());
+    run.progress_summary = Some("executor has not refreshed logs".to_string());
+    run.last_heartbeat_at = Some(Utc::now() - Duration::seconds(120));
+    run.heartbeat_expires_at = Some(Utc::now() - Duration::seconds(60));
+    run.heartbeat_ttl_seconds = Some(30);
+    save_run_record(&store, &run).unwrap();
+    store
+        .record_event(
+            &workflow.id,
+            "executor_response_promoted",
+            &serde_json::json!({
+                "run_id": run.run_id,
+                "task_id": "task-api",
+                "response_status": "needs_retry",
+                "summary": "cost report output needs retry",
+                "cost": {
+                    "estimated_usd": 0.42,
+                    "tokens_in": 1400,
+                    "tokens_out": 220
+                }
+            }),
+        )
+        .unwrap();
+    drop(store);
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        report["schema_version"],
+        "forge.orchestrator_improvement_candidates.v1"
+    );
+    let candidates = report["candidates"].as_array().unwrap();
+    assert!(!candidates.is_empty());
+    let top = &candidates[0];
+    assert_eq!(top["workflow_id"], workflow.id);
+    assert!(top["score"].as_i64().unwrap() >= 100);
+    assert_eq!(
+        top["parallelization"]["ready_parallel_task_count"]
+            .as_u64()
+            .unwrap(),
+        2
+    );
+    assert!(top["reasons"].as_array().unwrap().iter().any(|reason| {
+        reason["code"] == "stale_running_run" && reason["severity"] == "critical"
+    }));
+    assert!(top["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| { reason["code"] == "parallelization_opportunity" }));
+    assert_eq!(
+        top["cost_efficiency"]["repetitive_or_deterministic_ai_task_count"],
+        2
+    );
+    assert_eq!(
+        top["cost_efficiency"]["estimated_ai_cost_average_usd"],
+        5.0 / 3.0
+    );
+    assert_eq!(top["cost_efficiency"]["avoidable_estimated_cost_usd"], 4.0);
+    assert_eq!(top["cost_efficiency"]["observed_ai_cost_average_usd"], 0.42);
+    assert!(top["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| { reason["code"] == "avoidable_ai_cost" }));
+
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.improve.candidates",
+            "--input",
+            r#"{"limit":1}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_report: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp_report["status"], "ok");
+    assert_eq!(
+        mcp_report["result"]["schema_version"],
+        "forge.orchestrator_improvement_candidates.v1"
+    );
+    assert_eq!(
+        mcp_report["result"]["candidates"][0]["workflow_id"],
+        workflow.id
+    );
+}
+
+#[test]
+fn request_drive_surfaces_all_ready_parallel_handoffs() {
+    use forge_core::graph::{self, ExecutorKind};
+    use forge_core::request::{create_run_record, save_run_record};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Ship independent implementation tracks then merge the result",
+    ));
+    workflow.status = "running".to_string();
+    workflow.tasks = vec![
+        graph::task(
+            "task-api",
+            "Build API track",
+            &[],
+            &[],
+            vec![],
+            "API artifact",
+            (ExecutorKind::Ai, 1.0),
+        ),
+        graph::task(
+            "task-ui",
+            "Build UI track",
+            &[],
+            &[],
+            vec![],
+            "UI artifact",
+            (ExecutorKind::Ai, 1.0),
+        ),
+        graph::task(
+            "task-merge",
+            "Merge tracks",
+            &["task-api", "task-ui"],
+            &[],
+            vec![],
+            "merged result",
+            (ExecutorKind::Ai, 1.0),
+        ),
+    ];
+    store.save_workflow(&workflow).unwrap();
+    let run = create_run_record(&workflow, "codex", "running");
+    save_run_record(&store, &run).unwrap();
+    drop(store);
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "request",
+            "drive",
+            "--run",
+            &run.run_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "300",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let drive: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(drive["status"], "ready_for_handoff");
+    assert_eq!(drive["action"], "start_parallel_handoffs");
+    assert_eq!(drive["parallel_handoff_tasks"].as_array().unwrap().len(), 2);
+    assert_eq!(drive["parallel_next_commands"].as_array().unwrap().len(), 2);
+    assert!(drive["reason"].as_str().unwrap().contains("parallel"));
+
+    let completed_second = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "request",
+            "complete-task",
+            "--run",
+            &run.run_id,
+            "--task",
+            "task-ui",
+            "--executor",
+            "codex",
+            "--summary",
+            "UI track finished by a parallel executor.",
+            "--evidence-command",
+            "true",
+            "--evidence-summary",
+            "parallel task evidence passed",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let completed_second_json: Value = serde_json::from_slice(&completed_second).unwrap();
+    assert_eq!(completed_second_json["status"], "completed");
+    assert_eq!(completed_second_json["task_id"], "task-ui");
+}
+
+#[test]
 fn planned_tasks_include_scrum_safe_style_operational_metadata() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -7659,6 +7918,8 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
     assert!(skill.contains("forge.workflow.attach_artifact"));
     assert!(skill.contains("forge.context.request"));
     assert!(skill.contains("forge.task.handoff"));
+    assert!(skill.contains("forge improve candidates"));
+    assert!(skill.contains("forge.improve.candidates"));
     assert!(skill.contains("forge.schedule.summary"));
     assert!(skill.contains("forge.schedule.loop_summary"));
     assert!(skill.contains("forge.schedule.worker_status"));
@@ -7694,6 +7955,7 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
     for tool_name in [
         "forge.workflow.list",
         "forge.workflow.inspect",
+        "forge.improve.candidates",
         "forge.run.start",
         "forge.run.resume",
         "forge.run.status",
@@ -16817,6 +17079,10 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
     assert_eq!(
         snapshot_json["modifier_lane"]["schema_version"],
         "forge.ops.modifier_lane.v1"
+    );
+    assert_eq!(
+        snapshot_json["improvement_candidates"]["schema_version"],
+        "forge.orchestrator_improvement_candidates.v1"
     );
     assert_eq!(snapshot_json["modifier_lane"]["pending_count"], 0);
     assert!(snapshot_json["actions"]

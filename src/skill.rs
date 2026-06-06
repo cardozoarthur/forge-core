@@ -29,12 +29,14 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 6. Use `forge workflow attach-artifact ... --origin codex|opencode|gemini|forge_cli|skill` when new artifacts appear during execution.
 7. Use `forge context --workflow <id> --task <task-id> --budget <bytes> --strict --output json` before giving an agent task-specific context.
 8. Run `forge validate --workflow <id> --output json` before promotion. If `rework_tasks` is not empty, return those tasks to work.
-9. Run `forge improve --workflow <id> --target-version <version> --output json` only to generate a controlled experiment and changelog. Do not auto-promote without benchmark and validation evidence.
-10. Run `forge milestone status --version 0.5 --output json` and `forge milestone manifest --version 0.5 --output json` before claiming Forge 0.5 creative-runtime readiness; planned or groundwork capabilities block promotion.
+9. Run `forge improve candidates --output json` or `forge.improve.candidates` before choosing a workflow to mutate; use its run/event/outcome/parallelization/cost evidence to decide whether to recover a stale run, parallelize ready handoffs, replace avoidable AI work with command nodes, or generate a controlled experiment.
+10. Run `forge improve --workflow <id> --target-version <version> --output json` only to generate a controlled experiment and changelog. Do not auto-promote without benchmark and validation evidence.
+11. Run `forge milestone status --version 0.5 --output json` and `forge milestone manifest --version 0.5 --output json` before claiming Forge 0.5 creative-runtime readiness; planned or groundwork capabilities block promotion.
 
 ## MCP Agent Surface
 
 - Use `forge mcp tools --output json` to discover stable agent-facing tools before wiring a Codex/OpenCode workflow.
+- Use `forge improve candidates --output json` or MCP `forge.improve.candidates` as the orchestrator's first improvement scan. It ranks live/degraded workflows with workflow events, run heartbeats, outcome evidence, parallel-ready handoffs and cost-efficiency signals for repetitive/deterministic tasks that are still using AI.
 - Inspect the no-argument interactive dashboard through `forge.interactive.home`, discover slash commands through `forge.interactive.slash_commands`, and route conversational input through `forge.interactive.route` when an agent needs the same command/chat classification as the TUI without launching a local terminal.
 - For human+AI assisted operation, use `forge ops snapshot --output json` for an operational registry view or `forge ops serve --host 127.0.0.1 --port 8765` to open the local web console. The console is local-only by default and lets operators observe workflows, drive runs, step deterministic work, complete tasks with evidence and update workflow goals or task nodes in real time. Its modifier lane lets a separate strategic AI or human propose goal/node mutations and apply them through Forge-owned events while execution continues. Its visual surface shows tasks/subtasks and lets operators create whiteboards, screens, wireframes, flows, components, documents, token collections, token patches and collaboration events through Forge-owned workflow revisions.
 - Treat `outcome_status` from `forge request status`, `forge request drive` and `forge list` as the final-result gate. If it says `support_only`, update the goal or tasks with explicit user-facing deliverables. If it says `needs_user_delivery_evidence` or `needs_final_outcome_audit`, continue the workflow instead of claiming completion.
@@ -96,7 +98,9 @@ forge request list --status stale --output json
 forge request recover-stale --run <run-id> --origin codex --output json
 forge ops snapshot --output json
 forge ops serve --host 127.0.0.1 --port 8765
+forge improve candidates --output json
 forge mcp tools --output json
+forge mcp call forge.improve.candidates --input '{"limit":10}' --output json
 forge mcp call forge.interactive.home --output json
 forge mcp call forge.interactive.slash_commands --output json
 forge mcp call forge.interactive.route --input '{"input":"What is the current Forge status?","origin":"codex"}' --output json

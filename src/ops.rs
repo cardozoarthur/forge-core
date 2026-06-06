@@ -1,3 +1,4 @@
+use crate::improve::{rank_improvement_candidates, OrchestratorImprovementCandidatesReport};
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
     WorkflowRegistryReport,
@@ -44,6 +45,7 @@ pub struct OpsSnapshot {
     pub generated_at: DateTime<Utc>,
     pub mode: OpsMode,
     pub registry: WorkflowRegistryReport,
+    pub improvement_candidates: OrchestratorImprovementCandidatesReport,
     pub modifier_lane: OpsModifierLane,
     pub visual_workflows: Vec<OpsWorkflowVisual>,
     pub actions: Vec<OpsActionSpec>,
@@ -228,6 +230,7 @@ pub fn build_ops_snapshot(store: &ForgeStore) -> Result<OpsSnapshot> {
         store,
         WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
     )?;
+    let improvement_candidates = rank_improvement_candidates(store, 10)?;
     let modifier_lane = load_modifier_lane(store)?;
     let visual_workflows = build_visual_workflows(store)?;
     Ok(OpsSnapshot {
@@ -247,6 +250,7 @@ pub fn build_ops_snapshot(store: &ForgeStore) -> Result<OpsSnapshot> {
                 .to_string(),
         },
         registry,
+        improvement_candidates,
         modifier_lane,
         visual_workflows,
         actions: ops_actions(),

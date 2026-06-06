@@ -10,6 +10,7 @@ use crate::credential_vault::{
     CREDENTIAL_VAULT_COMMAND_SCHEMA,
 };
 use crate::handoff::build_task_handoff;
+use crate::improve::rank_improvement_candidates;
 use crate::inspection::inspect_workflow_with_focus;
 use crate::interaction::{
     answer_human_interaction, create_choice_interaction, create_form_interaction,
@@ -115,6 +116,11 @@ struct WorkflowListInput {
     lifecycle: Option<String>,
     context_action: Option<String>,
     quality_action: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImprovementCandidatesInput {
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -535,6 +541,18 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &["workflow_id"]),
                 "forge.inspection.v1",
                 &["forge", "inspect", "<workflow-id>", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.improve.candidates",
+                "Rank Improvement Candidates",
+                "Rank live or degraded workflows using runs, heartbeats, workflow events, outcome evidence, parallelization opportunities and avoidable AI-cost signals.",
+                object_schema(
+                    &[("limit", "integer", "maximum candidates to return")],
+                    &[],
+                ),
+                "forge.orchestrator_improvement_candidates.v1",
+                &["forge", "improve", "candidates", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -1523,6 +1541,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &input.workflow_id,
                 input.verbose.unwrap_or(false),
                 input.task_id.as_deref(),
+            )?)?
+        }
+        "forge.improve.candidates" => {
+            let input: ImprovementCandidatesInput = parse_input(input)?;
+            serde_json::to_value(rank_improvement_candidates(
+                store,
+                input.limit.unwrap_or(20),
             )?)?
         }
         "forge.interactive.home" => serde_json::to_value(build_interactive_home(store)?)?,

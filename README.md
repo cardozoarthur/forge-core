@@ -66,6 +66,7 @@ This is the first functional CLI + Skill version:
 - outcome status that separates support artifacts from user-facing final deliverables and requires final audit evidence before closing deliverable-driven workflows
 - final delivery package generation for async runs, attaching user-facing Markdown plus machine-readable JSON summaries of readiness, deliverables, evidence, tasks and remaining gaps
 - visual workflow surface for tasks, subtasks, whiteboards, screens, wireframes, flows, components, documents, design tokens and human+AI collaboration actions in the ops console
+- orchestrator improvement candidate ranking using workflow events, run heartbeats, outcome evidence, parallel-ready tasks and avoidable AI-cost metrics for repetitive/deterministic work
 - async workflow substrate policy with scope guards for Forge-owned resources
 - async request handoff for skill callers: submit a goal, receive `run_id`, continue later with Forge
 - process-liveness-aware run activity so a recorded live executor PID keeps long-running Forge handoffs active even after heartbeat TTL expiry
@@ -121,6 +122,7 @@ forge task validate-response --workflow <workflow-id> --task task-001 --response
 forge context --workflow <workflow-id> --task task-001 --budget 1200 --output json
 forge run --workflow <workflow-id> --simulate --output json
 forge validate --workflow <workflow-id> --output json
+forge improve candidates --output json
 forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 forge milestone manifest --version 0.5 --output json
@@ -262,6 +264,7 @@ forge mcp call forge.run.resume --input '{"run_id":"<run-id>","origin":"opencode
 forge mcp call forge.run.step --input '{"run_id":"<run-id>","executor":"codex","ttl_seconds":300,"origin":"codex"}' --output json
 forge mcp call forge.run.complete_task --input '{"run_id":"<run-id>","task_id":"<task-id>","executor":"codex","summary":"executor finished the ready task with passing evidence","origin":"codex"}' --output json
 forge mcp call forge.run.switch_executor --input '{"run_id":"<run-id>","executor":"opencode","fallback_executors":["codex"],"summary":"take over without stopping workflow","origin":"codex"}' --output json
+forge mcp call forge.improve.candidates --input '{"limit":10}' --output json
 forge mcp call forge.workflow.inspect --input '{"workflow_id":"<workflow-id>","verbose":true}' --output json
 forge mcp call forge.context.request --input '{"workflow_id":"<workflow-id>","task_id":"task-001","budget":1200}' --output json
 forge mcp call forge.task.handoff --input '{"workflow_id":"<workflow-id>","task_id":"task-001","executor":"codex","budget":1200}' --output json
@@ -276,7 +279,7 @@ forge mcp call forge.artifact.fetch --input '{"workflow_id":"<workflow-id>","pat
 ```
 
 The MCP call surface is a stable local adapter layer over the existing Forge CLI and SQLite state. It does not introduce a second source of truth: mutations still flow through Forge-owned workflow, schedule and artifact APIs, validation remains explicit, and artifact reads are bounded to Forge-owned artifact refs.
-The local assisted-operations surface is available through `forge ops snapshot --output json` and `forge ops serve --host 127.0.0.1 --port 8765`. It exposes workflow/run state plus local POST actions for `drive`, `step`, `complete-task`, live `update-goal` and live task/node update, so a human and a separate AI modifier can operate the same Forge state while execution continues. The snapshot also includes `modifier_lane` (`forge.ops.modifier_lane.v1`), reconstructed from Forge events, where a strategic AI or operator can create pending goal/node proposals and apply them as ordinary revisioned workflow mutations through `/api/modifier/propose-goal`, `/api/modifier/propose-task` and `/api/modifier/apply`. The same ops snapshot now includes `visual_workflows`, rendering tasks/subtasks and `forge.ops.design_surface.v1` details for Forge-owned whiteboards, screens, wireframes, flows, components, documents, design tokens and collaboration events. The web console can mutate this visual workspace through `/api/visual/create-artifact`, `/api/visual/set-tokens`, `/api/visual/patch-token` and `/api/visual/collaboration-event`, keeping the Figma-like design surface in Forge-owned workflow revisions instead of a separate source of truth.
+The local assisted-operations surface is available through `forge ops snapshot --output json` and `forge ops serve --host 127.0.0.1 --port 8765`. It exposes workflow/run state plus local POST actions for `drive`, `step`, `complete-task`, live `update-goal` and live task/node update, so a human and a separate AI modifier can operate the same Forge state while execution continues. The snapshot also includes `improvement_candidates` (`forge.orchestrator_improvement_candidates.v1`), ranking live/degraded workflows by event logs, heartbeats, outcome gaps, parallel-ready handoffs and repetitive deterministic work still using AI, including estimated average AI cost and avoidable cost. It also includes `modifier_lane` (`forge.ops.modifier_lane.v1`), reconstructed from Forge events, where a strategic AI or operator can create pending goal/node proposals and apply them as ordinary revisioned workflow mutations through `/api/modifier/propose-goal`, `/api/modifier/propose-task` and `/api/modifier/apply`. The same ops snapshot now includes `visual_workflows`, rendering tasks/subtasks and `forge.ops.design_surface.v1` details for Forge-owned whiteboards, screens, wireframes, flows, components, documents, design tokens and collaboration events. The web console can mutate this visual workspace through `/api/visual/create-artifact`, `/api/visual/set-tokens`, `/api/visual/patch-token` and `/api/visual/collaboration-event`, keeping the Figma-like design surface in Forge-owned workflow revisions instead of a separate source of truth.
 `forge request status`, `forge request drive` and registry rows expose `outcome_status` (`forge.outcome_status.v1`). It classifies declared deliverables as support or user-facing, counts user-facing artifact evidence, shows the next outcome action and requires a `final_completion_audit` artifact before Forge completes workflows whose intent declares final/user-facing deliverables.
 `forge request step` and `forge.run.step` let agents advance one ready deterministic task through the same executor-response validation path used by manual handoff responses. AI tasks and tasks with explicit external validation commands still require an executor handoff; Forge does not fake them.
 `forge request complete-task` and `forge.run.complete_task` give executors a direct closeout path for ready AI or mixed handoff work: Forge records a replayable execution trace, builds the executor response, validates passing evidence, promotes the task and immediately drives the next action.
@@ -464,6 +467,11 @@ Forge Core does not perform unrestricted self-modification.
 The current loop is:
 
 ```text
+rank live improvement candidates
+→ inspect run/event/outcome/parallelization/cost evidence
+→ recover stale or attention-needed runs when needed
+→ parallelize ready independent handoffs when useful
+→ replace repetitive deterministic AI work with command nodes or reusable subflows
 execute workflow
 → collect validation state
 → generate improvement experiment artifact
@@ -471,11 +479,14 @@ execute workflow
 → promote only when validation passes
 ```
 
+`forge improve candidates` returns `forge.orchestrator_improvement_candidates.v1`, ranking workflows by stale/missing heartbeats, failed/blocked tasks, rework events, outcome gaps, final package gaps, parallel-ready task sets and avoidable AI cost. The `cost_efficiency` block reports AI task count, repetitive/deterministic AI task count, estimated total/average AI cost, observed total/average AI cost when events include it and avoidable estimated cost.
+
 `forge improve` generates a controlled experiment artifact and keeps `auto_promoted=false`.
 
 Every improvement can target a version and generates a Markdown changelog:
 
 ```bash
+forge improve candidates --output json
 forge improve --workflow <workflow-id> --target-version 0.3.0 --output json
 ```
 

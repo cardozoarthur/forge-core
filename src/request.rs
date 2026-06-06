@@ -165,8 +165,12 @@ pub struct RequestDriveReport {
     pub latest_checkpoint: Option<TaskCheckpoint>,
     pub rework: Option<RequestDriveRework>,
     pub handoff_task: Option<RequestDriveTask>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parallel_handoff_tasks: Vec<RequestDriveTask>,
     pub blocked_tasks: Vec<RequestDriveBlockedTask>,
     pub next_command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parallel_next_commands: Vec<Vec<String>>,
     pub final_delivery_package: Option<RequestFinalDeliveryPackageReport>,
     pub reason: String,
     pub updated_at: DateTime<Utc>,
@@ -893,8 +897,10 @@ pub fn drive_request(
             latest_checkpoint,
             rework: Some(rework),
             handoff_task: None,
+            parallel_handoff_tasks: Vec::new(),
             blocked_tasks: drive_blocked_tasks(&handoff_summary.tasks),
             next_command,
+            parallel_next_commands: Vec::new(),
             final_delivery_package: None,
             reason: "Latest accepted executor response requested retry; rework must be handled before blind forward progress.".to_string(),
             updated_at: heartbeat.updated_at,
@@ -956,8 +962,10 @@ pub fn drive_request(
                     latest_checkpoint,
                     rework: None,
                     handoff_task: None,
+                    parallel_handoff_tasks: Vec::new(),
                     blocked_tasks: Vec::new(),
                     next_command,
+                    parallel_next_commands: Vec::new(),
                     final_delivery_package: None,
                     reason,
                     updated_at: heartbeat.updated_at,
@@ -1018,37 +1026,55 @@ pub fn drive_request(
             latest_checkpoint,
             rework: None,
             handoff_task: None,
+            parallel_handoff_tasks: Vec::new(),
             blocked_tasks: Vec::new(),
             next_command: Vec::new(),
+            parallel_next_commands: Vec::new(),
             final_delivery_package,
             reason: completion_reason,
             updated_at: completed_at,
         });
     }
 
-    if let Some(task) = next_pending_handoff_task(&workflow, &handoff_summary.tasks) {
+    let parallel_handoff_tasks = ready_handoff_tasks(&workflow, &handoff_summary.tasks);
+    if let Some(task) = parallel_handoff_tasks.first().cloned() {
         let handoff_budget = handoff_context_budget_for_task(&workflow, &task.task_id);
-        let next_command = vec![
-            "forge".to_string(),
-            "task".to_string(),
-            "handoff".to_string(),
-            "--workflow".to_string(),
-            workflow.id.clone(),
-            "--task".to_string(),
-            task.task_id.clone(),
-            "--executor".to_string(),
-            executor.to_string(),
-            "--ttl-seconds".to_string(),
-            ttl_seconds.max(1).to_string(),
-            "--budget".to_string(),
-            handoff_budget.to_string(),
-            "--output".to_string(),
-            "json".to_string(),
-        ];
+        let next_command = handoff_command(
+            &workflow.id,
+            &task.task_id,
+            executor,
+            ttl_seconds,
+            handoff_budget,
+        );
+        let parallel_next_commands = parallel_handoff_tasks
+            .iter()
+            .map(|task| {
+                handoff_command(
+                    &workflow.id,
+                    &task.task_id,
+                    executor,
+                    ttl_seconds,
+                    handoff_context_budget_for_task(&workflow, &task.task_id),
+                )
+            })
+            .collect::<Vec<_>>();
+        let parallel_ready_count = parallel_handoff_tasks.len();
+        let action = if parallel_ready_count > 1 {
+            "start_parallel_handoffs"
+        } else {
+            "start_handoff"
+        };
+        let reason = if parallel_ready_count > 1 {
+            format!(
+                "{parallel_ready_count} pending tasks have ready context and dependencies; start parallel executor handoffs within quota and resource limits."
+            )
+        } else {
+            "A pending task has ready context and dependencies; start executor handoff.".to_string()
+        };
         return Ok(RequestDriveReport {
             schema_version: "forge.request_drive.v1".to_string(),
             status: "ready_for_handoff".to_string(),
-            action: "start_handoff".to_string(),
+            action: action.to_string(),
             run_id: run.run_id,
             workflow_id: workflow.id,
             executor: executor.to_string(),
@@ -1060,11 +1086,12 @@ pub fn drive_request(
             latest_checkpoint,
             rework: None,
             handoff_task: Some(task),
+            parallel_handoff_tasks,
             blocked_tasks: drive_blocked_tasks(&handoff_summary.tasks),
             next_command,
+            parallel_next_commands,
             final_delivery_package: None,
-            reason: "A pending task has ready context and dependencies; start executor handoff."
-                .to_string(),
+            reason,
             updated_at: heartbeat.updated_at,
         });
     }
@@ -1084,6 +1111,7 @@ pub fn drive_request(
         latest_checkpoint,
         rework: None,
         handoff_task: None,
+        parallel_handoff_tasks: Vec::new(),
         blocked_tasks: drive_blocked_tasks(&handoff_summary.tasks),
         next_command: vec![
             "forge".to_string(),
@@ -1094,6 +1122,7 @@ pub fn drive_request(
             "--output".to_string(),
             "json".to_string(),
         ],
+        parallel_next_commands: Vec::new(),
         final_delivery_package: None,
         reason: "No pending task is currently ready for handoff.".to_string(),
         updated_at: heartbeat.updated_at,
@@ -1262,7 +1291,13 @@ pub fn complete_ready_task(
     let run = load_run_record(store, run_id)?;
     let workflow = store.load_workflow(&run.workflow_id)?;
     let updated_at = drive_before.updated_at;
-    let Some(handoff_task) = drive_before.handoff_task.clone() else {
+    let Some(handoff_task) = drive_before
+        .parallel_handoff_tasks
+        .iter()
+        .find(|task| task.task_id == input.task_id)
+        .cloned()
+        .or_else(|| drive_before.handoff_task.clone())
+    else {
         return Ok(RequestTaskCompletionReport {
             schema_version: "forge.request_task_completion.v1".to_string(),
             status: "not_ready".to_string(),
@@ -1284,6 +1319,11 @@ pub fn complete_ready_task(
     };
 
     if handoff_task.task_id != input.task_id {
+        let ready_task_ids = drive_before
+            .parallel_handoff_tasks
+            .iter()
+            .map(|task| task.task_id.clone())
+            .collect::<Vec<_>>();
         return Ok(RequestTaskCompletionReport {
             schema_version: "forge.request_task_completion.v1".to_string(),
             status: "not_ready".to_string(),
@@ -1300,8 +1340,10 @@ pub fn complete_ready_task(
             drive_before,
             drive_after: None,
             reason: format!(
-                "ready handoff task is {}, not {}",
-                handoff_task.task_id, input.task_id
+                "ready handoff task is {}, not {}; parallel_ready_tasks={}",
+                handoff_task.task_id,
+                input.task_id,
+                ready_task_ids.join(",")
             ),
             updated_at,
         });
@@ -1989,27 +2031,56 @@ fn latest_open_rework(
     Ok(None)
 }
 
-fn next_pending_handoff_task(
+fn ready_handoff_tasks(
     workflow: &Workflow,
     handoff_tasks: &[ContextHandoffTask],
-) -> Option<RequestDriveTask> {
-    handoff_tasks.iter().find_map(|handoff| {
-        let task = workflow
-            .tasks
-            .iter()
-            .find(|task| task.id == handoff.task_id)?;
-        if task.status != TaskStatus::Pending || !handoff.handoff_ready {
-            return None;
-        }
-        Some(RequestDriveTask {
-            task_id: handoff.task_id.clone(),
-            title: handoff.title.clone(),
-            executor: handoff.executor.clone(),
-            handoff_status: handoff.handoff_status.clone(),
-            context_sha256: handoff.context_sha256.clone(),
-            context_routing_cache_key: None,
+) -> Vec<RequestDriveTask> {
+    handoff_tasks
+        .iter()
+        .filter_map(|handoff| {
+            let task = workflow
+                .tasks
+                .iter()
+                .find(|task| task.id == handoff.task_id)?;
+            if task.status != TaskStatus::Pending || !handoff.handoff_ready {
+                return None;
+            }
+            Some(RequestDriveTask {
+                task_id: handoff.task_id.clone(),
+                title: handoff.title.clone(),
+                executor: handoff.executor.clone(),
+                handoff_status: handoff.handoff_status.clone(),
+                context_sha256: handoff.context_sha256.clone(),
+                context_routing_cache_key: None,
+            })
         })
-    })
+        .collect()
+}
+
+fn handoff_command(
+    workflow_id: &str,
+    task_id: &str,
+    executor: &str,
+    ttl_seconds: u64,
+    budget: usize,
+) -> Vec<String> {
+    vec![
+        "forge".to_string(),
+        "task".to_string(),
+        "handoff".to_string(),
+        "--workflow".to_string(),
+        workflow_id.to_string(),
+        "--task".to_string(),
+        task_id.to_string(),
+        "--executor".to_string(),
+        executor.to_string(),
+        "--ttl-seconds".to_string(),
+        ttl_seconds.max(1).to_string(),
+        "--budget".to_string(),
+        budget.to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]
 }
 
 fn drive_blocked_tasks(handoff_tasks: &[ContextHandoffTask]) -> Vec<RequestDriveBlockedTask> {
