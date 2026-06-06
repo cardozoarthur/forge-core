@@ -1,8 +1,8 @@
 # Forge Core
 
-Forge Core is a high-performance AI-native workflow runtime for transforming large objectives into validated, context-controlled atomic execution graphs.
+Forge Core is a high-performance AI-native operational and strategic workflow runtime for transforming large objectives into validated, context-controlled atomic execution graphs.
 
-Forge is not an LLM wrapper and not a human-flow builder. It treats models as interchangeable execution resources and can run workflows that mix AI steps, deterministic non-AI steps, waits/cron and notifications.
+Forge is not an LLM wrapper and not a human-flow builder. It treats models as interchangeable execution resources and can run workflows that mix AI steps, deterministic non-AI steps, code/subworkflows, waits/cron, notifications and live human/AI steering.
 
 The intended architecture is hybrid:
 
@@ -62,6 +62,7 @@ This is the first functional CLI + Skill version:
 - n8n-aware research planning that catalogs workflow primitives and evaluates Forge primitive candidates before graph promotion
 - goal-oriented tasks with subtasks, impediments, acceptance criteria and rework readiness checks
 - runtime workflow mutation for goals and artifacts with origin trace from `codex`, `opencode`, `forge_cli` or skills
+- local assisted operations console with workflow visibility, run controls and a strategic modifier lane for live goal/node proposals
 - async workflow substrate policy with scope guards for Forge-owned resources
 - async request handoff for skill callers: submit a goal, receive `run_id`, continue later with Forge
 - process-liveness-aware run activity so a recorded live executor PID keeps long-running Forge handoffs active even after heartbeat TTL expiry
@@ -272,7 +273,7 @@ forge mcp call forge.artifact.fetch --input '{"workflow_id":"<workflow-id>","pat
 ```
 
 The MCP call surface is a stable local adapter layer over the existing Forge CLI and SQLite state. It does not introduce a second source of truth: mutations still flow through Forge-owned workflow, schedule and artifact APIs, validation remains explicit, and artifact reads are bounded to Forge-owned artifact refs.
-The local assisted-operations surface is available through `forge ops snapshot --output json` and `forge ops serve --host 127.0.0.1 --port 8765`. It exposes workflow/run state plus local POST actions for `drive`, `step`, `complete-task`, live `update-goal` and live task/node update, so a human and a separate AI modifier can operate the same Forge state while execution continues.
+The local assisted-operations surface is available through `forge ops snapshot --output json` and `forge ops serve --host 127.0.0.1 --port 8765`. It exposes workflow/run state plus local POST actions for `drive`, `step`, `complete-task`, live `update-goal` and live task/node update, so a human and a separate AI modifier can operate the same Forge state while execution continues. The snapshot also includes `modifier_lane` (`forge.ops.modifier_lane.v1`), reconstructed from Forge events, where a strategic AI or operator can create pending goal/node proposals and apply them as ordinary revisioned workflow mutations through `/api/modifier/propose-goal`, `/api/modifier/propose-task` and `/api/modifier/apply`.
 `forge request step` and `forge.run.step` let agents advance one ready deterministic task through the same executor-response validation path used by manual handoff responses. AI tasks and tasks with explicit external validation commands still require an executor handoff; Forge does not fake them.
 `forge request complete-task` and `forge.run.complete_task` give executors a direct closeout path for ready AI or mixed handoff work: Forge records a replayable execution trace, builds the executor response, validates passing evidence, promotes the task and immediately drives the next action.
 AWS operations are exposed through `forge aws check`, `forge aws inventory`, `forge aws raw` and matching MCP tools. They delegate to `~/plugins/aws-ops/scripts/aws-ops`, use the project workspace AWS credential-vault defaults and keep secret resolution plus mutation gating outside Forge.

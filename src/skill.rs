@@ -7,7 +7,7 @@ pub const SKILL_NAME: &str = "forge-core";
 
 pub const SKILL_MD: &str = r#"---
 name: forge-core
-description: Use Forge Core to run autonomous or mixed AI/non-AI workflows with goal-oriented DAGs, executor/runtime sync, mutable goals/artifacts, validation gates, persistence, rework loops, and controlled self-improvement.
+description: Use Forge Core to run operational and strategic assisted AI/non-AI workflows with goal-oriented DAGs, executor/runtime sync, live goal/node mutation, mutable artifacts, validation gates, persistence, rework loops, and controlled self-improvement.
 license: MIT
 compatibility: codex, opencode, gemini
 metadata:
@@ -17,7 +17,7 @@ metadata:
 
 ## What Forge Core Does
 
-Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow builder. Use it when an objective needs to become a persistent execution graph that can mix AI steps, deterministic non-AI steps, scheduled waits/cron and notifications.
+Forge Core is an operational and strategic assisted-operations runtime, not a chatbot wrapper and not a human-flow builder. Use it when an objective needs to become a persistent execution graph that can mix AI steps, deterministic non-AI steps, scheduled waits/cron, notifications, code/subworkflow execution and live human/AI modification.
 
 ## Required Workflow
 
@@ -36,7 +36,7 @@ Forge Core is an operational runtime, not a chatbot wrapper and not a human-flow
 
 - Use `forge mcp tools --output json` to discover stable agent-facing tools before wiring a Codex/OpenCode workflow.
 - Inspect the no-argument interactive dashboard through `forge.interactive.home`, discover slash commands through `forge.interactive.slash_commands`, and route conversational input through `forge.interactive.route` when an agent needs the same command/chat classification as the TUI without launching a local terminal.
-- For human+AI assisted operation, use `forge ops snapshot --output json` for an operational registry view or `forge ops serve --host 127.0.0.1 --port 8765` to open the local web console. The console is local-only by default and lets operators observe workflows, drive runs, step deterministic work, complete tasks with evidence and update workflow goals or task nodes in real time.
+- For human+AI assisted operation, use `forge ops snapshot --output json` for an operational registry view or `forge ops serve --host 127.0.0.1 --port 8765` to open the local web console. The console is local-only by default and lets operators observe workflows, drive runs, step deterministic work, complete tasks with evidence and update workflow goals or task nodes in real time. Its modifier lane lets a separate strategic AI or human propose goal/node mutations and apply them through Forge-owned events while execution continues.
 - For async handoff, call `forge mcp call forge.run.start --input '{"goal":"<objective>","origin":"codex"}' --output json`, return `result.run_id` quickly, and let Forge remain the source of truth.
 - While an executor is alive, refresh observability with `forge request heartbeat --run <run-id> --executor codex --summary "<short progress>" --ttl-seconds 300 --pid <executor-pid> --origin codex --output json` or `forge.run.heartbeat`; this keeps `forge request status`, `forge request list` and `forge inspect` honest about active self-runs, including long runs whose heartbeat TTL expires while the recorded process is still alive.
 - Before polling passively or starting another task handoff, call `forge request drive --run <run-id> --executor codex --ttl-seconds 300 --origin codex --output json` or `forge.run.drive`; it refreshes the heartbeat and returns `rework_required`, `ready_for_handoff`, `complete` or `blocked` with the next safe command.

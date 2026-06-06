@@ -16728,6 +16728,16 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
         .unwrap()
         .iter()
         .any(|action| action["id"] == "update_goal" && action["mutates_workflow"] == true));
+    assert_eq!(
+        snapshot_json["modifier_lane"]["schema_version"],
+        "forge.ops.modifier_lane.v1"
+    );
+    assert_eq!(snapshot_json["modifier_lane"]["pending_count"], 0);
+    assert!(snapshot_json["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["id"] == "modifier_apply" && action["mutates_workflow"] == true));
 
     let store_handle = forge_core::storage::ForgeStore::open(&store).unwrap();
     let html_response = forge_core::ops::handle_ops_http_request(
@@ -16739,6 +16749,59 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
     let html = String::from_utf8(html_response.body).unwrap();
     assert!(html.contains("Forge Ops"));
     assert!(html.contains(workflow_id));
+    assert!(html.contains("Lane modificadora"));
+
+    let proposed_goal = "Objetivo proposto pela lane modificadora";
+    let propose_goal_request = format!(
+        "POST /api/modifier/propose-goal HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nworkflow_id={workflow_id}&title=Ajuste+estrategico&goal=Objetivo+proposto+pela+lane+modificadora&summary=Proposta+de+mudanca+estrategica&rationale=PM+separado+da+execucao&author=strategist"
+    );
+    let propose_goal_response =
+        forge_core::ops::handle_ops_http_request(&store_handle, &propose_goal_request);
+    assert_eq!(propose_goal_response.status_code, 200);
+    let propose_goal_json: Value = serde_json::from_slice(&propose_goal_response.body).unwrap();
+    assert_eq!(propose_goal_json["action"], "modifier_propose_goal");
+    assert_eq!(
+        propose_goal_json["result"]["status"],
+        "modifier_proposal_created"
+    );
+    assert_eq!(
+        propose_goal_json["result"]["proposal"]["target_kind"],
+        "workflow_goal"
+    );
+    let goal_proposal_id = propose_goal_json["result"]["proposal"]["proposal_id"]
+        .as_str()
+        .unwrap();
+
+    let lane_snapshot_response = forge_core::ops::handle_ops_http_request(
+        &store_handle,
+        "GET /api/snapshot HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!(lane_snapshot_response.status_code, 200);
+    let lane_snapshot_json: Value = serde_json::from_slice(&lane_snapshot_response.body).unwrap();
+    assert_eq!(lane_snapshot_json["modifier_lane"]["pending_count"], 1);
+    assert!(lane_snapshot_json["modifier_lane"]["proposals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|proposal| proposal["proposal_id"] == goal_proposal_id
+            && proposal["status"] == "pending"));
+
+    let apply_goal_request = format!(
+        "POST /api/modifier/apply HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nproposal_id={goal_proposal_id}&origin=strategist"
+    );
+    let apply_goal_response =
+        forge_core::ops::handle_ops_http_request(&store_handle, &apply_goal_request);
+    assert_eq!(apply_goal_response.status_code, 200);
+    let apply_goal_json: Value = serde_json::from_slice(&apply_goal_response.body).unwrap();
+    assert_eq!(apply_goal_json["action"], "modifier_apply");
+    assert_eq!(
+        apply_goal_json["result"]["status"],
+        "modifier_proposal_applied"
+    );
+    assert_eq!(
+        apply_goal_json["result"]["mutation"]["new_goal"],
+        proposed_goal
+    );
 
     let new_goal = "Objetivo atualizado em tempo real pelo console ops";
     let request = format!(
@@ -16765,6 +16828,37 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
     );
     assert_eq!(task_response_json["result"]["new_version"], 2);
 
+    let propose_task_request = format!(
+        "POST /api/modifier/propose-task HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nworkflow_id={workflow_id}&task_id=task-001&proposal_title=Ajuste+de+node&node_title=Node+redesenhado+pela+lane&goal=Node+redesenhado+durante+execucao&expected_output=ModifierNodeEvidence&summary=Alterar+node+sem+parar+workflow&rationale=Operacao+assistida+em+tempo+real&author=strategist"
+    );
+    let propose_task_response =
+        forge_core::ops::handle_ops_http_request(&store_handle, &propose_task_request);
+    assert_eq!(propose_task_response.status_code, 200);
+    let propose_task_json: Value = serde_json::from_slice(&propose_task_response.body).unwrap();
+    assert_eq!(propose_task_json["action"], "modifier_propose_task");
+    assert_eq!(
+        propose_task_json["result"]["proposal"]["target_kind"],
+        "task_node"
+    );
+    let task_proposal_id = propose_task_json["result"]["proposal"]["proposal_id"]
+        .as_str()
+        .unwrap();
+
+    let apply_task_request = format!(
+        "POST /api/modifier/apply HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nproposal_id={task_proposal_id}&origin=strategist"
+    );
+    let apply_task_response =
+        forge_core::ops::handle_ops_http_request(&store_handle, &apply_task_request);
+    assert_eq!(apply_task_response.status_code, 200);
+    let apply_task_json: Value = serde_json::from_slice(&apply_task_response.body).unwrap();
+    assert_eq!(apply_task_json["action"], "modifier_apply");
+    assert_eq!(apply_task_json["result"]["target_kind"], "task_node");
+    assert_eq!(
+        apply_task_json["result"]["mutation"]["new_title"],
+        "Node redesenhado pela lane"
+    );
+    assert_eq!(apply_task_json["result"]["mutation"]["new_version"], 3);
+
     let inspected = forge()
         .args([
             "--store",
@@ -16787,8 +16881,8 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
         .iter()
         .any(|node| {
             node["id"] == "task-001"
-                && node["title"] == "Node estrategico atualizado"
-                && node["expected_output"] == "NodeUpdateEvidence"
+                && node["title"] == "Node redesenhado pela lane"
+                && node["expected_output"] == "ModifierNodeEvidence"
         }));
 }
 
