@@ -16674,6 +16674,125 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
 }
 
 #[test]
+fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Operate workflows through a local assisted operations console",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+
+    let snapshot = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "ops",
+            "snapshot",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let snapshot_json: Value = serde_json::from_slice(&snapshot).unwrap();
+    assert_eq!(snapshot_json["schema_version"], "forge.ops.snapshot.v1");
+    assert_eq!(snapshot_json["mode"]["operational"], true);
+    assert_eq!(snapshot_json["mode"]["strategic"], true);
+    assert_eq!(snapshot_json["mode"]["realtime_mutation"], true);
+    assert!(snapshot_json["registry"]["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|workflow| workflow["workflow_id"] == workflow_id));
+    assert!(snapshot_json["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["id"] == "update_goal" && action["mutates_workflow"] == true));
+
+    let store_handle = forge_core::storage::ForgeStore::open(&store).unwrap();
+    let html_response = forge_core::ops::handle_ops_http_request(
+        &store_handle,
+        "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!(html_response.status_code, 200);
+    assert_eq!(html_response.content_type, "text/html; charset=utf-8");
+    let html = String::from_utf8(html_response.body).unwrap();
+    assert!(html.contains("Forge Ops"));
+    assert!(html.contains(workflow_id));
+
+    let new_goal = "Objetivo atualizado em tempo real pelo console ops";
+    let request = format!(
+        "POST /api/workflow/update-goal HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nworkflow_id={workflow_id}&goal=Objetivo+atualizado+em+tempo+real+pelo+console+ops"
+    );
+    let response = forge_core::ops::handle_ops_http_request(&store_handle, &request);
+    assert_eq!(response.status_code, 200);
+    let response_json: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response_json["schema_version"], "forge.ops.action.v1");
+    assert_eq!(response_json["action"], "update_goal");
+    assert_eq!(response_json["result"]["new_goal"], new_goal);
+
+    let task_request = format!(
+        "POST /api/workflow/update-task HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nworkflow_id={workflow_id}&task_id=task-001&title=Node+estrategico+atualizado&goal=Node+atualizado+durante+processamento&expected_output=NodeUpdateEvidence"
+    );
+    let task_response = forge_core::ops::handle_ops_http_request(&store_handle, &task_request);
+    assert_eq!(task_response.status_code, 200);
+    let task_response_json: Value = serde_json::from_slice(&task_response.body).unwrap();
+    assert_eq!(task_response_json["action"], "update_task");
+    assert_eq!(task_response_json["result"]["task_id"], "task-001");
+    assert_eq!(
+        task_response_json["result"]["new_title"],
+        "Node estrategico atualizado"
+    );
+    assert_eq!(task_response_json["result"]["new_version"], 2);
+
+    let inspected = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected_json: Value = serde_json::from_slice(&inspected).unwrap();
+    assert_eq!(inspected_json["current_goal"], new_goal);
+    assert!(inspected_json["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| {
+            node["id"] == "task-001"
+                && node["title"] == "Node estrategico atualizado"
+                && node["expected_output"] == "NodeUpdateEvidence"
+        }));
+}
+
+#[test]
 fn request_drive_surfaces_needs_retry_as_rework_instead_of_blind_handoff() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

@@ -24,6 +24,32 @@ pub struct WorkflowGoalUpdateReport {
     pub revision: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct WorkflowTaskUpdateInput<'a> {
+    pub task_id: &'a str,
+    pub title: Option<&'a str>,
+    pub goal: Option<&'a str>,
+    pub expected_output: Option<&'a str>,
+    pub origin: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowTaskUpdateReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub origin: String,
+    pub previous_title: String,
+    pub new_title: String,
+    pub previous_goal: String,
+    pub new_goal: String,
+    pub previous_expected_output: String,
+    pub new_expected_output: String,
+    pub previous_version: u64,
+    pub new_version: u64,
+    pub revision: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ArtifactAttachReport {
     pub status: String,
@@ -161,6 +187,94 @@ pub fn update_workflow_goal(
         origin: origin.to_string(),
         previous_goal,
         new_goal: goal.to_string(),
+        revision,
+    })
+}
+
+pub fn update_workflow_task(
+    store: &ForgeStore,
+    workflow_id: &str,
+    input: WorkflowTaskUpdateInput<'_>,
+) -> Result<WorkflowTaskUpdateReport> {
+    let mut workflow = store.load_workflow(workflow_id)?;
+    let Some(task) = workflow
+        .tasks
+        .iter_mut()
+        .find(|task| task.id == input.task_id)
+    else {
+        bail!(
+            "task {} not found in workflow {}",
+            input.task_id,
+            workflow_id
+        );
+    };
+
+    let previous_title = task.title.clone();
+    let previous_goal = task.goal.clone();
+    let previous_expected_output = task.expected_output.clone();
+    let previous_version = task.version;
+
+    if let Some(title) = input.title.filter(|value| !value.trim().is_empty()) {
+        task.title = title.trim().to_string();
+    }
+    if let Some(goal) = input.goal.filter(|value| !value.trim().is_empty()) {
+        task.goal = goal.trim().to_string();
+        task.work_item.goal_validation.goal = task.goal.clone();
+    }
+    if let Some(expected_output) = input
+        .expected_output
+        .filter(|value| !value.trim().is_empty())
+    {
+        task.expected_output = expected_output.trim().to_string();
+    }
+    task.version = task.version.saturating_add(1);
+
+    let new_title = task.title.clone();
+    let new_goal = task.goal.clone();
+    let new_expected_output = task.expected_output.clone();
+    let new_version = task.version;
+
+    let revision = push_revision(
+        &mut workflow.revisions,
+        input.origin,
+        "task_updated",
+        &format!(
+            "updated task {} from version {} to {}",
+            input.task_id, previous_version, new_version
+        ),
+    );
+    store.save_workflow(&workflow)?;
+    store.record_event(
+        workflow_id,
+        "workflow_task_updated",
+        &serde_json::json!({
+            "origin": input.origin,
+            "task_id": input.task_id,
+            "previous_title": previous_title,
+            "new_title": new_title,
+            "previous_goal": previous_goal,
+            "new_goal": new_goal,
+            "previous_expected_output": previous_expected_output,
+            "new_expected_output": new_expected_output,
+            "previous_version": previous_version,
+            "new_version": new_version,
+            "revision": revision
+        }),
+    )?;
+
+    Ok(WorkflowTaskUpdateReport {
+        status: "workflow_task_updated".to_string(),
+        workflow_id: workflow_id.to_string(),
+        task_id: input.task_id.to_string(),
+        origin: input.origin.to_string(),
+        previous_title,
+        new_title,
+        previous_goal,
+        new_goal,
+        previous_expected_output,
+        new_expected_output,
+        previous_version,
+        new_version,
         revision,
     })
 }

@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod milestone;
 pub mod multimodal;
 pub mod notify;
+pub mod ops;
 pub mod patch;
 pub mod registry;
 pub mod request;

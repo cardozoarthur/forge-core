@@ -48,6 +48,7 @@ use forge_core::multimodal::{
     build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
     build_multimodal_status, evaluate_multimodal_guard,
 };
+use forge_core::ops::{build_ops_snapshot, serve_ops_console};
 use forge_core::patch::{build_patch_apply, build_patch_plan, build_patch_revert};
 use forge_core::registry::{
     attach_reuse_candidates_as_child_subflows, context_action_catalog, find_reuse_candidates,
@@ -225,6 +226,10 @@ enum Commands {
         #[command(subcommand)]
         command: InteractionCommands,
     },
+    Ops {
+        #[command(subcommand)]
+        command: OpsCommands,
+    },
     Milestone {
         #[command(subcommand)]
         command: MilestoneCommands,
@@ -271,6 +276,20 @@ enum SkillCommands {
         no_prompt: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OpsCommands {
+    Snapshot {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Serve {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 8765)]
+        port: u16,
     },
 }
 
@@ -2660,6 +2679,18 @@ fn run() -> Result<i32> {
                 let store = ForgeStore::open(cli.store)?;
                 let report = list_human_interactions(&store)?;
                 print_response(output, &report)?;
+                Ok(0)
+            }
+        },
+        Commands::Ops { command } => match command {
+            OpsCommands::Snapshot { output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_ops_snapshot(&store)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            OpsCommands::Serve { host, port } => {
+                serve_ops_console(cli.store, &host, port)?;
                 Ok(0)
             }
         },
