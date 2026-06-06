@@ -7578,6 +7578,100 @@ fn improve_candidates_suggest_final_package_for_completed_workflow_with_legacy_r
 }
 
 #[test]
+fn improve_candidates_suggest_task_handoffs_for_parallel_workflow_without_driveable_run() {
+    use forge_core::graph::{self, ExecutorKind};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Deliver final workflow result with independent backend and frontend evidence",
+    ));
+    workflow.status = "running".to_string();
+    workflow.tasks = vec![
+        graph::task(
+            "task-api",
+            "Build backend evidence",
+            &[],
+            &[],
+            vec![],
+            "backend evidence artifact",
+            (ExecutorKind::Ai, 0.2),
+        ),
+        graph::task(
+            "task-ui",
+            "Build frontend evidence",
+            &[],
+            &[],
+            vec![],
+            "frontend evidence artifact",
+            (ExecutorKind::Ai, 0.2),
+        ),
+        graph::task(
+            "task-demo",
+            "Assemble demo",
+            &["task-api", "task-ui"],
+            &[],
+            vec![],
+            "final demo package",
+            (ExecutorKind::Ai, 0.2),
+        ),
+    ];
+    store.save_workflow(&workflow).unwrap();
+    drop(store);
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let top = &report["candidates"][0];
+    assert_eq!(top["workflow_id"], workflow.id);
+    assert_eq!(top["recommended_action"], "start_parallel_handoffs");
+    assert!(top["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "parallelization_opportunity"));
+    for task_id in ["task-api", "task-ui"] {
+        assert!(
+            top["suggested_commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| {
+                    command.as_array().unwrap()
+                        == &vec![
+                            Value::String("forge".to_string()),
+                            Value::String("task".to_string()),
+                            Value::String("handoff".to_string()),
+                            Value::String("--workflow".to_string()),
+                            Value::String(workflow.id.clone()),
+                            Value::String("--task".to_string()),
+                            Value::String(task_id.to_string()),
+                            Value::String("--executor".to_string()),
+                            Value::String("codex".to_string()),
+                            Value::String("--output".to_string()),
+                            Value::String("json".to_string()),
+                        ]
+                }),
+            "missing direct handoff suggestion for {task_id}"
+        );
+    }
+}
+
+#[test]
 fn request_drive_surfaces_all_ready_parallel_handoffs() {
     use forge_core::graph::{self, ExecutorKind};
     use forge_core::request::{create_run_record, save_run_record};

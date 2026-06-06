@@ -816,6 +816,33 @@ fn suggested_commands(
                 "--output".to_string(),
                 "json".to_string(),
             ]);
+        } else if parallelization.ready_parallel_task_count > 0 {
+            commands.extend(
+                parallelization
+                    .ready_parallel_task_ids
+                    .iter()
+                    .take(
+                        parallelization
+                            .recommended_max_parallelism
+                            .max(1)
+                            .min(parallelization.ready_parallel_task_count),
+                    )
+                    .map(|task_id| {
+                        vec![
+                            "forge".to_string(),
+                            "task".to_string(),
+                            "handoff".to_string(),
+                            "--workflow".to_string(),
+                            workflow.id.clone(),
+                            "--task".to_string(),
+                            task_id.clone(),
+                            "--executor".to_string(),
+                            "codex".to_string(),
+                            "--output".to_string(),
+                            "json".to_string(),
+                        ]
+                    }),
+            );
         }
     }
     if has_reason(reasons, "missing_final_outcome_audit")
