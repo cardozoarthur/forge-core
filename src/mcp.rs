@@ -30,9 +30,10 @@ use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
 use crate::request::{
-    cancel_request, complete_ready_task, drive_request, heartbeat_request, list_requests,
-    load_request_status, recover_stale_request, resume_async_request, start_async_request,
-    step_request, switch_request_executor, RequestExecutorSwitchInput, RequestTaskCompletionInput,
+    cancel_request, complete_ready_task, create_final_delivery_package, drive_request,
+    heartbeat_request, list_requests, load_request_status, recover_stale_request,
+    resume_async_request, start_async_request, step_request, switch_request_executor,
+    RequestExecutorSwitchInput, RequestTaskCompletionInput,
 };
 use crate::schedule::{
     aggregate_summary, build_schedule_worker_status, create_daily_goal_research_workflow,
@@ -933,6 +934,18 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
+                "forge.run.final_package",
+                "Create Final Delivery Package",
+                "Create a user-facing final delivery package for a run, attaching Markdown and JSON artifacts that summarize readiness, deliverables, evidence, tasks and remaining gaps.",
+                object_schema(&[
+                    ("run_id", "string", "run id"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["run_id"]),
+                "forge.request_final_delivery_package.v1",
+                &["forge", "request", "final-package", "--run", "<run-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
                 "forge.run.switch_executor",
                 "Switch Async Run Executor",
                 "Hot-swap the active executor for an async run without cancelling the run, changing workflow id, dropping checkpoints or weakening explicit user directives.",
@@ -1769,6 +1782,15 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     ttl_seconds: input.ttl_seconds.unwrap_or(300),
                     origin: &origin,
                 },
+            )?)?
+        }
+        "forge.run.final_package" => {
+            let input: RunIdInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(create_final_delivery_package(
+                store,
+                &input.run_id,
+                &origin,
             )?)?
         }
         "forge.run.switch_executor" => {

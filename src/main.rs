@@ -56,9 +56,10 @@ use forge_core::registry::{
     WorkflowRegistryFilters,
 };
 use forge_core::request::{
-    cancel_request, complete_ready_task, drive_request, heartbeat_request, list_requests,
-    load_request_status, recover_stale_request, resume_async_request, start_async_request,
-    step_request, switch_request_executor, RequestExecutorSwitchInput, RequestTaskCompletionInput,
+    cancel_request, complete_ready_task, create_final_delivery_package, drive_request,
+    heartbeat_request, list_requests, load_request_status, recover_stale_request,
+    resume_async_request, start_async_request, step_request, switch_request_executor,
+    RequestExecutorSwitchInput, RequestTaskCompletionInput,
 };
 use forge_core::runtime::{
     guard_runtime_scope, load_runtimes, sync_runtimes, RuntimeGuardRequest, RuntimeSyncOptions,
@@ -983,6 +984,14 @@ enum RequestCommands {
         tokens_out: i64,
         #[arg(long = "ttl-seconds", default_value_t = 300)]
         ttl_seconds: u64,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    FinalPackage {
+        #[arg(long = "run")]
+        run_id: String,
         #[arg(long, default_value = "forge_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -2460,6 +2469,16 @@ fn run() -> Result<i32> {
                     };
                 print_response(output, &report)?;
                 Ok(exit_code)
+            }
+            RequestCommands::FinalPackage {
+                run_id,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = create_final_delivery_package(&store, &run_id, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
             }
             RequestCommands::List { status, output } => {
                 let store = ForgeStore::open(cli.store)?;

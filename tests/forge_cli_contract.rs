@@ -17551,6 +17551,102 @@ fn request_drive_requires_final_completion_audit_for_explicit_final_criteria() {
         .as_str()
         .unwrap()
         .contains("final completion audit passed"));
+
+    let final_package = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "final-package",
+            "--run",
+            run_id,
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let final_package_json: Value = serde_json::from_slice(&final_package).unwrap();
+    assert_eq!(
+        final_package_json["schema_version"],
+        "forge.request_final_delivery_package.v1"
+    );
+    assert_eq!(
+        final_package_json["status"],
+        "final_delivery_package_created"
+    );
+    assert_eq!(final_package_json["readiness"], "ready_for_user");
+    assert_eq!(final_package_json["action"], "deliver_to_user");
+    assert_eq!(
+        final_package_json["outcome_status"]["status"],
+        "final_outcome_verified"
+    );
+    assert_eq!(
+        final_package_json["markdown_artifact"]["artifact"]["kind"],
+        "final_delivery_package"
+    );
+    assert_eq!(
+        final_package_json["json_artifact"]["artifact"]["kind"],
+        "final_delivery_package_json"
+    );
+    let markdown_path = temp.path().join(
+        final_package_json["markdown_artifact"]["artifact"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    let markdown = fs::read_to_string(markdown_path).unwrap();
+    assert!(markdown.contains("# Final Delivery Package"));
+    assert!(markdown.contains("Readiness: `ready_for_user`"));
+    assert!(markdown.contains("final_outcome_verified"));
+
+    let mcp_tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_tools_json: Value = serde_json::from_slice(&mcp_tools).unwrap();
+    assert!(mcp_tools_json["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| {
+            tool["name"] == "forge.run.final_package"
+                && tool["output_schema"] == "forge.request_final_delivery_package.v1"
+                && tool["mutates_workflow"] == true
+        }));
+
+    let mcp_input = serde_json::json!({
+        "run_id": run_id,
+        "origin": "mcp"
+    })
+    .to_string();
+    let mcp_package = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.run.final_package",
+            "--input",
+            &mcp_input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_package_json: Value = serde_json::from_slice(&mcp_package).unwrap();
+    assert_eq!(mcp_package_json["status"], "ok");
+    assert_eq!(mcp_package_json["tool_name"], "forge.run.final_package");
+    assert_eq!(mcp_package_json["result"]["readiness"], "ready_for_user");
 }
 
 #[test]

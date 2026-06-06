@@ -43,6 +43,7 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 - Before polling passively or starting another task handoff, call `forge request drive --run <run-id> --executor codex --ttl-seconds 300 --origin codex --output json` or `forge.run.drive`; it refreshes the heartbeat and returns `rework_required`, `ready_for_handoff`, `complete` or `blocked` with the next safe command.
 - When `forge request drive` returns a ready deterministic task, prefer `forge request step --run <run-id> --executor codex --ttl-seconds 300 --origin codex --output json` or `forge.run.step` before manual handoff; it auto-promotes one command/wait/notification task through the normal executor-response validation path and refuses AI or external-command tasks instead of faking work.
 - When an AI or mixed executor has actually done the ready handoff work, close it with `forge request complete-task --run <run-id> --task <task-id> --executor codex --summary "<result>" --origin codex --output json` or `forge.run.complete_task`; Forge writes a replayable execution trace, builds the executor response, validates it, promotes the task and immediately drives the next action.
+- Before handing a run back to the user, create a final delivery package with `forge request final-package --run <run-id> --origin codex --output json` or `forge.run.final_package`; it attaches Markdown and JSON summaries and reports `ready_for_user`, `in_progress` or `not_ready_for_user` so a support artifact is not mistaken for the requested final result.
 - If the current executor is about to hit a model limit, becomes unavailable, or should hand off work, use `forge request switch-executor --run <run-id> --executor opencode --fallback-executor codex --summary "<takeover summary>" --origin codex --output json` or `forge.run.switch_executor`. This hot-swap preserves the same `run_id`, workflow id, checkpoints, artifacts and explicit user directives; it does not require shutting the workflow down. Use fallback executors to keep a run recoverable when the primary executor fails or loses model capacity.
 - If a heartbeat becomes stale, use `forge request recover-stale --run <run-id> --origin codex --output json` or `forge.run.recover_stale` to move the run to `needs_attention` without losing workflow/run lineage.
 - Poll later with `forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json`.
@@ -87,6 +88,7 @@ forge request heartbeat --run <run-id> --executor codex --summary "executor appl
 forge request drive --run <run-id> --executor codex --ttl-seconds 300 --origin codex --output json
 forge request step --run <run-id> --executor codex --ttl-seconds 300 --origin codex --output json
 forge request complete-task --run <run-id> --task <task-id> --executor codex --summary "executor finished the ready task with passing evidence" --origin codex --output json
+forge request final-package --run <run-id> --origin codex --output json
 forge request switch-executor --run <run-id> --executor opencode --fallback-executor codex --summary "codex limit approaching; opencode continuing from Forge state" --origin codex --output json
 forge request status --run <run-id> --output json
 forge request resume --run <run-id> --origin codex --output json
@@ -103,6 +105,7 @@ forge mcp call forge.run.heartbeat --input '{"run_id":"<run-id>","executor":"cod
 forge mcp call forge.run.drive --input '{"run_id":"<run-id>","executor":"codex","ttl_seconds":300,"origin":"codex"}' --output json
 forge mcp call forge.run.step --input '{"run_id":"<run-id>","executor":"codex","ttl_seconds":300,"origin":"codex"}' --output json
 forge mcp call forge.run.complete_task --input '{"run_id":"<run-id>","task_id":"<task-id>","executor":"codex","summary":"executor finished the ready task with passing evidence","origin":"codex"}' --output json
+forge mcp call forge.run.final_package --input '{"run_id":"<run-id>","origin":"codex"}' --output json
 forge mcp call forge.run.switch_executor --input '{"run_id":"<run-id>","executor":"opencode","fallback_executors":["codex"],"summary":"take over without stopping workflow","origin":"codex"}' --output json
 forge mcp call forge.run.recover_stale --input '{"run_id":"<run-id>","origin":"codex"}' --output json
 forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json

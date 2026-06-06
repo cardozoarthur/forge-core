@@ -253,6 +253,24 @@ pub struct RequestTaskCompletionReport {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct RequestFinalDeliveryPackageReport {
+    pub schema_version: String,
+    pub status: String,
+    pub action: String,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub origin: String,
+    pub readiness: String,
+    pub outcome_status: OutcomeStatusReport,
+    pub task_summary: TaskStatusSummary,
+    pub markdown_artifact: ArtifactAttachReport,
+    pub json_artifact: ArtifactAttachReport,
+    pub latest_validation_evidence: Option<ValidationEvidenceSummary>,
+    pub reason: String,
+    pub generated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RequestExecutorSwitchReport {
     pub status: String,
@@ -1412,6 +1430,330 @@ pub fn complete_ready_task(
         reason: "Forge recorded executor evidence, generated a replayable execution trace, validated the response, and drove the run forward.".to_string(),
         updated_at: Utc::now(),
     })
+}
+
+pub fn create_final_delivery_package(
+    store: &ForgeStore,
+    run_id: &str,
+    origin: &str,
+) -> Result<RequestFinalDeliveryPackageReport> {
+    let run = load_run_record(store, run_id)?;
+    let workflow = store.load_workflow(&run.workflow_id)?;
+    let generated_at = Utc::now();
+    let timestamp = generated_at.format("%Y%m%dT%H%M%SZ");
+    let outcome_status = request_outcome_status(store, &workflow)?;
+    let task_summary = summarize_tasks(&workflow);
+    let latest_validation_evidence = load_latest_validation_evidence(store, &workflow.id)?;
+    let listed_artifacts = list_workflow_artifacts(&store.base_dir(), &workflow.id)?;
+    let (readiness, action, reason) =
+        final_delivery_readiness(&outcome_status, &task_summary, &workflow.status);
+
+    let package_context = FinalDeliveryPackageContext {
+        run: &run,
+        workflow: &workflow,
+        outcome_status: &outcome_status,
+        task_summary: &task_summary,
+        latest_validation_evidence: latest_validation_evidence.as_ref(),
+        listed_artifacts: &listed_artifacts,
+        readiness: &readiness,
+        reason: &reason,
+        generated_at,
+    };
+
+    let package_payload = build_final_delivery_payload(&package_context);
+    let json_relative_path = format!(
+        "tmp/{}/final-delivery-package-{}.json",
+        workflow.id, timestamp
+    );
+    let (json_path, _) =
+        write_json_artifact(&store.base_dir(), &json_relative_path, &package_payload)?;
+    let json_artifact = crate::workflow::attach_workflow_artifact(
+        store,
+        &workflow.id,
+        &json_path,
+        "final_delivery_package_json",
+        origin,
+    )?;
+
+    let markdown = render_final_delivery_markdown(&package_context);
+    let markdown_relative_path = format!(
+        "tmp/{}/final-delivery-package-{}.md",
+        workflow.id, timestamp
+    );
+    let markdown_path = write_text_artifact(
+        &store.base_dir(),
+        &markdown_relative_path,
+        markdown.as_str(),
+    )?;
+    let markdown_artifact = crate::workflow::attach_workflow_artifact(
+        store,
+        &workflow.id,
+        &markdown_path,
+        "final_delivery_package",
+        origin,
+    )?;
+
+    store.record_event(
+        &workflow.id,
+        "final_delivery_package_created",
+        &serde_json::json!({
+            "run_id": &run.run_id,
+            "origin": origin,
+            "readiness": &readiness,
+            "markdown_artifact": &markdown_artifact.artifact.path,
+            "json_artifact": &json_artifact.artifact.path,
+            "generated_at": generated_at,
+        }),
+    )?;
+
+    Ok(RequestFinalDeliveryPackageReport {
+        schema_version: "forge.request_final_delivery_package.v1".to_string(),
+        status: "final_delivery_package_created".to_string(),
+        action,
+        run_id: run.run_id,
+        workflow_id: workflow.id,
+        origin: origin.to_string(),
+        readiness,
+        outcome_status,
+        task_summary,
+        markdown_artifact,
+        json_artifact,
+        latest_validation_evidence,
+        reason,
+        generated_at,
+    })
+}
+
+fn final_delivery_readiness(
+    outcome_status: &OutcomeStatusReport,
+    task_summary: &TaskStatusSummary,
+    workflow_status: &str,
+) -> (String, String, String) {
+    if matches!(
+        outcome_status.status.as_str(),
+        "final_outcome_verified" | "user_outcome_evidenced"
+    ) {
+        return (
+            "ready_for_user".to_string(),
+            "deliver_to_user".to_string(),
+            "The package includes evidenced user-facing deliverables and the outcome gate is satisfied.".to_string(),
+        );
+    }
+
+    if outcome_status.status == "support_only" {
+        return (
+            "not_ready_for_user".to_string(),
+            "define_user_facing_deliverables".to_string(),
+            outcome_status.reason.clone(),
+        );
+    }
+
+    if task_summary.completed < task_summary.total || workflow_status != "completed" {
+        return (
+            "in_progress".to_string(),
+            "continue_workflow".to_string(),
+            "The workflow still has incomplete work or final evidence before the user-facing package can be treated as complete.".to_string(),
+        );
+    }
+
+    (
+        "not_ready_for_user".to_string(),
+        outcome_status.action.clone(),
+        outcome_status.reason.clone(),
+    )
+}
+
+struct FinalDeliveryPackageContext<'a> {
+    run: &'a RunRecord,
+    workflow: &'a Workflow,
+    outcome_status: &'a OutcomeStatusReport,
+    task_summary: &'a TaskStatusSummary,
+    latest_validation_evidence: Option<&'a ValidationEvidenceSummary>,
+    listed_artifacts: &'a [crate::artifact::ListedArtifact],
+    readiness: &'a str,
+    reason: &'a str,
+    generated_at: DateTime<Utc>,
+}
+
+fn build_final_delivery_payload(context: &FinalDeliveryPackageContext<'_>) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": "forge.final_delivery_package.v1",
+        "status": context.readiness,
+        "reason": context.reason,
+        "generated_at": context.generated_at,
+        "run": {
+            "run_id": &context.run.run_id,
+            "status": &context.run.status,
+            "requested_goal": &context.run.goal,
+            "origin": &context.run.origin,
+        },
+        "workflow": {
+            "workflow_id": &context.workflow.id,
+            "status": &context.workflow.status,
+            "goal": &context.workflow.goal,
+            "current_revision": context.workflow.revisions.last().map(|revision| revision.revision).unwrap_or(0),
+        },
+        "task_summary": context.task_summary,
+        "outcome_status": context.outcome_status,
+        "deliverables": &context.outcome_status.deliverables,
+        "completed_tasks": context.workflow.tasks.iter()
+            .filter(|task| task.status == TaskStatus::Completed)
+            .map(|task| serde_json::json!({
+                "task_id": &task.id,
+                "title": &task.title,
+                "goal": &task.goal,
+                "expected_output": &task.expected_output,
+            }))
+            .collect::<Vec<_>>(),
+        "open_tasks": context.workflow.tasks.iter()
+            .filter(|task| task.status != TaskStatus::Completed)
+            .map(|task| serde_json::json!({
+                "task_id": &task.id,
+                "title": &task.title,
+                "status": format!("{:?}", task.status).to_lowercase(),
+                "goal": &task.goal,
+                "expected_output": &task.expected_output,
+            }))
+            .collect::<Vec<_>>(),
+        "attached_artifacts": context.workflow.artifacts.iter()
+            .map(|artifact| serde_json::json!({
+                "id": &artifact.id,
+                "kind": &artifact.kind,
+                "path": &artifact.path,
+                "sha256": &artifact.sha256,
+                "created_at": artifact.created_at,
+            }))
+            .collect::<Vec<_>>(),
+        "artifact_inventory": context.listed_artifacts,
+        "latest_validation_evidence": context.latest_validation_evidence,
+    })
+}
+
+fn render_final_delivery_markdown(context: &FinalDeliveryPackageContext<'_>) -> String {
+    let mut markdown = String::new();
+    markdown.push_str("# Final Delivery Package\n\n");
+    markdown.push_str(&format!("- Generated at: `{}`\n", context.generated_at));
+    markdown.push_str(&format!("- Readiness: `{}`\n", context.readiness));
+    markdown.push_str(&format!("- Reason: {}\n", context.reason));
+    markdown.push_str(&format!(
+        "- Run: `{}` ({})\n",
+        context.run.run_id, context.run.status
+    ));
+    markdown.push_str(&format!(
+        "- Workflow: `{}` ({})\n\n",
+        context.workflow.id, context.workflow.status
+    ));
+    markdown.push_str("## Goal\n\n");
+    markdown.push_str(&context.workflow.goal);
+    markdown.push_str("\n\n");
+
+    markdown.push_str("## Outcome\n\n");
+    markdown.push_str(&format!(
+        "- Status: `{}`\n- Action: `{}`\n- User-facing deliverables: {}/{}\n- Final audit passed: `{}`\n\n",
+        context.outcome_status.status,
+        context.outcome_status.action,
+        context.outcome_status.evidenced_user_facing_deliverable_count,
+        context.outcome_status.user_facing_deliverable_count,
+        context.outcome_status.final_completion_audit_passed,
+    ));
+
+    markdown.push_str("## Deliverables\n\n");
+    if context.outcome_status.deliverables.is_empty() {
+        markdown.push_str("- No deliverables were declared.\n\n");
+    } else {
+        for deliverable in &context.outcome_status.deliverables {
+            markdown.push_str(&format!(
+                "- `{}`: {} ({})\n",
+                deliverable.status, deliverable.name, deliverable.kind
+            ));
+            for artifact_ref in &deliverable.artifact_refs {
+                markdown.push_str(&format!("  - Artifact: `{artifact_ref}`\n"));
+            }
+            for task_ref in &deliverable.completed_task_refs {
+                markdown.push_str(&format!("  - Completed task: `{task_ref}`\n"));
+            }
+        }
+        markdown.push('\n');
+    }
+
+    markdown.push_str("## Task Summary\n\n");
+    markdown.push_str(&format!(
+        "- Total: {}\n- Completed: {}\n- Pending: {}\n- Running: {}\n- Blocked: {}\n- Failed: {}\n\n",
+        context.task_summary.total,
+        context.task_summary.completed,
+        context.task_summary.pending,
+        context.task_summary.running,
+        context.task_summary.blocked,
+        context.task_summary.failed,
+    ));
+
+    markdown.push_str("## Completed Tasks\n\n");
+    let completed_tasks = context
+        .workflow
+        .tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::Completed)
+        .collect::<Vec<_>>();
+    if completed_tasks.is_empty() {
+        markdown.push_str("- No completed tasks yet.\n\n");
+    } else {
+        for task in completed_tasks {
+            markdown.push_str(&format!(
+                "- `{}`: {} -> {}\n",
+                task.id, task.title, task.expected_output
+            ));
+        }
+        markdown.push('\n');
+    }
+
+    markdown.push_str("## Attached Artifacts\n\n");
+    if context.workflow.artifacts.is_empty() {
+        markdown.push_str("- No attached workflow artifacts yet.\n\n");
+    } else {
+        for artifact in &context.workflow.artifacts {
+            markdown.push_str(&format!(
+                "- `{}` `{}` `{}`\n",
+                artifact.kind, artifact.path, artifact.sha256
+            ));
+        }
+        markdown.push('\n');
+    }
+
+    markdown.push_str("## Validation Evidence\n\n");
+    if let Some(evidence) = context.latest_validation_evidence {
+        markdown.push_str(&format!(
+            "- Latest validation: `{}` from `{}`\n- Passed: `{}`\n- Artifact: `{}`\n\n",
+            evidence.status, evidence.executor, evidence.validation_passed, evidence.artifact_path,
+        ));
+    } else {
+        markdown
+            .push_str("- No self-evolution validation artifact was found for this workflow.\n\n");
+    }
+
+    markdown.push_str("## Artifact Inventory\n\n");
+    if context.listed_artifacts.is_empty() {
+        markdown.push_str("- No artifact files were found on disk before package creation.\n");
+    } else {
+        for artifact in context.listed_artifacts {
+            markdown.push_str(&format!(
+                "- `{}` ({} bytes, `{}`)\n",
+                artifact.path, artifact.bytes, artifact.sha256
+            ));
+        }
+    }
+
+    markdown
+}
+
+fn write_text_artifact(base_dir: &Path, relative_path: &str, content: &str) -> Result<PathBuf> {
+    let full_path = base_dir.join(relative_path);
+    if let Some(parent) = full_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create artifact directory {}", parent.display()))?;
+    }
+    fs::write(&full_path, content)
+        .with_context(|| format!("failed to write artifact {}", full_path.display()))?;
+    Ok(full_path)
 }
 
 fn is_auto_steppable_task(task: &AtomicTask) -> bool {

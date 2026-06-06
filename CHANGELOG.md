@@ -8,6 +8,7 @@
 - Added MCP tools `forge.aws.check`, `forge.aws.inventory` and `forge.aws.raw` so agents can validate, observe and run guarded AWS CLI commands through Forge without resolving secrets.
 - Added `forge request step` and MCP `forge.run.step` so Forge can auto-promote one ready deterministic task through executor-response validation instead of stopping at a handoff instruction.
 - Added `forge request complete-task` and MCP `forge.run.complete_task` so AI/mixed executors can close a ready task with a replayable execution trace, validated response and immediate next-action drive.
+- Added `forge request final-package` and MCP `forge.run.final_package` so completed or in-progress runs can materialize a user-facing Markdown delivery package plus machine-readable JSON readiness summary instead of ending at support artifacts.
 - Added `forge ops snapshot` and `forge ops serve` as a local assisted-operations web surface for workflow visibility plus real-time drive, step, complete-task, update-goal and task/node update actions.
 - Added an ops modifier lane to the assisted-operations snapshot and web console so a separate strategic AI or human can create pending goal/task-node proposals and apply them as live, revisioned Forge workflow mutations while execution continues.
 - Added `forge.outcome_status.v1` to request status/drive and registry summaries so Forge distinguishes support-only artifacts from user-facing final deliverables and blocks completion for user-facing deliverables until final audit evidence exists.
