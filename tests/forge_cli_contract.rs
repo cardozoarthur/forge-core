@@ -17551,6 +17551,30 @@ fn request_drive_requires_final_completion_audit_for_explicit_final_criteria() {
         .as_str()
         .unwrap()
         .contains("final completion audit passed"));
+    assert_eq!(
+        completed_json["final_delivery_package"]["schema_version"],
+        "forge.request_final_delivery_package.v1"
+    );
+    assert_eq!(
+        completed_json["final_delivery_package"]["status"],
+        "final_delivery_package_created"
+    );
+    assert_eq!(
+        completed_json["final_delivery_package"]["readiness"],
+        "ready_for_user"
+    );
+    assert_eq!(
+        completed_json["final_delivery_package"]["markdown_artifact"]["artifact"]["kind"],
+        "final_delivery_package"
+    );
+    let auto_package_markdown_path = temp.path().join(
+        completed_json["final_delivery_package"]["markdown_artifact"]["artifact"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    let auto_package_markdown = fs::read_to_string(auto_package_markdown_path).unwrap();
+    assert!(auto_package_markdown.contains("# Final Delivery Package"));
+    assert!(auto_package_markdown.contains("Readiness: `ready_for_user`"));
 
     let final_package = forge()
         .args([

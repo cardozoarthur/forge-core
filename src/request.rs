@@ -167,6 +167,7 @@ pub struct RequestDriveReport {
     pub handoff_task: Option<RequestDriveTask>,
     pub blocked_tasks: Vec<RequestDriveBlockedTask>,
     pub next_command: Vec<String>,
+    pub final_delivery_package: Option<RequestFinalDeliveryPackageReport>,
     pub reason: String,
     pub updated_at: DateTime<Utc>,
 }
@@ -253,7 +254,7 @@ pub struct RequestTaskCompletionReport {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RequestFinalDeliveryPackageReport {
     pub schema_version: String,
     pub status: String,
@@ -894,6 +895,7 @@ pub fn drive_request(
             handoff_task: None,
             blocked_tasks: drive_blocked_tasks(&handoff_summary.tasks),
             next_command,
+            final_delivery_package: None,
             reason: "Latest accepted executor response requested retry; rework must be handled before blind forward progress.".to_string(),
             updated_at: heartbeat.updated_at,
         });
@@ -956,6 +958,7 @@ pub fn drive_request(
                     handoff_task: None,
                     blocked_tasks: Vec::new(),
                     next_command,
+                    final_delivery_package: None,
                     reason,
                     updated_at: heartbeat.updated_at,
                 });
@@ -995,6 +998,11 @@ pub fn drive_request(
         } else {
             "All workflow tasks are completed.".to_string()
         };
+        let final_delivery_package = Some(create_final_delivery_package(
+            store,
+            &completed_run.run_id,
+            origin,
+        )?);
         return Ok(RequestDriveReport {
             schema_version: "forge.request_drive.v1".to_string(),
             status: "complete".to_string(),
@@ -1012,6 +1020,7 @@ pub fn drive_request(
             handoff_task: None,
             blocked_tasks: Vec::new(),
             next_command: Vec::new(),
+            final_delivery_package,
             reason: completion_reason,
             updated_at: completed_at,
         });
@@ -1053,6 +1062,7 @@ pub fn drive_request(
             handoff_task: Some(task),
             blocked_tasks: drive_blocked_tasks(&handoff_summary.tasks),
             next_command,
+            final_delivery_package: None,
             reason: "A pending task has ready context and dependencies; start executor handoff."
                 .to_string(),
             updated_at: heartbeat.updated_at,
@@ -1084,6 +1094,7 @@ pub fn drive_request(
             "--output".to_string(),
             "json".to_string(),
         ],
+        final_delivery_package: None,
         reason: "No pending task is currently ready for handoff.".to_string(),
         updated_at: heartbeat.updated_at,
     })
