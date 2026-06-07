@@ -7920,6 +7920,264 @@ fn improve_candidates_evaluate_attached_final_completion_audit() {
         .unwrap()
         .iter()
         .any(|reason| reason["code"] == "missing_final_outcome_audit"));
+    assert!(!top["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "parallelization_opportunity"));
+    assert!(top["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "post_final_verification_cleanup"));
+    assert!(top["score"].as_i64().unwrap() < 45);
+    assert_eq!(
+        top["recommended_action"],
+        "refresh_final_delivery_package_if_needed"
+    );
+}
+
+#[test]
+fn improve_candidates_deprioritize_final_verified_workflows_below_unfinished_outcomes() {
+    use chrono::Utc;
+    use forge_core::graph::{self, ArtifactRecord, ExecutorKind, TaskStatus};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let final_audit_path = temp
+        .path()
+        .join("artifacts/verified/final_completion_audit.json");
+    fs::create_dir_all(final_audit_path.parent().unwrap()).unwrap();
+    fs::write(
+        &final_audit_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "forge.final_completion_audit.v1",
+            "status": "passed",
+            "goal_fully_satisfied": true,
+            "evidence": [{
+                "criterion": "Demo report delivered",
+                "status": "passed",
+                "artifact_refs": ["artifacts/verified/demo-report.md"],
+                "summary": "The demo report is verified."
+            }],
+            "missing_criteria": [],
+            "open_items": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let report_path = temp.path().join("artifacts/missing/demo-report.md");
+    fs::create_dir_all(report_path.parent().unwrap()).unwrap();
+    fs::write(&report_path, "# Demo report\n").unwrap();
+
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut verified = graph::create_workflow(forge_core::intent::parse_intent(
+        "Deliver partner demo report with final audit.",
+    ));
+    verified.status = "running".to_string();
+    verified.intent.deliverables = vec!["Demo report".to_string()];
+    verified.tasks = vec![
+        graph::task(
+            "task-left",
+            "Support task left pending",
+            &[],
+            &[],
+            vec![],
+            "support evidence",
+            (ExecutorKind::Command, 0.0002),
+        ),
+        graph::task(
+            "task-right",
+            "Second support task left pending",
+            &[],
+            &[],
+            vec![],
+            "support evidence",
+            (ExecutorKind::Command, 0.0002),
+        ),
+    ];
+    verified.artifacts.push(ArtifactRecord {
+        id: "artifact-final-audit".to_string(),
+        kind: "final_completion_audit".to_string(),
+        path: "artifacts/verified/final_completion_audit.json".to_string(),
+        sha256: hex_sha256(&fs::read(&final_audit_path).unwrap()),
+        created_at: Utc::now(),
+        lineage: None,
+    });
+    store.save_workflow(&verified).unwrap();
+    store
+        .record_event(
+            &verified.id,
+            "executor_response_promoted",
+            &serde_json::json!({
+                "task_id": "task-left",
+                "response_status": "needs_retry",
+                "summary": "historical retry before final audit"
+            }),
+        )
+        .unwrap();
+
+    let mut missing_audit = graph::create_workflow(forge_core::intent::parse_intent(
+        "Deliver partner demo report. Critério Final: only complete when the demo report is audited.",
+    ));
+    missing_audit.status = "running".to_string();
+    missing_audit.intent.deliverables = vec!["Demo report".to_string()];
+    missing_audit.tasks = vec![
+        graph::task(
+            "task-report",
+            "Demo report",
+            &[],
+            &[],
+            vec![],
+            "Demo report",
+            (ExecutorKind::Command, 0.0002),
+        ),
+        graph::task(
+            "task-support-left",
+            "Support cleanup left pending",
+            &[],
+            &[],
+            vec![],
+            "support evidence",
+            (ExecutorKind::Command, 0.0002),
+        ),
+        graph::task(
+            "task-support-right",
+            "Support cleanup right pending",
+            &[],
+            &[],
+            vec![],
+            "support evidence",
+            (ExecutorKind::Command, 0.0002),
+        ),
+    ];
+    missing_audit.tasks[0].status = TaskStatus::Completed;
+    missing_audit.tasks[0]
+        .work_item
+        .goal_validation
+        .definitively_ready = true;
+    missing_audit.artifacts.push(ArtifactRecord {
+        id: "artifact-demo-report".to_string(),
+        kind: "markdown_report".to_string(),
+        path: "artifacts/missing/demo-report.md".to_string(),
+        sha256: hex_sha256(&fs::read(&report_path).unwrap()),
+        created_at: Utc::now(),
+        lineage: None,
+    });
+    store.save_workflow(&missing_audit).unwrap();
+    drop(store);
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let candidates = report["candidates"].as_array().unwrap();
+    assert_eq!(
+        candidates[0]["workflow_id"],
+        missing_audit.id,
+        "candidates: {}",
+        serde_json::to_string_pretty(&report["candidates"]).unwrap()
+    );
+    assert_eq!(
+        candidates[0]["outcome_status"]["status"],
+        "needs_final_outcome_audit"
+    );
+    assert!(candidates[0]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "missing_final_outcome_audit"));
+    assert!(candidates[0]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "parallelization_opportunity"));
+    assert_eq!(
+        candidates[0]["recommended_action"],
+        "produce_and_package_final_user_outcome"
+    );
+    let verified_candidate = candidates
+        .iter()
+        .find(|candidate| candidate["workflow_id"] == verified.id)
+        .unwrap();
+    assert_eq!(
+        verified_candidate["outcome_status"]["status"],
+        "final_outcome_verified"
+    );
+    assert!(
+        verified_candidate["score"].as_i64().unwrap() < candidates[0]["score"].as_i64().unwrap()
+    );
+    assert!(!verified_candidate["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "rework_loop_signal"));
+}
+
+#[test]
+fn improve_candidates_recommend_deliverable_repair_for_support_only_workflows() {
+    use forge_core::graph::{self, ExecutorKind};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Generate an internal atomic task graph for tracking.",
+    ));
+    workflow.status = "running".to_string();
+    workflow.intent.deliverables = vec!["Atomic task graph".to_string()];
+    workflow.tasks = vec![graph::task(
+        "task-graph",
+        "Build atomic task graph",
+        &[],
+        &[],
+        vec![],
+        "atomic task graph",
+        (ExecutorKind::Command, 0.0002),
+    )];
+    store.save_workflow(&workflow).unwrap();
+    drop(store);
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let top = &report["candidates"][0];
+    assert_eq!(top["workflow_id"], workflow.id);
+    assert_eq!(top["outcome_status"]["status"], "support_only");
+    assert!(top["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "support_only_output_risk"));
+    assert_eq!(
+        top["recommended_action"],
+        "update_goal_or_tasks_with_user_facing_deliverables"
+    );
 }
 
 #[test]

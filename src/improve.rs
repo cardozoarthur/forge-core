@@ -274,6 +274,7 @@ pub fn rank_improvement_candidates(
             "measure repetitive or deterministic AI work by item group and average cost per execution before normalizing"
                 .to_string(),
             "penalize support-only completion when the user asked for final outcomes".to_string(),
+            "deprioritize workflows whose final user outcome is already verified; treat remaining support tasks as cleanup instead of delivery blockers".to_string(),
         ],
         candidates,
     })
@@ -339,6 +340,62 @@ fn build_improvement_candidate(
         stale_run_count,
         needs_attention_run_count,
     };
+
+    let final_outcome_verified = outcome_status.status == "final_outcome_verified";
+    let has_active_runtime_issue = needs_attention_run_count > 0
+        || stale_run_count > 0
+        || missing_heartbeat_count > 0
+        || task_counts.failed > 0
+        || task_counts.blocked > 0;
+    if final_outcome_verified && !has_active_runtime_issue {
+        let mut score = 0;
+        let mut reasons = Vec::new();
+        if workflow.status != "completed" || task_counts.pending > 0 || task_counts.running > 0 {
+            push_reason(
+                &mut reasons,
+                &mut score,
+                "post_final_verification_cleanup",
+                "low",
+                10,
+                "Final user outcome is already verified; remaining running/pending support state should be completed, archived or compacted without reopening the user deliverable."
+                    .to_string(),
+            );
+        }
+        if final_delivery_package_count == 0 {
+            push_reason(
+                &mut reasons,
+                &mut score,
+                "verified_without_final_package",
+                "low",
+                15,
+                "Final outcome audit passed, but no final delivery package event was recorded; refresh the handoff package only if the user-facing summary is needed."
+                    .to_string(),
+            );
+        }
+        if score <= 0 {
+            return Ok(None);
+        }
+
+        let suggested_commands =
+            suggested_commands(workflow, runs, &reasons, &parallelization, &events);
+
+        return Ok(Some(OrchestratorImprovementCandidate {
+            workflow_id: workflow.id.clone(),
+            goal: workflow.goal.clone(),
+            workflow_status: workflow.status.clone(),
+            score,
+            priority: priority_for_score(score),
+            recommended_action: recommended_action(&reasons),
+            reasons,
+            evidence,
+            parallelization,
+            cost_efficiency,
+            outcome_status,
+            active_runs: run_evidence,
+            latest_events,
+            suggested_commands,
+        }));
+    }
 
     let mut score = 0;
     let mut reasons = Vec::new();
@@ -1397,12 +1454,22 @@ fn recommended_action(reasons: &[ImprovementCandidateReason]) -> String {
         "inspect_resume_or_cancel_run"
     } else if has("failed_tasks") || has("blocked_tasks") {
         "repair_failed_or_blocked_tasks"
+    } else if has("verified_without_final_package") {
+        "refresh_final_delivery_package_if_needed"
+    } else if has("post_final_verification_cleanup") {
+        "complete_or_archive_verified_support_state"
+    } else if has("missing_final_outcome_audit") {
+        "produce_and_package_final_user_outcome"
+    } else if has("support_only_output_risk") {
+        "update_goal_or_tasks_with_user_facing_deliverables"
     } else if has("rework_loop_signal") {
         "run_rework_loop"
     } else if has("parallelization_opportunity") {
         "start_parallel_handoffs"
-    } else if has("missing_user_delivery_evidence") || has("missing_final_outcome_audit") {
+    } else if has("missing_user_delivery_evidence") {
         "produce_and_package_final_user_outcome"
+    } else if has("completed_without_final_package") {
+        "refresh_final_delivery_package_if_needed"
     } else {
         "inspect_workflow_for_improvement"
     }
@@ -1469,7 +1536,9 @@ fn suggested_commands(
             }
         }
     }
-    if has_reason(reasons, "completed_without_final_package") {
+    if has_reason(reasons, "completed_without_final_package")
+        || has_reason(reasons, "verified_without_final_package")
+    {
         if let Some(run) = latest_run_with_status(runs, "completed").or_else(|| latest_run(runs)) {
             commands.push(vec![
                 "forge".to_string(),
@@ -1483,6 +1552,16 @@ fn suggested_commands(
                 "json".to_string(),
             ]);
         }
+    }
+    if has_reason(reasons, "post_final_verification_cleanup") {
+        commands.push(vec![
+            "forge".to_string(),
+            "status".to_string(),
+            "--workflow".to_string(),
+            workflow.id.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]);
     }
     if has_reason(reasons, "missing_final_outcome_audit")
         && workflow_ready_for_final_audit_command(workflow)
