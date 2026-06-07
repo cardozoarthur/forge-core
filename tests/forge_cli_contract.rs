@@ -7628,6 +7628,198 @@ fn improve_candidates_do_not_count_final_audit_as_avoidable_ai_cost() {
 }
 
 #[test]
+fn improve_candidates_measure_operational_rework_ai_that_should_be_deterministic() {
+    use forge_core::graph::{self, ExecutorKind};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Deliver verified daily Goal research with Telegram evidence and reports",
+    ));
+    workflow.status = "running".to_string();
+    workflow.tasks = vec![
+        graph::task(
+            "task-inspection",
+            "Complete live hackathon regulation inspection evidence",
+            &[],
+            &[],
+            vec![],
+            "Playwright regulation inspection evidence JSON",
+            (ExecutorKind::Ai, 0.25),
+        ),
+        graph::task(
+            "task-telegram",
+            "Replace simulated Telegram delivery with delivery evidence",
+            &[],
+            &[],
+            vec![],
+            "real Telegram delivery record JSON",
+            (ExecutorKind::Ai, 0.25),
+        ),
+        graph::task(
+            "task-report",
+            "Refresh final Goal research report from verified evidence",
+            &["task-inspection", "task-telegram"],
+            &[],
+            vec![],
+            "Markdown report from verified evidence",
+            (ExecutorKind::Ai, 0.25),
+        ),
+        graph::task(
+            "task-fit",
+            "Evaluate hackathon Goal fit",
+            &["task-inspection"],
+            &[],
+            vec![],
+            "strategic fit decision",
+            (ExecutorKind::Ai, 0.012),
+        ),
+    ];
+    store.save_workflow(&workflow).unwrap();
+    drop(store);
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let top = &report["candidates"][0];
+    assert_eq!(top["workflow_id"], workflow.id);
+    assert_eq!(
+        top["cost_efficiency"]["repetitive_or_deterministic_ai_task_count"],
+        3
+    );
+    assert_eq!(
+        top["cost_efficiency"]["repetitive_or_deterministic_ai_task_ids"],
+        serde_json::json!(["task-inspection", "task-telegram", "task-report"])
+    );
+    assert_eq!(
+        top["cost_efficiency"]["repetitive_or_deterministic_ai_cost_item_count"],
+        3
+    );
+    assert_eq!(top["cost_efficiency"]["avoidable_estimated_cost_usd"], 0.75);
+    assert_eq!(
+        top["cost_efficiency"]["avoidable_estimated_cost_average_usd"],
+        0.25
+    );
+    assert!(top["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "avoidable_ai_cost"
+            && reason["summary"]
+                .as_str()
+                .unwrap()
+                .contains("average avoidable estimated AI cost per execution is $0.250000")));
+}
+
+#[test]
+fn improve_candidates_measure_completed_repetitive_ai_history_without_reopening_task() {
+    use forge_core::graph::{self, ExecutorKind, TaskStatus};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Measure historical repeated AI cost without reopening completed work",
+    ));
+    workflow.status = "completed".to_string();
+    workflow.tasks = vec![graph::task(
+        "task-cost",
+        "Calculate daily cost report",
+        &[],
+        &[],
+        vec![],
+        "deterministic cost JSON",
+        (ExecutorKind::Ai, 2.0),
+    )];
+    workflow.tasks[0].status = TaskStatus::Completed;
+    workflow.tasks[0]
+        .work_item
+        .goal_validation
+        .definitively_ready = true;
+    store.save_workflow(&workflow).unwrap();
+    for estimated_usd in [0.4, 0.6] {
+        store
+            .record_event(
+                &workflow.id,
+                "executor_response_promoted",
+                &serde_json::json!({
+                    "task_id": "task-cost",
+                    "response_status": "completed",
+                    "cost": {
+                        "estimated_usd": estimated_usd,
+                        "tokens_in": 1000,
+                        "tokens_out": 200
+                    }
+                }),
+            )
+            .unwrap();
+    }
+    drop(store);
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let top = &report["candidates"][0];
+    assert_eq!(top["workflow_id"], workflow.id);
+    assert_eq!(
+        top["cost_efficiency"]["repetitive_or_deterministic_ai_task_count"],
+        0
+    );
+    assert_eq!(
+        top["cost_efficiency"]["repetitive_or_deterministic_ai_cost_item_count"],
+        1
+    );
+    assert_eq!(
+        top["cost_efficiency"]["measured_repetitive_or_deterministic_ai_execution_count"],
+        2
+    );
+    assert_eq!(
+        top["cost_efficiency"]["measured_repetitive_or_deterministic_ai_cost_total_usd"],
+        1.0
+    );
+    assert_eq!(
+        top["cost_efficiency"]["measured_repetitive_or_deterministic_ai_cost_average_usd"],
+        0.5
+    );
+    let item = &top["cost_efficiency"]["repetitive_or_deterministic_ai_cost_items"][0];
+    assert_eq!(item["observed_execution_count"], 2);
+    assert_eq!(item["observed_cost_average_per_execution_usd"], 0.5);
+    assert_eq!(top["cost_efficiency"]["avoidable_estimated_cost_usd"], 0.0);
+    assert!(!top["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "avoidable_ai_cost"));
+}
+
+#[test]
 fn improve_candidates_do_not_treat_completed_legacy_ai_as_actionable_cost() {
     use forge_core::graph::{self, ExecutorKind, TaskStatus};
     use forge_core::request::{create_run_record, save_run_record};
@@ -8176,6 +8368,93 @@ fn improve_candidates_suggest_task_handoffs_for_parallel_workflow_without_drivea
             "missing direct handoff suggestion for {task_id}"
         );
     }
+}
+
+#[test]
+fn improve_candidates_suggest_forge_cli_for_no_ai_ready_handoffs() {
+    use forge_core::graph::{self, ExecutorKind};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Run deterministic evidence generation beside an AI review",
+    ));
+    workflow.status = "running".to_string();
+    workflow.tasks = vec![
+        graph::task(
+            "task-json",
+            "Generate deterministic evidence JSON",
+            &[],
+            &[],
+            vec![],
+            "evidence JSON",
+            (ExecutorKind::Command, 0.0005),
+        ),
+        graph::task(
+            "task-review",
+            "Review strategic fit",
+            &[],
+            &[],
+            vec![],
+            "judgment summary",
+            (ExecutorKind::Ai, 0.2),
+        ),
+    ];
+    store.save_workflow(&workflow).unwrap();
+    drop(store);
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let top = &report["candidates"][0];
+    assert_eq!(top["workflow_id"], workflow.id);
+    let commands = top["suggested_commands"].as_array().unwrap();
+    assert!(commands.iter().any(|command| {
+        command.as_array().unwrap()
+            == &vec![
+                Value::String("forge".to_string()),
+                Value::String("task".to_string()),
+                Value::String("handoff".to_string()),
+                Value::String("--workflow".to_string()),
+                Value::String(workflow.id.clone()),
+                Value::String("--task".to_string()),
+                Value::String("task-json".to_string()),
+                Value::String("--executor".to_string()),
+                Value::String("forge_cli".to_string()),
+                Value::String("--output".to_string()),
+                Value::String("json".to_string()),
+            ]
+    }));
+    assert!(commands.iter().any(|command| {
+        command.as_array().unwrap()
+            == &vec![
+                Value::String("forge".to_string()),
+                Value::String("task".to_string()),
+                Value::String("handoff".to_string()),
+                Value::String("--workflow".to_string()),
+                Value::String(workflow.id.clone()),
+                Value::String("--task".to_string()),
+                Value::String("task-review".to_string()),
+                Value::String("--executor".to_string()),
+                Value::String("codex".to_string()),
+                Value::String("--output".to_string()),
+                Value::String("json".to_string()),
+            ]
+    }));
 }
 
 #[test]
@@ -14908,6 +15187,19 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
         .as_str()
         .unwrap()
         .contains(task_id));
+
+    let event_store = ForgeStore::open(&store).unwrap();
+    let promoted_event = event_store
+        .load_workflow_events(workflow_id)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == "executor_response_promoted")
+        .expect("accepted executor response should record a promotion event");
+    assert_eq!(promoted_event.data["cost"]["estimated_usd"], 0.12);
+    assert_eq!(promoted_event.data["cost"]["tokens_in"], 1200);
+    assert_eq!(promoted_event.data["cost"]["tokens_out"], 220);
+    assert_eq!(promoted_event.data["artifact_count"], 1);
+    assert_eq!(promoted_event.data["trace_ref"], "traces/task-001.jsonl");
 }
 
 #[test]

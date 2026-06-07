@@ -130,6 +130,13 @@ pub fn validate_executor_response_file(
                 "task_id": task_id,
                 "response_status": response.status,
                 "response_sha256": response_sha256,
+                "cost": {
+                    "estimated_usd": response.cost.estimated_usd,
+                    "tokens_in": response.cost.tokens_in,
+                    "tokens_out": response.cost.tokens_out
+                },
+                "artifact_count": response.artifacts.len(),
+                "trace_ref": response.trace_ref,
                 "revision": promotion.revision,
                 "generated_rework_task_ids": promotion.generated_rework_task_ids
             }),

@@ -109,6 +109,9 @@ pub struct CostEfficiencyReport {
     pub repetitive_or_deterministic_ai_task_titles: Vec<String>,
     pub repetitive_or_deterministic_ai_cost_item_count: usize,
     pub repetitive_or_deterministic_ai_cost_items: Vec<RepetitiveAiCostItemReport>,
+    pub measured_repetitive_or_deterministic_ai_execution_count: usize,
+    pub measured_repetitive_or_deterministic_ai_cost_total_usd: Option<f64>,
+    pub measured_repetitive_or_deterministic_ai_cost_average_usd: Option<f64>,
     pub estimated_ai_cost_total_usd: f64,
     pub estimated_ai_cost_average_usd: f64,
     pub observed_ai_cost_total_usd: Option<f64>,
@@ -613,6 +616,10 @@ fn build_cost_efficiency_report(
         .iter()
         .filter(|task| task.executor == ExecutorKind::Ai)
         .collect::<Vec<_>>();
+    let ai_task_ids = ai_tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<BTreeSet<_>>();
     let ai_task_count = ai_tasks.len();
     let estimated_ai_cost_total_usd = normalize_zero_cost(
         ai_tasks
@@ -626,8 +633,42 @@ fn build_cost_efficiency_report(
         .copied()
         .filter(|task| normalizable_avoidable_ai_task(task))
         .collect::<Vec<_>>();
+    let observed_cost_task_ids = events
+        .iter()
+        .filter(|event| observed_ai_cost_from_event(event).is_some())
+        .filter_map(event_task_id)
+        .collect::<BTreeSet<_>>();
+    let measured_repetitive_ai_tasks = ai_tasks
+        .iter()
+        .copied()
+        .filter(|task| looks_repetitive_or_deterministic_ai_task(task))
+        .filter(|task| {
+            task.status != TaskStatus::Completed
+                || observed_cost_task_ids.contains(task.id.as_str())
+        })
+        .collect::<Vec<_>>();
     let repetitive_or_deterministic_ai_cost_items =
-        build_repetitive_ai_cost_item_reports(&repetitive_ai_tasks, events);
+        build_repetitive_ai_cost_item_reports(&measured_repetitive_ai_tasks, events);
+    let measured_repetitive_or_deterministic_ai_execution_count =
+        repetitive_or_deterministic_ai_cost_items
+            .iter()
+            .map(|item| item.observed_execution_count)
+            .sum::<usize>();
+    let measured_repetitive_or_deterministic_ai_cost_total_usd = {
+        let total = repetitive_or_deterministic_ai_cost_items
+            .iter()
+            .filter_map(|item| item.observed_cost_total_usd)
+            .sum::<f64>();
+        (measured_repetitive_or_deterministic_ai_execution_count > 0)
+            .then(|| normalize_zero_cost(total))
+    };
+    let measured_repetitive_or_deterministic_ai_cost_average_usd =
+        measured_repetitive_or_deterministic_ai_cost_total_usd.map(|total| {
+            average_cost(
+                total,
+                measured_repetitive_or_deterministic_ai_execution_count,
+            )
+        });
     let avoidable_estimated_cost_usd = normalize_zero_cost(
         repetitive_ai_tasks
             .iter()
@@ -638,13 +679,14 @@ fn build_cost_efficiency_report(
         average_cost(avoidable_estimated_cost_usd, repetitive_ai_tasks.len());
     let observed_costs = events
         .iter()
+        .filter(|event| event_task_id(event).map_or(true, |task_id| ai_task_ids.contains(task_id)))
         .filter_map(observed_ai_cost_from_event)
         .collect::<Vec<_>>();
     let observed_ai_cost_total_usd =
         (!observed_costs.is_empty()).then(|| normalize_zero_cost(observed_costs.iter().sum()));
     let observed_ai_cost_average_usd =
         observed_ai_cost_total_usd.map(|total| average_cost(total, observed_costs.len()));
-    let repetitive_task_ids = repetitive_ai_tasks
+    let repetitive_task_ids = measured_repetitive_ai_tasks
         .iter()
         .map(|task| task.id.as_str())
         .collect::<BTreeSet<_>>();
@@ -680,6 +722,9 @@ fn build_cost_efficiency_report(
         repetitive_or_deterministic_ai_cost_item_count: repetitive_or_deterministic_ai_cost_items
             .len(),
         repetitive_or_deterministic_ai_cost_items,
+        measured_repetitive_or_deterministic_ai_execution_count,
+        measured_repetitive_or_deterministic_ai_cost_total_usd,
+        measured_repetitive_or_deterministic_ai_cost_average_usd,
         estimated_ai_cost_total_usd,
         estimated_ai_cost_average_usd,
         observed_ai_cost_total_usd,
@@ -837,6 +882,16 @@ fn looks_repetitive_or_deterministic_ai_task(task: &crate::graph::AtomicTask) ->
         "import",
         "csv",
         "json",
+        "telegram",
+        "playwright",
+        "pdf",
+        "markdown report",
+        "delivery evidence",
+        "delivery record",
+        "verified evidence",
+        "regulation inspection",
+        "inspection evidence",
+        "report from verified evidence",
     ];
     task_has_repetition_signal(task)
         || task.execution_policy.deterministic
@@ -1401,7 +1456,7 @@ fn suggested_commands(
                 .into_iter()
                 .take(3)
             {
-                push_task_handoff_command(&mut commands, &workflow.id, &task_id);
+                push_task_handoff_command(&mut commands, workflow, &task_id);
             }
         }
     }
@@ -1482,7 +1537,7 @@ fn suggested_commands(
             commands.extend(
                 task_ids_to_suggest
                     .iter()
-                    .map(|task_id| task_handoff_command(&workflow.id, task_id)),
+                    .map(|task_id| task_handoff_command(workflow, task_id)),
             );
         }
     }
@@ -1512,26 +1567,39 @@ fn suggested_commands(
     commands
 }
 
-fn push_task_handoff_command(commands: &mut Vec<Vec<String>>, workflow_id: &str, task_id: &str) {
+fn push_task_handoff_command(commands: &mut Vec<Vec<String>>, workflow: &Workflow, task_id: &str) {
     if !task_handoff_already_suggested(commands, task_id) {
-        commands.push(task_handoff_command(workflow_id, task_id));
+        commands.push(task_handoff_command(workflow, task_id));
     }
 }
 
-fn task_handoff_command(workflow_id: &str, task_id: &str) -> Vec<String> {
+fn task_handoff_command(workflow: &Workflow, task_id: &str) -> Vec<String> {
+    let executor = workflow
+        .tasks
+        .iter()
+        .find(|task| task.id == task_id)
+        .map(suggested_handoff_executor)
+        .unwrap_or("codex");
     vec![
         "forge".to_string(),
         "task".to_string(),
         "handoff".to_string(),
         "--workflow".to_string(),
-        workflow_id.to_string(),
+        workflow.id.clone(),
         "--task".to_string(),
         task_id.to_string(),
         "--executor".to_string(),
-        "codex".to_string(),
+        executor.to_string(),
         "--output".to_string(),
         "json".to_string(),
     ]
+}
+
+fn suggested_handoff_executor(task: &AtomicTask) -> &'static str {
+    match task.executor {
+        ExecutorKind::Ai | ExecutorKind::Mixed if task.execution_policy.ai_allowed => "codex",
+        _ => "forge_cli",
+    }
 }
 
 fn task_handoff_already_suggested(commands: &[Vec<String>], task_id: &str) -> bool {
