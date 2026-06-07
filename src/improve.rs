@@ -1510,7 +1510,9 @@ fn priority_for_score(score: i64) -> String {
 
 fn recommended_action(reasons: &[ImprovementCandidateReason]) -> String {
     let has = |code: &str| reasons.iter().any(|reason| reason.code == code);
-    if has("stale_running_run") || has("missing_runtime_heartbeat") {
+    if has("support_only_output_risk") {
+        "update_goal_or_tasks_with_user_facing_deliverables"
+    } else if has("stale_running_run") || has("missing_runtime_heartbeat") {
         "recover_or_resume_run_before_mutation"
     } else if has("run_needs_attention") {
         "inspect_resume_or_cancel_run"
@@ -1522,8 +1524,6 @@ fn recommended_action(reasons: &[ImprovementCandidateReason]) -> String {
         "complete_or_archive_verified_support_state"
     } else if has("missing_final_outcome_audit") {
         "produce_and_package_final_user_outcome"
-    } else if has("support_only_output_risk") {
-        "update_goal_or_tasks_with_user_facing_deliverables"
     } else if has("rework_loop_signal") {
         "run_rework_loop"
     } else if has("parallelization_opportunity") {
@@ -1546,6 +1546,38 @@ fn suggested_commands(
     events: &[StoreEvent],
 ) -> Vec<Vec<String>> {
     let mut commands = Vec::new();
+    if has_reason(reasons, "support_only_output_risk") {
+        commands.push(vec![
+            "forge".to_string(),
+            "workflow".to_string(),
+            "update-goal".to_string(),
+            "--workflow".to_string(),
+            workflow.id.clone(),
+            "--goal".to_string(),
+            "<goal with explicit user-facing deliverables>".to_string(),
+            "--origin".to_string(),
+            "forge_cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]);
+        commands.push(vec![
+            "forge".to_string(),
+            "status".to_string(),
+            "--workflow".to_string(),
+            workflow.id.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]);
+        commands.push(vec![
+            "forge".to_string(),
+            "improve".to_string(),
+            "--workflow".to_string(),
+            workflow.id.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]);
+        return commands;
+    }
     for run in runs {
         let activity = build_run_activity(run);
         if run.status == "running" && activity.heartbeat_status == "stale" {
@@ -1569,28 +1601,6 @@ fn suggested_commands(
                 "json".to_string(),
             ]);
         }
-    }
-    if has_reason(reasons, "support_only_output_risk")
-        && !has_reason(reasons, "parallelization_opportunity")
-        && !has_reason(reasons, "rework_loop_signal")
-    {
-        commands.push(vec![
-            "forge".to_string(),
-            "status".to_string(),
-            "--workflow".to_string(),
-            workflow.id.clone(),
-            "--output".to_string(),
-            "json".to_string(),
-        ]);
-        commands.push(vec![
-            "forge".to_string(),
-            "improve".to_string(),
-            "--workflow".to_string(),
-            workflow.id.clone(),
-            "--output".to_string(),
-            "json".to_string(),
-        ]);
-        return commands;
     }
     if has_reason(reasons, "rework_loop_signal") {
         if let Some(run) = latest_driveable_run(runs) {

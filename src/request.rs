@@ -814,6 +814,49 @@ pub fn update_run_status(
     Ok(run)
 }
 
+fn mark_run_needs_attention_for_terminal_outcome(
+    store: &ForgeStore,
+    run: &RunRecord,
+    workflow: &Workflow,
+    origin: &str,
+    reason: &str,
+) -> Result<RunRecord> {
+    let attention_at = Utc::now();
+    let previous_status = run.status.clone();
+    let previous_workflow_status = workflow.status.clone();
+    let mut attention_run = run.clone();
+    attention_run.status = "needs_attention".to_string();
+    attention_run.active_executor = None;
+    attention_run.executor_pid = None;
+    attention_run.progress_summary = Some(reason.to_string());
+    attention_run.last_heartbeat_at = None;
+    attention_run.heartbeat_expires_at = None;
+    attention_run.heartbeat_ttl_seconds = None;
+    attention_run.updated_at = attention_at;
+    save_run_record(store, &attention_run)?;
+
+    let mut attention_workflow = workflow.clone();
+    attention_workflow.status = "needs_attention".to_string();
+    store.save_workflow(&attention_workflow)?;
+
+    store.record_event(
+        &attention_workflow.id,
+        "terminal_outcome_needs_attention",
+        &serde_json::json!({
+            "run_id": attention_run.run_id,
+            "origin": origin,
+            "previous_status": previous_status,
+            "new_status": attention_run.status,
+            "previous_workflow_status": previous_workflow_status,
+            "new_workflow_status": attention_workflow.status,
+            "reason": reason,
+            "updated_at": attention_at,
+        }),
+    )?;
+
+    Ok(attention_run)
+}
+
 pub fn heartbeat_request(
     store: &ForgeStore,
     run_id: &str,
@@ -876,28 +919,28 @@ pub fn drive_request(
     ttl_seconds: u64,
     origin: &str,
 ) -> Result<RequestDriveReport> {
-    let heartbeat = heartbeat_request(
-        store,
-        run_id,
-        executor,
-        "forge drive evaluating next runnable action",
-        ttl_seconds,
-        None,
-        origin,
-    )?;
     let run = load_run_record(store, run_id)?;
-    let mut workflow = store.load_workflow(&run.workflow_id)?;
+    let workflow = store.load_workflow(&run.workflow_id)?;
     let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
     let latest_checkpoint = latest_actionable_checkpoint(&workflow, &checkpoints);
-    let mut task_summary = summarize_tasks(&workflow);
-    let mut handoff_summary = build_context_handoff_summary(
+    let task_summary = summarize_tasks(&workflow);
+    let handoff_summary = build_context_handoff_summary(
         &workflow,
         request_drive_context_budget(&workflow),
         &checkpoints,
     )?;
-    let mut outcome_status = request_outcome_status(store, &workflow)?;
+    let outcome_status = request_outcome_status(store, &workflow)?;
 
     if let Some(rework) = latest_open_rework(store, &workflow)? {
+        let heartbeat = heartbeat_request(
+            store,
+            run_id,
+            executor,
+            "forge drive evaluating next runnable action",
+            ttl_seconds,
+            None,
+            origin,
+        )?;
         let next_command = vec![
             "forge".to_string(),
             "task".to_string(),
@@ -946,6 +989,15 @@ pub fn drive_request(
         && (outcome_status.final_completion_audit_required
             || outcome_status.final_completion_audit_present)
     {
+        let attention_reason = "All workflow tasks are complete, but the outcome is still support-only; the workflow needs explicit user-facing deliverables before final completion.";
+        let attention_run = mark_run_needs_attention_for_terminal_outcome(
+            store,
+            &run,
+            &workflow,
+            origin,
+            attention_reason,
+        )?;
+        let activity = build_run_activity(&attention_run);
         let next_command = vec![
             "forge".to_string(),
             "workflow".to_string(),
@@ -967,7 +1019,7 @@ pub fn drive_request(
             workflow_id: workflow.id,
             executor: executor.to_string(),
             origin: origin.to_string(),
-            activity: heartbeat.activity,
+            activity,
             task_summary,
             outcome_status,
             checkpoint_count: checkpoints.len(),
@@ -979,11 +1031,31 @@ pub fn drive_request(
             next_command,
             parallel_next_commands: Vec::new(),
             final_delivery_package: None,
-            reason: "All workflow tasks are complete, but the outcome is still support-only; the workflow needs explicit user-facing deliverables before final completion."
-                .to_string(),
-            updated_at: heartbeat.updated_at,
+            reason: attention_reason.to_string(),
+            updated_at: attention_run.updated_at,
         });
     }
+
+    let heartbeat = heartbeat_request(
+        store,
+        run_id,
+        executor,
+        "forge drive evaluating next runnable action",
+        ttl_seconds,
+        None,
+        origin,
+    )?;
+    let run = load_run_record(store, run_id)?;
+    let mut workflow = store.load_workflow(&run.workflow_id)?;
+    let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
+    let latest_checkpoint = latest_actionable_checkpoint(&workflow, &checkpoints);
+    let mut task_summary = summarize_tasks(&workflow);
+    let mut handoff_summary = build_context_handoff_summary(
+        &workflow,
+        request_drive_context_budget(&workflow),
+        &checkpoints,
+    )?;
+    let mut outcome_status = request_outcome_status(store, &workflow)?;
 
     if task_summary.completed == task_summary.total && task_summary.total > 0 {
         if let Some(reason) = final_completion_audit_block_reason(store, &workflow)? {

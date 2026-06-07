@@ -8279,6 +8279,22 @@ fn improve_candidates_recommend_deliverable_repair_for_support_only_workflows() 
         command.as_array().unwrap()
             == &vec![
                 Value::String("forge".to_string()),
+                Value::String("workflow".to_string()),
+                Value::String("update-goal".to_string()),
+                Value::String("--workflow".to_string()),
+                Value::String(workflow.id.clone()),
+                Value::String("--goal".to_string()),
+                Value::String("<goal with explicit user-facing deliverables>".to_string()),
+                Value::String("--origin".to_string()),
+                Value::String("forge_cli".to_string()),
+                Value::String("--output".to_string()),
+                Value::String("json".to_string()),
+            ]
+    }));
+    assert!(commands.iter().any(|command| {
+        command.as_array().unwrap()
+            == &vec![
+                Value::String("forge".to_string()),
                 Value::String("status".to_string()),
                 Value::String("--workflow".to_string()),
                 Value::String(workflow.id.clone()),
@@ -8367,6 +8383,14 @@ fn improve_candidates_do_not_request_final_audit_for_support_only_explicit_final
         .unwrap()
         .iter()
         .any(|reason| reason["code"] == "support_only_output_risk"));
+    assert!(top["suggested_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("update-goal".to_string()))));
     assert!(!top["suggested_commands"]
         .as_array()
         .unwrap()
@@ -8971,6 +8995,7 @@ fn improve_candidates_suggest_forge_cli_for_no_ai_ready_handoffs() {
         "Run deterministic evidence generation beside an AI review",
     ));
     workflow.status = "running".to_string();
+    workflow.intent.deliverables = vec!["partner-ready evidence report".to_string()];
     workflow.tasks = vec![
         graph::task(
             "task-json",
@@ -9931,11 +9956,45 @@ fn final_audit_cannot_verify_support_only_workflow_without_user_deliverables() {
     assert_eq!(driven_json["status"], "blocked");
     assert_eq!(driven_json["action"], "define_user_facing_deliverables");
     assert_eq!(driven_json["outcome_status"]["status"], "support_only");
+    assert_eq!(driven_json["activity"]["active"], false);
+    assert_eq!(
+        driven_json["activity"]["heartbeat_status"],
+        "needs_attention"
+    );
     assert_eq!(driven_json["final_delivery_package"], Value::Null);
     assert!(driven_json["reason"]
         .as_str()
         .unwrap()
         .contains("support-only"));
+
+    let attention_status = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            &run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let attention_json: Value = serde_json::from_slice(&attention_status).unwrap();
+    assert_eq!(attention_json["status"], "needs_attention");
+    assert_eq!(attention_json["workflow_status"], "needs_attention");
+    assert_eq!(attention_json["activity"]["active"], false);
+    assert_eq!(
+        attention_json["activity"]["heartbeat_status"],
+        "needs_attention"
+    );
+    assert_eq!(
+        attention_json["activity"]["recovery"]["action"],
+        "resume_cancel_or_inspect"
+    );
 
     let candidates = forge()
         .args([
