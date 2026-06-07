@@ -15202,7 +15202,7 @@ fn rework_handoff_preserves_failure_summary_and_artifact_manifest_for_delivery()
             store.to_str().unwrap(),
             "plan",
             "--goal",
-            "Migrate project workspace Rust repositories and validate final delivery",
+            "Migrate platform Rust repositories and validate final delivery",
             "--output",
             "json",
         ])
@@ -15220,10 +15220,10 @@ fn rework_handoff_preserves_failure_summary_and_artifact_manifest_for_delivery()
     fs::write(
         &report_path,
         serde_json::to_vec_pretty(&serde_json::json!({
-            "schema_version": "digital_directive.validation_report.v1",
+            "schema_version": "platform.validation_report.v1",
             "status": "blocked_no_code_to_validate",
             "required_rework": [
-                "Clonar ou inicializar os 19 repositórios alvo.",
+                "Clonar ou inicializar os repositórios alvo.",
                 "Criar README, Cargo.toml e src/lib.rs por repositório.",
                 "Rodar cargo fmt, clippy e test antes de marcar completo."
             ]
@@ -15259,7 +15259,7 @@ fn rework_handoff_preserves_failure_summary_and_artifact_manifest_for_delivery()
         fs::write(
             &extra_report,
             serde_json::to_vec_pretty(&serde_json::json!({
-                "schema_version": "digital_directive.validation_report.v1",
+                "schema_version": "platform.validation_report.v1",
                 "status": "blocked_no_code_to_validate",
                 "index": index,
                 "required_rework": "Criar crates Rust reais antes de validar."
@@ -15328,7 +15328,7 @@ fn rework_handoff_preserves_failure_summary_and_artifact_manifest_for_delivery()
             "--state",
             "needs_retry",
             "--summary",
-            "Validação bloqueada: 19 repos privados existem, mas estão vazios e sem Cargo.toml.",
+            "Validação bloqueada: os repos privados existem, mas estão vazios e sem Cargo.toml.",
             "--context-sha256",
             baseline_context["context_sha256"].as_str().unwrap(),
             "--context-routing-cache-key",
@@ -15378,7 +15378,7 @@ fn rework_handoff_preserves_failure_summary_and_artifact_manifest_for_delivery()
         "rework context should expose attached reports so executors can fix the real blocker"
     );
     assert!(content.contains("State: needs_retry"));
-    assert!(content.contains("Summary: Validação bloqueada: 19 repos privados existem"));
+    assert!(content.contains("Summary: Validação bloqueada: os repos privados existem"));
     assert!(content.contains("attached-report-task-006-validation-report"));
 }
 
@@ -15393,7 +15393,7 @@ fn artifact_manifest_command_context_requires_artifact_section_under_default_han
             store.to_str().unwrap(),
             "plan",
             "--goal",
-            "Migrate project workspace Rust repositories and validate final delivery",
+            "Migrate platform Rust repositories and validate final delivery",
             "--output",
             "json",
         ])
@@ -15414,7 +15414,7 @@ fn artifact_manifest_command_context_requires_artifact_section_under_default_han
     fs::write(
         &manifest_path,
         serde_json::to_vec_pretty(&serde_json::json!({
-            "schema_version": "digital_directive.artifact_manifest.v1",
+            "schema_version": "platform.artifact_manifest.v1",
             "artifact_count": 20,
             "artifacts": [
                 {
