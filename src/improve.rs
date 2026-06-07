@@ -1,5 +1,7 @@
 use crate::artifact::write_json_artifact;
-use crate::graph::{ExecutorKind, TaskStatus, Workflow};
+use crate::graph::{
+    AtomicTask, ExecutionPolicySpec, ExecutorKind, TaskStatus, Workflow, WorkflowRevision,
+};
 use crate::outcome::{assess_workflow_outcome_metadata, OutcomeStatusReport};
 use crate::request::{build_run_activity, RunActivity, RunRecord};
 use crate::scheduler::{plan_parallel_execution, ParallelSchedulePlan};
@@ -132,6 +134,39 @@ pub struct ImprovementRunEvidence {
 pub struct ImprovementEventSummary {
     pub kind: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AvoidableAiCostNormalizationReport {
+    pub status: String,
+    pub schema_version: String,
+    pub workflow_id: String,
+    pub origin: String,
+    pub revision: u64,
+    pub normalized_task_count: usize,
+    pub normalized_tasks: Vec<NormalizedAvoidableAiTask>,
+    pub propagated_version_task_count: usize,
+    pub propagated_version_task_ids: Vec<String>,
+    pub avoided_estimated_cost_usd: f64,
+    pub validation_status: String,
+    pub promotable: bool,
+    pub event_kind: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NormalizedAvoidableAiTask {
+    pub task_id: String,
+    pub title: String,
+    pub status: String,
+    pub previous_executor: String,
+    pub new_executor: String,
+    pub previous_policy_mode: String,
+    pub new_policy_mode: String,
+    pub previous_estimated_cost_usd: f64,
+    pub new_estimated_cost_usd: f64,
+    pub avoidable_estimated_cost_usd: f64,
+    pub previous_version: u64,
+    pub new_version: u64,
 }
 
 pub fn rank_improvement_candidates(
@@ -628,6 +663,202 @@ fn looks_repetitive_or_deterministic_ai_task(task: &crate::graph::AtomicTask) ->
             .any(|keyword| text.contains(keyword))
 }
 
+fn normalizable_avoidable_ai_task(task: &crate::graph::AtomicTask) -> bool {
+    task.executor == ExecutorKind::Ai
+        && task.status != TaskStatus::Completed
+        && looks_repetitive_or_deterministic_ai_task(task)
+}
+
+fn normalized_command_cost(task: &crate::graph::AtomicTask) -> f64 {
+    let text = format!("{} {}", task.title, task.expected_output).to_lowercase();
+    if text.contains("extract requirements") || text.contains("requirements") {
+        0.0002
+    } else {
+        0.0005
+    }
+}
+
+fn deterministic_execution_policy(selection_reason: &str) -> ExecutionPolicySpec {
+    ExecutionPolicySpec {
+        mode: "deterministic_executor".to_string(),
+        ai_allowed: false,
+        deterministic: true,
+        code_runtime: None,
+        reuse_hint: "task_local".to_string(),
+        selection_reason: selection_reason.to_string(),
+        validation_gate: "task_validation_rules".to_string(),
+    }
+}
+
+fn propagate_dependency_version_boundary(tasks: &mut [AtomicTask]) -> Vec<String> {
+    let mut propagated = BTreeSet::new();
+    loop {
+        let versions = tasks
+            .iter()
+            .map(|task| (task.id.clone(), task.version))
+            .collect::<BTreeMap<_, _>>();
+        let mut changed = false;
+        for task in tasks.iter_mut() {
+            let minimum_dependency_version = task
+                .dependencies
+                .iter()
+                .filter_map(|dependency| versions.get(dependency))
+                .copied()
+                .max()
+                .unwrap_or(task.version);
+            if task.version < minimum_dependency_version {
+                task.version = minimum_dependency_version;
+                propagated.insert(task.id.clone());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    propagated.into_iter().collect()
+}
+
+pub fn normalize_avoidable_ai_costs(
+    store: &ForgeStore,
+    workflow_id: &str,
+    origin: &str,
+) -> Result<AvoidableAiCostNormalizationReport> {
+    let mut workflow = store.load_workflow(workflow_id)?;
+    let mut normalized_tasks = Vec::new();
+    let mut avoided_estimated_cost_usd = 0.0;
+
+    for task in &mut workflow.tasks {
+        if !normalizable_avoidable_ai_task(task) {
+            continue;
+        }
+
+        let previous_estimated_cost_usd = task.cost.estimated_cost_usd;
+        let new_estimated_cost_usd = normalized_command_cost(task);
+        let previous_policy_mode = task.execution_policy.mode.clone();
+        let previous_version = task.version;
+        task.executor = ExecutorKind::Command;
+        task.execution_policy = deterministic_execution_policy(
+            "normalized avoidable AI cost: repetitive or deterministic work can run without a live model call",
+        );
+        task.cost.estimated_cost_usd = new_estimated_cost_usd;
+        task.version += 1;
+        let avoidable_estimated_cost_usd =
+            (previous_estimated_cost_usd - new_estimated_cost_usd).max(0.0);
+        avoided_estimated_cost_usd += avoidable_estimated_cost_usd;
+
+        normalized_tasks.push(NormalizedAvoidableAiTask {
+            task_id: task.id.clone(),
+            title: task.title.clone(),
+            status: serde_json::to_value(&task.status)?
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string(),
+            previous_executor: "ai".to_string(),
+            new_executor: "command".to_string(),
+            previous_policy_mode,
+            new_policy_mode: task.execution_policy.mode.clone(),
+            previous_estimated_cost_usd,
+            new_estimated_cost_usd,
+            avoidable_estimated_cost_usd,
+            previous_version,
+            new_version: task.version,
+        });
+    }
+
+    let propagated_version_task_ids = propagate_dependency_version_boundary(&mut workflow.tasks);
+    if normalized_tasks.is_empty() && propagated_version_task_ids.is_empty() {
+        let validation = validate_workflow(&workflow);
+        return Ok(AvoidableAiCostNormalizationReport {
+            status: "no_changes".to_string(),
+            schema_version: "forge.improve.avoidable_ai_cost_normalization.v1".to_string(),
+            workflow_id: workflow.id,
+            origin: origin.to_string(),
+            revision: workflow
+                .revisions
+                .last()
+                .map(|item| item.revision)
+                .unwrap_or(0),
+            normalized_task_count: 0,
+            normalized_tasks,
+            propagated_version_task_count: 0,
+            propagated_version_task_ids: Vec::new(),
+            avoided_estimated_cost_usd,
+            validation_status: validation.status,
+            promotable: validation.promotable,
+            event_kind: "avoidable_ai_cost_normalization_noop".to_string(),
+        });
+    }
+
+    let validation = validate_workflow(&workflow);
+    let revision = workflow
+        .revisions
+        .last()
+        .map(|item| item.revision + 1)
+        .unwrap_or(1);
+    let (status, change_type, event_kind, summary) = if normalized_tasks.is_empty() {
+        (
+            "version_boundary_repaired",
+            "avoidable_ai_cost_version_boundary_repaired",
+            "avoidable_ai_cost_version_boundary_repaired",
+            format!(
+                "repaired dependency version boundary for {} downstream task(s)",
+                propagated_version_task_ids.len()
+            ),
+        )
+    } else {
+        (
+            "normalized",
+            "avoidable_ai_cost_normalized",
+            "avoidable_ai_cost_normalized",
+            format!(
+                "normalized {} repetitive or deterministic AI task(s) to command executor",
+                normalized_tasks.len()
+            ),
+        )
+    };
+    workflow.revisions.push(WorkflowRevision {
+        revision,
+        origin: origin.to_string(),
+        change_type: change_type.to_string(),
+        summary,
+        created_at: Utc::now(),
+    });
+    store.save_workflow(&workflow)?;
+    store.record_event(
+        &workflow.id,
+        event_kind,
+        &json!({
+            "schema_version": "forge.improve.avoidable_ai_cost_normalization.v1",
+            "revision": revision,
+            "origin": origin,
+            "normalized_task_count": normalized_tasks.len(),
+            "normalized_tasks": normalized_tasks.clone(),
+            "propagated_version_task_count": propagated_version_task_ids.len(),
+            "propagated_version_task_ids": propagated_version_task_ids.clone(),
+            "avoided_estimated_cost_usd": avoided_estimated_cost_usd,
+            "validation_status": validation.status.clone(),
+            "promotable": validation.promotable
+        }),
+    )?;
+
+    Ok(AvoidableAiCostNormalizationReport {
+        status: status.to_string(),
+        schema_version: "forge.improve.avoidable_ai_cost_normalization.v1".to_string(),
+        workflow_id: workflow.id,
+        origin: origin.to_string(),
+        revision,
+        normalized_task_count: normalized_tasks.len(),
+        normalized_tasks,
+        propagated_version_task_count: propagated_version_task_ids.len(),
+        propagated_version_task_ids,
+        avoided_estimated_cost_usd,
+        validation_status: validation.status,
+        promotable: validation.promotable,
+        event_kind: event_kind.to_string(),
+    })
+}
+
 fn observed_ai_cost_from_event(event: &crate::storage::StoreEvent) -> Option<f64> {
     event
         .data
@@ -860,6 +1091,21 @@ fn suggested_commands(
             workflow.id.clone(),
             "--executor".to_string(),
             "codex".to_string(),
+            "--origin".to_string(),
+            "forge_cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]);
+    }
+    if has_reason(reasons, "avoidable_ai_cost")
+        && workflow.tasks.iter().any(normalizable_avoidable_ai_task)
+    {
+        commands.push(vec![
+            "forge".to_string(),
+            "improve".to_string(),
+            "normalize-cost".to_string(),
+            "--workflow".to_string(),
+            workflow.id.clone(),
             "--origin".to_string(),
             "forge_cli".to_string(),
             "--output".to_string(),

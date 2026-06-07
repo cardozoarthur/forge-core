@@ -25,7 +25,9 @@ use forge_core::executor::{
 };
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff;
-use forge_core::improve::{generate_improvement, rank_improvement_candidates};
+use forge_core::improve::{
+    generate_improvement, normalize_avoidable_ai_costs, rank_improvement_candidates,
+};
 use forge_core::inspection::inspect_workflow_with_focus;
 use forge_core::intent::parse_intent;
 use forge_core::interaction::{
@@ -1102,6 +1104,14 @@ enum ImproveCommands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
+    NormalizeCost {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1568,6 +1578,15 @@ fn run() -> Result<i32> {
             match command {
                 Some(ImproveCommands::Candidates { limit, output }) => {
                     let report = rank_improvement_candidates(&store, limit)?;
+                    print_response(output, &report)?;
+                    Ok(0)
+                }
+                Some(ImproveCommands::NormalizeCost {
+                    workflow,
+                    origin,
+                    output,
+                }) => {
+                    let report = normalize_avoidable_ai_costs(&store, &workflow, &origin)?;
                     print_response(output, &report)?;
                     Ok(0)
                 }
