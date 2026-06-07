@@ -188,6 +188,10 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
+    Brains {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
     ExecutorQuota {
         #[command(subcommand)]
         command: ExecutorQuotaCommands,
@@ -1767,6 +1771,12 @@ fn run() -> Result<i32> {
             let store = ForgeStore::open(cli.store)?;
             let report = load_executors(&store)?;
             print_response(output, &report)?;
+            Ok(0)
+        }
+        Commands::Brains { output } => {
+            let store = ForgeStore::open(cli.store)?;
+            let report = load_executors(&store)?;
+            print_response(output, &report.brain_router)?;
             Ok(0)
         }
         Commands::ExecutorQuota { command } => match command {

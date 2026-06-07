@@ -9,7 +9,7 @@ pub const SKILL_MD: &str = r#"---
 name: forge-core
 description: Use Forge Core to run operational and strategic assisted AI/non-AI workflows with goal-oriented DAGs, executor/runtime sync, live goal/node mutation, mutable artifacts, validation gates, persistence, rework loops, and controlled self-improvement.
 license: MIT
-compatibility: codex, opencode, gemini
+compatibility: codex, opencode, gemini, claude
 metadata:
   runtime: rust
   cli: forge
@@ -22,7 +22,7 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 ## Required Workflow
 
 1. Run `forge plan --goal "<human objective>" --output json`.
-2. For skill-style use, prefer `forge request start --goal "<objective>" --origin codex|opencode|gemini|skill --output json` and return the `run_id` to the caller.
+2. For skill-style use, prefer `forge request start --goal "<objective>" --origin codex|opencode|gemini|claude|skill --output json` and return the `run_id` to the caller.
 3. Run `forge sync all --home "$HOME" --output json` when executor or runtime availability may have changed.
 4. Inspect the generated atomic tasks, task goals, subtasks, impediments, async policy and validation rules.
 5. Use `forge workflow update-goal ... --origin codex|opencode|gemini|forge_cli|skill` when the human changes direction during execution.
@@ -36,8 +36,10 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 ## MCP Agent Surface
 
 - Use `forge mcp tools --output json` to discover stable agent-facing tools before wiring a Codex/OpenCode workflow.
+- Treat Codex, OpenCode, Gemini CLI, Claude CLI and future CLIs as replaceable execution brains only. Forge owns and routes workflow state, memory, skills, MCP servers/tools, credential-vault references, context packets, shell/session lifecycle, permissions, cost policy, validation gates and self-improvement decisions. Inspect this boundary with `forge brains --output json` or MCP `forge.brain_router` before handing work to a brain.
 - Use `forge improve candidates --output json` or MCP `forge.improve.candidates` as the orchestrator's first improvement scan. It ranks live/degraded workflows with workflow events, run heartbeats, outcome evidence, parallel-ready handoffs and cost-efficiency signals for repetitive/deterministic tasks that are still using AI.
 - Inspect the no-argument interactive dashboard through `forge.interactive.home`, discover slash commands through `forge.interactive.slash_commands`, and route conversational input through `forge.interactive.route` when an agent needs the same command/chat classification as the TUI without launching a local terminal.
+- Use the interactive `/brains` and `/shells` commands to show Forge-controlled brain routing and attachable shell entrypoints. Directly opening `codex`, `opencode`, `gemini` or `claude` should be treated as inspection/debugging; production handoff should go through Forge context, leases and validation.
 - For human+AI assisted operation, use `forge ops snapshot --output json` for an operational registry view or `forge ops serve --host 127.0.0.1 --port 8765` to open the local web console. The console is local-only by default and lets operators observe workflows, drive runs, step deterministic work, complete tasks with evidence and update workflow goals or task nodes in real time. Its modifier lane lets a separate strategic AI or human propose goal/node mutations and apply them through Forge-owned events while execution continues. Its visual surface shows tasks/subtasks and lets operators create whiteboards, screens, wireframes, flows, components, documents, token collections, token patches and collaboration events through Forge-owned workflow revisions.
 - Treat `outcome_status` from `forge request status`, `forge request drive` and `forge list` as the final-result gate. If it says `support_only`, update the goal or tasks with explicit user-facing deliverables. If it says `needs_user_delivery_evidence` or `needs_final_outcome_audit`, continue the workflow instead of claiming completion.
 - If `forge improve candidates` reports `missing_final_outcome_audit` for a workflow without a driveable run, use `forge request ensure-final-audit --workflow <workflow-id> --executor codex --origin codex --output json` or MCP `forge.workflow.ensure_final_audit` to create or surface the final audit task before packaging.
@@ -104,6 +106,8 @@ forge improve candidates --output json
 forge mcp tools --output json
 forge mcp call forge.improve.candidates --input '{"limit":10}' --output json
 forge mcp call forge.interactive.home --output json
+forge brains --output json
+forge mcp call forge.brain_router --output json
 forge mcp call forge.interactive.slash_commands --output json
 forge mcp call forge.interactive.route --input '{"input":"What is the current Forge status?","origin":"codex"}' --output json
 forge mcp call forge.run.start --input '{"goal":"Improve Forge Core","origin":"codex"}' --output json

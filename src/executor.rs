@@ -55,7 +55,55 @@ pub struct ExecutorSyncReport {
     pub usable: Vec<String>,
     pub executors: Vec<ExecutorState>,
     pub integrations: Vec<ExecutorIntegration>,
+    pub brain_router: BrainRouterReport,
     pub quota_policy: ExecutorQuotaPolicyReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainRouterReport {
+    pub schema_version: String,
+    pub controller: String,
+    pub controller_role: String,
+    pub brain_role: String,
+    pub routing_principle: String,
+    pub selected_brain: Option<String>,
+    pub forge_controlled_surfaces: Vec<String>,
+    pub brain_owned_surfaces: Vec<String>,
+    pub brains: Vec<BrainCandidate>,
+    pub shell_sessions: Vec<BrainShellSessionSpec>,
+    pub safety_gates: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainCandidate {
+    pub id: String,
+    pub display_name: String,
+    pub command: String,
+    pub status: String,
+    pub execution_mode: String,
+    pub session_role: String,
+    pub persistent_state_owner: String,
+    pub context_source: String,
+    pub memory_source: String,
+    pub skills_source: String,
+    pub mcp_source: String,
+    pub installed: bool,
+    pub configured: bool,
+    pub allowed: bool,
+    pub non_interactive_ready: bool,
+    pub shell_entrypoints: Vec<Vec<String>>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainShellSessionSpec {
+    pub id: String,
+    pub brain_id: String,
+    pub entry_command: Vec<String>,
+    pub attachable: bool,
+    pub role: String,
+    pub state_boundary: String,
+    pub safety_note: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -235,6 +283,7 @@ fn build_report(
     });
     let integrations = build_integrations(&executors);
     let quota_policy = build_quota_policy(&executors, store);
+    let brain_router = build_brain_router(&executors, &quota_policy);
 
     ExecutorSyncReport {
         status: status.to_string(),
@@ -243,6 +292,7 @@ fn build_report(
         usable,
         executors,
         integrations,
+        brain_router,
         quota_policy,
     }
 }
@@ -625,6 +675,188 @@ fn build_integrations(executors: &[ExecutorState]) -> Vec<ExecutorIntegration> {
                 .to_string()
         },
     }]
+}
+
+fn build_brain_router(
+    executors: &[ExecutorState],
+    quota_policy: &ExecutorQuotaPolicyReport,
+) -> BrainRouterReport {
+    let selected_brain = quota_policy
+        .selection_trace
+        .iter()
+        .find(|candidate| candidate.decision == "select")
+        .map(|candidate| candidate.executor.clone());
+    let mut brains = executors
+        .iter()
+        .map(brain_candidate)
+        .collect::<Vec<BrainCandidate>>();
+    brains.sort_by(|left, right| left.id.cmp(&right.id));
+
+    BrainRouterReport {
+        schema_version: "forge.brain_router.v1".to_string(),
+        controller: "forge".to_string(),
+        controller_role: "orchestration_control_plane".to_string(),
+        brain_role: "replaceable_execution_brain".to_string(),
+        routing_principle:
+            "Forge owns memory, skills, MCP routing, context, workflow state, shell/session lifecycle, permissions, cost policy and validation; external CLIs only execute bounded brain work."
+                .to_string(),
+        selected_brain,
+        forge_controlled_surfaces: vec![
+            "workflow_graph".to_string(),
+            "memory".to_string(),
+            "skills".to_string(),
+            "mcp_servers_and_tools".to_string(),
+            "credential_vault_references".to_string(),
+            "context_packets".to_string(),
+            "artifact_lineage".to_string(),
+            "shell_session_lifecycle".to_string(),
+            "permissions".to_string(),
+            "cost_and_quota_policy".to_string(),
+            "validation_gates".to_string(),
+            "self_improvement_decisions".to_string(),
+        ],
+        brain_owned_surfaces: vec![
+            "reasoning_for_assigned_task".to_string(),
+            "bounded_code_or_text_proposals".to_string(),
+            "child_process_execution_when_authorized_by_forge".to_string(),
+        ],
+        shell_sessions: brain_shell_sessions(&brains),
+        safety_gates: vec![
+            "sync_executors_before_handoff".to_string(),
+            "human_authorization_for_external_cli_use".to_string(),
+            "forge_context_packet_required_before_ai_handoff".to_string(),
+            "credential_vault_secrets_never_printed".to_string(),
+            "validation_or_final_audit_required_before_claiming_completion".to_string(),
+        ],
+        brains,
+    }
+}
+
+fn brain_candidate(executor: &ExecutorState) -> BrainCandidate {
+    let status = if executor.allowed && executor.installed && executor.configured {
+        if executor.non_interactive_ready {
+            "ready"
+        } else {
+            "interactive_or_auth_blocked"
+        }
+    } else if !executor.installed {
+        "not_installed"
+    } else if !executor.configured {
+        "not_configured"
+    } else if !executor.allowed {
+        "not_authorized"
+    } else {
+        "unknown"
+    };
+    let reason = match status {
+        "ready" => "installed, configured, human-authorized and non-interactive smoke test passed",
+        "interactive_or_auth_blocked" => {
+            "installed/configured/authorized, but Forge has not validated safe non-interactive execution"
+        }
+        "not_installed" => "command is not available on PATH or configured executor paths",
+        "not_configured" => "Forge did not find CLI configuration or required environment evidence",
+        "not_authorized" => "human authorization is required before Forge may use this brain adapter",
+        _ => "brain adapter state is unknown",
+    };
+
+    BrainCandidate {
+        id: executor.id.clone(),
+        display_name: executor.display_name.clone(),
+        command: executor.command.clone(),
+        status: status.to_string(),
+        execution_mode: brain_execution_mode(&executor.id).to_string(),
+        session_role: "execution_brain_adapter".to_string(),
+        persistent_state_owner: "forge".to_string(),
+        context_source: "forge_context_packet".to_string(),
+        memory_source: "forge_memory_router".to_string(),
+        skills_source: "forge_skill_router".to_string(),
+        mcp_source: "forge_mcp_router".to_string(),
+        installed: executor.installed,
+        configured: executor.configured,
+        allowed: executor.allowed,
+        non_interactive_ready: executor.non_interactive_ready,
+        shell_entrypoints: brain_shell_entrypoints(executor),
+        reason: reason.to_string(),
+    }
+}
+
+fn brain_execution_mode(id: &str) -> &'static str {
+    match id {
+        "codex" | "opencode" | "gemini" | "claude" => "external_cli_brain",
+        "ollama" => "local_model_runtime",
+        _ => "custom_execution_brain",
+    }
+}
+
+fn brain_shell_entrypoints(executor: &ExecutorState) -> Vec<Vec<String>> {
+    match executor.id.as_str() {
+        "opencode" => vec![
+            vec!["opencode".to_string()],
+            vec![
+                "opencode".to_string(),
+                "attach".to_string(),
+                "<url>".to_string(),
+            ],
+        ],
+        "gemini" => vec![
+            vec!["gemini".to_string()],
+            vec![
+                "gemini".to_string(),
+                "-p".to_string(),
+                "<prompt>".to_string(),
+            ],
+        ],
+        "claude" => vec![
+            vec!["claude".to_string()],
+            vec![
+                "claude".to_string(),
+                "-p".to_string(),
+                "<prompt>".to_string(),
+            ],
+        ],
+        "codex" => vec![vec!["codex".to_string()]],
+        "ollama" => vec![vec![
+            "ollama".to_string(),
+            "run".to_string(),
+            "<model>".to_string(),
+        ]],
+        _ => vec![vec![executor.command.clone()]],
+    }
+}
+
+fn brain_shell_sessions(brains: &[BrainCandidate]) -> Vec<BrainShellSessionSpec> {
+    let mut sessions = vec![BrainShellSessionSpec {
+        id: "forge-tui".to_string(),
+        brain_id: "forge".to_string(),
+        entry_command: vec!["forge".to_string()],
+        attachable: true,
+        role: "primary_control_tui".to_string(),
+        state_boundary: "Forge owns workflow state, memory, skills, MCP routing and shell lifecycle."
+            .to_string(),
+        safety_note:
+            "Use this as the default human operation surface; external brains should be launched from Forge-controlled handoffs."
+                .to_string(),
+    }];
+
+    for brain in brains {
+        if let Some(entry_command) = brain.shell_entrypoints.first() {
+            sessions.push(BrainShellSessionSpec {
+                id: format!("{}-shell", brain.id),
+                brain_id: brain.id.clone(),
+                entry_command: entry_command.clone(),
+                attachable: brain.installed,
+                role: "execution_brain_shell".to_string(),
+                state_boundary:
+                    "External CLI session is an execution surface only; Forge remains the source of truth for memory, skills, MCPs, context and workflow lineage."
+                        .to_string(),
+                safety_note:
+                    "Open directly only for inspection/debugging; production handoff should go through Forge permissions, context packets and validation gates."
+                        .to_string(),
+            });
+        }
+    }
+
+    sessions
 }
 
 fn build_quota_policy(

@@ -2,8 +2,12 @@ use crate::artifact::write_json_artifact;
 use crate::graph::{
     AtomicTask, ExecutionPolicySpec, ExecutorKind, TaskStatus, Workflow, WorkflowRevision,
 };
-use crate::outcome::{assess_workflow_outcome_metadata, OutcomeStatusReport};
-use crate::request::{build_run_activity, RunActivity, RunRecord};
+use crate::outcome::{
+    assess_workflow_outcome, assess_workflow_outcome_metadata, OutcomeStatusReport,
+};
+use crate::request::{
+    build_run_activity, final_completion_audit_block_reason, RunActivity, RunRecord,
+};
 use crate::scheduler::{plan_parallel_execution, ParallelSchedulePlan};
 use crate::storage::{ForgeStore, StoreEvent};
 use crate::validation::validate_workflow;
@@ -281,7 +285,12 @@ fn build_improvement_candidate(
     runs: &[RunRecord],
 ) -> Result<Option<OrchestratorImprovementCandidate>> {
     let events = store.load_workflow_events(&workflow.id)?;
-    let outcome_status = assess_workflow_outcome_metadata(workflow);
+    let final_completion_audit_block_reason = final_completion_audit_block_reason(store, workflow)?;
+    let outcome_status = assess_workflow_outcome(
+        workflow,
+        true,
+        final_completion_audit_block_reason.as_deref(),
+    );
     let parallel_plan = plan_parallel_execution(workflow);
     let parallelization = build_parallelization_report(workflow, &parallel_plan);
     let cost_efficiency = build_cost_efficiency_report(workflow, &events);

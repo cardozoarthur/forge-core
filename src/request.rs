@@ -2797,7 +2797,7 @@ fn final_completion_audit_attach_command(workflow_id: &str, origin: &str) -> Vec
     ]
 }
 
-fn final_completion_audit_block_reason(
+pub(crate) fn final_completion_audit_block_reason(
     store: &ForgeStore,
     workflow: &Workflow,
 ) -> Result<Option<String>> {

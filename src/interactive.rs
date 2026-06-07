@@ -45,6 +45,9 @@ pub struct InteractiveDashboard {
     pub pending_approvals: usize,
     pub validation_failures: usize,
     pub executor_availability: String,
+    pub brain_router: String,
+    pub forge_controlled_surfaces: Vec<String>,
+    pub shell_entrypoints: Vec<String>,
     pub runtime_node_status: String,
     pub repository_context: String,
     pub estimated_costs: String,
@@ -172,6 +175,40 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
     } else {
         format!("usable executors: {}", executors.usable.join(", "))
     };
+    let brain_router = format!(
+        "{} controls {} surface(s) across {} brain adapter(s); selected brain: {}",
+        executors.brain_router.controller,
+        executors.brain_router.forge_controlled_surfaces.len(),
+        executors.brain_router.brains.len(),
+        executors
+            .brain_router
+            .selected_brain
+            .as_deref()
+            .unwrap_or("none")
+    );
+    let forge_controlled_surfaces = executors
+        .brain_router
+        .forge_controlled_surfaces
+        .iter()
+        .take(8)
+        .cloned()
+        .collect::<Vec<_>>();
+    let shell_entrypoints = executors
+        .brain_router
+        .shell_sessions
+        .iter()
+        .map(|session| {
+            format!(
+                "{}: {}",
+                session.id,
+                if session.entry_command.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    session.entry_command.join(" ")
+                }
+            )
+        })
+        .collect::<Vec<_>>();
     let runtime_node_status = if runtimes.usable.is_empty() {
         "no allowed async run substrates".to_string()
     } else {
@@ -217,6 +254,9 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             pending_approvals,
             validation_failures,
             executor_availability,
+            brain_router,
+            forge_controlled_surfaces,
+            shell_entrypoints,
             runtime_node_status,
             repository_context: env::current_dir()
                 .map(|path| path.display().to_string())
@@ -239,6 +279,8 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 "/artifacts".to_string(),
                 "/milestone".to_string(),
                 "/sync".to_string(),
+                "/brains".to_string(),
+                "/shells".to_string(),
                 "/validate".to_string(),
                 "/logs".to_string(),
                 "/workers".to_string(),
@@ -397,6 +439,16 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     let d = &report.dashboard;
     let quick_actions = d.quick_actions.join(" ");
     let next_commands = d.useful_next_commands.join(" | ");
+    let forge_controlled_surfaces = if d.forge_controlled_surfaces.is_empty() {
+        "none".to_string()
+    } else {
+        d.forge_controlled_surfaces.join(", ")
+    };
+    let shell_entrypoints = if d.shell_entrypoints.is_empty() {
+        "none".to_string()
+    } else {
+        d.shell_entrypoints.join(" | ")
+    };
     let attention_actions = if d.attention_actions.is_empty() {
         "none".to_string()
     } else {
@@ -420,6 +472,9 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Pending approvals: {pending_approvals}\n\
          Validation failures: {validation_failures}\n\
          Executor availability: {executor_availability}\n\
+         Brain router: {brain_router}\n\
+         Forge-controlled surfaces: {forge_controlled_surfaces}\n\
+         Shell entrypoints: {shell_entrypoints}\n\
          Runtime/node status: {runtime_node_status}\n\
          Scheduler worker status: {scheduler_worker_status}\n\
          Repository context: {repository_context}\n\
@@ -440,6 +495,9 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         pending_approvals = d.pending_approvals,
         validation_failures = d.validation_failures,
         executor_availability = d.executor_availability,
+        brain_router = d.brain_router,
+        forge_controlled_surfaces = forge_controlled_surfaces,
+        shell_entrypoints = shell_entrypoints,
         runtime_node_status = d.runtime_node_status,
         scheduler_worker_status = d.scheduler_worker_status,
         repository_context = d.repository_context,
@@ -539,6 +597,15 @@ fn executor_or_runtime_required(lower: &str) -> bool {
     lower.contains("codex")
         || lower.contains("opencode")
         || lower.contains("gemini")
+        || lower.contains("claude")
+        || lower.contains("brain")
+        || lower.contains("cerebro")
+        || lower.contains("cérebro")
+        || lower.contains("memory")
+        || lower.contains("memoria")
+        || lower.contains("memória")
+        || lower.contains("skill")
+        || lower.contains("mcp")
         || lower.contains("docker")
         || lower.contains("k8s")
         || lower.contains("kubernetes")
@@ -755,6 +822,22 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Executors",
             "List executor policy.",
             &["forge", "executors"],
+            false,
+            "low",
+        ),
+        slash(
+            "/brains",
+            "Brains",
+            "List Forge-controlled execution brains and routing boundaries.",
+            &["forge", "brains"],
+            false,
+            "low",
+        ),
+        slash(
+            "/shells",
+            "Shells",
+            "List Forge-controlled TUI and external brain shell entrypoints.",
+            &["forge", "brains"],
             false,
             "low",
         ),

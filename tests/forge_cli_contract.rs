@@ -7820,6 +7820,109 @@ fn improve_candidates_measure_completed_repetitive_ai_history_without_reopening_
 }
 
 #[test]
+fn improve_candidates_evaluate_attached_final_completion_audit() {
+    use chrono::Utc;
+    use forge_core::graph::{self, ArtifactRecord, ExecutorKind};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let artifact_path = temp
+        .path()
+        .join("artifacts/demo/final_completion_audit.json");
+    fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "forge.final_completion_audit.v1",
+            "status": "passed",
+            "goal_fully_satisfied": true,
+            "evidence": [
+                {
+                    "criterion": "User-facing deliverable is verified",
+                    "status": "passed",
+                    "artifact_refs": ["artifacts/demo/report.md"],
+                    "summary": "The final output has been audited."
+                }
+            ],
+            "missing_criteria": [],
+            "open_items": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Deliver final workflow result with a final completion audit.",
+    ));
+    workflow.status = "running".to_string();
+    workflow.tasks = vec![
+        graph::task(
+            "task-left",
+            "Support task left pending",
+            &[],
+            &[],
+            vec![],
+            "support evidence",
+            (ExecutorKind::Command, 0.0002),
+        ),
+        graph::task(
+            "task-right",
+            "Second support task left pending",
+            &[],
+            &[],
+            vec![],
+            "support evidence",
+            (ExecutorKind::Command, 0.0002),
+        ),
+    ];
+    workflow.artifacts.push(ArtifactRecord {
+        id: "artifact-final-audit".to_string(),
+        kind: "final_completion_audit".to_string(),
+        path: "artifacts/demo/final_completion_audit.json".to_string(),
+        sha256: hex_sha256(&fs::read(&artifact_path).unwrap()),
+        created_at: Utc::now(),
+        lineage: None,
+    });
+    store.save_workflow(&workflow).unwrap();
+    drop(store);
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let top = &report["candidates"][0];
+    assert_eq!(top["workflow_id"], workflow.id);
+    assert_eq!(top["outcome_status"]["status"], "final_outcome_verified");
+    assert_eq!(
+        top["outcome_status"]["final_completion_audit_present"],
+        true
+    );
+    assert_eq!(
+        top["outcome_status"]["final_completion_audit_evaluated"],
+        true
+    );
+    assert_eq!(top["outcome_status"]["final_completion_audit_passed"], true);
+    assert!(!top["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "missing_final_outcome_audit"));
+}
+
+#[test]
 fn improve_candidates_do_not_treat_completed_legacy_ai_as_actionable_cost() {
     use forge_core::graph::{self, ExecutorKind, TaskStatus};
     use forge_core::request::{create_run_record, save_run_record};
@@ -9476,6 +9579,126 @@ fn sync_persists_human_allowed_executor_policy() {
     let opencode = find_executor(&json, "opencode");
     assert_eq!(opencode["allowed"], false);
     assert_eq!(opencode["decision_source"], "human_deny");
+}
+
+#[test]
+fn brain_router_keeps_memory_skills_mcp_and_shells_under_forge_control() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(temp.path().join(".codex")).unwrap();
+    fs::write(temp.path().join(".codex/config.toml"), "model = \"test\"\n").unwrap();
+    fs::create_dir_all(temp.path().join(".config/opencode")).unwrap();
+    fs::create_dir_all(temp.path().join(".gemini")).unwrap();
+    fs::write(temp.path().join(".gemini/settings.json"), "{}\n").unwrap();
+    fs::create_dir_all(temp.path().join(".claude")).unwrap();
+    for name in ["codex", "opencode", "gemini", "claude"] {
+        write_fake_cli(&bin, name);
+    }
+
+    let synced = forge()
+        .env("GEMINI_API_KEY", "test-key")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "executors",
+            "--home",
+            temp.path().to_str().unwrap(),
+            "--executor-path",
+            bin.to_str().unwrap(),
+            "--allow",
+            "codex",
+            "--allow",
+            "opencode",
+            "--allow",
+            "gemini",
+            "--allow",
+            "claude",
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let synced_json: Value = serde_json::from_slice(&synced).unwrap();
+    assert_eq!(
+        synced_json["brain_router"]["schema_version"],
+        "forge.brain_router.v1"
+    );
+    assert_eq!(synced_json["brain_router"]["controller"], "forge");
+    assert_eq!(
+        synced_json["brain_router"]["controller_role"],
+        "orchestration_control_plane"
+    );
+    assert_eq!(
+        synced_json["brain_router"]["brain_role"],
+        "replaceable_execution_brain"
+    );
+    for surface in [
+        "workflow_graph",
+        "memory",
+        "skills",
+        "mcp_servers_and_tools",
+        "credential_vault_references",
+        "context_packets",
+        "shell_session_lifecycle",
+        "validation_gates",
+    ] {
+        assert!(
+            synced_json["brain_router"]["forge_controlled_surfaces"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(surface)),
+            "{surface} should stay under Forge control"
+        );
+    }
+    assert!(!synced_json["brain_router"]["brain_owned_surfaces"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("memory")));
+
+    let brains = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "brains",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let brains_json: Value = serde_json::from_slice(&brains).unwrap();
+    assert_eq!(brains_json["schema_version"], "forge.brain_router.v1");
+    assert_eq!(brains_json["selected_brain"], "opencode");
+    let claude = brains_json["brains"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|brain| brain["id"] == "claude")
+        .unwrap();
+    assert_eq!(claude["session_role"], "execution_brain_adapter");
+    assert_eq!(claude["persistent_state_owner"], "forge");
+    assert_eq!(claude["memory_source"], "forge_memory_router");
+    assert_eq!(claude["skills_source"], "forge_skill_router");
+    assert_eq!(claude["mcp_source"], "forge_mcp_router");
+    assert_eq!(claude["status"], "ready");
+    assert!(brains_json["shell_sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|session| {
+            session["id"] == "forge-tui"
+                && session["role"] == "primary_control_tui"
+                && session["entry_command"] == serde_json::json!(["forge"])
+        }));
 }
 
 #[test]
@@ -23115,6 +23338,9 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     assert!(text.contains("Pending approvals"));
     assert!(text.contains("Validation failures"));
     assert!(text.contains("Executor availability"));
+    assert!(text.contains("Brain router"));
+    assert!(text.contains("Forge-controlled surfaces"));
+    assert!(text.contains("Shell entrypoints"));
     assert!(text.contains("Runtime/node status"));
     assert!(text.contains("Scheduler worker status"));
     assert!(text.contains("Repository context"));
@@ -23124,6 +23350,8 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     assert!(text.contains("/status"));
     assert!(text.contains("/workflows"));
     assert!(text.contains("/context"));
+    assert!(text.contains("/brains"));
+    assert!(text.contains("/shells"));
     assert!(text.contains("/pm"));
     assert!(text.contains("/decision"));
 }
@@ -23327,6 +23555,8 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         "/config",
         "/sync",
         "/executors",
+        "/brains",
+        "/shells",
         "/runtimes",
         "/validate",
         "/approve",
@@ -23699,6 +23929,7 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
 
     for (name, output_schema, mutates_workflow) in [
         ("forge.interactive.home", "forge.interactive.home.v1", false),
+        ("forge.brain_router", "forge.brain_router.v1", false),
         (
             "forge.interactive.slash_commands",
             "forge.interactive.slash_commands.v1",
@@ -23736,6 +23967,31 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("/status")));
+    assert!(home_json["result"]["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/brains")));
+
+    let brain_router = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.brain_router"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let brain_router_json: Value = serde_json::from_slice(&brain_router).unwrap();
+    assert_eq!(
+        brain_router_json["result"]["schema_version"],
+        "forge.brain_router.v1"
+    );
+    assert_eq!(brain_router_json["result"]["controller"], "forge");
+    assert!(brain_router_json["result"]["forge_controlled_surfaces"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("mcp_servers_and_tools")));
 
     let slash = forge()
         .arg("--store")
@@ -23797,6 +24053,14 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge mcp call forge.interactive.route"),
         "the packaged Forge skill should include a callable interactive route example"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.brain_router"),
+        "the packaged Forge skill should expose Forge-owned brain routing boundaries"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("Codex, OpenCode, Gemini CLI, Claude CLI"),
+        "the packaged Forge skill should describe external CLIs as replaceable execution brains"
     );
 }
 

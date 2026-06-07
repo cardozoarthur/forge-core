@@ -9,6 +9,7 @@ use crate::credential_vault::{
     run_describe as run_credential_vault_describe, run_records as run_credential_vault_records,
     CREDENTIAL_VAULT_COMMAND_SCHEMA,
 };
+use crate::executor::load_executors;
 use crate::handoff::build_task_handoff;
 use crate::improve::rank_improvement_candidates;
 use crate::inspection::inspect_workflow_with_focus;
@@ -569,6 +570,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.home.v1",
                 &["forge", "interactive", "home", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.brain_router",
+                "Inspect Brain Router",
+                "Return Forge-owned execution-brain routing boundaries so agents know Codex/OpenCode/Gemini/Claude are replaceable execution brains, while Forge controls memory, skills, MCP routing, context, shells, permissions and validation.",
+                object_schema(&[], &[]),
+                "forge.brain_router.v1",
+                &["forge", "brains", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -1571,6 +1581,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             )?)?
         }
         "forge.interactive.home" => serde_json::to_value(build_interactive_home(store)?)?,
+        "forge.brain_router" => serde_json::to_value(load_executors(store)?.brain_router)?,
         "forge.interactive.slash_commands" => serde_json::to_value(slash_command_catalog())?,
         "forge.interactive.route" => {
             let input: InteractiveRouteInput = parse_input(input)?;
