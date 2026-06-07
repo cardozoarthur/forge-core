@@ -142,11 +142,7 @@ pub fn assess_workflow_outcome(
             .tasks
             .iter()
             .all(|task| task.status == TaskStatus::Completed);
-    let support_only_after_audit =
-        user_facing_deliverable_count == 0 && final_completion_audit_artifact_passed;
-    let support_only_without_final_audit =
-        user_facing_deliverable_count == 0 && !final_completion_audit_required;
-    let (status, action, reason) = if support_only_after_audit || support_only_without_final_audit {
+    let (status, action, reason) = if user_facing_deliverable_count == 0 {
         (
             "support_only".to_string(),
             "define_user_facing_deliverables".to_string(),

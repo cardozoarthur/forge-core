@@ -8297,6 +8297,87 @@ fn improve_candidates_recommend_deliverable_repair_for_support_only_workflows() 
 }
 
 #[test]
+fn improve_candidates_do_not_request_final_audit_for_support_only_explicit_final_criteria() {
+    use forge_core::graph::{self, ExecutorKind, TaskStatus};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Generate internal workflow support artifacts. Critério Final: workflow só termina quando a auditoria final passar.",
+    ));
+    workflow.status = "completed".to_string();
+    workflow.intent.deliverables = vec![
+        "Atomic task graph".to_string(),
+        "Validation plan".to_string(),
+        "Artifact manifest".to_string(),
+    ];
+    workflow.tasks = vec![graph::task(
+        "task-graph",
+        "Build atomic task graph",
+        &[],
+        &[],
+        vec![],
+        "atomic task graph",
+        (ExecutorKind::Command, 0.0002),
+    )];
+    workflow.tasks[0].status = TaskStatus::Completed;
+    store.save_workflow(&workflow).unwrap();
+    drop(store);
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--workflow",
+            &workflow.id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let top = &report["candidates"][0];
+    assert_eq!(top["workflow_id"], workflow.id);
+    assert_eq!(top["outcome_status"]["status"], "support_only");
+    assert_eq!(
+        top["outcome_status"]["action"],
+        "define_user_facing_deliverables"
+    );
+    assert_eq!(
+        top["outcome_status"]["final_completion_audit_required"],
+        true
+    );
+    assert_eq!(
+        top["outcome_status"]["final_completion_audit_present"],
+        false
+    );
+    assert_eq!(
+        top["recommended_action"],
+        "update_goal_or_tasks_with_user_facing_deliverables"
+    );
+    assert!(top["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "support_only_output_risk"));
+    assert!(!top["suggested_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("ensure-final-audit".to_string()))));
+}
+
+#[test]
 fn improve_candidates_do_not_treat_completed_legacy_ai_as_actionable_cost() {
     use forge_core::graph::{self, ExecutorKind, TaskStatus};
     use forge_core::request::{create_run_record, save_run_record};
