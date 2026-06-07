@@ -107,6 +107,8 @@ pub struct CostEfficiencyReport {
     pub repetitive_or_deterministic_ai_task_count: usize,
     pub repetitive_or_deterministic_ai_task_ids: Vec<String>,
     pub repetitive_or_deterministic_ai_task_titles: Vec<String>,
+    pub repetitive_or_deterministic_ai_cost_item_count: usize,
+    pub repetitive_or_deterministic_ai_cost_items: Vec<RepetitiveAiCostItemReport>,
     pub estimated_ai_cost_total_usd: f64,
     pub estimated_ai_cost_average_usd: f64,
     pub observed_ai_cost_total_usd: Option<f64>,
@@ -116,6 +118,30 @@ pub struct CostEfficiencyReport {
     pub avoidable_observed_cost_total_usd: Option<f64>,
     pub avoidable_observed_cost_average_usd: Option<f64>,
     pub recommendation: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RepetitiveAiCostItemReport {
+    pub item_key: String,
+    pub classification: String,
+    pub estimated_execution_count: usize,
+    pub observed_execution_count: usize,
+    pub task_count: usize,
+    pub task_ids: Vec<String>,
+    pub task_titles: Vec<String>,
+    pub estimated_cost_total_usd: f64,
+    pub estimated_cost_average_per_execution_usd: f64,
+    pub replacement_estimated_cost_total_usd: f64,
+    pub replacement_estimated_cost_average_per_execution_usd: f64,
+    pub avoidable_estimated_cost_total_usd: f64,
+    pub avoidable_estimated_cost_average_per_execution_usd: f64,
+    pub estimated_savings_after_replacement_total_usd: f64,
+    pub estimated_savings_after_replacement_average_per_execution_usd: f64,
+    pub observed_cost_total_usd: Option<f64>,
+    pub observed_cost_average_per_execution_usd: Option<f64>,
+    pub avoidable_observed_cost_total_usd: Option<f64>,
+    pub avoidable_observed_cost_average_per_execution_usd: Option<f64>,
+    pub recommended_replacement: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -237,6 +263,8 @@ pub fn rank_improvement_candidates(
             "prefer workflows with failed, blocked or retrying tasks before cosmetic improvement"
                 .to_string(),
             "surface parallel-ready task sets when dependencies and context allow multiple handoffs"
+                .to_string(),
+            "measure repetitive or deterministic AI work by item group and average cost per execution before normalizing"
                 .to_string(),
             "penalize support-only completion when the user asked for final outcomes".to_string(),
         ],
@@ -398,6 +426,16 @@ fn build_improvement_candidate(
         );
     }
     if cost_efficiency.repetitive_or_deterministic_ai_task_count > 0 {
+        let highest_average_item = cost_efficiency
+            .repetitive_or_deterministic_ai_cost_items
+            .first()
+            .map(|item| {
+                format!(
+                    "; highest item `{}` averages ${:.6} estimated AI cost per execution",
+                    item.item_key, item.estimated_cost_average_per_execution_usd
+                )
+            })
+            .unwrap_or_default();
         push_reason(
             &mut reasons,
             &mut score,
@@ -408,10 +446,12 @@ fn build_improvement_candidate(
                 .min(5) as i64
                 * 5),
             format!(
-                "{} AI task(s) look repetitive or deterministic; average avoidable estimated AI cost per execution is ${:.6} and avoidable estimated cost is ${:.6}.",
+                "{} AI task(s) across {} repeated/deterministic item group(s) look avoidable; average avoidable estimated AI cost per execution is ${:.6} and avoidable estimated cost is ${:.6}{}.",
                 cost_efficiency.repetitive_or_deterministic_ai_task_count,
+                cost_efficiency.repetitive_or_deterministic_ai_cost_item_count,
                 cost_efficiency.avoidable_estimated_cost_average_usd,
-                cost_efficiency.avoidable_estimated_cost_usd
+                cost_efficiency.avoidable_estimated_cost_usd,
+                highest_average_item
             ),
         );
     }
@@ -584,6 +624,8 @@ fn build_cost_efficiency_report(
         .copied()
         .filter(|task| normalizable_avoidable_ai_task(task))
         .collect::<Vec<_>>();
+    let repetitive_or_deterministic_ai_cost_items =
+        build_repetitive_ai_cost_item_reports(&repetitive_ai_tasks, events);
     let avoidable_estimated_cost_usd = repetitive_ai_tasks
         .iter()
         .map(|task| task.cost.estimated_cost_usd)
@@ -631,6 +673,9 @@ fn build_cost_efficiency_report(
             .iter()
             .map(|task| task.title.clone())
             .collect(),
+        repetitive_or_deterministic_ai_cost_item_count: repetitive_or_deterministic_ai_cost_items
+            .len(),
+        repetitive_or_deterministic_ai_cost_items,
         estimated_ai_cost_total_usd,
         estimated_ai_cost_average_usd,
         observed_ai_cost_total_usd,
@@ -641,6 +686,117 @@ fn build_cost_efficiency_report(
         avoidable_observed_cost_average_usd,
         recommendation,
     }
+}
+
+fn build_repetitive_ai_cost_item_reports(
+    tasks: &[&AtomicTask],
+    events: &[crate::storage::StoreEvent],
+) -> Vec<RepetitiveAiCostItemReport> {
+    let mut tasks_by_item: BTreeMap<String, Vec<&AtomicTask>> = BTreeMap::new();
+    for task in tasks {
+        tasks_by_item
+            .entry(repetitive_cost_item_key(task))
+            .or_default()
+            .push(*task);
+    }
+
+    let mut observed_costs_by_task: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
+    for event in events {
+        let Some(task_id) = event_task_id(event) else {
+            continue;
+        };
+        let Some(cost) = observed_ai_cost_from_event(event) else {
+            continue;
+        };
+        observed_costs_by_task
+            .entry(task_id)
+            .or_default()
+            .push(cost);
+    }
+
+    let mut reports = Vec::new();
+    for (item_key, item_tasks) in tasks_by_item {
+        let task_count = item_tasks.len();
+        let estimated_cost_total_usd = item_tasks
+            .iter()
+            .map(|task| task.cost.estimated_cost_usd)
+            .sum::<f64>();
+        let replacement_estimated_cost_total_usd = item_tasks
+            .iter()
+            .map(|task| normalized_command_cost(task))
+            .sum::<f64>();
+        let estimated_savings_after_replacement_total_usd =
+            (estimated_cost_total_usd - replacement_estimated_cost_total_usd).max(0.0);
+        let observed_costs = item_tasks
+            .iter()
+            .flat_map(|task| {
+                observed_costs_by_task
+                    .get(task.id.as_str())
+                    .into_iter()
+                    .flatten()
+                    .copied()
+            })
+            .collect::<Vec<_>>();
+        let observed_execution_count = observed_costs.len();
+        let observed_cost_total_usd =
+            (!observed_costs.is_empty()).then(|| observed_costs.iter().sum::<f64>());
+        let observed_cost_average_per_execution_usd =
+            observed_cost_total_usd.map(|total| average_cost(total, observed_execution_count));
+        let classification = if task_count > 1
+            || item_tasks
+                .iter()
+                .any(|task| task_has_repetition_signal(task))
+        {
+            "repetitive_ai_item"
+        } else {
+            "deterministic_ai_item"
+        };
+
+        reports.push(RepetitiveAiCostItemReport {
+            item_key,
+            classification: classification.to_string(),
+            estimated_execution_count: task_count,
+            observed_execution_count,
+            task_count,
+            task_ids: item_tasks.iter().map(|task| task.id.clone()).collect(),
+            task_titles: item_tasks.iter().map(|task| task.title.clone()).collect(),
+            estimated_cost_total_usd,
+            estimated_cost_average_per_execution_usd: average_cost(
+                estimated_cost_total_usd,
+                task_count,
+            ),
+            replacement_estimated_cost_total_usd,
+            replacement_estimated_cost_average_per_execution_usd: average_cost(
+                replacement_estimated_cost_total_usd,
+                task_count,
+            ),
+            avoidable_estimated_cost_total_usd: estimated_cost_total_usd,
+            avoidable_estimated_cost_average_per_execution_usd: average_cost(
+                estimated_cost_total_usd,
+                task_count,
+            ),
+            estimated_savings_after_replacement_total_usd,
+            estimated_savings_after_replacement_average_per_execution_usd: average_cost(
+                estimated_savings_after_replacement_total_usd,
+                task_count,
+            ),
+            observed_cost_total_usd,
+            observed_cost_average_per_execution_usd,
+            avoidable_observed_cost_total_usd: observed_cost_total_usd,
+            avoidable_observed_cost_average_per_execution_usd:
+                observed_cost_average_per_execution_usd,
+            recommended_replacement: "command_node_or_cached_reusable_subflow".to_string(),
+        });
+    }
+
+    reports.sort_by(|left, right| {
+        right
+            .avoidable_estimated_cost_total_usd
+            .partial_cmp(&left.avoidable_estimated_cost_total_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left.item_key.cmp(&right.item_key))
+    });
+    reports
 }
 
 fn looks_repetitive_or_deterministic_ai_task(task: &crate::graph::AtomicTask) -> bool {
@@ -674,11 +830,102 @@ fn looks_repetitive_or_deterministic_ai_task(task: &crate::graph::AtomicTask) ->
         "csv",
         "json",
     ];
-    task.schedule.is_some()
+    task_has_repetition_signal(task)
         || task.execution_policy.deterministic
         || deterministic_keywords
             .iter()
             .any(|keyword| text.contains(keyword))
+}
+
+fn task_has_repetition_signal(task: &crate::graph::AtomicTask) -> bool {
+    let text = format!("{} {} {}", task.title, task.goal, task.expected_output).to_lowercase();
+    let repetitive_keywords = [
+        "repeated",
+        "repetitive",
+        "recurring",
+        "frequent",
+        "daily",
+        "weekly",
+        "monthly",
+        "hourly",
+        "nightly",
+        "cron",
+        "scheduled",
+        "diário",
+        "diária",
+        "diario",
+        "diaria",
+        "semanal",
+        "mensal",
+        "recorrente",
+        "agendado",
+    ];
+    task.schedule.is_some()
+        || repetitive_keywords
+            .iter()
+            .any(|keyword| text.contains(keyword))
+}
+
+fn repetitive_cost_item_key(task: &crate::graph::AtomicTask) -> String {
+    let title = normalize_repetitive_signature_text(&task.title);
+    let expected_output = normalize_repetitive_signature_text(&task.expected_output);
+    if expected_output.is_empty() {
+        title
+    } else {
+        format!("{title} -> {expected_output}")
+    }
+}
+
+fn normalize_repetitive_signature_text(value: &str) -> String {
+    let normalized = value
+        .to_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    normalized
+        .split_whitespace()
+        .filter(|token| !repetitive_signature_stopword(token))
+        .filter(|token| token.parse::<u64>().is_err())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn repetitive_signature_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "a" | "an"
+            | "the"
+            | "de"
+            | "da"
+            | "do"
+            | "das"
+            | "dos"
+            | "daily"
+            | "weekly"
+            | "monthly"
+            | "hourly"
+            | "nightly"
+            | "cron"
+            | "scheduled"
+            | "recurring"
+            | "repeated"
+            | "repetitive"
+            | "frequent"
+            | "diário"
+            | "diária"
+            | "diario"
+            | "diaria"
+            | "semanal"
+            | "mensal"
+            | "agendado"
+            | "recorrente"
+    )
 }
 
 fn normalizable_avoidable_ai_task(task: &crate::graph::AtomicTask) -> bool {

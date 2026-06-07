@@ -7490,6 +7490,41 @@ fn improve_candidates_rank_live_workflows_with_logs_and_parallel_opportunities()
         top["cost_efficiency"]["avoidable_observed_cost_average_usd"],
         0.42
     );
+    assert_eq!(
+        top["cost_efficiency"]["repetitive_or_deterministic_ai_cost_item_count"],
+        1
+    );
+    let cost_item = &top["cost_efficiency"]["repetitive_or_deterministic_ai_cost_items"][0];
+    assert_eq!(
+        cost_item["item_key"],
+        "calculate cost report -> deterministic cost json"
+    );
+    assert_eq!(cost_item["classification"], "repetitive_ai_item");
+    assert_eq!(cost_item["estimated_execution_count"], 2);
+    assert_eq!(cost_item["observed_execution_count"], 1);
+    assert_eq!(cost_item["task_count"], 2);
+    assert_eq!(
+        cost_item["task_ids"],
+        serde_json::json!(["task-api", "task-ui"])
+    );
+    assert_eq!(cost_item["estimated_cost_average_per_execution_usd"], 2.0);
+    assert_eq!(
+        cost_item["avoidable_estimated_cost_average_per_execution_usd"],
+        2.0
+    );
+    assert_eq!(
+        cost_item["replacement_estimated_cost_average_per_execution_usd"],
+        0.0005
+    );
+    assert_eq!(cost_item["observed_cost_average_per_execution_usd"], 0.42);
+    assert!(
+        (cost_item["estimated_savings_after_replacement_total_usd"]
+            .as_f64()
+            .unwrap()
+            - 3.999)
+            .abs()
+            < 1e-12
+    );
     assert!(top["reasons"]
         .as_array()
         .unwrap()
