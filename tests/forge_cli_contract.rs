@@ -18734,6 +18734,161 @@ fn request_ensure_final_audit_creates_audit_task_without_driving_a_run() {
 }
 
 #[test]
+fn request_ensure_final_audit_repairs_dependencies_when_user_outcome_is_evidenced() {
+    use chrono::Utc;
+    use forge_core::graph::{self, ArtifactRecord, ExecutorKind, TaskStatus, ValidationRule};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Schedule daily Goal research and deliver Markdown and PDF Goal reports with Telegram delivery record.",
+    ));
+    workflow.status = "running".to_string();
+    workflow.intent.deliverables = vec![
+        "atomic task graph".to_string(),
+        "Markdown and PDF Goal reports".to_string(),
+        "Telegram delivery record".to_string(),
+    ];
+    workflow.tasks = vec![
+        graph::task(
+            "task-support",
+            "Parse intent",
+            &[],
+            &[],
+            vec![],
+            "support metadata",
+            (ExecutorKind::Command, 0.0002),
+        ),
+        graph::task(
+            "task-report",
+            "Generate Markdown and PDF Goal reports",
+            &[],
+            &[],
+            vec![],
+            "goal report artifact",
+            (ExecutorKind::Command, 0.0002),
+        ),
+        graph::task(
+            "task-telegram",
+            "Record Telegram delivery record",
+            &[],
+            &[],
+            vec![],
+            "telegram delivery record",
+            (ExecutorKind::Notification, 0.0002),
+        ),
+        graph::task(
+            "task-audit",
+            "Audit final completion criteria",
+            &["task-support", "task-report", "task-telegram"],
+            &[],
+            vec![ValidationRule {
+                kind: "artifact".to_string(),
+                command: None,
+                expected: "final completion audit artifact".to_string(),
+            }],
+            "final_completion_audit JSON",
+            (ExecutorKind::Ai, 0.35),
+        ),
+    ];
+    workflow.tasks[1].status = TaskStatus::Completed;
+    workflow.tasks[2].status = TaskStatus::Completed;
+    workflow.artifacts = vec![
+        ArtifactRecord {
+            id: "artifact-report".to_string(),
+            kind: "report".to_string(),
+            path: "artifacts/demo/goal-report.pdf".to_string(),
+            sha256: hex_sha256(b"goal report"),
+            created_at: Utc::now(),
+            lineage: None,
+        },
+        ArtifactRecord {
+            id: "artifact-telegram".to_string(),
+            kind: "notification".to_string(),
+            path: "artifacts/demo/telegram-delivery.json".to_string(),
+            sha256: hex_sha256(b"telegram delivery"),
+            created_at: Utc::now(),
+            lineage: None,
+        },
+    ];
+    let workflow_id = workflow.id.clone();
+    store.save_workflow(&workflow).unwrap();
+    drop(store);
+
+    let candidates = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let candidates_json: Value = serde_json::from_slice(&candidates).unwrap();
+    let top = &candidates_json["candidates"][0];
+    assert_eq!(top["workflow_id"], workflow_id);
+    assert!(top["suggested_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("ensure-final-audit".to_string()))));
+
+    let ensured = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "request",
+            "ensure-final-audit",
+            "--workflow",
+            &workflow_id,
+            "--executor",
+            "codex",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ensured_json: Value = serde_json::from_slice(&ensured).unwrap();
+    assert_eq!(
+        ensured_json["status"],
+        "final_audit_task_dependencies_repaired"
+    );
+    assert_eq!(ensured_json["action"], "handoff_final_completion_audit");
+    assert_eq!(ensured_json["audit_task_created"], false);
+    assert_eq!(ensured_json["audit_task_repaired"], true);
+    assert!(ensured_json["next_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("task-audit".to_string())));
+
+    let store = ForgeStore::open(&store_path).unwrap();
+    let updated = store.load_workflow(&workflow_id).unwrap();
+    let audit_task = updated
+        .tasks
+        .iter()
+        .find(|task| task.id == "task-audit")
+        .unwrap();
+    assert_eq!(
+        audit_task.dependencies,
+        vec!["task-report".to_string(), "task-telegram".to_string()]
+    );
+}
+
+#[test]
 fn request_ensure_final_audit_waits_for_incomplete_workflow() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

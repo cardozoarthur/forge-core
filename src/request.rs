@@ -23,6 +23,7 @@ use crate::workflow::ArtifactAttachReport;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -287,6 +288,7 @@ pub struct RequestFinalAuditReport {
     pub outcome_status: OutcomeStatusReport,
     pub audit_task_id: Option<String>,
     pub audit_task_created: bool,
+    pub audit_task_repaired: bool,
     pub next_command: Vec<String>,
     pub reason: String,
     pub updated_at: DateTime<Utc>,
@@ -1612,6 +1614,7 @@ pub fn ensure_final_audit(
             outcome_status: request_outcome_status(store, &workflow)?,
             audit_task_id: final_completion_audit_task_id(&workflow),
             audit_task_created: false,
+            audit_task_repaired: false,
             next_command: Vec::new(),
             reason: "Final completion audit is already satisfied or not required.".to_string(),
             updated_at,
@@ -1619,7 +1622,10 @@ pub fn ensure_final_audit(
     };
 
     let existing_audit_task_id = final_completion_audit_task_id(&workflow);
-    if existing_audit_task_id.is_none() && !non_audit_tasks_completed(&workflow) {
+    let audit_dependency_ids = final_completion_audit_dependency_ids(&workflow);
+    if existing_audit_task_id.is_none()
+        && !final_completion_audit_dependency_ids_completed(&workflow, &audit_dependency_ids)
+    {
         return Ok(RequestFinalAuditReport {
             schema_version: "forge.request_final_audit.v1".to_string(),
             status: "final_audit_waiting_for_workflow_completion".to_string(),
@@ -1630,9 +1636,10 @@ pub fn ensure_final_audit(
             outcome_status: request_outcome_status(store, &workflow)?,
             audit_task_id: None,
             audit_task_created: false,
+            audit_task_repaired: false,
             next_command: Vec::new(),
             reason: format!(
-                "Final completion audit waits until all non-audit workflow tasks are complete. {block_reason}"
+                "Final completion audit waits until required outcome evidence dependencies are complete. {block_reason}"
             ),
             updated_at,
         });
@@ -1641,6 +1648,8 @@ pub fn ensure_final_audit(
     let maybe_updated =
         ensure_final_completion_audit_task(store, &workflow, origin, &block_reason)?;
     let active_workflow = maybe_updated.as_ref().unwrap_or(&workflow);
+    let audit_task_created = maybe_updated.is_some() && existing_audit_task_id.is_none();
+    let audit_task_repaired = maybe_updated.is_some() && existing_audit_task_id.is_some();
     let audit_task_id = final_completion_audit_task_id(active_workflow);
     let next_command = if let Some(task_id) = audit_task_id.as_deref() {
         let audit_task_is_completed = active_workflow
@@ -1669,8 +1678,10 @@ pub fn ensure_final_audit(
     });
     let status = if audit_waits_for_dependencies {
         "final_audit_waiting_for_dependencies"
-    } else if maybe_updated.is_some() {
+    } else if audit_task_created {
         "final_audit_task_created"
+    } else if audit_task_repaired {
+        "final_audit_task_dependencies_repaired"
     } else if audit_task_id.is_some() {
         "final_audit_task_ready"
     } else {
@@ -1693,7 +1704,8 @@ pub fn ensure_final_audit(
         task_summary: summarize_tasks(active_workflow),
         outcome_status: request_outcome_status(store, active_workflow)?,
         audit_task_id,
-        audit_task_created: maybe_updated.is_some(),
+        audit_task_created,
+        audit_task_repaired,
         next_command,
         reason: block_reason,
         updated_at,
@@ -2561,13 +2573,56 @@ fn ensure_final_completion_audit_task(
     origin: &str,
     block_reason: &str,
 ) -> Result<Option<Workflow>> {
-    if final_completion_audit_task_exists(workflow) {
-        return Ok(None);
+    let expected_dependency_ids = final_completion_audit_dependency_ids(workflow);
+    if let Some(existing_audit_task_index) = workflow
+        .tasks
+        .iter()
+        .position(is_final_completion_audit_task)
+    {
+        let existing_dependencies = &workflow.tasks[existing_audit_task_index].dependencies;
+        if existing_dependencies == &expected_dependency_ids {
+            return Ok(None);
+        }
+
+        let mut updated = workflow.clone();
+        let task_id = updated.tasks[existing_audit_task_index].id.clone();
+        let previous_dependency_count = updated.tasks[existing_audit_task_index].dependencies.len();
+        updated.tasks[existing_audit_task_index].dependencies = expected_dependency_ids.clone();
+        let revision = updated
+            .revisions
+            .last()
+            .map(|revision| revision.revision + 1)
+            .unwrap_or(1);
+        updated.revisions.push(WorkflowRevision {
+            revision,
+            origin: origin.to_string(),
+            change_type: "completion_audit_dependencies_repaired".to_string(),
+            summary: format!(
+                "repaired {task_id} dependencies from {previous_dependency_count} to {} outcome evidence prerequisite(s)",
+                expected_dependency_ids.len()
+            ),
+            created_at: Utc::now(),
+        });
+        store.save_workflow(&updated)?;
+        store.record_event(
+            &updated.id,
+            "completion_audit_dependencies_repaired",
+            &serde_json::json!({
+                "origin": origin,
+                "task_id": task_id,
+                "previous_dependency_count": previous_dependency_count,
+                "dependency_count": expected_dependency_ids.len(),
+                "dependencies": expected_dependency_ids,
+                "reason": block_reason,
+                "revision": revision,
+            }),
+        )?;
+        return Ok(Some(updated));
     }
 
     let mut updated = workflow.clone();
     let task_id = format!("task-{:03}", updated.tasks.len() + 1);
-    let dependency_ids: Vec<String> = updated.tasks.iter().map(|task| task.id.clone()).collect();
+    let dependency_ids = expected_dependency_ids;
     let dependency_refs: Vec<&str> = dependency_ids.iter().map(String::as_str).collect();
     let mut audit_task = task(
         &task_id,
@@ -2618,15 +2673,13 @@ fn ensure_final_completion_audit_task(
             "origin": origin,
             "task_id": task_id,
             "reason": block_reason,
+            "dependency_count": dependency_ids.len(),
+            "dependencies": dependency_ids,
             "required_artifact_kind": FINAL_COMPLETION_AUDIT_KIND,
             "revision": revision,
         }),
     )?;
     Ok(Some(updated))
-}
-
-fn final_completion_audit_task_exists(workflow: &Workflow) -> bool {
-    workflow.tasks.iter().any(is_final_completion_audit_task)
 }
 
 fn final_completion_audit_task_id(workflow: &Workflow) -> Option<String> {
@@ -2637,12 +2690,50 @@ fn final_completion_audit_task_id(workflow: &Workflow) -> Option<String> {
         .map(|task| task.id.clone())
 }
 
-fn non_audit_tasks_completed(workflow: &Workflow) -> bool {
+fn final_completion_audit_dependency_ids(workflow: &Workflow) -> Vec<String> {
+    let outcome_status = assess_workflow_outcome(workflow, false, None);
+    if outcome_status.user_facing_deliverable_count > 0
+        && outcome_status.missing_user_facing_deliverable_count == 0
+    {
+        let known_non_audit_task_ids = workflow
+            .tasks
+            .iter()
+            .filter(|task| !is_final_completion_audit_task(task))
+            .map(|task| task.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut dependency_ids = BTreeSet::new();
+        for deliverable in outcome_status
+            .deliverables
+            .iter()
+            .filter(|deliverable| deliverable.kind == "user_facing")
+        {
+            for task_id in &deliverable.completed_task_refs {
+                if known_non_audit_task_ids.contains(task_id.as_str()) {
+                    dependency_ids.insert(task_id.clone());
+                }
+            }
+        }
+        return dependency_ids.into_iter().collect();
+    }
+
     workflow
         .tasks
         .iter()
         .filter(|task| !is_final_completion_audit_task(task))
-        .all(|task| task.status == TaskStatus::Completed)
+        .map(|task| task.id.clone())
+        .collect()
+}
+
+fn final_completion_audit_dependency_ids_completed(
+    workflow: &Workflow,
+    dependency_ids: &[String],
+) -> bool {
+    dependency_ids.iter().all(|dependency| {
+        workflow
+            .tasks
+            .iter()
+            .any(|task| task.id == *dependency && task.status == TaskStatus::Completed)
+    })
 }
 
 fn final_completion_audit_dependencies_completed(workflow: &Workflow, task_id: &str) -> bool {

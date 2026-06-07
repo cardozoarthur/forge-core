@@ -1127,6 +1127,23 @@ fn suggested_commands(
             ]);
         }
     }
+    if has_reason(reasons, "missing_final_outcome_audit")
+        && workflow_ready_for_final_audit_command(workflow)
+    {
+        commands.push(vec![
+            "forge".to_string(),
+            "request".to_string(),
+            "ensure-final-audit".to_string(),
+            "--workflow".to_string(),
+            workflow.id.clone(),
+            "--executor".to_string(),
+            "codex".to_string(),
+            "--origin".to_string(),
+            "forge_cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]);
+    }
     if parallelization.ready_parallel_task_count > 0 || has_reason(reasons, "rework_loop_signal") {
         if let Some(run) = latest_driveable_run(runs) {
             commands.push(vec![
@@ -1147,10 +1164,20 @@ fn suggested_commands(
                 "json".to_string(),
             ]);
         } else if parallelization.ready_parallel_task_count > 0 {
+            let mut ready_task_ids = parallelization
+                .ready_parallel_task_ids
+                .iter()
+                .collect::<Vec<_>>();
+            ready_task_ids.sort_by_key(|task_id| {
+                if task_id_is_final_completion_audit(workflow, task_id) {
+                    0
+                } else {
+                    1
+                }
+            });
             commands.extend(
-                parallelization
-                    .ready_parallel_task_ids
-                    .iter()
+                ready_task_ids
+                    .into_iter()
                     .take(
                         parallelization
                             .recommended_max_parallelism
@@ -1174,23 +1201,6 @@ fn suggested_commands(
                     }),
             );
         }
-    }
-    if has_reason(reasons, "missing_final_outcome_audit")
-        && workflow_ready_for_final_audit_command(workflow)
-    {
-        commands.push(vec![
-            "forge".to_string(),
-            "request".to_string(),
-            "ensure-final-audit".to_string(),
-            "--workflow".to_string(),
-            workflow.id.clone(),
-            "--executor".to_string(),
-            "codex".to_string(),
-            "--origin".to_string(),
-            "forge_cli".to_string(),
-            "--output".to_string(),
-            "json".to_string(),
-        ]);
     }
     if has_reason(reasons, "avoidable_ai_cost")
         && workflow.tasks.iter().any(normalizable_avoidable_ai_task)
@@ -1245,6 +1255,10 @@ fn latest_driveable_run(runs: &[RunRecord]) -> Option<&RunRecord> {
 }
 
 fn workflow_ready_for_final_audit_command(workflow: &Workflow) -> bool {
+    if workflow_has_evidenced_user_outcome(workflow) {
+        return true;
+    }
+
     if let Some(audit_task) = workflow
         .tasks
         .iter()
@@ -1263,6 +1277,19 @@ fn workflow_ready_for_final_audit_command(workflow: &Workflow) -> bool {
             .tasks
             .iter()
             .all(|task| task.status == TaskStatus::Completed)
+}
+
+fn workflow_has_evidenced_user_outcome(workflow: &Workflow) -> bool {
+    let outcome = assess_workflow_outcome_metadata(workflow);
+    outcome.user_facing_deliverable_count > 0 && outcome.missing_user_facing_deliverable_count == 0
+}
+
+fn task_id_is_final_completion_audit(workflow: &Workflow, task_id: &str) -> bool {
+    workflow
+        .tasks
+        .iter()
+        .find(|task| task.id == task_id)
+        .is_some_and(looks_like_final_completion_audit_task)
 }
 
 fn looks_like_final_completion_audit_task(task: &crate::graph::AtomicTask) -> bool {
