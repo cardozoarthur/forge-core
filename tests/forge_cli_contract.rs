@@ -7593,6 +7593,76 @@ fn improve_candidates_do_not_count_final_audit_as_avoidable_ai_cost() {
 }
 
 #[test]
+fn improve_candidates_do_not_treat_completed_legacy_ai_as_actionable_cost() {
+    use forge_core::graph::{self, ExecutorKind, TaskStatus};
+    use forge_core::request::{create_run_record, save_run_record};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Deliver final workflow result with historical completed requirement extraction",
+    ));
+    workflow.status = "completed".to_string();
+    workflow.tasks = vec![graph::task(
+        "task-extract",
+        "Extract requirements",
+        &[],
+        &[],
+        vec![],
+        "requirements JSON",
+        (ExecutorKind::Ai, 0.02),
+    )];
+    workflow.tasks[0].status = TaskStatus::Completed;
+    workflow.tasks[0]
+        .work_item
+        .goal_validation
+        .definitively_ready = true;
+    store.save_workflow(&workflow).unwrap();
+    let run = create_run_record(&workflow, "codex", "completed");
+    save_run_record(&store, &run).unwrap();
+    drop(store);
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let top = &report["candidates"][0];
+    assert_eq!(top["workflow_id"], workflow.id);
+    assert_eq!(
+        top["cost_efficiency"]["repetitive_or_deterministic_ai_task_count"],
+        0
+    );
+    assert_eq!(top["cost_efficiency"]["avoidable_estimated_cost_usd"], 0.0);
+    assert!(!top["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "avoidable_ai_cost"));
+    assert!(!top["suggested_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|part| { part.as_str().is_some_and(|value| value == "normalize-cost") })));
+}
+
+#[test]
 fn improve_normalize_cost_converts_legacy_deterministic_ai_tasks() {
     use forge_core::graph::{self, ExecutorKind};
 
@@ -7809,6 +7879,102 @@ fn improve_normalize_cost_repairs_partial_version_boundary() {
         updated.revisions[0].change_type,
         "avoidable_ai_cost_version_boundary_repaired"
     );
+}
+
+#[test]
+fn improve_normalize_cost_all_normalizes_ranked_candidates() {
+    use forge_core::graph::{self, ExecutorKind};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow_ids = Vec::new();
+
+    for goal in [
+        "Normalize legacy requirement extraction costs for workflow A",
+        "Normalize legacy requirement extraction costs for workflow B",
+    ] {
+        let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(goal));
+        workflow.status = "running".to_string();
+        workflow.tasks = vec![
+            graph::task(
+                "task-extract",
+                "Extract requirements",
+                &[],
+                &[],
+                vec![],
+                "requirements JSON",
+                (ExecutorKind::Ai, 0.02),
+            ),
+            graph::task(
+                "task-docs",
+                "Generate documentation",
+                &["task-extract"],
+                &[],
+                vec![],
+                "operator report",
+                (ExecutorKind::Ai, 0.35),
+            ),
+        ];
+        workflow_ids.push(workflow.id.clone());
+        store.save_workflow(&workflow).unwrap();
+    }
+    drop(store);
+
+    let normalize_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "normalize-cost",
+            "--all",
+            "--limit",
+            "20",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let normalized: Value = serde_json::from_slice(&normalize_output).unwrap();
+    assert_eq!(normalized["status"], "normalized");
+    assert_eq!(
+        normalized["schema_version"],
+        "forge.improve.avoidable_ai_cost_batch_normalization.v1"
+    );
+    assert_eq!(normalized["requested_limit"], 20);
+    assert_eq!(normalized["attempted_workflow_count"], 2);
+    assert_eq!(normalized["normalized_workflow_count"], 2);
+    assert_eq!(normalized["repaired_workflow_count"], 0);
+    assert_eq!(normalized["no_change_workflow_count"], 0);
+    assert_eq!(normalized["total_normalized_task_count"], 2);
+    assert_eq!(normalized["total_propagated_version_task_count"], 2);
+    assert!(
+        (normalized["total_avoided_estimated_cost_usd"]
+            .as_f64()
+            .unwrap()
+            - 0.0396)
+            .abs()
+            < f64::EPSILON
+    );
+
+    let store = ForgeStore::open(&store_path).unwrap();
+    for workflow_id in workflow_ids {
+        let workflow = store.load_workflow(&workflow_id).unwrap();
+        let task_json = serde_json::to_value(&workflow.tasks).unwrap();
+        let tasks = task_json.as_array().unwrap();
+        let extract = find_task(tasks, "Extract requirements");
+        assert_eq!(extract["executor"], "command");
+        assert_eq!(extract["execution_policy"]["ai_allowed"], false);
+        assert_eq!(extract["version"], 2);
+        let docs = find_task(tasks, "Generate documentation");
+        assert_eq!(docs["executor"], "ai");
+        assert_eq!(docs["version"], 2);
+    }
 }
 
 #[test]

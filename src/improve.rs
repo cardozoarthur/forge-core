@@ -169,6 +169,23 @@ pub struct NormalizedAvoidableAiTask {
     pub new_version: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AvoidableAiCostBatchNormalizationReport {
+    pub status: String,
+    pub schema_version: String,
+    pub origin: String,
+    pub requested_limit: usize,
+    pub ranked_candidate_count: usize,
+    pub attempted_workflow_count: usize,
+    pub normalized_workflow_count: usize,
+    pub repaired_workflow_count: usize,
+    pub no_change_workflow_count: usize,
+    pub total_normalized_task_count: usize,
+    pub total_propagated_version_task_count: usize,
+    pub total_avoided_estimated_cost_usd: f64,
+    pub reports: Vec<AvoidableAiCostNormalizationReport>,
+}
+
 pub fn rank_improvement_candidates(
     store: &ForgeStore,
     limit: usize,
@@ -564,7 +581,7 @@ fn build_cost_efficiency_report(
     let repetitive_ai_tasks = ai_tasks
         .iter()
         .copied()
-        .filter(|task| looks_repetitive_or_deterministic_ai_task(task))
+        .filter(|task| normalizable_avoidable_ai_task(task))
         .collect::<Vec<_>>();
     let avoidable_estimated_cost_usd = repetitive_ai_tasks
         .iter()
@@ -856,6 +873,84 @@ pub fn normalize_avoidable_ai_costs(
         validation_status: validation.status,
         promotable: validation.promotable,
         event_kind: event_kind.to_string(),
+    })
+}
+
+pub fn normalize_avoidable_ai_costs_for_candidates(
+    store: &ForgeStore,
+    limit: usize,
+    origin: &str,
+) -> Result<AvoidableAiCostBatchNormalizationReport> {
+    let candidates = rank_improvement_candidates(store, limit)?;
+    let mut reports = Vec::new();
+    let mut attempted = BTreeSet::new();
+
+    for candidate in &candidates.candidates {
+        if candidate
+            .cost_efficiency
+            .repetitive_or_deterministic_ai_task_count
+            == 0
+        {
+            continue;
+        }
+        if !attempted.insert(candidate.workflow_id.clone()) {
+            continue;
+        }
+        reports.push(normalize_avoidable_ai_costs(
+            store,
+            &candidate.workflow_id,
+            origin,
+        )?);
+    }
+
+    let normalized_workflow_count = reports
+        .iter()
+        .filter(|report| report.normalized_task_count > 0)
+        .count();
+    let repaired_workflow_count = reports
+        .iter()
+        .filter(|report| {
+            report.normalized_task_count == 0 && report.propagated_version_task_count > 0
+        })
+        .count();
+    let no_change_workflow_count = reports
+        .iter()
+        .filter(|report| {
+            report.normalized_task_count == 0 && report.propagated_version_task_count == 0
+        })
+        .count();
+    let total_normalized_task_count = reports
+        .iter()
+        .map(|report| report.normalized_task_count)
+        .sum();
+    let total_propagated_version_task_count = reports
+        .iter()
+        .map(|report| report.propagated_version_task_count)
+        .sum();
+    let total_avoided_estimated_cost_usd = reports
+        .iter()
+        .map(|report| report.avoided_estimated_cost_usd)
+        .sum();
+    let status = if normalized_workflow_count > 0 || repaired_workflow_count > 0 {
+        "normalized"
+    } else {
+        "no_changes"
+    };
+
+    Ok(AvoidableAiCostBatchNormalizationReport {
+        status: status.to_string(),
+        schema_version: "forge.improve.avoidable_ai_cost_batch_normalization.v1".to_string(),
+        origin: origin.to_string(),
+        requested_limit: limit,
+        ranked_candidate_count: candidates.candidate_count,
+        attempted_workflow_count: reports.len(),
+        normalized_workflow_count,
+        repaired_workflow_count,
+        no_change_workflow_count,
+        total_normalized_task_count,
+        total_propagated_version_task_count,
+        total_avoided_estimated_cost_usd,
+        reports,
     })
 }
 

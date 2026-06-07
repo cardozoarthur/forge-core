@@ -26,7 +26,8 @@ use forge_core::executor::{
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff;
 use forge_core::improve::{
-    generate_improvement, normalize_avoidable_ai_costs, rank_improvement_candidates,
+    generate_improvement, normalize_avoidable_ai_costs,
+    normalize_avoidable_ai_costs_for_candidates, rank_improvement_candidates,
 };
 use forge_core::inspection::inspect_workflow_with_focus;
 use forge_core::intent::parse_intent;
@@ -1106,7 +1107,11 @@ enum ImproveCommands {
     },
     NormalizeCost {
         #[arg(long)]
-        workflow: String,
+        workflow: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
         #[arg(long, default_value = "forge_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -1583,11 +1588,28 @@ fn run() -> Result<i32> {
                 }
                 Some(ImproveCommands::NormalizeCost {
                     workflow,
+                    all,
+                    limit,
                     origin,
                     output,
                 }) => {
-                    let report = normalize_avoidable_ai_costs(&store, &workflow, &origin)?;
-                    print_response(output, &report)?;
+                    if all && workflow.is_some() {
+                        anyhow::bail!(
+                            "`forge improve normalize-cost` accepts either --workflow <id> or --all, not both"
+                        );
+                    }
+                    if all {
+                        let report =
+                            normalize_avoidable_ai_costs_for_candidates(&store, limit, &origin)?;
+                        print_response(output, &report)?;
+                    } else if let Some(workflow) = workflow {
+                        let report = normalize_avoidable_ai_costs(&store, &workflow, &origin)?;
+                        print_response(output, &report)?;
+                    } else {
+                        anyhow::bail!(
+                            "`forge improve normalize-cost` requires --workflow <id> or --all"
+                        );
+                    }
                     Ok(0)
                 }
                 None => {
