@@ -940,6 +940,51 @@ pub fn drive_request(
         });
     }
 
+    if task_summary.completed == task_summary.total
+        && task_summary.total > 0
+        && outcome_status.status == "support_only"
+        && (outcome_status.final_completion_audit_required
+            || outcome_status.final_completion_audit_present)
+    {
+        let next_command = vec![
+            "forge".to_string(),
+            "workflow".to_string(),
+            "update-goal".to_string(),
+            "--workflow".to_string(),
+            workflow.id.clone(),
+            "--goal".to_string(),
+            "<goal with explicit user-facing deliverables>".to_string(),
+            "--origin".to_string(),
+            origin.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ];
+        return Ok(RequestDriveReport {
+            schema_version: "forge.request_drive.v1".to_string(),
+            status: "blocked".to_string(),
+            action: outcome_status.action.clone(),
+            run_id: run.run_id,
+            workflow_id: workflow.id,
+            executor: executor.to_string(),
+            origin: origin.to_string(),
+            activity: heartbeat.activity,
+            task_summary,
+            outcome_status,
+            checkpoint_count: checkpoints.len(),
+            latest_checkpoint,
+            rework: None,
+            handoff_task: None,
+            parallel_handoff_tasks: Vec::new(),
+            blocked_tasks: drive_blocked_tasks(&handoff_summary.tasks),
+            next_command,
+            parallel_next_commands: Vec::new(),
+            final_delivery_package: None,
+            reason: "All workflow tasks are complete, but the outcome is still support-only; the workflow needs explicit user-facing deliverables before final completion."
+                .to_string(),
+            updated_at: heartbeat.updated_at,
+        });
+    }
+
     if task_summary.completed == task_summary.total && task_summary.total > 0 {
         if let Some(reason) = final_completion_audit_block_reason(store, &workflow)? {
             if let Some(updated_workflow) =

@@ -9718,6 +9718,175 @@ Integrações públicas devem ter mensagem clara de entrega.
 }
 
 #[test]
+fn final_audit_cannot_verify_support_only_workflow_without_user_deliverables() {
+    use chrono::Utc;
+    use forge_core::graph::{self, ArtifactRecord, ExecutorKind, TaskStatus};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let audit_path = temp
+        .path()
+        .join("artifacts/support-only/final_completion_audit.json");
+    fs::create_dir_all(audit_path.parent().unwrap()).unwrap();
+    fs::write(
+        &audit_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "forge.final_completion_audit.v1",
+            "status": "passed",
+            "goal_fully_satisfied": true,
+            "evidence": [{
+                "criterion": "Support workflow artifacts were generated",
+                "status": "passed",
+                "artifact_refs": ["artifacts/support-only/atomic-task-graph.json"],
+                "summary": "Support artifacts exist, but no user-facing deliverable was declared."
+            }],
+            "missing_criteria": [],
+            "open_items": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Generate internal workflow support artifacts. Critério Final: workflow só termina quando a auditoria final passar.",
+    ));
+    workflow.status = "completed".to_string();
+    workflow.intent.deliverables = vec![
+        "Atomic task graph".to_string(),
+        "Validation plan".to_string(),
+        "Artifact manifest".to_string(),
+    ];
+    workflow.tasks = vec![graph::task(
+        "task-graph",
+        "Build atomic task graph",
+        &[],
+        &[],
+        vec![],
+        "atomic task graph",
+        (ExecutorKind::Command, 0.0002),
+    )];
+    workflow.tasks[0].status = TaskStatus::Completed;
+    workflow.artifacts.push(ArtifactRecord {
+        id: "artifact-final-audit".to_string(),
+        kind: "final_completion_audit".to_string(),
+        path: "artifacts/support-only/final_completion_audit.json".to_string(),
+        sha256: hex_sha256(&fs::read(&audit_path).unwrap()),
+        created_at: Utc::now(),
+        lineage: None,
+    });
+    store.save_workflow(&workflow).unwrap();
+    let run = forge_core::request::create_run_record(&workflow, "codex", "accepted");
+    let run_id = run.run_id.clone();
+    forge_core::request::save_run_record(&store, &run).unwrap();
+    drop(store);
+
+    let run_status = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            &run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let run_status_json: Value = serde_json::from_slice(&run_status).unwrap();
+    assert_eq!(run_status_json["outcome_status"]["status"], "support_only");
+    assert_eq!(
+        run_status_json["outcome_status"]["action"],
+        "define_user_facing_deliverables"
+    );
+    assert_eq!(
+        run_status_json["outcome_status"]["final_completion_audit_evaluated"],
+        true
+    );
+    assert_eq!(
+        run_status_json["outcome_status"]["final_completion_audit_present"],
+        true
+    );
+    assert_eq!(
+        run_status_json["outcome_status"]["final_completion_audit_passed"],
+        false
+    );
+    assert_eq!(
+        run_status_json["outcome_status"]["user_facing_deliverable_count"],
+        0
+    );
+    assert!(
+        run_status_json["outcome_status"]["final_completion_audit_block_reason"]
+            .as_str()
+            .unwrap()
+            .contains("only support deliverables")
+    );
+
+    let driven = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "request",
+            "drive",
+            "--run",
+            &run_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "300",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let driven_json: Value = serde_json::from_slice(&driven).unwrap();
+    assert_eq!(driven_json["status"], "blocked");
+    assert_eq!(driven_json["action"], "define_user_facing_deliverables");
+    assert_eq!(driven_json["outcome_status"]["status"], "support_only");
+    assert_eq!(driven_json["final_delivery_package"], Value::Null);
+    assert!(driven_json["reason"]
+        .as_str()
+        .unwrap()
+        .contains("support-only"));
+
+    let candidates = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--workflow",
+            &workflow.id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let candidates_json: Value = serde_json::from_slice(&candidates).unwrap();
+    let top = &candidates_json["candidates"][0];
+    assert_eq!(top["outcome_status"]["status"], "support_only");
+    assert!(top["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "support_only_output_risk"));
+    assert_eq!(
+        top["recommended_action"],
+        "update_goal_or_tasks_with_user_facing_deliverables"
+    );
+}
+
+#[test]
 fn mcp_call_starts_resumes_and_polls_async_run_for_agent_handoff() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -19951,11 +20120,11 @@ fn request_drive_requires_final_completion_audit_for_explicit_final_criteria() {
     );
     assert_eq!(
         status_json["outcome_status"]["status"],
-        "needs_final_outcome_audit"
+        "needs_user_delivery_evidence"
     );
     assert_eq!(
         status_json["outcome_status"]["action"],
-        "attach_final_completion_audit"
+        "produce_user_facing_deliverables"
     );
     assert_eq!(
         status_json["outcome_status"]["final_completion_audit_required"],

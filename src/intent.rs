@@ -24,6 +24,17 @@ pub fn parse_intent(goal: &str) -> IntentSpec {
     if lower.contains("dashboard") || lower.contains("docs") {
         deliverables.push("documentation artifact".to_string());
     }
+    if lower.contains("deploy") || lower.contains("deployment") {
+        push_deliverable_once(&mut deliverables, "deployment evidence");
+    }
+    if lower.contains("telegram") {
+        push_deliverable_once(&mut deliverables, "Telegram notification evidence");
+    }
+    if lower.contains("server/client")
+        || (lower.contains("server") && lower.contains("client") && lower.contains("evidence"))
+    {
+        push_deliverable_once(&mut deliverables, "server/client evidence");
+    }
     if lower.contains("runtime") || lower.contains("workflow") {
         deliverables.push("persistent runtime state".to_string());
     }
@@ -132,6 +143,15 @@ pub fn parse_intent(goal: &str) -> IntentSpec {
         deliverables,
         risks,
         unknowns,
+    }
+}
+
+fn push_deliverable_once(deliverables: &mut Vec<String>, deliverable: &str) {
+    if !deliverables
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(deliverable))
+    {
+        deliverables.push(deliverable.to_string());
     }
 }
 

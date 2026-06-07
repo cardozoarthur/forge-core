@@ -5,6 +5,7 @@ pub const FINAL_COMPLETION_AUDIT_KIND: &str = "final_completion_audit";
 
 const OUTCOME_STATUS_SCHEMA_VERSION: &str = "forge.outcome_status.v1";
 const OUTCOME_REGISTRY_SCHEMA_VERSION: &str = "forge.outcome_registry_summary.v1";
+const SUPPORT_ONLY_FINAL_AUDIT_BLOCK_REASON: &str = "Final completion audit cannot verify a user-facing outcome because the workflow declares only support deliverables.";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OutcomeStatusReport {
@@ -92,7 +93,7 @@ pub fn assess_workflow_outcome(
         .artifacts
         .iter()
         .any(is_final_completion_audit_artifact);
-    let final_completion_audit_passed = final_completion_audit_required
+    let final_completion_audit_artifact_passed = final_completion_audit_required
         && final_completion_audit_evaluated
         && final_completion_audit_block_reason.is_none();
     let (user_facing_artifact_count, support_artifact_count) =
@@ -106,7 +107,7 @@ pub fn assess_workflow_outcome(
             deliverable_status(
                 workflow,
                 deliverable,
-                final_completion_audit_passed,
+                final_completion_audit_artifact_passed,
                 final_completion_audit_present,
             )
         })
@@ -127,20 +128,35 @@ pub fn assess_workflow_outcome(
         .count();
     let missing_user_facing_deliverable_count =
         user_facing_deliverable_count.saturating_sub(evidenced_user_facing_deliverable_count);
+    let final_completion_audit_passed =
+        final_completion_audit_artifact_passed && user_facing_deliverable_count > 0;
+    let effective_final_completion_audit_block_reason =
+        if final_completion_audit_artifact_passed && user_facing_deliverable_count == 0 {
+            Some(SUPPORT_ONLY_FINAL_AUDIT_BLOCK_REASON.to_string())
+        } else {
+            final_completion_audit_block_reason.map(str::to_string)
+        };
 
     let all_tasks_completed = !workflow.tasks.is_empty()
         && workflow
             .tasks
             .iter()
             .all(|task| task.status == TaskStatus::Completed);
-    let (status, action, reason) = if user_facing_deliverable_count == 0
-        && !final_completion_audit_required
-    {
+    let support_only_after_audit =
+        user_facing_deliverable_count == 0 && final_completion_audit_artifact_passed;
+    let support_only_without_final_audit =
+        user_facing_deliverable_count == 0 && !final_completion_audit_required;
+    let (status, action, reason) = if support_only_after_audit || support_only_without_final_audit {
         (
             "support_only".to_string(),
             "define_user_facing_deliverables".to_string(),
-            "Workflow intent only declares support deliverables; final user outcome is not explicit."
-                .to_string(),
+            if final_completion_audit_required {
+                "Workflow has explicit final criteria, but its intent only declares support deliverables; final user outcome is not explicit."
+                    .to_string()
+            } else {
+                "Workflow intent only declares support deliverables; final user outcome is not explicit."
+                    .to_string()
+            },
         )
     } else if final_completion_audit_passed {
         (
@@ -202,8 +218,7 @@ pub fn assess_workflow_outcome(
         final_completion_audit_evaluated,
         final_completion_audit_present,
         final_completion_audit_passed,
-        final_completion_audit_block_reason: final_completion_audit_block_reason
-            .map(str::to_string),
+        final_completion_audit_block_reason: effective_final_completion_audit_block_reason,
         deliverables,
     }
 }
