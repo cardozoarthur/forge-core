@@ -8178,6 +8178,26 @@ fn improve_candidates_recommend_deliverable_repair_for_support_only_workflows() 
         top["recommended_action"],
         "update_goal_or_tasks_with_user_facing_deliverables"
     );
+    let commands = top["suggested_commands"].as_array().unwrap();
+    assert!(commands.iter().any(|command| {
+        command.as_array().unwrap()
+            == &vec![
+                Value::String("forge".to_string()),
+                Value::String("status".to_string()),
+                Value::String("--workflow".to_string()),
+                Value::String(workflow.id.clone()),
+                Value::String("--output".to_string()),
+                Value::String("json".to_string()),
+            ]
+    }));
+    assert!(!commands.iter().any(|command| command
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("final-package".to_string()))));
+    assert!(!commands.iter().any(|command| command
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("handoff".to_string()))));
 }
 
 #[test]
@@ -8566,17 +8586,41 @@ fn improve_normalize_cost_all_normalizes_ranked_candidates() {
 }
 
 #[test]
-fn improve_candidates_suggest_final_package_for_completed_workflow_with_legacy_run() {
-    use forge_core::graph::{self, ExecutorKind, TaskStatus};
+fn improve_candidates_suggest_final_package_for_verified_workflow_with_legacy_run() {
+    use chrono::Utc;
+    use forge_core::graph::{self, ArtifactRecord, ExecutorKind, TaskStatus};
     use forge_core::request::{create_run_record, save_run_record};
 
     let temp = tempdir().unwrap();
     let store_path = temp.path().join("forge.sqlite");
+    let audit_relative_path = "artifacts/demo/final_completion_audit.json";
+    let audit_path = temp.path().join(audit_relative_path);
+    fs::create_dir_all(audit_path.parent().unwrap()).unwrap();
+    fs::write(
+        &audit_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "forge.final_completion_audit.v1",
+            "status": "passed",
+            "goal_fully_satisfied": true,
+            "evidence": [{
+                "criterion": "Partner-ready demo package delivered",
+                "status": "passed",
+                "artifact_refs": ["artifacts/demo/partner-ready-demo-package.md"],
+                "summary": "The demo package is ready for the partner."
+            }],
+            "missing_criteria": [],
+            "open_items": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
     let store = ForgeStore::open(&store_path).unwrap();
     let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
         "Deliver a partner-ready demo package with final evidence",
     ));
     workflow.status = "completed".to_string();
+    workflow.intent.deliverables = vec!["partner-ready demo package".to_string()];
     workflow.tasks = vec![graph::task(
         "task-demo",
         "Build demo package",
@@ -8587,6 +8631,14 @@ fn improve_candidates_suggest_final_package_for_completed_workflow_with_legacy_r
         (ExecutorKind::Ai, 1.0),
     )];
     workflow.tasks[0].status = TaskStatus::Completed;
+    workflow.artifacts.push(ArtifactRecord {
+        id: "artifact-final-audit".to_string(),
+        kind: "final_completion_audit".to_string(),
+        path: audit_relative_path.to_string(),
+        sha256: hex_sha256(&fs::read(&audit_path).unwrap()),
+        created_at: Utc::now(),
+        lineage: None,
+    });
     store.save_workflow(&workflow).unwrap();
 
     let mut run = create_run_record(&workflow, "codex", "cancelled");
@@ -8616,7 +8668,7 @@ fn improve_candidates_suggest_final_package_for_completed_workflow_with_legacy_r
         .as_array()
         .unwrap()
         .iter()
-        .any(|reason| reason["code"] == "completed_without_final_package"));
+        .any(|reason| reason["code"] == "verified_without_final_package"));
     assert!(top["suggested_commands"]
         .as_array()
         .unwrap()

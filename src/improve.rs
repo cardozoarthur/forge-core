@@ -1508,6 +1508,28 @@ fn suggested_commands(
             ]);
         }
     }
+    if has_reason(reasons, "support_only_output_risk")
+        && !has_reason(reasons, "parallelization_opportunity")
+        && !has_reason(reasons, "rework_loop_signal")
+    {
+        commands.push(vec![
+            "forge".to_string(),
+            "status".to_string(),
+            "--workflow".to_string(),
+            workflow.id.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]);
+        commands.push(vec![
+            "forge".to_string(),
+            "improve".to_string(),
+            "--workflow".to_string(),
+            workflow.id.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]);
+        return commands;
+    }
     if has_reason(reasons, "rework_loop_signal") {
         if let Some(run) = latest_driveable_run(runs) {
             commands.push(vec![
@@ -1536,9 +1558,11 @@ fn suggested_commands(
             }
         }
     }
-    if has_reason(reasons, "completed_without_final_package")
-        || has_reason(reasons, "verified_without_final_package")
-    {
+    let final_package_is_ready_or_verified = has_reason(reasons, "verified_without_final_package")
+        || (has_reason(reasons, "completed_without_final_package")
+            && !has_reason(reasons, "missing_user_delivery_evidence")
+            && !has_reason(reasons, "missing_final_outcome_audit"));
+    if final_package_is_ready_or_verified {
         if let Some(run) = latest_run_with_status(runs, "completed").or_else(|| latest_run(runs)) {
             commands.push(vec![
                 "forge".to_string(),
