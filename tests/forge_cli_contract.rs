@@ -2183,11 +2183,18 @@ fn plan_from_human_goal_creates_persistent_atomic_graph() {
     assert_eq!(json["status"], "planned");
     assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
     assert!(json["tasks"].as_array().unwrap().len() >= 7);
-    assert!(json["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|task| task["title"] == "Extract requirements"));
+    let requirements_task = find_task(json["tasks"].as_array().unwrap(), "Extract requirements");
+    assert_eq!(requirements_task["executor"], "command");
+    assert_eq!(
+        requirements_task["execution_policy"]["mode"],
+        "deterministic_executor"
+    );
+    assert_eq!(requirements_task["execution_policy"]["ai_allowed"], false);
+    assert_eq!(requirements_task["execution_policy"]["deterministic"], true);
+    assert_eq!(
+        requirements_task["cost"]["estimated_cost_usd"],
+        serde_json::json!(0.0002)
+    );
     assert!(json["tasks"]
         .as_array()
         .unwrap()
@@ -3122,9 +3129,14 @@ fn context_controller_returns_minimal_task_local_context() {
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
     let workflow_id = json["workflow_id"].as_str().unwrap();
-    let ai_task = find_task(json["tasks"].as_array().unwrap(), "Extract requirements");
-    let task_id = ai_task["id"].as_str().unwrap();
-    assert_eq!(ai_task["executor"], "ai");
+    let requirements_task = find_task(json["tasks"].as_array().unwrap(), "Extract requirements");
+    let task_id = requirements_task["id"].as_str().unwrap();
+    assert_eq!(requirements_task["executor"], "command");
+    assert_eq!(
+        requirements_task["execution_policy"]["mode"],
+        "deterministic_executor"
+    );
+    assert_eq!(requirements_task["execution_policy"]["ai_allowed"], false);
 
     let context_output = forge()
         .args([
@@ -3181,9 +3193,10 @@ fn context_controller_returns_versioned_shard_manifest() {
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
     let workflow_id = json["workflow_id"].as_str().unwrap();
-    let ai_task = find_task(json["tasks"].as_array().unwrap(), "Extract requirements");
-    let task_id = ai_task["id"].as_str().unwrap();
-    assert_eq!(ai_task["executor"], "ai");
+    let requirements_task = find_task(json["tasks"].as_array().unwrap(), "Extract requirements");
+    let task_id = requirements_task["id"].as_str().unwrap();
+    assert_eq!(requirements_task["executor"], "command");
+    assert_eq!(requirements_task["execution_policy"]["ai_allowed"], false);
 
     let context_output = forge()
         .args([
@@ -3259,7 +3272,7 @@ fn context_package_routes_dependency_readiness_as_structured_context() {
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
     let workflow_id = json["workflow_id"].as_str().unwrap();
-    let requirements_task = find_task(json["tasks"].as_array().unwrap(), "Extract requirements");
+    let documentation_task = find_task(json["tasks"].as_array().unwrap(), "Generate documentation");
 
     let context_output = forge()
         .args([
@@ -3269,7 +3282,7 @@ fn context_package_routes_dependency_readiness_as_structured_context() {
             "--workflow",
             workflow_id,
             "--task",
-            requirements_task["id"].as_str().unwrap(),
+            documentation_task["id"].as_str().unwrap(),
             "--budget",
             "1100",
             "--output",
@@ -3294,13 +3307,13 @@ fn context_package_routes_dependency_readiness_as_structured_context() {
     assert_eq!(context["dependency_summary"]["ready"], false);
     assert_eq!(
         context["dependency_summary"]["blocking_task_ids"],
-        serde_json::json!(["task-001"])
+        serde_json::json!(["task-007"])
     );
 
     let dependencies = context["dependency_refs"].as_array().unwrap();
     assert_eq!(dependencies.len(), 1);
-    assert_eq!(dependencies[0]["task_id"], "task-001");
-    assert_eq!(dependencies[0]["title"], "Parse intent");
+    assert_eq!(dependencies[0]["task_id"], "task-007");
+    assert_eq!(dependencies[0]["title"], "Integrate artifacts");
     assert_eq!(dependencies[0]["status"], "pending");
     assert_eq!(dependencies[0]["blocking"], true);
     assert_eq!(dependencies[0]["missing"], false);
@@ -3316,7 +3329,7 @@ fn context_package_routes_dependency_readiness_as_structured_context() {
     assert!(context["content"]
         .as_str()
         .unwrap()
-        .contains("task-001 Parse intent [pending] blocking"));
+        .contains("task-007 Integrate artifacts [pending] blocking"));
 }
 
 #[test]
@@ -3412,7 +3425,7 @@ fn context_package_summarizes_routing_decisions_for_executor_cost_audit() {
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
     let workflow_id = json["workflow_id"].as_str().unwrap();
-    let ai_task = find_task(json["tasks"].as_array().unwrap(), "Extract requirements");
+    let ai_task = find_task(json["tasks"].as_array().unwrap(), "Generate documentation");
     let budget = 420_u64;
 
     let context_output = forge()
@@ -3505,7 +3518,7 @@ fn context_package_exposes_routing_economy_for_cost_audit() {
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
     let workflow_id = json["workflow_id"].as_str().unwrap();
-    let ai_task = find_task(json["tasks"].as_array().unwrap(), "Extract requirements");
+    let requirements_task = find_task(json["tasks"].as_array().unwrap(), "Extract requirements");
 
     let context_output = forge()
         .args([
@@ -3515,7 +3528,7 @@ fn context_package_exposes_routing_economy_for_cost_audit() {
             "--workflow",
             workflow_id,
             "--task",
-            ai_task["id"].as_str().unwrap(),
+            requirements_task["id"].as_str().unwrap(),
             "--budget",
             "420",
             "--output",
@@ -3545,30 +3558,34 @@ fn context_package_exposes_routing_economy_for_cost_audit() {
         economy["schema_version"],
         "forge.context.routing_economy.v1"
     );
-    assert_eq!(economy["executor_profile_id"], "ai_reasoning");
+    assert_eq!(economy["executor_profile_id"], "no_ai_deterministic");
     assert_eq!(economy["baseline_bytes"], baseline_bytes);
     assert_eq!(economy["selected_bytes"], selected_bytes);
     assert_eq!(
         economy["compression_saved_bytes"],
         context["routing_summary"]["compression_saved_bytes"]
     );
+    let budget_omitted_bytes = economy["budget_omitted_bytes"].as_u64().unwrap();
+    let profile_filtered_bytes = economy["profile_filtered_bytes"].as_u64().unwrap();
     assert_eq!(
-        economy["budget_omitted_bytes"],
+        budget_omitted_bytes + profile_filtered_bytes,
         context["routing_summary"]["omitted_bytes"]
+            .as_u64()
+            .unwrap()
     );
-    assert_eq!(economy["profile_filtered_bytes"], 0);
+    assert!(profile_filtered_bytes > 0);
     assert_eq!(
         economy["total_avoided_bytes"],
         baseline_bytes - selected_bytes
     );
     assert!(economy["reduction_bps"].as_u64().unwrap() > 0);
-    assert_eq!(economy["model_call_avoided"], false);
-    assert_eq!(economy["estimated_model_calls_avoided"], 0);
-    assert_eq!(economy["cost_decision"], "model_context_reduced");
+    assert_eq!(economy["model_call_avoided"], true);
+    assert_eq!(economy["estimated_model_calls_avoided"], 1);
+    assert_eq!(economy["cost_decision"], "no_ai_deterministic_route");
     assert!(economy["reason"]
         .as_str()
         .unwrap()
-        .contains("selected a bounded AI context"));
+        .contains("avoiding a model call"));
     assert!(context["routing_fingerprint"]["components"]
         .as_array()
         .unwrap()
@@ -3886,7 +3903,7 @@ fn context_package_exposes_replay_manifest_for_resumable_executor_context() {
     assert_eq!(manifest["workflow_id"], workflow_id);
     assert_eq!(manifest["task_id"], task_id);
     assert_eq!(manifest["workflow_revision"], context["workflow_revision"]);
-    assert_eq!(manifest["executor_profile_id"], "ai_reasoning");
+    assert_eq!(manifest["executor_profile_id"], "no_ai_deterministic");
     assert_eq!(manifest["requested_budget"], 1200);
     assert_eq!(manifest["effective_budget"], context["effective_budget"]);
     assert_eq!(manifest["context_sha256"], context["context_sha256"]);
@@ -4069,7 +4086,7 @@ fn context_controller_compresses_oversized_shards_before_omitting() {
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
     let workflow_id = json["workflow_id"].as_str().unwrap();
-    let ai_task = find_task(json["tasks"].as_array().unwrap(), "Extract requirements");
+    let ai_task = find_task(json["tasks"].as_array().unwrap(), "Generate documentation");
     let task_id = ai_task["id"].as_str().unwrap();
     assert_eq!(ai_task["executor"], "ai");
 
@@ -4759,7 +4776,7 @@ fn context_package_exposes_stable_routing_fingerprint_for_executor_cache_keys() 
         fingerprint["schema_version"],
         "forge.context.routing_fingerprint.v1"
     );
-    assert_eq!(fingerprint["executor_profile_id"], "ai_reasoning");
+    assert_eq!(fingerprint["executor_profile_id"], "no_ai_deterministic");
     assert_eq!(fingerprint["workflow_revision"], 0);
     assert_eq!(fingerprint["cache_key"].as_str().unwrap().len(), 64);
     assert_eq!(
@@ -5077,7 +5094,7 @@ fn context_shards_expose_selection_cost_audit_for_compression_and_omission() {
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
     let workflow_id = json["workflow_id"].as_str().unwrap();
-    let task = find_task(json["tasks"].as_array().unwrap(), "Extract requirements");
+    let task = find_task(json["tasks"].as_array().unwrap(), "Generate documentation");
 
     let context_output = forge()
         .args([
@@ -5311,7 +5328,7 @@ fn context_package_exposes_selection_receipt_for_auditable_context_routing() {
     assert_eq!(receipt["workflow_id"], workflow_id);
     assert_eq!(receipt["task_id"], task["id"]);
     assert_eq!(receipt["workflow_revision"], context["workflow_revision"]);
-    assert_eq!(receipt["executor_profile_id"], "ai_reasoning");
+    assert_eq!(receipt["executor_profile_id"], "no_ai_deterministic");
     assert_eq!(receipt["requested_budget"], 420);
     assert_eq!(receipt["effective_budget"], context["effective_budget"]);
     assert_eq!(
@@ -5327,10 +5344,13 @@ fn context_package_exposes_selection_receipt_for_auditable_context_routing() {
     assert_eq!(receipt["required_complete"], context["context_ready"]);
     assert_eq!(receipt["route_status"], context["budget_plan"]["status"]);
     assert_eq!(receipt["handoff_status"], context["handoff_status"]);
-    assert!(receipt["compressed_sections"]
-        .as_array()
-        .unwrap()
-        .contains(&Value::String("workflow_goal".to_string())));
+    let compressed_sections = receipt["compressed_sections"].as_array().unwrap();
+    assert_eq!(
+        compressed_sections.len(),
+        context["routing_summary"]["compressed_shards"]
+            .as_u64()
+            .unwrap() as usize
+    );
     assert!(!receipt["budget_omitted_sections"]
         .as_array()
         .unwrap()
@@ -5700,7 +5720,7 @@ fn context_package_exposes_minimum_correct_set_for_required_sections() {
     assert_eq!(minimum["workflow_id"], workflow_id);
     assert_eq!(minimum["task_id"], task["id"]);
     assert_eq!(minimum["workflow_revision"], context["workflow_revision"]);
-    assert_eq!(minimum["executor_profile_id"], "ai_reasoning");
+    assert_eq!(minimum["executor_profile_id"], "no_ai_deterministic");
     assert_eq!(minimum["required_complete"], context["context_ready"]);
     assert_eq!(
         minimum["missing_required_sections"],
@@ -12145,14 +12165,14 @@ fn list_aggregates_execution_policy_routes_for_registry_rows() {
     );
     assert_eq!(summary["workflows"], 1);
     assert_eq!(summary["total_tasks"], task_count);
-    assert_eq!(summary["ai_tasks"], 3);
+    assert_eq!(summary["ai_tasks"], 2);
     assert_eq!(summary["mixed_tasks"], 1);
-    assert_eq!(summary["deterministic_tasks"], 8);
-    assert_eq!(summary["model_call_required_tasks"], 4);
-    assert_eq!(summary["model_call_avoided_tasks"], 8);
+    assert_eq!(summary["deterministic_tasks"], 9);
+    assert_eq!(summary["model_call_required_tasks"], 3);
+    assert_eq!(summary["model_call_avoided_tasks"], 9);
     assert_eq!(summary["local_code_nodes"], 1);
     assert_eq!(summary["reusable_local_code_nodes"], 1);
-    assert_eq!(summary["command_tasks"], 6);
+    assert_eq!(summary["command_tasks"], 7);
     assert_eq!(summary["wait_tasks"], 1);
     assert_eq!(summary["notification_tasks"], 1);
 
@@ -12163,9 +12183,9 @@ fn list_aggregates_execution_policy_routes_for_registry_rows() {
     );
     assert_eq!(row["execution_policy"]["workflows"], 1);
     assert_eq!(row["execution_policy"]["total_tasks"], task_count);
-    assert_eq!(row["execution_policy"]["ai_tasks"], 3);
+    assert_eq!(row["execution_policy"]["ai_tasks"], 2);
     assert_eq!(row["execution_policy"]["mixed_tasks"], 1);
-    assert_eq!(row["execution_policy"]["deterministic_tasks"], 8);
+    assert_eq!(row["execution_policy"]["deterministic_tasks"], 9);
     assert_eq!(row["execution_policy"]["local_code_nodes"], 1);
     assert_eq!(row["execution_policy"]["reusable_local_code_nodes"], 1);
     assert_eq!(row["reusable_subflows"].as_array().unwrap().len(), 1);
@@ -15196,7 +15216,10 @@ fn cluster_placement_blocks_remote_ai_tasks_without_explicit_authorization() {
         .clone();
     let planned: Value = serde_json::from_slice(&planned_output).unwrap();
     let workflow_id = planned["workflow_id"].as_str().unwrap();
-    let ai_task = find_task(planned["tasks"].as_array().unwrap(), "Extract requirements");
+    let ai_task = find_task(
+        planned["tasks"].as_array().unwrap(),
+        "Generate documentation",
+    );
 
     let placement_output = forge()
         .args([
@@ -25957,7 +25980,7 @@ fn validation_blocks_promotion_when_ai_executor_has_ai_disabled_in_execution_pol
         .assert()
         .success();
 
-    make_execution_policy_inconsistent(&store, workflow_id, "Extract requirements");
+    make_execution_policy_inconsistent(&store, workflow_id, "Generate documentation");
 
     let validation_output = forge()
         .args([
@@ -25983,7 +26006,7 @@ fn validation_blocks_promotion_when_ai_executor_has_ai_disabled_in_execution_pol
         .unwrap()
         .iter()
         .any(|rule| {
-            rule["task_id"] == "task-002"
+            rule["task_id"] == "task-008"
                 && rule["kind"] == "execution_policy"
                 && rule["message"]
                     .as_str()
@@ -25995,7 +26018,7 @@ fn validation_blocks_promotion_when_ai_executor_has_ai_disabled_in_execution_pol
         .unwrap()
         .iter()
         .any(|task| {
-            task["task_id"] == "task-002"
+            task["task_id"] == "task-008"
                 && task["reason"]
                     .as_str()
                     .unwrap()

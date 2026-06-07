@@ -649,7 +649,7 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
                 None,
             )],
             "Requirement summary artifact",
-            (ExecutorKind::Ai, 0.02),
+            (ExecutorKind::Command, 0.0002),
         ),
         task(
             "task-003",
