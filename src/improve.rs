@@ -614,10 +614,12 @@ fn build_cost_efficiency_report(
         .filter(|task| task.executor == ExecutorKind::Ai)
         .collect::<Vec<_>>();
     let ai_task_count = ai_tasks.len();
-    let estimated_ai_cost_total_usd = ai_tasks
-        .iter()
-        .map(|task| task.cost.estimated_cost_usd)
-        .sum::<f64>();
+    let estimated_ai_cost_total_usd = normalize_zero_cost(
+        ai_tasks
+            .iter()
+            .map(|task| task.cost.estimated_cost_usd)
+            .sum::<f64>(),
+    );
     let estimated_ai_cost_average_usd = average_cost(estimated_ai_cost_total_usd, ai_task_count);
     let repetitive_ai_tasks = ai_tasks
         .iter()
@@ -626,10 +628,12 @@ fn build_cost_efficiency_report(
         .collect::<Vec<_>>();
     let repetitive_or_deterministic_ai_cost_items =
         build_repetitive_ai_cost_item_reports(&repetitive_ai_tasks, events);
-    let avoidable_estimated_cost_usd = repetitive_ai_tasks
-        .iter()
-        .map(|task| task.cost.estimated_cost_usd)
-        .sum::<f64>();
+    let avoidable_estimated_cost_usd = normalize_zero_cost(
+        repetitive_ai_tasks
+            .iter()
+            .map(|task| task.cost.estimated_cost_usd)
+            .sum::<f64>(),
+    );
     let avoidable_estimated_cost_average_usd =
         average_cost(avoidable_estimated_cost_usd, repetitive_ai_tasks.len());
     let observed_costs = events
@@ -637,7 +641,7 @@ fn build_cost_efficiency_report(
         .filter_map(observed_ai_cost_from_event)
         .collect::<Vec<_>>();
     let observed_ai_cost_total_usd =
-        (!observed_costs.is_empty()).then(|| observed_costs.iter().sum());
+        (!observed_costs.is_empty()).then(|| normalize_zero_cost(observed_costs.iter().sum()));
     let observed_ai_cost_average_usd =
         observed_ai_cost_total_usd.map(|total| average_cost(total, observed_costs.len()));
     let repetitive_task_ids = repetitive_ai_tasks
@@ -651,8 +655,8 @@ fn build_cost_efficiency_report(
         })
         .filter_map(observed_ai_cost_from_event)
         .collect::<Vec<_>>();
-    let avoidable_observed_cost_total_usd =
-        (!avoidable_observed_costs.is_empty()).then(|| avoidable_observed_costs.iter().sum());
+    let avoidable_observed_cost_total_usd = (!avoidable_observed_costs.is_empty())
+        .then(|| normalize_zero_cost(avoidable_observed_costs.iter().sum()));
     let avoidable_observed_cost_average_usd = avoidable_observed_cost_total_usd
         .map(|total| average_cost(total, avoidable_observed_costs.len()));
     let recommendation = if repetitive_ai_tasks.is_empty() {
@@ -717,14 +721,18 @@ fn build_repetitive_ai_cost_item_reports(
     let mut reports = Vec::new();
     for (item_key, item_tasks) in tasks_by_item {
         let task_count = item_tasks.len();
-        let estimated_cost_total_usd = item_tasks
-            .iter()
-            .map(|task| task.cost.estimated_cost_usd)
-            .sum::<f64>();
-        let replacement_estimated_cost_total_usd = item_tasks
-            .iter()
-            .map(|task| normalized_command_cost(task))
-            .sum::<f64>();
+        let estimated_cost_total_usd = normalize_zero_cost(
+            item_tasks
+                .iter()
+                .map(|task| task.cost.estimated_cost_usd)
+                .sum::<f64>(),
+        );
+        let replacement_estimated_cost_total_usd = normalize_zero_cost(
+            item_tasks
+                .iter()
+                .map(|task| normalized_command_cost(task))
+                .sum::<f64>(),
+        );
         let estimated_savings_after_replacement_total_usd =
             (estimated_cost_total_usd - replacement_estimated_cost_total_usd).max(0.0);
         let observed_costs = item_tasks
@@ -738,8 +746,8 @@ fn build_repetitive_ai_cost_item_reports(
             })
             .collect::<Vec<_>>();
         let observed_execution_count = observed_costs.len();
-        let observed_cost_total_usd =
-            (!observed_costs.is_empty()).then(|| observed_costs.iter().sum::<f64>());
+        let observed_cost_total_usd = (!observed_costs.is_empty())
+            .then(|| normalize_zero_cost(observed_costs.iter().sum::<f64>()));
         let observed_cost_average_per_execution_usd =
             observed_cost_total_usd.map(|total| average_cost(total, observed_execution_count));
         let classification = if task_count > 1
@@ -1225,7 +1233,15 @@ fn average_cost(total: f64, count: usize) -> f64 {
     if count == 0 {
         0.0
     } else {
-        total / count as f64
+        normalize_zero_cost(total / count as f64)
+    }
+}
+
+fn normalize_zero_cost(value: f64) -> f64 {
+    if value == 0.0 {
+        0.0
+    } else {
+        value
     }
 }
 
