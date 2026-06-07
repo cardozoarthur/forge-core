@@ -412,6 +412,9 @@ mod tests {
             },
             async_policy: AsyncPolicy::default(),
             execution_policy: ExecutionPolicySpec::default(),
+            node_brain_routing: crate::graph::node_brain_routing_for_executor(
+                &ExecutorKind::Command,
+            ),
             child_subflows: vec![],
             human_interaction: None,
             status: TaskStatus::Pending,

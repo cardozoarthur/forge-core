@@ -7561,6 +7561,102 @@ fn improve_candidates_rank_live_workflows_with_logs_and_parallel_opportunities()
 }
 
 #[test]
+fn improve_candidates_can_focus_scan_by_goal_text_for_active_work() {
+    use forge_core::graph::{self, ExecutorKind};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+
+    let mut forge_workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Improve Forge Core autonomously until the user-facing runtime result is verified.",
+    ));
+    forge_workflow.status = "running".to_string();
+    forge_workflow.intent.deliverables = vec!["Forge Core runtime verification report".to_string()];
+    forge_workflow.tasks = vec![graph::task(
+        "task-forge-report",
+        "Produce Forge Core runtime verification report",
+        &[],
+        &[],
+        vec![],
+        "Forge Core runtime verification report",
+        (ExecutorKind::Command, 0.0002),
+    )];
+    store.save_workflow(&forge_workflow).unwrap();
+
+    let mut hackathon_workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Create a hackathon pitch report with final outcome evidence.",
+    ));
+    hackathon_workflow.status = "running".to_string();
+    hackathon_workflow.intent.deliverables = vec!["Hackathon pitch report".to_string()];
+    hackathon_workflow.tasks = vec![graph::task(
+        "task-hackathon-report",
+        "Produce hackathon pitch report",
+        &[],
+        &[],
+        vec![],
+        "Hackathon pitch report",
+        (ExecutorKind::Command, 0.0002),
+    )];
+    store.save_workflow(&hackathon_workflow).unwrap();
+    drop(store);
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--goal-contains",
+            "Forge Core",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(report["total_workflows"], 2);
+    assert_eq!(report["matched_workflows"], 1);
+    assert_eq!(
+        report["filter"]["goal_contains"],
+        serde_json::json!(["Forge Core"])
+    );
+    let candidates = report["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0]["workflow_id"], forge_workflow.id);
+    assert_ne!(candidates[0]["workflow_id"], hackathon_workflow.id);
+
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.improve.candidates",
+            "--input",
+            r#"{"limit":5,"goal_contains":["Forge Core"]}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_report: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp_report["status"], "ok");
+    assert_eq!(mcp_report["result"]["matched_workflows"], 1);
+    assert_eq!(
+        mcp_report["result"]["candidates"][0]["workflow_id"],
+        forge_workflow.id
+    );
+}
+
+#[test]
 fn improve_candidates_do_not_count_final_audit_as_avoidable_ai_cost() {
     use forge_core::graph::{self, ExecutorKind};
 
@@ -9329,10 +9425,13 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
         "forge.workflow.list",
         "forge.workflow.inspect",
         "forge.improve.candidates",
+        "forge.memory.policy",
+        "forge.memory.search",
         "forge.run.start",
         "forge.run.resume",
         "forge.run.status",
         "forge.workflow.update_goal",
+        "forge.workflow.update_node_brain",
         "forge.workflow.attach_artifact",
         "forge.context.request",
         "forge.task.handoff",
@@ -9357,12 +9456,55 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
         .unwrap()
         .contains("return a run_id"));
 
+    let improve_candidates = find_mcp_tool(&json, "forge.improve.candidates");
+    assert_eq!(
+        improve_candidates["input_schema"]["properties"]["goal_contains"]["type"],
+        "array"
+    );
+    assert_eq!(
+        improve_candidates["input_schema"]["properties"]["workflow_ids"]["type"],
+        "array"
+    );
+
     let update_goal = find_mcp_tool(&json, "forge.workflow.update_goal");
     assert_eq!(update_goal["mutates_workflow"], true);
     assert!(update_goal["description"]
         .as_str()
         .unwrap()
         .contains("revision"));
+
+    let update_node_brain = find_mcp_tool(&json, "forge.workflow.update_node_brain");
+    assert_eq!(update_node_brain["mutates_workflow"], true);
+    assert_eq!(
+        update_node_brain["input_schema"]["properties"]["allowed_brains"]["type"],
+        "array"
+    );
+    assert_eq!(
+        update_node_brain["input_schema"]["properties"]["agent_slots"]["type"],
+        "array"
+    );
+    assert!(update_node_brain["description"]
+        .as_str()
+        .unwrap()
+        .contains("without stopping the workflow run"));
+
+    let memory_policy = find_mcp_tool(&json, "forge.memory.policy");
+    assert_eq!(memory_policy["output_schema"], "forge.memory_policy.v1");
+    assert!(memory_policy["description"]
+        .as_str()
+        .unwrap()
+        .contains("manager-shared customer suggestions"));
+
+    let memory_search = find_mcp_tool(&json, "forge.memory.search");
+    assert_eq!(memory_search["output_schema"], "forge.memory_search.v1");
+    assert_eq!(
+        memory_search["input_schema"]["properties"]["scopes"]["type"],
+        "array"
+    );
+    assert_eq!(
+        memory_search["input_schema"]["properties"]["query"]["type"],
+        "string"
+    );
 
     let task_handoff = find_mcp_tool(&json, "forge.task.handoff");
     assert_eq!(task_handoff["async_safe"], true);
@@ -9372,6 +9514,207 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
         .as_str()
         .unwrap()
         .contains("Acquire a bounded executor handoff"));
+}
+
+#[test]
+fn memory_search_separates_customer_private_and_manager_shared_suggestions() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let global_root = temp.path().join("global-memory");
+    let project_root = temp.path().join("project-memory");
+    let processing_root = temp.path().join("processing-memory");
+    fs::create_dir_all(&global_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    fs::create_dir_all(&processing_root).unwrap();
+
+    fs::write(
+        project_root.join("customer-suggestions.md"),
+        r#"---
+visibility: private
+shareability: manager_shared
+retention: promote_curated_summary
+---
+
+# Sugestão do cliente
+
+Cliente sugeriu que a integração operacional mostre uma explicação simples para o gestor antes da execução recorrente.
+"#,
+    )
+    .unwrap();
+    fs::write(
+        processing_root.join("raw-lead-thread.md"),
+        r#"---
+visibility: private
+shareability: non_shareable
+retention: temporary
+---
+
+# Thread do lead
+
+Cliente citou dados privados e detalhes temporários sobre orçamento para integração operacional.
+"#,
+    )
+    .unwrap();
+    fs::write(
+        global_root.join("operating-policy.md"),
+        r#"---
+visibility: public
+shareability: global_shared
+---
+
+# Política pública
+
+Integrações públicas devem ter mensagem clara de entrega.
+"#,
+    )
+    .unwrap();
+
+    let policy = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "policy",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let policy_json: Value = serde_json::from_slice(&policy).unwrap();
+    assert_eq!(policy_json["schema_version"], "forge.memory_policy.v1");
+    assert!(policy_json["shareability_levels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|level| level["shareability"] == "manager_shared"));
+    assert!(policy_json["interface_policy"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|policy| policy["scenario"]
+            .as_str()
+            .unwrap()
+            .contains("customer suggestion")));
+    assert_eq!(
+        policy_json["business_operating_model"]["default_departments"],
+        serde_json::json!([
+            "product",
+            "technical",
+            "financial",
+            "administrative",
+            "marketing",
+            "communication",
+            "delivery"
+        ])
+    );
+
+    let manager_search = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "search",
+            "--query",
+            "cliente integração operacional gestor",
+            "--scope",
+            "project",
+            "--scope",
+            "processing",
+            "--audience",
+            "manager",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--processing-root",
+            processing_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manager_json: Value = serde_json::from_slice(&manager_search).unwrap();
+    assert_eq!(manager_json["schema_version"], "forge.memory_search.v1");
+    assert_eq!(manager_json["status"], "memory_search_complete");
+    assert_eq!(manager_json["result_count"], 1);
+    assert_eq!(manager_json["results"][0]["shareability"], "manager_shared");
+    assert_eq!(manager_json["results"][0]["visibility"], "private");
+    assert_eq!(
+        manager_json["results"][0]["access_decision"],
+        "allowed_by_audience_visibility_policy"
+    );
+    assert!(manager_json["results"][0]["snippet"]
+        .as_str()
+        .unwrap()
+        .contains("explicação simples"));
+    assert_eq!(manager_json["governance"]["denied_result_count"], 1);
+
+    let public_search = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "search",
+            "--query",
+            "cliente integração operacional gestor",
+            "--scope",
+            "project",
+            "--scope",
+            "processing",
+            "--audience",
+            "public",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--processing-root",
+            processing_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let public_json: Value = serde_json::from_slice(&public_search).unwrap();
+    assert_eq!(public_json["result_count"], 0);
+    assert_eq!(public_json["governance"]["denied_result_count"], 2);
+
+    let mcp_input = serde_json::json!({
+        "query": "integração operacional gestor",
+        "scopes": ["project", "processing"],
+        "audience": "manager",
+        "project_root": project_root,
+        "processing_root": processing_root,
+        "limit": 5
+    })
+    .to_string();
+    let mcp_search = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.memory.search",
+        ])
+        .arg("--input")
+        .arg(mcp_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_search).unwrap();
+    assert_eq!(mcp_json["tool_name"], "forge.memory.search");
+    assert_eq!(mcp_json["result"]["result_count"], 1);
+    assert_eq!(
+        mcp_json["result"]["results"][0]["shareability"],
+        "manager_shared"
+    );
 }
 
 #[test]
@@ -9945,10 +10288,31 @@ fn brain_router_keeps_memory_skills_mcp_and_shells_under_forge_control() {
         synced_json["brain_router"]["controller_role"],
         "orchestration_control_plane"
     );
+    assert_eq!(synced_json["brain_router"]["orchestrator_brain"], "forge");
     assert_eq!(
         synced_json["brain_router"]["brain_role"],
         "replaceable_execution_brain"
     );
+    assert_eq!(
+        synced_json["brain_router"]["node_brain_role"],
+        "per_node_agentic_execution_brain"
+    );
+    assert!(synced_json["brain_router"]["node_brain_routing_policy"]
+        .as_str()
+        .unwrap()
+        .contains("one or more agent slots"));
+    assert!(synced_json["brain_router"]["parallel_agent_policy"]
+        .as_str()
+        .unwrap()
+        .contains("parallel"));
+    assert!(synced_json["brain_router"]["hot_swap_policy"]
+        .as_str()
+        .unwrap()
+        .contains("switch-executor"));
+    assert!(synced_json["brain_router"]["hot_swap_policy"]
+        .as_str()
+        .unwrap()
+        .contains("update-node-brain"));
     for surface in [
         "workflow_graph",
         "memory",
@@ -9987,6 +10351,11 @@ fn brain_router_keeps_memory_skills_mcp_and_shells_under_forge_control() {
         .clone();
     let brains_json: Value = serde_json::from_slice(&brains).unwrap();
     assert_eq!(brains_json["schema_version"], "forge.brain_router.v1");
+    assert_eq!(brains_json["orchestrator_brain"], "forge");
+    assert_eq!(
+        brains_json["node_brain_role"],
+        "per_node_agentic_execution_brain"
+    );
     assert_eq!(brains_json["selected_brain"], "opencode");
     let claude = brains_json["brains"]
         .as_array()
@@ -15198,6 +15567,351 @@ fn task_handoff_packet_carries_full_execution_policy_for_deterministic_code_node
     );
     assert_eq!(packet["lease_status"], "not_requested");
     assert_eq!(packet["handoff_ready"], false);
+}
+
+#[test]
+fn task_handoff_packet_carries_per_node_brain_routing_for_ai_agents() {
+    use forge_core::graph::{self, ExecutorKind, NodeBrainAgentSlotSpec};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Run parallel AI research with different node brains.",
+    ));
+    workflow.status = "running".to_string();
+    workflow.tasks = vec![graph::task(
+        "task-ai-research",
+        "Research node with multiple brains",
+        &[],
+        &["goal", "repo context"],
+        vec![],
+        "AI research report",
+        (ExecutorKind::Ai, 0.35),
+    )];
+    workflow.tasks[0].node_brain_routing.agent_slots = vec![
+        NodeBrainAgentSlotSpec {
+            slot_id: "agent-codex-001".to_string(),
+            brain_id: Some("codex".to_string()),
+            role: "implementation_agent".to_string(),
+            parallel_group: "research-wave".to_string(),
+            state_owner: "forge".to_string(),
+        },
+        NodeBrainAgentSlotSpec {
+            slot_id: "agent-codex-002".to_string(),
+            brain_id: Some("codex".to_string()),
+            role: "test_agent".to_string(),
+            parallel_group: "research-wave".to_string(),
+            state_owner: "forge".to_string(),
+        },
+        NodeBrainAgentSlotSpec {
+            slot_id: "agent-gemini-001".to_string(),
+            brain_id: Some("gemini".to_string()),
+            role: "research_agent".to_string(),
+            parallel_group: "research-wave".to_string(),
+            state_owner: "forge".to_string(),
+        },
+    ];
+    workflow.tasks[0].node_brain_routing.max_parallel_agents = 3;
+    store.save_workflow(&workflow).unwrap();
+    drop(store);
+
+    let handoff = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            &workflow.id,
+            "--task",
+            "task-ai-research",
+            "--executor",
+            "gemini",
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
+    assert_eq!(handoff_json["selected_brain"], "gemini");
+    assert_eq!(handoff_json["orchestrator_brain"], "forge");
+    let packet = &handoff_json["packet"];
+    assert_eq!(packet["selected_brain"], "gemini");
+    assert_eq!(packet["orchestrator_brain"], "forge");
+    assert_eq!(
+        packet["node_brain_routing"]["schema_version"],
+        "forge.node_brain_routing.v1"
+    );
+    assert_eq!(packet["node_brain_routing"]["scope"], "agentic_ai_node");
+    assert_eq!(packet["node_brain_routing"]["selection_owner"], "forge");
+    assert_eq!(
+        packet["node_brain_routing"]["supports_parallel_agent_brains"],
+        true
+    );
+    assert_eq!(
+        packet["node_brain_routing"]["supports_multiple_agents_per_brain"],
+        true
+    );
+    assert_eq!(packet["node_brain_routing"]["hot_swappable"], true);
+    assert_eq!(packet["node_brain_routing"]["max_parallel_agents"], 3);
+    assert!(packet["node_brain_routing"]["allowed_brains"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("codex")));
+    assert!(packet["node_brain_routing"]["allowed_brains"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("gemini")));
+    let slots = packet["node_brain_routing"]["agent_slots"]
+        .as_array()
+        .unwrap();
+    assert_eq!(slots.len(), 3);
+    assert_eq!(
+        slots
+            .iter()
+            .filter(|slot| slot["brain_id"] == "codex")
+            .count(),
+        2
+    );
+    assert!(slots.iter().any(|slot| slot["brain_id"] == "gemini"));
+    assert_eq!(
+        packet["node_brain_routing"]["switch_command"],
+        serde_json::json!([
+            "forge",
+            "request",
+            "switch-executor",
+            "--run",
+            "<run-id>",
+            "--executor",
+            "<brain-id>",
+            "--output",
+            "json"
+        ])
+    );
+    assert_eq!(
+        packet["node_brain_routing"]["workflow_mutation_command"],
+        serde_json::json!([
+            "forge",
+            "workflow",
+            "update-node-brain",
+            "--workflow",
+            "<workflow-id>",
+            "--task",
+            "<task-id>",
+            "--default-brain",
+            "<brain-id>",
+            "--output",
+            "json"
+        ])
+    );
+    assert_eq!(
+        packet["node_brain_routing"]["memory_source"],
+        "forge_memory_router"
+    );
+    assert_eq!(
+        packet["node_brain_routing"]["skills_source"],
+        "forge_skill_router"
+    );
+    assert_eq!(
+        packet["node_brain_routing"]["mcp_source"],
+        "forge_mcp_router"
+    );
+}
+
+#[test]
+fn workflow_update_node_brain_hot_swaps_node_routing_without_stopping_workflow() {
+    use forge_core::graph::{self, ExecutorKind};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Run a workflow whose AI node changes brains while it is active.",
+    ));
+    workflow.status = "running".to_string();
+    workflow.tasks = vec![graph::task(
+        "task-ai-switchable",
+        "Switchable AI node",
+        &[],
+        &["goal", "runtime state"],
+        vec![],
+        "validated AI result",
+        (ExecutorKind::Ai, 0.42),
+    )];
+    store.save_workflow(&workflow).unwrap();
+    drop(store);
+
+    let updated = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "workflow",
+            "update-node-brain",
+            "--workflow",
+            &workflow.id,
+            "--task",
+            "task-ai-switchable",
+            "--default-brain",
+            "gemini",
+            "--allowed-brain",
+            "codex",
+            "--allowed-brain",
+            "gemini",
+            "--agent-slot",
+            "agent-codex-implementation=codex:implementation_agent:parallel-wave",
+            "--agent-slot",
+            "agent-codex-tests=codex:test_agent:parallel-wave",
+            "--agent-slot",
+            "agent-gemini-research=gemini:research_agent:parallel-wave",
+            "--max-parallel-agents",
+            "3",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let updated_json: Value = serde_json::from_slice(&updated).unwrap();
+    assert_eq!(
+        updated_json["status"],
+        "workflow_node_brain_routing_updated"
+    );
+    assert_eq!(updated_json["workflow_id"], workflow.id);
+    assert_eq!(updated_json["task_id"], "task-ai-switchable");
+    assert_eq!(updated_json["orchestrator_brain"], "forge");
+    assert_eq!(updated_json["can_switch_without_stopping_workflow"], true);
+    assert_eq!(updated_json["previous_version"], 1);
+    assert_eq!(updated_json["new_version"], 2);
+    assert_eq!(updated_json["revision"], 1);
+    assert_eq!(
+        updated_json["new_routing"]["default_brain"],
+        serde_json::json!("gemini")
+    );
+    assert_eq!(updated_json["new_routing"]["max_parallel_agents"], 3);
+    assert_eq!(
+        updated_json["new_routing"]["supports_parallel_agent_brains"],
+        true
+    );
+    assert_eq!(
+        updated_json["new_routing"]["supports_multiple_agents_per_brain"],
+        true
+    );
+    let updated_slots = updated_json["new_routing"]["agent_slots"]
+        .as_array()
+        .unwrap();
+    assert_eq!(updated_slots.len(), 3);
+    assert_eq!(
+        updated_slots
+            .iter()
+            .filter(|slot| slot["brain_id"] == "codex")
+            .count(),
+        2
+    );
+    assert!(updated_slots
+        .iter()
+        .any(|slot| slot["brain_id"] == "gemini"));
+    assert!(updated_json["new_routing"]["workflow_mutation_command"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("update-node-brain")));
+
+    let handoff = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            &workflow.id,
+            "--task",
+            "task-ai-switchable",
+            "--executor",
+            "gemini",
+            "--budget",
+            "1600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
+    assert_eq!(
+        handoff_json["packet"]["node_brain_routing"]["default_brain"],
+        serde_json::json!("gemini")
+    );
+    assert_eq!(
+        handoff_json["packet"]["node_brain_routing"]["agent_slots"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+
+    let mcp_input = serde_json::json!({
+        "workflow_id": workflow.id,
+        "task_id": "task-ai-switchable",
+        "default_brain": "claude",
+        "agent_slots": ["agent-claude-review=claude:review_agent:review-wave"],
+        "max_parallel_agents": 1,
+        "origin": "gemini"
+    })
+    .to_string();
+    let mcp_updated = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.workflow.update_node_brain",
+        ])
+        .arg("--input")
+        .arg(mcp_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_updated).unwrap();
+    assert_eq!(mcp_json["tool_name"], "forge.workflow.update_node_brain");
+    assert_eq!(
+        mcp_json["result"]["status"],
+        "workflow_node_brain_routing_updated"
+    );
+    assert_eq!(mcp_json["result"]["new_version"], 3);
+    assert_eq!(mcp_json["result"]["revision"], 2);
+    assert_eq!(
+        mcp_json["result"]["new_routing"]["default_brain"],
+        serde_json::json!("claude")
+    );
+    assert_eq!(
+        mcp_json["result"]["new_routing"]["agent_slots"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(mcp_json["result"]["new_routing"]["allowed_brains"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("claude")));
 }
 
 #[test]
@@ -20437,6 +21151,44 @@ fn request_switch_executor_hot_swaps_agent_without_stopping_run_or_losing_direct
     assert_eq!(switched_json["previous_status"], "running");
     assert_eq!(switched_json["previous_executor"], "codex");
     assert_eq!(switched_json["new_executor"], "opencode");
+    assert_eq!(
+        switched_json["brain_switch_policy"]["schema_version"],
+        "forge.brain_switch_policy.v1"
+    );
+    assert_eq!(
+        switched_json["brain_switch_policy"]["orchestrator_brain"],
+        "forge"
+    );
+    assert_eq!(
+        switched_json["brain_switch_policy"]["switch_scope"],
+        "workflow_run_execution_brain"
+    );
+    assert_eq!(
+        switched_json["brain_switch_policy"]["can_switch_without_stopping_workflow"],
+        true
+    );
+    assert_eq!(
+        switched_json["brain_switch_policy"]["preserves_run_id"],
+        true
+    );
+    assert_eq!(
+        switched_json["brain_switch_policy"]["preserves_workflow_id"],
+        true
+    );
+    assert_eq!(
+        switched_json["brain_switch_policy"]["preserves_checkpoints"],
+        true
+    );
+    assert_eq!(
+        switched_json["brain_switch_policy"]["node_brain_routing_source"],
+        "workflow.tasks[].node_brain_routing"
+    );
+    assert!(
+        switched_json["brain_switch_policy"]["node_brain_routing_mutation_command"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("update-node-brain"))
+    );
     assert_eq!(
         switched_json["fallback_executors"],
         serde_json::json!(["codex"])

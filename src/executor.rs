@@ -64,8 +64,13 @@ pub struct BrainRouterReport {
     pub schema_version: String,
     pub controller: String,
     pub controller_role: String,
+    pub orchestrator_brain: String,
     pub brain_role: String,
+    pub node_brain_role: String,
     pub routing_principle: String,
+    pub node_brain_routing_policy: String,
+    pub parallel_agent_policy: String,
+    pub hot_swap_policy: String,
     pub selected_brain: Option<String>,
     pub forge_controlled_surfaces: Vec<String>,
     pub brain_owned_surfaces: Vec<String>,
@@ -696,9 +701,20 @@ fn build_brain_router(
         schema_version: "forge.brain_router.v1".to_string(),
         controller: "forge".to_string(),
         controller_role: "orchestration_control_plane".to_string(),
+        orchestrator_brain: "forge".to_string(),
         brain_role: "replaceable_execution_brain".to_string(),
+        node_brain_role: "per_node_agentic_execution_brain".to_string(),
         routing_principle:
             "Forge owns memory, skills, MCP routing, context, workflow state, shell/session lifecycle, permissions, cost policy and validation; external CLIs only execute bounded brain work."
+                .to_string(),
+        node_brain_routing_policy:
+            "Each AI or mixed workflow node may declare its own Forge-owned node_brain_routing contract with one or more agent slots, different brains per slot, and multiple agents on the same brain."
+                .to_string(),
+        parallel_agent_policy:
+            "Forge may lease and run independent AI node agent slots in parallel when dependencies, context budgets, quota and validation gates allow it."
+                .to_string(),
+        hot_swap_policy:
+            "A workflow run can switch the active execution brain through forge request switch-executor without changing run id, workflow id, checkpoints or user directives. One AI/mixed workflow node can mutate its own node_brain_routing through forge workflow update-node-brain while the workflow remains active."
                 .to_string(),
         selected_brain,
         forge_controlled_surfaces: vec![

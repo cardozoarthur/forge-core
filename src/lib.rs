@@ -17,6 +17,7 @@ pub mod interactive;
 pub mod ir;
 pub mod lease;
 pub mod mcp;
+pub mod memory;
 pub mod milestone;
 pub mod multimodal;
 pub mod notify;

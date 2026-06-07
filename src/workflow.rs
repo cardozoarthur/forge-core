@@ -1,5 +1,8 @@
 use crate::artifact::copy_artifact;
-use crate::graph::{ArtifactRecord, TaskStatus, Workflow, WorkflowRevision};
+use crate::graph::{
+    node_brain_routing_for_executor, ArtifactRecord, ExecutorKind, NodeBrainAgentSlotSpec,
+    NodeBrainRoutingSpec, TaskStatus, Workflow, WorkflowRevision,
+};
 use crate::ir::{
     preview_token_change_impact, resolve_token_collection, CollaborationAuditEvent,
     CollaborationComment, CollaborationConflictEvent, CollaborationPatchEvent,
@@ -47,6 +50,31 @@ pub struct WorkflowTaskUpdateReport {
     pub new_expected_output: String,
     pub previous_version: u64,
     pub new_version: u64,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkflowNodeBrainRoutingUpdateInput {
+    pub task_id: String,
+    pub default_brain: Option<String>,
+    pub allowed_brains: Vec<String>,
+    pub agent_slots: Vec<NodeBrainAgentSlotSpec>,
+    pub max_parallel_agents: Option<usize>,
+    pub origin: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowNodeBrainRoutingUpdateReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub origin: String,
+    pub orchestrator_brain: String,
+    pub can_switch_without_stopping_workflow: bool,
+    pub previous_version: u64,
+    pub new_version: u64,
+    pub previous_routing: NodeBrainRoutingSpec,
+    pub new_routing: NodeBrainRoutingSpec,
     pub revision: u64,
 }
 
@@ -279,6 +307,206 @@ pub fn update_workflow_task(
     })
 }
 
+pub fn parse_node_brain_agent_slot(value: &str) -> Result<NodeBrainAgentSlotSpec> {
+    let (slot_id, rest) = value.split_once('=').with_context(|| {
+        format!("invalid agent slot `{value}`; expected slot_id=brain_id:role:parallel_group")
+    })?;
+    let parts = rest.split(':').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        bail!("invalid agent slot `{value}`; expected slot_id=brain_id:role:parallel_group");
+    }
+    let slot_id = slot_id.trim();
+    let role = parts[1].trim();
+    let parallel_group = parts[2].trim();
+    if slot_id.is_empty() || role.is_empty() || parallel_group.is_empty() {
+        bail!("invalid agent slot `{value}`; slot id, role and parallel group are required");
+    }
+
+    Ok(NodeBrainAgentSlotSpec {
+        slot_id: slot_id.to_string(),
+        brain_id: empty_to_none(parts[0]),
+        role: role.to_string(),
+        parallel_group: parallel_group.to_string(),
+        state_owner: "forge".to_string(),
+    })
+}
+
+pub fn update_workflow_node_brain_routing(
+    store: &ForgeStore,
+    workflow_id: &str,
+    input: WorkflowNodeBrainRoutingUpdateInput,
+) -> Result<WorkflowNodeBrainRoutingUpdateReport> {
+    let mut workflow = store.load_workflow(workflow_id)?;
+    let task_index = workflow
+        .tasks
+        .iter()
+        .position(|task| task.id == input.task_id)
+        .with_context(|| {
+            format!(
+                "task {} not found in workflow {}",
+                input.task_id, workflow_id
+            )
+        })?;
+
+    let (previous_version, new_version, previous_routing, new_routing, orchestrator_brain) = {
+        let task = &mut workflow.tasks[task_index];
+        if !matches!(task.executor, ExecutorKind::Ai | ExecutorKind::Mixed) {
+            bail!(
+                "task {} uses executor {:?}; node brain routing is only mutable for AI or mixed tasks",
+                input.task_id,
+                task.executor
+            );
+        }
+        if input.default_brain.is_none()
+            && input.allowed_brains.is_empty()
+            && input.agent_slots.is_empty()
+            && input.max_parallel_agents.is_none()
+        {
+            bail!("no node brain routing changes were provided");
+        }
+
+        let previous_version = task.version;
+        let previous_routing = task.node_brain_routing.clone();
+        let mut routing = if task.node_brain_routing.scope == "agentic_ai_node" {
+            task.node_brain_routing.clone()
+        } else {
+            node_brain_routing_for_executor(&task.executor)
+        };
+
+        routing.scope = "agentic_ai_node".to_string();
+        routing.orchestrator_brain = "forge".to_string();
+        routing.selection_owner = "forge".to_string();
+        routing.supports_parallel_agent_brains = true;
+        routing.supports_multiple_agents_per_brain = true;
+        routing.hot_swappable = true;
+        routing.state_owner = "forge_workflow_state".to_string();
+        routing.memory_source = "forge_memory_router".to_string();
+        routing.skills_source = "forge_skill_router".to_string();
+        routing.mcp_source = "forge_mcp_router".to_string();
+        routing.switch_command = vec![
+            "forge".to_string(),
+            "request".to_string(),
+            "switch-executor".to_string(),
+            "--run".to_string(),
+            "<run-id>".to_string(),
+            "--executor".to_string(),
+            "<brain-id>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ];
+        routing.workflow_mutation_command = vec![
+            "forge".to_string(),
+            "workflow".to_string(),
+            "update-node-brain".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--task".to_string(),
+            "<task-id>".to_string(),
+            "--default-brain".to_string(),
+            "<brain-id>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ];
+
+        let allowed_brains = clean_unique(input.allowed_brains);
+        if !allowed_brains.is_empty() {
+            routing.allowed_brains = allowed_brains;
+        }
+        if routing.allowed_brains.is_empty() {
+            routing.allowed_brains = node_brain_routing_for_executor(&task.executor).allowed_brains;
+        }
+
+        if let Some(default_brain) = clean_optional_owned(input.default_brain) {
+            ensure_unique_value(&mut routing.allowed_brains, &default_brain);
+            routing.default_brain = Some(default_brain);
+        }
+
+        if !input.agent_slots.is_empty() {
+            let mut seen_slots = Vec::new();
+            for slot in &input.agent_slots {
+                if seen_slots.contains(&slot.slot_id) {
+                    bail!("duplicate node brain agent slot id: {}", slot.slot_id);
+                }
+                seen_slots.push(slot.slot_id.clone());
+                if let Some(brain_id) = slot.brain_id.as_deref().and_then(empty_to_none) {
+                    ensure_unique_value(&mut routing.allowed_brains, &brain_id);
+                }
+            }
+            routing.agent_slots = input.agent_slots;
+        }
+
+        let requested_max = input.max_parallel_agents.unwrap_or_else(|| {
+            routing
+                .max_parallel_agents
+                .max(routing.agent_slots.len())
+                .max(1)
+        });
+        if requested_max == 0 && !routing.agent_slots.is_empty() {
+            bail!("max parallel agents must be greater than zero when agent slots are configured");
+        }
+        if requested_max < routing.agent_slots.len() {
+            bail!(
+                "max parallel agents {} is lower than configured agent slots {}",
+                requested_max,
+                routing.agent_slots.len()
+            );
+        }
+        routing.max_parallel_agents = requested_max;
+
+        task.node_brain_routing = routing;
+        task.version = task.version.saturating_add(1);
+        let new_version = task.version;
+        let new_routing = task.node_brain_routing.clone();
+        let orchestrator_brain = new_routing.orchestrator_brain.clone();
+        (
+            previous_version,
+            new_version,
+            previous_routing,
+            new_routing,
+            orchestrator_brain,
+        )
+    };
+
+    let revision = push_revision(
+        &mut workflow.revisions,
+        &input.origin,
+        "node_brain_routing_updated",
+        &format!(
+            "updated node brain routing for task {} from version {} to {}",
+            input.task_id, previous_version, new_version
+        ),
+    );
+    store.save_workflow(&workflow)?;
+    store.record_event(
+        workflow_id,
+        "workflow_node_brain_routing_updated",
+        &serde_json::json!({
+            "origin": input.origin,
+            "task_id": input.task_id,
+            "previous_version": previous_version,
+            "new_version": new_version,
+            "previous_routing": previous_routing,
+            "new_routing": new_routing,
+            "revision": revision,
+            "can_switch_without_stopping_workflow": true
+        }),
+    )?;
+
+    Ok(WorkflowNodeBrainRoutingUpdateReport {
+        status: "workflow_node_brain_routing_updated".to_string(),
+        workflow_id: workflow_id.to_string(),
+        task_id: input.task_id,
+        origin: input.origin,
+        orchestrator_brain,
+        can_switch_without_stopping_workflow: true,
+        previous_version,
+        new_version,
+        previous_routing,
+        new_routing,
+        revision,
+    })
+}
+
 pub fn attach_workflow_artifact(
     store: &ForgeStore,
     workflow_id: &str,
@@ -466,6 +694,26 @@ fn empty_to_none(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn clean_optional_owned(value: Option<String>) -> Option<String> {
+    value.and_then(|item| empty_to_none(&item))
+}
+
+fn clean_unique(values: Vec<String>) -> Vec<String> {
+    let mut cleaned = Vec::new();
+    for value in values {
+        if let Some(value) = empty_to_none(&value) {
+            ensure_unique_value(&mut cleaned, &value);
+        }
+    }
+    cleaned
+}
+
+fn ensure_unique_value(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|item| item == value) {
+        values.push(value.to_string());
     }
 }
 

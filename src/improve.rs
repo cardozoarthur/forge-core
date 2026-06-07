@@ -40,9 +40,23 @@ pub struct OrchestratorImprovementCandidatesReport {
     pub schema_version: String,
     pub generated_at: DateTime<Utc>,
     pub total_workflows: usize,
+    pub matched_workflows: usize,
+    pub filter: ImprovementCandidateFilter,
     pub candidate_count: usize,
     pub selection_policy: Vec<String>,
     pub candidates: Vec<OrchestratorImprovementCandidate>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ImprovementCandidateFilter {
+    pub workflow_ids: Vec<String>,
+    pub goal_contains: Vec<String>,
+}
+
+impl ImprovementCandidateFilter {
+    pub fn active(&self) -> bool {
+        !self.workflow_ids.is_empty() || !self.goal_contains.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -223,6 +237,14 @@ pub fn rank_improvement_candidates(
     store: &ForgeStore,
     limit: usize,
 ) -> Result<OrchestratorImprovementCandidatesReport> {
+    rank_improvement_candidates_with_filter(store, limit, ImprovementCandidateFilter::default())
+}
+
+pub fn rank_improvement_candidates_with_filter(
+    store: &ForgeStore,
+    limit: usize,
+    filter: ImprovementCandidateFilter,
+) -> Result<OrchestratorImprovementCandidatesReport> {
     let workflows = store.load_workflows()?;
     let total_workflows = workflows.len();
     let runs = store
@@ -239,7 +261,12 @@ pub fn rank_improvement_candidates(
     }
 
     let mut candidates = Vec::new();
+    let mut matched_workflows = 0;
     for workflow in workflows {
+        if !improvement_candidate_filter_matches(&workflow, &filter) {
+            continue;
+        }
+        matched_workflows += 1;
         let workflow_runs = runs_by_workflow
             .get(&workflow.id)
             .map(Vec::as_slice)
@@ -275,9 +302,44 @@ pub fn rank_improvement_candidates(
                 .to_string(),
             "penalize support-only completion when the user asked for final outcomes".to_string(),
             "deprioritize workflows whose final user outcome is already verified; treat remaining support tasks as cleanup instead of delivery blockers".to_string(),
+            "allow focused candidate scans by workflow id or goal text so active work is not drowned by unrelated historical backlog".to_string(),
         ],
+        matched_workflows,
+        filter,
         candidates,
     })
+}
+
+fn improvement_candidate_filter_matches(
+    workflow: &Workflow,
+    filter: &ImprovementCandidateFilter,
+) -> bool {
+    if !filter.workflow_ids.is_empty()
+        && !filter
+            .workflow_ids
+            .iter()
+            .any(|workflow_id| workflow_id == &workflow.id)
+    {
+        return false;
+    }
+    if !filter.goal_contains.is_empty() {
+        let mut haystack = workflow.goal.clone();
+        if let Some(initial_goal) = &workflow.initial_goal {
+            haystack.push('\n');
+            haystack.push_str(initial_goal);
+        }
+        let haystack = haystack.to_lowercase();
+        if !filter
+            .goal_contains
+            .iter()
+            .map(|needle| needle.trim().to_lowercase())
+            .filter(|needle| !needle.is_empty())
+            .any(|needle| haystack.contains(&needle))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn build_improvement_candidate(

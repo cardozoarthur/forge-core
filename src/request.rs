@@ -304,6 +304,7 @@ pub struct RequestExecutorSwitchReport {
     pub origin: String,
     pub previous_executor: Option<String>,
     pub new_executor: String,
+    pub brain_switch_policy: BrainSwitchPolicyReport,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_executors: Vec<String>,
     pub activity: RunActivity,
@@ -312,6 +313,20 @@ pub struct RequestExecutorSwitchReport {
     pub latest_checkpoint: Option<TaskCheckpoint>,
     pub handoff_summary: ContextHandoffSummary,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainSwitchPolicyReport {
+    pub schema_version: String,
+    pub orchestrator_brain: String,
+    pub switch_scope: String,
+    pub can_switch_without_stopping_workflow: bool,
+    pub preserves_run_id: bool,
+    pub preserves_workflow_id: bool,
+    pub preserves_checkpoints: bool,
+    pub preserves_user_directives: bool,
+    pub node_brain_routing_source: String,
+    pub node_brain_routing_mutation_command: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2323,6 +2338,32 @@ pub fn switch_request_executor(
         origin: input.origin,
         previous_executor,
         new_executor: input.executor,
+        brain_switch_policy: BrainSwitchPolicyReport {
+            schema_version: "forge.brain_switch_policy.v1".to_string(),
+            orchestrator_brain: "forge".to_string(),
+            switch_scope: "workflow_run_execution_brain".to_string(),
+            can_switch_without_stopping_workflow: true,
+            preserves_run_id: executor_switch.continuity_policy.preserve_run_id,
+            preserves_workflow_id: executor_switch.continuity_policy.preserve_workflow_id,
+            preserves_checkpoints: executor_switch.continuity_policy.preserve_checkpoints,
+            preserves_user_directives: executor_switch
+                .continuity_policy
+                .user_directives_remain_authoritative,
+            node_brain_routing_source: "workflow.tasks[].node_brain_routing".to_string(),
+            node_brain_routing_mutation_command: vec![
+                "forge".to_string(),
+                "workflow".to_string(),
+                "update-node-brain".to_string(),
+                "--workflow".to_string(),
+                "<workflow-id>".to_string(),
+                "--task".to_string(),
+                "<task-id>".to_string(),
+                "--default-brain".to_string(),
+                "<brain-id>".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        },
         fallback_executors,
         activity,
         executor_switch,

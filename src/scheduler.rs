@@ -204,7 +204,9 @@ fn compute_execution_waves(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{create_workflow, CostEstimate, ExecutorKind, TaskStatus};
+    use crate::graph::{
+        create_workflow, node_brain_routing_for_executor, CostEstimate, ExecutorKind, TaskStatus,
+    };
     use crate::intent::IntentSpec;
 
     fn make_workflow_with_deps(dependency_chains: &[(&str, &[&str])]) -> Workflow {
@@ -256,6 +258,7 @@ mod tests {
                 },
                 async_policy: crate::graph::AsyncPolicy::default(),
                 execution_policy: crate::graph::ExecutionPolicySpec::default(),
+                node_brain_routing: node_brain_routing_for_executor(&ExecutorKind::Command),
                 child_subflows: vec![],
                 human_interaction: None,
                 status: TaskStatus::Pending,

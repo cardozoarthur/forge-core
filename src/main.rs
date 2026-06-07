@@ -27,7 +27,8 @@ use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff;
 use forge_core::improve::{
     generate_improvement, normalize_avoidable_ai_costs,
-    normalize_avoidable_ai_costs_for_candidates, rank_improvement_candidates,
+    normalize_avoidable_ai_costs_for_candidates, rank_improvement_candidates_with_filter,
+    ImprovementCandidateFilter,
 };
 use forge_core::inspection::inspect_workflow_with_focus;
 use forge_core::intent::parse_intent;
@@ -43,6 +44,7 @@ use forge_core::interactive::{
 use forge_core::ir::{CreativeArtifact, TokenCollection};
 use forge_core::lease::{acquire_task_lease, release_task_lease};
 use forge_core::mcp::{call_mcp_tool, mcp_tools_manifest};
+use forge_core::memory::{memory_policy_report, search_memory, MemorySearchOptions};
 use forge_core::milestone::{
     build_milestone_export_demo, build_milestone_manifest, build_milestone_research,
     build_milestone_status, build_replacement_cli_demo,
@@ -80,9 +82,10 @@ use forge_core::validation::validate_workflow;
 use forge_core::workflow::{
     attach_creative_artifact, attach_workflow_artifact, get_workflow_token_collection,
     inspect_creative_artifact, inspect_creative_collaboration, list_creative_artifacts,
-    patch_workflow_token, record_creative_collaboration_event, resolve_workflow_tokens,
-    set_workflow_token_collection, update_workflow_goal, validate_child_subflow_binding,
-    CreativeCollaborationEventRequest, ProductDecisionInput,
+    parse_node_brain_agent_slot, patch_workflow_token, record_creative_collaboration_event,
+    resolve_workflow_tokens, set_workflow_token_collection, update_workflow_goal,
+    update_workflow_node_brain_routing, validate_child_subflow_binding,
+    CreativeCollaborationEventRequest, ProductDecisionInput, WorkflowNodeBrainRoutingUpdateInput,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -247,6 +250,10 @@ enum Commands {
     Multimodal {
         #[command(subcommand)]
         command: MultimodalCommands,
+    },
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommands,
     },
     Patch {
         #[command(subcommand)]
@@ -712,6 +719,24 @@ enum WorkflowCommands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
+    UpdateNodeBrain {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long = "default-brain")]
+        default_brain: Option<String>,
+        #[arg(long = "allowed-brain")]
+        allowed_brains: Vec<String>,
+        #[arg(long = "agent-slot")]
+        agent_slots: Vec<String>,
+        #[arg(long = "max-parallel-agents")]
+        max_parallel_agents: Option<usize>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
     AttachArtifact {
         #[arg(long)]
         workflow: String,
@@ -1102,10 +1127,44 @@ enum McpCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum MemoryCommands {
+    Policy {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Search {
+        #[arg(long)]
+        query: String,
+        #[arg(long = "scope")]
+        scopes: Vec<String>,
+        #[arg(long, default_value = "private")]
+        audience: String,
+        #[arg(long)]
+        visibility: Option<String>,
+        #[arg(long = "run")]
+        run_id: Option<String>,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        #[arg(long = "global-root")]
+        global_root: Option<PathBuf>,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
+        #[arg(long = "processing-root")]
+        processing_root: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum ImproveCommands {
     Candidates {
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        #[arg(long = "workflow")]
+        workflows: Vec<String>,
+        #[arg(long = "goal-contains")]
+        goal_contains: Vec<String>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -1585,8 +1644,20 @@ fn run() -> Result<i32> {
         } => {
             let store = ForgeStore::open(cli.store)?;
             match command {
-                Some(ImproveCommands::Candidates { limit, output }) => {
-                    let report = rank_improvement_candidates(&store, limit)?;
+                Some(ImproveCommands::Candidates {
+                    limit,
+                    workflows,
+                    goal_contains,
+                    output,
+                }) => {
+                    let report = rank_improvement_candidates_with_filter(
+                        &store,
+                        limit,
+                        ImprovementCandidateFilter {
+                            workflow_ids: workflows,
+                            goal_contains,
+                        },
+                    )?;
                     print_response(output, &report)?;
                     Ok(0)
                 }
@@ -2116,6 +2187,36 @@ fn run() -> Result<i32> {
             } => {
                 let store = ForgeStore::open(cli.store)?;
                 let report = update_workflow_goal(&store, &workflow, &goal, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            WorkflowCommands::UpdateNodeBrain {
+                workflow,
+                task,
+                default_brain,
+                allowed_brains,
+                agent_slots,
+                max_parallel_agents,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let parsed_slots = agent_slots
+                    .iter()
+                    .map(|slot| parse_node_brain_agent_slot(slot))
+                    .collect::<Result<Vec<_>>>()?;
+                let report = update_workflow_node_brain_routing(
+                    &store,
+                    &workflow,
+                    WorkflowNodeBrainRoutingUpdateInput {
+                        task_id: task,
+                        default_brain,
+                        allowed_brains,
+                        agent_slots: parsed_slots,
+                        max_parallel_agents,
+                        origin,
+                    },
+                )?;
                 print_response(output, &report)?;
                 Ok(0)
             }
@@ -2662,6 +2763,44 @@ fn run() -> Result<i32> {
             } => {
                 let store = ForgeStore::open(cli.store)?;
                 let report = recover_stale_request(&store, &run_id, &origin)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+        },
+        Commands::Memory { command } => match command {
+            MemoryCommands::Policy { output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = memory_policy_report(&store);
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MemoryCommands::Search {
+                query,
+                scopes,
+                audience,
+                visibility,
+                run_id,
+                limit,
+                global_root,
+                project_root,
+                processing_root,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = search_memory(
+                    &store,
+                    MemorySearchOptions {
+                        query,
+                        scopes,
+                        audience,
+                        visibility,
+                        run_id,
+                        limit,
+                        global_root,
+                        project_root,
+                        processing_root,
+                    },
+                )?;
                 print_response(output, &report)?;
                 Ok(0)
             }

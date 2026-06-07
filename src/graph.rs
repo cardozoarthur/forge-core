@@ -159,6 +159,67 @@ impl Default for ExecutionPolicySpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeBrainAgentSlotSpec {
+    pub slot_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brain_id: Option<String>,
+    pub role: String,
+    pub parallel_group: String,
+    pub state_owner: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeBrainRoutingSpec {
+    #[serde(default = "node_brain_routing_schema_version")]
+    pub schema_version: String,
+    pub scope: String,
+    pub orchestrator_brain: String,
+    pub selection_owner: String,
+    #[serde(default)]
+    pub allowed_brains: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_brain: Option<String>,
+    #[serde(default)]
+    pub agent_slots: Vec<NodeBrainAgentSlotSpec>,
+    pub max_parallel_agents: usize,
+    pub supports_parallel_agent_brains: bool,
+    pub supports_multiple_agents_per_brain: bool,
+    pub hot_swappable: bool,
+    #[serde(default)]
+    pub switch_command: Vec<String>,
+    #[serde(default)]
+    pub workflow_mutation_command: Vec<String>,
+    pub state_owner: String,
+    pub memory_source: String,
+    pub skills_source: String,
+    pub mcp_source: String,
+}
+
+impl Default for NodeBrainRoutingSpec {
+    fn default() -> Self {
+        Self {
+            schema_version: node_brain_routing_schema_version(),
+            scope: "legacy_unspecified_node".to_string(),
+            orchestrator_brain: "forge".to_string(),
+            selection_owner: "forge".to_string(),
+            allowed_brains: Vec::new(),
+            default_brain: None,
+            agent_slots: Vec::new(),
+            max_parallel_agents: 0,
+            supports_parallel_agent_brains: false,
+            supports_multiple_agents_per_brain: false,
+            hot_swappable: false,
+            switch_command: Vec::new(),
+            workflow_mutation_command: Vec::new(),
+            state_owner: "forge_workflow_state".to_string(),
+            memory_source: "forge_memory_router".to_string(),
+            skills_source: "forge_skill_router".to_string(),
+            mcp_source: "forge_mcp_router".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChildSubflowRef {
     pub workflow_id: String,
     pub task_id: String,
@@ -302,6 +363,64 @@ fn default_node_version() -> u64 {
     1
 }
 
+fn node_brain_routing_schema_version() -> String {
+    "forge.node_brain_routing.v1".to_string()
+}
+
+pub fn node_brain_routing_for_executor(executor: &ExecutorKind) -> NodeBrainRoutingSpec {
+    let mut routing = NodeBrainRoutingSpec::default();
+    match executor {
+        ExecutorKind::Ai | ExecutorKind::Mixed => {
+            routing.scope = "agentic_ai_node".to_string();
+            routing.allowed_brains = vec![
+                "codex".to_string(),
+                "opencode".to_string(),
+                "gemini".to_string(),
+                "claude".to_string(),
+            ];
+            routing.agent_slots = vec![NodeBrainAgentSlotSpec {
+                slot_id: "agent-001".to_string(),
+                brain_id: None,
+                role: "primary_node_agent".to_string(),
+                parallel_group: "node-default".to_string(),
+                state_owner: "forge".to_string(),
+            }];
+            routing.max_parallel_agents = 4;
+            routing.supports_parallel_agent_brains = true;
+            routing.supports_multiple_agents_per_brain = true;
+            routing.hot_swappable = true;
+            routing.switch_command = vec![
+                "forge".to_string(),
+                "request".to_string(),
+                "switch-executor".to_string(),
+                "--run".to_string(),
+                "<run-id>".to_string(),
+                "--executor".to_string(),
+                "<brain-id>".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ];
+            routing.workflow_mutation_command = vec![
+                "forge".to_string(),
+                "workflow".to_string(),
+                "update-node-brain".to_string(),
+                "--workflow".to_string(),
+                "<workflow-id>".to_string(),
+                "--task".to_string(),
+                "<task-id>".to_string(),
+                "--default-brain".to_string(),
+                "<brain-id>".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ];
+        }
+        ExecutorKind::Command | ExecutorKind::Wait | ExecutorKind::Notification => {
+            routing.scope = "non_agentic_node".to_string();
+        }
+    }
+    routing
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtomicTask {
     pub id: String,
@@ -327,6 +446,8 @@ pub struct AtomicTask {
     pub async_policy: AsyncPolicy,
     #[serde(default)]
     pub execution_policy: ExecutionPolicySpec,
+    #[serde(default)]
+    pub node_brain_routing: NodeBrainRoutingSpec,
     #[serde(default)]
     pub child_subflows: Vec<ChildSubflowRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -499,6 +620,7 @@ pub fn task(
     let (executor, estimated_cost_usd) = executor;
     let work_item = work_item(id, title, dependencies, &validation_rules);
     let execution_policy = default_execution_policy(&executor);
+    let node_brain_routing = node_brain_routing_for_executor(&executor);
     AtomicTask {
         id: id.to_string(),
         title: title.to_string(),
@@ -527,6 +649,7 @@ pub fn task(
         work_item,
         async_policy: AsyncPolicy::default(),
         execution_policy,
+        node_brain_routing,
         child_subflows: Vec::new(),
         human_interaction: None,
         status: TaskStatus::Pending,

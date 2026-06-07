@@ -11,7 +11,7 @@ use crate::credential_vault::{
 };
 use crate::executor::load_executors;
 use crate::handoff::build_task_handoff;
-use crate::improve::rank_improvement_candidates;
+use crate::improve::{rank_improvement_candidates_with_filter, ImprovementCandidateFilter};
 use crate::inspection::inspect_workflow_with_focus;
 use crate::interaction::{
     answer_human_interaction, create_choice_interaction, create_form_interaction,
@@ -19,6 +19,7 @@ use crate::interaction::{
 };
 use crate::interactive::{build_interactive_home, route_interactive_input, slash_command_catalog};
 use crate::ir::{CreativeArtifact, TokenCollection};
+use crate::memory::{memory_policy_report, search_memory, MemorySearchOptions};
 use crate::milestone::{
     build_milestone_export_demo, build_milestone_manifest, build_milestone_research,
     build_milestone_status, build_replacement_cli_demo,
@@ -47,8 +48,10 @@ use crate::validation::{validate_workflow, ValidationReport};
 use crate::workflow::{
     attach_creative_artifact, attach_workflow_artifact, get_workflow_token_collection,
     inspect_creative_artifact, inspect_creative_collaboration, list_creative_artifacts,
-    patch_workflow_token, record_creative_collaboration_event, resolve_workflow_tokens,
-    set_workflow_token_collection, update_workflow_goal, CreativeCollaborationEventRequest,
+    parse_node_brain_agent_slot, patch_workflow_token, record_creative_collaboration_event,
+    resolve_workflow_tokens, set_workflow_token_collection, update_workflow_goal,
+    update_workflow_node_brain_routing, CreativeCollaborationEventRequest,
+    WorkflowNodeBrainRoutingUpdateInput,
 };
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -122,6 +125,22 @@ struct WorkflowListInput {
 #[derive(Debug, Deserialize)]
 struct ImprovementCandidatesInput {
     limit: Option<usize>,
+    workflow_ids: Option<Vec<String>>,
+    goal_contains: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemorySearchInput {
+    query: String,
+    #[serde(default)]
+    scopes: Vec<String>,
+    audience: Option<String>,
+    visibility: Option<String>,
+    run_id: Option<String>,
+    limit: Option<usize>,
+    global_root: Option<String>,
+    project_root: Option<String>,
+    processing_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -278,6 +297,19 @@ struct WorkflowUpdateGoalInput {
     workflow_id: String,
     goal: String,
     origin: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowUpdateNodeBrainInput {
+    workflow_id: String,
+    task_id: String,
+    default_brain: Option<String>,
+    #[serde(default)]
+    allowed_brains: Vec<String>,
+    #[serde(default)]
+    agent_slots: Vec<String>,
+    max_parallel_agents: Option<usize>,
+    origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -556,7 +588,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "Rank Improvement Candidates",
                 "Rank live or degraded workflows using runs, heartbeats, workflow events, outcome evidence, parallelization opportunities and avoidable AI-cost signals.",
                 object_schema(
-                    &[("limit", "integer", "maximum candidates to return")],
+                    &[
+                        ("limit", "integer", "maximum candidates to return"),
+                        ("workflow_ids", "array", "optional workflow ids to include"),
+                        (
+                            "goal_contains",
+                            "array",
+                            "optional case-insensitive goal text filters",
+                        ),
+                    ],
                     &[],
                 ),
                 "forge.orchestrator_improvement_candidates.v1",
@@ -579,6 +619,37 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.brain_router.v1",
                 &["forge", "brains", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.memory.policy",
+                "Inspect Memory Policy",
+                "Return Forge's file-first memory governance model: global, project and processing scopes; public, internal and private visibility; manager-shared customer suggestions; and company-level request handling.",
+                object_schema(&[], &[]),
+                "forge.memory_policy.v1",
+                &["forge", "memory", "policy", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.memory.search",
+                "Search File Memory",
+                "Search Markdown memory snippets across global, project and processing scopes with visibility/shareability filtering and line-range results.",
+                object_schema(
+                    &[
+                        ("query", "string", "search query"),
+                        ("scopes", "array", "optional memory scopes: global|project|processing"),
+                        ("audience", "string", "public|internal|manager|private"),
+                        ("visibility", "string", "optional visibility filter: public|internal|private"),
+                        ("run_id", "string", "optional run id for processing memory"),
+                        ("limit", "integer", "maximum results"),
+                        ("global_root", "string", "optional global memory root override"),
+                        ("project_root", "string", "optional project memory root override"),
+                        ("processing_root", "string", "optional processing memory root override"),
+                    ],
+                    &["query"],
+                ),
+                "forge.memory_search.v1",
+                &["forge", "memory", "search", "--query", "<query>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -1066,6 +1137,23 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &["workflow_id", "goal", "origin"]),
                 "forge.workflow_goal_update.v1",
                 &["forge", "workflow", "update-goal", "--workflow", "<workflow-id>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.workflow.update_node_brain",
+                "Update Node Brain Routing",
+                "Mutate one AI or mixed workflow node's Forge-owned brain routing without stopping the workflow run. Supports default brain, allowed brains, multiple agent slots and parallel-agent limits.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("task_id", "string", "task/node id"),
+                    ("default_brain", "string", "optional default execution brain for this node"),
+                    ("allowed_brains", "array", "optional allowed brain ids"),
+                    ("agent_slots", "array", "optional slot specs: slot_id=brain_id:role:parallel_group"),
+                    ("max_parallel_agents", "integer", "optional node-level parallel agent limit"),
+                    ("origin", "string", "codex|opencode|gemini|claude|skill|mcp"),
+                ], &["workflow_id", "task_id"]),
+                "forge.workflow_node_brain_routing_update.v1",
+                &["forge", "workflow", "update-node-brain", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -1575,13 +1663,35 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.improve.candidates" => {
             let input: ImprovementCandidatesInput = parse_input(input)?;
-            serde_json::to_value(rank_improvement_candidates(
+            serde_json::to_value(rank_improvement_candidates_with_filter(
                 store,
                 input.limit.unwrap_or(20),
+                ImprovementCandidateFilter {
+                    workflow_ids: input.workflow_ids.unwrap_or_default(),
+                    goal_contains: input.goal_contains.unwrap_or_default(),
+                },
             )?)?
         }
         "forge.interactive.home" => serde_json::to_value(build_interactive_home(store)?)?,
         "forge.brain_router" => serde_json::to_value(load_executors(store)?.brain_router)?,
+        "forge.memory.policy" => serde_json::to_value(memory_policy_report(store))?,
+        "forge.memory.search" => {
+            let input: MemorySearchInput = parse_input(input)?;
+            serde_json::to_value(search_memory(
+                store,
+                MemorySearchOptions {
+                    query: input.query,
+                    scopes: input.scopes,
+                    audience: input.audience.unwrap_or_else(|| "private".to_string()),
+                    visibility: input.visibility,
+                    run_id: input.run_id,
+                    limit: input.limit.unwrap_or(10),
+                    global_root: input.global_root.map(PathBuf::from),
+                    project_root: input.project_root.map(PathBuf::from),
+                    processing_root: input.processing_root.map(PathBuf::from),
+                },
+            )?)?
+        }
         "forge.interactive.slash_commands" => serde_json::to_value(slash_command_catalog())?,
         "forge.interactive.route" => {
             let input: InteractiveRouteInput = parse_input(input)?;
@@ -1906,6 +2016,27 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &input.workflow_id,
                 &input.goal,
                 &input.origin,
+            )?)?
+        }
+        "forge.workflow.update_node_brain" => {
+            let input: WorkflowUpdateNodeBrainInput = parse_input(input)?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            let agent_slots = input
+                .agent_slots
+                .iter()
+                .map(|slot| parse_node_brain_agent_slot(slot))
+                .collect::<Result<Vec<_>>>()?;
+            serde_json::to_value(update_workflow_node_brain_routing(
+                store,
+                &input.workflow_id,
+                WorkflowNodeBrainRoutingUpdateInput {
+                    task_id: input.task_id,
+                    default_brain: input.default_brain,
+                    allowed_brains: input.allowed_brains,
+                    agent_slots,
+                    max_parallel_agents: input.max_parallel_agents,
+                    origin,
+                },
             )?)?
         }
         "forge.workflow.attach_artifact" => {

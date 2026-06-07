@@ -28,15 +28,19 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 5. Use `forge workflow update-goal ... --origin codex|opencode|gemini|forge_cli|skill` when the human changes direction during execution.
 6. Use `forge workflow attach-artifact ... --origin codex|opencode|gemini|forge_cli|skill` when new artifacts appear during execution.
 7. Use `forge context --workflow <id> --task <task-id> --budget <bytes> --strict --output json` before giving an agent task-specific context.
-8. Run `forge validate --workflow <id> --output json` before promotion. If `rework_tasks` is not empty, return those tasks to work.
-9. Run `forge improve candidates --output json` or `forge.improve.candidates` before choosing a workflow to mutate; use its run/event/outcome/parallelization/cost evidence to decide whether to recover a stale run, parallelize ready handoffs, replace avoidable AI work with command nodes, or generate a controlled experiment.
-10. Run `forge improve --workflow <id> --target-version <version> --output json` only to generate a controlled experiment and changelog. Do not auto-promote without benchmark and validation evidence.
-11. Run `forge milestone status --version 0.5 --output json` and `forge milestone manifest --version 0.5 --output json` before claiming Forge 0.5 creative-runtime readiness; planned or groundwork capabilities block promotion.
+8. Use `forge memory policy --output json` and `forge memory search --query "<query>" --scope global|project|processing --audience public|internal|manager|private --output json` before loading broad historical context. Forge memory is file-first, scoped and visibility-gated; search returns snippets and line ranges, not whole files.
+9. Run `forge validate --workflow <id> --output json` before promotion. If `rework_tasks` is not empty, return those tasks to work.
+10. Run `forge improve candidates --output json` or `forge.improve.candidates` before choosing a workflow to mutate; use its run/event/outcome/parallelization/cost evidence to decide whether to recover a stale run, parallelize ready handoffs, replace avoidable AI work with command nodes, or generate a controlled experiment.
+11. Run `forge improve --workflow <id> --target-version <version> --output json` only to generate a controlled experiment and changelog. Do not auto-promote without benchmark and validation evidence.
+12. Run `forge milestone status --version 0.5 --output json` and `forge milestone manifest --version 0.5 --output json` before claiming Forge 0.5 creative-runtime readiness; planned or groundwork capabilities block promotion.
 
 ## MCP Agent Surface
 
 - Use `forge mcp tools --output json` to discover stable agent-facing tools before wiring a Codex/OpenCode workflow.
 - Treat Codex, OpenCode, Gemini CLI, Claude CLI and future CLIs as replaceable execution brains only. Forge owns and routes workflow state, memory, skills, MCP servers/tools, credential-vault references, context packets, shell/session lifecycle, permissions, cost policy, validation gates and self-improvement decisions. Inspect this boundary with `forge brains --output json` or MCP `forge.brain_router` before handing work to a brain.
+- Distinguish the orchestrator brain from node brains. Forge is the orchestrator brain/control plane; each AI or mixed workflow node can carry its own `node_brain_routing` contract with one or more agent slots, different brains per slot, multiple agents on the same brain, Forge-owned memory/skills/MCP routing, parallel execution when leases/quota/context allow it, node-level routing mutation through `forge workflow update-node-brain`, and run-level hot-swap through `forge request switch-executor` without stopping the workflow.
+- Treat memory as scoped, classified files. `global` memory lives across projects, `project` memory belongs under the workflow/project `.forge` area, and `processing` memory is run-lived scratch that may be deleted after final packaging. Classify each memory as `public`, `internal` or `private`, and as `global_shared`, `project_shared`, `manager_shared`, `thread_private` or `non_shareable`. A customer suggestion starts private/thread-scoped, but a curated suggestion can be `manager_shared` for a manager or product owner without becoming public or globally reusable.
+- Treat every customer request as company work, not only technical work. Even small tasks should decide what will be done, how it will be done, how delivery will be accepted, how it will be communicated, and whether product, technical, financial, administrative, marketing, communication or delivery concerns apply.
 - Use `forge improve candidates --output json` or MCP `forge.improve.candidates` as the orchestrator's first improvement scan. It ranks live/degraded workflows with workflow events, run heartbeats, outcome evidence, parallel-ready handoffs and cost-efficiency signals for repetitive/deterministic tasks that are still using AI.
 - Inspect the no-argument interactive dashboard through `forge.interactive.home`, discover slash commands through `forge.interactive.slash_commands`, and route conversational input through `forge.interactive.route` when an agent needs the same command/chat classification as the TUI without launching a local terminal.
 - Use the interactive `/brains` and `/shells` commands to show Forge-controlled brain routing and attachable shell entrypoints. Directly opening `codex`, `opencode`, `gemini` or `claude` should be treated as inspection/debugging; production handoff should go through Forge context, leases and validation.
@@ -49,7 +53,8 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 - When `forge request drive` returns a ready deterministic task, prefer `forge request step --run <run-id> --executor codex --ttl-seconds 300 --origin codex --output json` or `forge.run.step` before manual handoff; it auto-promotes one command/wait/notification task through the normal executor-response validation path and refuses AI or external-command tasks instead of faking work.
 - When an AI or mixed executor has actually done the ready handoff work, close it with `forge request complete-task --run <run-id> --task <task-id> --executor codex --summary "<result>" --origin codex --output json` or `forge.run.complete_task`; Forge writes a replayable execution trace, builds the executor response, validates it, promotes the task and immediately drives the next action.
 - When `forge request drive` returns `complete`, inspect its `final_delivery_package`; Forge attaches Markdown and JSON summaries automatically at completion. Before handing an older or in-progress run back to the user, create or refresh the same package with `forge request final-package --run <run-id> --origin codex --output json` or `forge.run.final_package`; it reports `ready_for_user`, `in_progress` or `not_ready_for_user` so a support artifact is not mistaken for the requested final result.
-- If the current executor is about to hit a model limit, becomes unavailable, or should hand off work, use `forge request switch-executor --run <run-id> --executor opencode --fallback-executor codex --summary "<takeover summary>" --origin codex --output json` or `forge.run.switch_executor`. This hot-swap preserves the same `run_id`, workflow id, checkpoints, artifacts and explicit user directives; it does not require shutting the workflow down. Use fallback executors to keep a run recoverable when the primary executor fails or loses model capacity.
+- If the current executor is about to hit a model limit, becomes unavailable, or should hand off work, use `forge request switch-executor --run <run-id> --executor opencode --fallback-executor codex --summary "<takeover summary>" --origin codex --output json` or `forge.run.switch_executor`. This hot-swap changes the execution brain for the workflow run while preserving the same `run_id`, workflow id, checkpoints, artifacts and explicit user directives; it does not require shutting the workflow down. Use fallback executors to keep a run recoverable when the primary executor fails or loses model capacity.
+- To change one AI/mixed node's brain routing while the workflow remains active, use `forge workflow update-node-brain --workflow <workflow-id> --task <task-id> --default-brain gemini --agent-slot agent-001=gemini:primary_node_agent:node-default --max-parallel-agents 1 --origin codex --output json` or MCP `forge.workflow.update_node_brain`. Use repeated `--agent-slot` values for multiple agents, including multiple agents on the same brain.
 - If a heartbeat becomes stale, use `forge request recover-stale --run <run-id> --origin codex --output json` or `forge.run.recover_stale` to move the run to `needs_attention` without losing workflow/run lineage.
 - Poll later with `forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json`.
 - List active requests with `forge mcp call forge.request.list --input '{"status":"accepted"}' --output json`.
@@ -79,6 +84,7 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 - Runtime goal/artifact changes must go through Forge so revisions and origins are persisted.
 - When Codex/OpenCode use Forge as a skill, they should not wait for long work inline. They should start a request, return `run_id`, and let Forge continue asynchronously.
 - Do not expose full project history to a task when `forge context` can produce bounded local context.
+- Do not expose private or internal memory to public audiences. Customer suggestions may be shared with a manager only after classification as `manager_shared`; public/global memory writes require explicit approval.
 - Treat model providers as interchangeable execution resources and keep non-AI steps independent from live model calls.
 - Do not resolve or print credential-vault secret values. Prefer `forge credential-vault exec` so secrets only enter the child process environment.
 - A notification step can generate an email payload with final workflow costs when that was part of the user's objective.
@@ -96,6 +102,7 @@ forge request complete-task --run <run-id> --task <task-id> --executor codex --s
 forge request final-package --run <run-id> --origin codex --output json
 forge request ensure-final-audit --workflow <workflow-id> --executor codex --origin codex --output json
 forge request switch-executor --run <run-id> --executor opencode --fallback-executor codex --summary "codex limit approaching; opencode continuing from Forge state" --origin codex --output json
+forge workflow update-node-brain --workflow <workflow-id> --task task-001 --default-brain gemini --agent-slot agent-001=gemini:primary_node_agent:node-default --max-parallel-agents 1 --origin codex --output json
 forge request status --run <run-id> --output json
 forge request resume --run <run-id> --origin codex --output json
 forge request list --status stale --output json
@@ -108,6 +115,10 @@ forge mcp call forge.improve.candidates --input '{"limit":10}' --output json
 forge mcp call forge.interactive.home --output json
 forge brains --output json
 forge mcp call forge.brain_router --output json
+forge memory policy --output json
+forge memory search --query "customer suggestion operations" --scope project --scope processing --audience manager --output json
+forge mcp call forge.memory.policy --output json
+forge mcp call forge.memory.search --input '{"query":"customer suggestion operations","scopes":["project","processing"],"audience":"manager","limit":5}' --output json
 forge mcp call forge.interactive.slash_commands --output json
 forge mcp call forge.interactive.route --input '{"input":"What is the current Forge status?","origin":"codex"}' --output json
 forge mcp call forge.run.start --input '{"goal":"Improve Forge Core","origin":"codex"}' --output json
@@ -117,6 +128,7 @@ forge mcp call forge.run.step --input '{"run_id":"<run-id>","executor":"codex","
 forge mcp call forge.run.complete_task --input '{"run_id":"<run-id>","task_id":"<task-id>","executor":"codex","summary":"executor finished the ready task with passing evidence","origin":"codex"}' --output json
 forge mcp call forge.run.final_package --input '{"run_id":"<run-id>","origin":"codex"}' --output json
 forge mcp call forge.run.switch_executor --input '{"run_id":"<run-id>","executor":"opencode","fallback_executors":["codex"],"summary":"take over without stopping workflow","origin":"codex"}' --output json
+forge mcp call forge.workflow.update_node_brain --input '{"workflow_id":"<workflow-id>","task_id":"task-001","default_brain":"gemini","agent_slots":["agent-001=gemini:primary_node_agent:node-default"],"max_parallel_agents":1,"origin":"codex"}' --output json
 forge mcp call forge.run.recover_stale --input '{"run_id":"<run-id>","origin":"codex"}' --output json
 forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json
 forge request list --output json
