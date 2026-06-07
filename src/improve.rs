@@ -5,7 +5,7 @@ use crate::graph::{
 use crate::outcome::{assess_workflow_outcome_metadata, OutcomeStatusReport};
 use crate::request::{build_run_activity, RunActivity, RunRecord};
 use crate::scheduler::{plan_parallel_execution, ParallelSchedulePlan};
-use crate::storage::ForgeStore;
+use crate::storage::{ForgeStore, StoreEvent};
 use crate::validation::validate_workflow;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -472,7 +472,8 @@ fn build_improvement_candidate(
         return Ok(None);
     }
 
-    let suggested_commands = suggested_commands(workflow, runs, &reasons, &parallelization);
+    let suggested_commands =
+        suggested_commands(workflow, runs, &reasons, &parallelization, &events);
 
     Ok(Some(OrchestratorImprovementCandidate {
         workflow_id: workflow.id.clone(),
@@ -1086,6 +1087,7 @@ fn suggested_commands(
     runs: &[RunRecord],
     reasons: &[ImprovementCandidateReason],
     parallelization: &ParallelizationOpportunityReport,
+    events: &[StoreEvent],
 ) -> Vec<Vec<String>> {
     let mut commands = Vec::new();
     for run in runs {
@@ -1110,6 +1112,34 @@ fn suggested_commands(
                 "--output".to_string(),
                 "json".to_string(),
             ]);
+        }
+    }
+    if has_reason(reasons, "rework_loop_signal") {
+        if let Some(run) = latest_driveable_run(runs) {
+            commands.push(vec![
+                "forge".to_string(),
+                "request".to_string(),
+                "drive".to_string(),
+                "--run".to_string(),
+                run.run_id.clone(),
+                "--executor".to_string(),
+                run.active_executor
+                    .clone()
+                    .unwrap_or_else(|| "codex".to_string()),
+                "--ttl-seconds".to_string(),
+                "300".to_string(),
+                "--origin".to_string(),
+                "forge_cli".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]);
+        } else {
+            for task_id in latest_generated_rework_task_ids(events, workflow)
+                .into_iter()
+                .take(3)
+            {
+                push_task_handoff_command(&mut commands, &workflow.id, &task_id);
+            }
         }
     }
     if has_reason(reasons, "completed_without_final_package") {
@@ -1144,7 +1174,7 @@ fn suggested_commands(
             "json".to_string(),
         ]);
     }
-    if parallelization.ready_parallel_task_count > 0 || has_reason(reasons, "rework_loop_signal") {
+    if parallelization.ready_parallel_task_count > 0 {
         if let Some(run) = latest_driveable_run(runs) {
             commands.push(vec![
                 "forge".to_string(),
@@ -1175,30 +1205,21 @@ fn suggested_commands(
                     1
                 }
             });
+            let task_ids_to_suggest = ready_task_ids
+                .into_iter()
+                .filter(|task_id| !task_handoff_already_suggested(&commands, task_id))
+                .take(
+                    parallelization
+                        .recommended_max_parallelism
+                        .max(1)
+                        .min(parallelization.ready_parallel_task_count),
+                )
+                .cloned()
+                .collect::<Vec<_>>();
             commands.extend(
-                ready_task_ids
-                    .into_iter()
-                    .take(
-                        parallelization
-                            .recommended_max_parallelism
-                            .max(1)
-                            .min(parallelization.ready_parallel_task_count),
-                    )
-                    .map(|task_id| {
-                        vec![
-                            "forge".to_string(),
-                            "task".to_string(),
-                            "handoff".to_string(),
-                            "--workflow".to_string(),
-                            workflow.id.clone(),
-                            "--task".to_string(),
-                            task_id.clone(),
-                            "--executor".to_string(),
-                            "codex".to_string(),
-                            "--output".to_string(),
-                            "json".to_string(),
-                        ]
-                    }),
+                task_ids_to_suggest
+                    .iter()
+                    .map(|task_id| task_handoff_command(&workflow.id, task_id)),
             );
         }
     }
@@ -1226,6 +1247,79 @@ fn suggested_commands(
         "json".to_string(),
     ]);
     commands
+}
+
+fn push_task_handoff_command(commands: &mut Vec<Vec<String>>, workflow_id: &str, task_id: &str) {
+    if !task_handoff_already_suggested(commands, task_id) {
+        commands.push(task_handoff_command(workflow_id, task_id));
+    }
+}
+
+fn task_handoff_command(workflow_id: &str, task_id: &str) -> Vec<String> {
+    vec![
+        "forge".to_string(),
+        "task".to_string(),
+        "handoff".to_string(),
+        "--workflow".to_string(),
+        workflow_id.to_string(),
+        "--task".to_string(),
+        task_id.to_string(),
+        "--executor".to_string(),
+        "codex".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]
+}
+
+fn task_handoff_already_suggested(commands: &[Vec<String>], task_id: &str) -> bool {
+    commands.iter().any(|command| {
+        command.first().is_some_and(|part| part == "forge")
+            && command.get(1).is_some_and(|part| part == "task")
+            && command.get(2).is_some_and(|part| part == "handoff")
+            && command
+                .windows(2)
+                .any(|window| window[0] == "--task" && window[1] == task_id)
+    })
+}
+
+fn latest_generated_rework_task_ids(events: &[StoreEvent], workflow: &Workflow) -> Vec<String> {
+    let pending_task_ids = workflow
+        .tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::Pending)
+        .map(|task| task.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut task_ids = Vec::new();
+    for event in events.iter().rev() {
+        if event.kind != "executor_response_promoted" {
+            continue;
+        }
+        if event
+            .data
+            .get("response_status")
+            .and_then(|value| value.as_str())
+            != Some("needs_retry")
+        {
+            continue;
+        }
+        let Some(generated) = event
+            .data
+            .get("generated_rework_task_ids")
+            .and_then(|value| value.as_array())
+        else {
+            continue;
+        };
+        for task_id in generated.iter().filter_map(|value| value.as_str()) {
+            if pending_task_ids.contains(task_id) && seen.insert(task_id.to_string()) {
+                task_ids.push(task_id.to_string());
+            }
+        }
+        if !task_ids.is_empty() {
+            break;
+        }
+    }
+    task_ids
 }
 
 fn has_reason(reasons: &[ImprovementCandidateReason], code: &str) -> bool {

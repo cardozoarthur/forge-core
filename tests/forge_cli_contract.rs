@@ -19356,6 +19356,122 @@ fn needs_retry_response_with_rework_items_expands_into_runnable_tasks() {
 }
 
 #[test]
+fn improve_candidates_prioritize_generated_rework_tasks_without_driveable_run() {
+    use forge_core::graph::{self, ExecutorKind};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Deliver final workflow result with a final report and audited delivery evidence.",
+    ));
+    workflow.status = "running".to_string();
+    workflow.tasks = vec![graph::task(
+        "task-audit",
+        "Audit final completion criteria",
+        &[],
+        &[],
+        vec![],
+        "final_completion_audit JSON",
+        (ExecutorKind::Ai, 0.35),
+    )];
+    let workflow_id = workflow.id.clone();
+    store.save_workflow(&workflow).unwrap();
+    drop(store);
+
+    let response_path = temp.path().join("needs-rework.json");
+    fs::write(
+        &response_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "forge.executor_response.v1",
+            "task_id": "task-audit",
+            "status": "needs_retry",
+            "artifacts": ["artifacts/final-audit.md"],
+            "trace_ref": "artifacts/final-audit.md#missing-work",
+            "cost": {
+                "estimated_usd": 0.0,
+                "tokens_in": 0,
+                "tokens_out": 0
+            },
+            "validation_evidence": [
+                {
+                    "command": "inspect final outcome",
+                    "exit_code": 0,
+                    "summary": "final delivery evidence is still missing"
+                }
+            ],
+            "rework_items": [
+                {
+                    "title": "Produce final delivery evidence",
+                    "goal": "Attach final report and delivery evidence before final completion.",
+                    "expected_output": "final delivery evidence artifact"
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "task",
+            "validate-response",
+            "--workflow",
+            &workflow_id,
+            "--task",
+            "task-audit",
+            "--response",
+            response_path.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "candidates",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let top = &report["candidates"][0];
+    assert_eq!(top["workflow_id"], workflow_id);
+    assert_eq!(top["recommended_action"], "run_rework_loop");
+    assert!(top["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "rework_loop_signal"));
+    assert_eq!(
+        top["suggested_commands"][0],
+        serde_json::json!([
+            "forge",
+            "task",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-002",
+            "--executor",
+            "codex",
+            "--output",
+            "json"
+        ])
+    );
+}
+
+#[test]
 fn request_switch_executor_hot_swaps_agent_without_stopping_run_or_losing_directives() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
