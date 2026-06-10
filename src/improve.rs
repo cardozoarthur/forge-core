@@ -1,7 +1,8 @@
 use crate::artifact::write_json_artifact;
 use crate::event::{build_event_improvement_policy, EventImprovementRecommendation};
 use crate::graph::{
-    AtomicTask, ExecutionPolicySpec, ExecutorKind, TaskStatus, Workflow, WorkflowRevision,
+    AsyncPolicy, AtomicTask, ExecutionPolicySpec, ExecutorKind, TaskStatus, ValidationRule,
+    Workflow, WorkflowRevision,
 };
 use crate::outcome::{
     assess_workflow_outcome, assess_workflow_outcome_metadata, OutcomeStatusReport,
@@ -272,10 +273,21 @@ pub struct EventPolicyProposedChange {
     pub task_id: String,
     pub title: String,
     pub policy: String,
+    pub changed_fields: Vec<String>,
     pub previous_executor: String,
     pub new_executor: String,
     pub previous_execution_policy_mode: String,
     pub new_execution_policy_mode: String,
+    pub previous_execution_policy_reuse_hint: String,
+    pub new_execution_policy_reuse_hint: String,
+    pub previous_async_policy_mode: String,
+    pub new_async_policy_mode: String,
+    pub previous_async_resume_strategy: String,
+    pub new_async_resume_strategy: String,
+    pub previous_context_requirement_count: usize,
+    pub new_context_requirement_count: usize,
+    pub previous_validation_rule_count: usize,
+    pub new_validation_rule_count: usize,
     pub previous_estimated_cost_usd: f64,
     pub new_estimated_cost_usd: f64,
     pub previous_version: u64,
@@ -296,6 +308,10 @@ pub struct EventPolicyRollbackChange {
     pub task_id: String,
     pub restore_executor: String,
     pub restore_execution_policy_mode: String,
+    pub restore_execution_policy: ExecutionPolicySpec,
+    pub restore_async_policy: AsyncPolicy,
+    pub restore_context_requirements: Vec<String>,
+    pub restore_validation_rules: Vec<ValidationRule>,
     pub restore_estimated_cost_usd: f64,
     pub restore_version: u64,
 }
@@ -1507,57 +1523,36 @@ pub fn apply_event_improvement_policy(
     let mut proposed_changes = Vec::new();
     let mut rollback_changes = Vec::new();
 
-    if recommendation.recommended_policy == "prefer_deterministic_node" {
-        if let Some(node_ref) = recommendation.node_ref.as_deref() {
-            if let Some(task) = workflow.tasks.iter_mut().find(|task| task.id == node_ref) {
-                if task.executor == ExecutorKind::Command
-                    && task.execution_policy.deterministic
-                    && !task.execution_policy.ai_allowed
-                {
-                    return Ok(event_policy_noop_report(
-                        workflow,
-                        origin,
-                        apply,
-                        approved_by,
-                        recommendation,
-                        "event_policy_application_already_applied",
-                        "event_policy_application_noop",
-                    ));
-                }
-                let previous_executor = executor_name(&task.executor);
-                let previous_execution_policy_mode = task.execution_policy.mode.clone();
-                let previous_estimated_cost_usd = task.cost.estimated_cost_usd;
-                let previous_version = task.version;
-                let new_estimated_cost_usd = normalized_command_cost(task);
-                let new_version = previous_version + 1;
-                proposed_changes.push(EventPolicyProposedChange {
-                    task_id: task.id.clone(),
-                    title: task.title.clone(),
-                    policy: recommendation.recommended_policy.clone(),
-                    previous_executor: previous_executor.clone(),
-                    new_executor: "command".to_string(),
-                    previous_execution_policy_mode: previous_execution_policy_mode.clone(),
-                    new_execution_policy_mode: "deterministic_executor".to_string(),
-                    previous_estimated_cost_usd,
-                    new_estimated_cost_usd,
-                    previous_version,
-                    new_version,
-                    reason: recommendation.reason.clone(),
-                });
-                rollback_changes.push(EventPolicyRollbackChange {
-                    task_id: task.id.clone(),
-                    restore_executor: previous_executor,
-                    restore_execution_policy_mode: previous_execution_policy_mode,
-                    restore_estimated_cost_usd: previous_estimated_cost_usd,
-                    restore_version: previous_version,
-                });
+    if let Some(node_ref) = recommendation.node_ref.as_deref() {
+        if let Some(task) = workflow.tasks.iter_mut().find(|task| task.id == node_ref) {
+            let previous_task = task.clone();
+            let mut proposed_task = task.clone();
+            let changed_fields =
+                apply_event_policy_recommendation_to_task(&mut proposed_task, &recommendation);
+            if changed_fields.is_empty()
+                && recommendation.recommended_policy == "prefer_deterministic_node"
+            {
+                return Ok(event_policy_noop_report(
+                    workflow,
+                    origin,
+                    apply,
+                    approved_by,
+                    recommendation,
+                    "event_policy_application_already_applied",
+                    "event_policy_application_noop",
+                ));
+            }
+            if !changed_fields.is_empty() {
+                proposed_task.version = previous_task.version + 1;
+                proposed_changes.push(event_policy_proposed_change(
+                    &previous_task,
+                    &proposed_task,
+                    &recommendation,
+                    changed_fields,
+                ));
+                rollback_changes.push(event_policy_rollback_change(&previous_task));
                 if apply && approved_by.is_some() {
-                    task.executor = ExecutorKind::Command;
-                    task.execution_policy = deterministic_execution_policy(
-                        "applied event improvement policy: repeated observed execution can be benchmarked as deterministic work",
-                    );
-                    task.cost.estimated_cost_usd = new_estimated_cost_usd;
-                    task.version = new_version;
+                    *task = proposed_task;
                 }
             }
         }
@@ -1735,6 +1730,177 @@ fn select_event_policy_recommendation(
                     .is_none_or(|policy| recommendation.recommended_policy == policy)
         })
         .cloned()
+}
+
+fn apply_event_policy_recommendation_to_task(
+    task: &mut AtomicTask,
+    recommendation: &EventImprovementRecommendation,
+) -> Vec<String> {
+    let mut changed_fields = Vec::new();
+    match recommendation.recommended_policy.as_str() {
+        "prefer_deterministic_node" => {
+            if task.executor == ExecutorKind::Command
+                && task.execution_policy.deterministic
+                && !task.execution_policy.ai_allowed
+            {
+                return changed_fields;
+            }
+            task.executor = ExecutorKind::Command;
+            task.execution_policy = deterministic_execution_policy(
+                "applied event improvement policy: repeated observed execution can be benchmarked as deterministic work",
+            );
+            task.cost.estimated_cost_usd = normalized_command_cost(task);
+            mark_event_policy_changed_field(&mut changed_fields, "executor");
+            mark_event_policy_changed_field(&mut changed_fields, "execution_policy");
+            mark_event_policy_changed_field(&mut changed_fields, "cost");
+        }
+        "add_validation_or_rework_gate" => {
+            let marker = format!("event_policy_rework_gate:{}", recommendation.id);
+            if !task.validation_rules.iter().any(|rule| {
+                rule.kind == "event_policy_rework_gate" && rule.expected.contains(&marker)
+            }) {
+                task.validation_rules.push(ValidationRule {
+                    kind: "event_policy_rework_gate".to_string(),
+                    command: None,
+                    expected: format!(
+                        "{marker}: inspect retry evidence before repeating execution; return needs_retry with exact missing contract when validation fails"
+                    ),
+                });
+                mark_event_policy_changed_field(&mut changed_fields, "validation_rules");
+            }
+            if push_event_policy_context_requirement(
+                &mut task.context_requirements,
+                format!(
+                    "event_policy_retry_evidence:{}: inspect retry count {} and last event sequence {} before executor handoff",
+                    recommendation.id,
+                    recommendation.total_retry_count,
+                    recommendation.last_event_sequence
+                ),
+            ) {
+                mark_event_policy_changed_field(&mut changed_fields, "context_requirements");
+            }
+        }
+        "tighten_context_routing" => {
+            if push_event_policy_context_requirement(
+                &mut task.context_requirements,
+                format!(
+                    "event_policy_context_routing:{}: use node-scoped shards, compression, cache or governed memory search before executor handoff",
+                    recommendation.id
+                ),
+            ) {
+                mark_event_policy_changed_field(&mut changed_fields, "context_requirements");
+            }
+            if task.execution_policy.reuse_hint != "event_policy_context_cache" {
+                task.execution_policy.reuse_hint = "event_policy_context_cache".to_string();
+                task.execution_policy.selection_reason = format!(
+                    "event improvement policy requested tighter context routing after max pressure {} bps",
+                    recommendation.max_context_pressure_bps.unwrap_or_default()
+                );
+                mark_event_policy_changed_field(&mut changed_fields, "execution_policy");
+            }
+        }
+        "supervise_wait_or_external_dependency" => {
+            if push_event_policy_context_requirement(
+                &mut task.context_requirements,
+                format!(
+                    "event_policy_wait_supervision:{}: route recurring wait evidence to event runtime reconciliation before manual retry",
+                    recommendation.id
+                ),
+            ) {
+                mark_event_policy_changed_field(&mut changed_fields, "context_requirements");
+            }
+            if task.async_policy.mode != "event_supervised_wait" {
+                task.async_policy.mode = "event_supervised_wait".to_string();
+                mark_event_policy_changed_field(&mut changed_fields, "async_policy");
+            }
+            if task.async_policy.resume_strategy != "event_runtime_reconcile_or_manual_resume" {
+                task.async_policy.resume_strategy =
+                    "event_runtime_reconcile_or_manual_resume".to_string();
+                mark_event_policy_changed_field(&mut changed_fields, "async_policy");
+            }
+            if !task
+                .async_policy
+                .run_substrates
+                .iter()
+                .any(|substrate| substrate == "forge_event_runtime_daemon")
+            {
+                task.async_policy
+                    .run_substrates
+                    .push("forge_event_runtime_daemon".to_string());
+                mark_event_policy_changed_field(&mut changed_fields, "async_policy");
+            }
+        }
+        _ => {}
+    }
+    changed_fields
+}
+
+fn mark_event_policy_changed_field(changed_fields: &mut Vec<String>, field: &str) {
+    if !changed_fields.iter().any(|existing| existing == field) {
+        changed_fields.push(field.to_string());
+    }
+}
+
+fn push_event_policy_context_requirement(
+    context_requirements: &mut Vec<String>,
+    requirement: String,
+) -> bool {
+    if context_requirements
+        .iter()
+        .any(|existing| existing == &requirement)
+    {
+        false
+    } else {
+        context_requirements.push(requirement);
+        true
+    }
+}
+
+fn event_policy_proposed_change(
+    previous_task: &AtomicTask,
+    proposed_task: &AtomicTask,
+    recommendation: &EventImprovementRecommendation,
+    changed_fields: Vec<String>,
+) -> EventPolicyProposedChange {
+    EventPolicyProposedChange {
+        task_id: previous_task.id.clone(),
+        title: previous_task.title.clone(),
+        policy: recommendation.recommended_policy.clone(),
+        changed_fields,
+        previous_executor: executor_name(&previous_task.executor),
+        new_executor: executor_name(&proposed_task.executor),
+        previous_execution_policy_mode: previous_task.execution_policy.mode.clone(),
+        new_execution_policy_mode: proposed_task.execution_policy.mode.clone(),
+        previous_execution_policy_reuse_hint: previous_task.execution_policy.reuse_hint.clone(),
+        new_execution_policy_reuse_hint: proposed_task.execution_policy.reuse_hint.clone(),
+        previous_async_policy_mode: previous_task.async_policy.mode.clone(),
+        new_async_policy_mode: proposed_task.async_policy.mode.clone(),
+        previous_async_resume_strategy: previous_task.async_policy.resume_strategy.clone(),
+        new_async_resume_strategy: proposed_task.async_policy.resume_strategy.clone(),
+        previous_context_requirement_count: previous_task.context_requirements.len(),
+        new_context_requirement_count: proposed_task.context_requirements.len(),
+        previous_validation_rule_count: previous_task.validation_rules.len(),
+        new_validation_rule_count: proposed_task.validation_rules.len(),
+        previous_estimated_cost_usd: previous_task.cost.estimated_cost_usd,
+        new_estimated_cost_usd: proposed_task.cost.estimated_cost_usd,
+        previous_version: previous_task.version,
+        new_version: proposed_task.version,
+        reason: recommendation.reason.clone(),
+    }
+}
+
+fn event_policy_rollback_change(previous_task: &AtomicTask) -> EventPolicyRollbackChange {
+    EventPolicyRollbackChange {
+        task_id: previous_task.id.clone(),
+        restore_executor: executor_name(&previous_task.executor),
+        restore_execution_policy_mode: previous_task.execution_policy.mode.clone(),
+        restore_execution_policy: previous_task.execution_policy.clone(),
+        restore_async_policy: previous_task.async_policy.clone(),
+        restore_context_requirements: previous_task.context_requirements.clone(),
+        restore_validation_rules: previous_task.validation_rules.clone(),
+        restore_estimated_cost_usd: previous_task.cost.estimated_cost_usd,
+        restore_version: previous_task.version,
+    }
 }
 
 fn event_policy_rollback_plan(changes: Vec<EventPolicyRollbackChange>) -> EventPolicyRollbackPlan {

@@ -7981,6 +7981,220 @@ fn improve_apply_event_policy_requires_approval_and_records_rollback_gate() {
 }
 
 #[test]
+fn improve_apply_event_policy_covers_retry_context_and_wait_policies() {
+    use forge_core::graph::{self, ExecutorKind};
+    use forge_core::intent;
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(intent::parse_intent(
+        "Harden an operational node from event policy recommendations",
+    ));
+    workflow.tasks = vec![graph::task(
+        "task-ops",
+        "Operate external payment reconciliation",
+        &[],
+        &["payment context"],
+        vec![],
+        "reconciled payment state",
+        (ExecutorKind::Ai, 1.5),
+    )];
+    store.save_workflow(&workflow).unwrap();
+    {
+        let connection = Connection::open(&store_path).unwrap();
+        for index in 0..3 {
+            let source_id = format!("event-policy-broad-{index}");
+            let created_at = format!("2026-06-10T12:{:02}:00Z", index * 5);
+            let data = serde_json::json!({
+                "node_id": "task-ops",
+                "addon_id": "forge.addon.billing",
+                "duration_ms": 100,
+                "retry_count": 1,
+                "wait_seconds": 25,
+                "context": {
+                    "effective_budget": 1000,
+                    "routing_summary": {
+                        "selected_bytes": 910 + index,
+                        "remaining_budget": 90 - index
+                    },
+                    "memory_policy": {
+                        "memory_level": "short_term",
+                        "memory_scope": "organization"
+                    }
+                }
+            });
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO global_events (
+                        source, source_id, workflow_id, kind, origin, status,
+                        organization_id, brand_id, product_id, user_id, channel_id,
+                        tenant_context_json, data_json, created_at
+                    )
+                    VALUES (
+                        'event_policy_broad_seed', ?1, ?2, 'executor_retry_observed', 'codex', 'recorded',
+                        'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
+                        '{}', ?3, ?4
+                    )
+                    "#,
+                    rusqlite::params![source_id, workflow.id, data.to_string(), created_at],
+                )
+                .unwrap();
+        }
+    }
+
+    let retry_plan_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "apply-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--policy",
+            "add_validation_or_rework_gate",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let retry_plan: Value = serde_json::from_slice(&retry_plan_output).unwrap();
+    assert_eq!(retry_plan["status"], "event_policy_application_planned");
+    let retry_changed_fields = retry_plan["proposed_changes"][0]["changed_fields"]
+        .as_array()
+        .unwrap();
+    assert!(retry_changed_fields
+        .iter()
+        .any(|field| field == "validation_rules"));
+    assert!(retry_changed_fields
+        .iter()
+        .any(|field| field == "context_requirements"));
+    assert_eq!(
+        retry_plan["rollback_plan"]["changes"][0]["restore_validation_rules"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+
+    let retry_apply_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "apply-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--policy",
+            "add_validation_or_rework_gate",
+            "--apply",
+            "--approved-by",
+            "codex-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let retry_apply: Value = serde_json::from_slice(&retry_apply_output).unwrap();
+    assert_eq!(retry_apply["status"], "event_policy_application_applied");
+    assert_eq!(retry_apply["revision"], 1);
+
+    let context_apply_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "apply-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--policy",
+            "tighten_context_routing",
+            "--apply",
+            "--approved-by",
+            "codex-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let context_apply: Value = serde_json::from_slice(&context_apply_output).unwrap();
+    assert_eq!(context_apply["status"], "event_policy_application_applied");
+    assert_eq!(
+        context_apply["proposed_changes"][0]["new_execution_policy_reuse_hint"],
+        "event_policy_context_cache"
+    );
+    assert!(context_apply["proposed_changes"][0]["changed_fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field == "execution_policy"));
+
+    let wait_apply_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "apply-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--policy",
+            "supervise_wait_or_external_dependency",
+            "--apply",
+            "--approved-by",
+            "codex-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let wait_apply: Value = serde_json::from_slice(&wait_apply_output).unwrap();
+    assert_eq!(wait_apply["status"], "event_policy_application_applied");
+    assert_eq!(
+        wait_apply["proposed_changes"][0]["new_async_policy_mode"],
+        "event_supervised_wait"
+    );
+
+    let updated = ForgeStore::open(&store_path)
+        .unwrap()
+        .load_workflow(&workflow.id)
+        .unwrap();
+    let task = &updated.tasks[0];
+    assert_eq!(updated.revisions.len(), 3);
+    assert_eq!(task.version, 4);
+    assert_eq!(
+        task.execution_policy.reuse_hint,
+        "event_policy_context_cache"
+    );
+    assert_eq!(task.async_policy.mode, "event_supervised_wait");
+    assert!(task
+        .async_policy
+        .run_substrates
+        .iter()
+        .any(|substrate| substrate == "forge_event_runtime_daemon"));
+    assert!(task
+        .validation_rules
+        .iter()
+        .any(|rule| rule.kind == "event_policy_rework_gate"));
+    assert!(task
+        .context_requirements
+        .iter()
+        .any(|requirement| { requirement.starts_with("event_policy_context_routing:") }));
+}
+
+#[test]
 fn improve_candidates_rank_live_workflows_with_logs_and_parallel_opportunities() {
     use chrono::{Duration, Utc};
     use forge_core::graph::{self, ExecutorKind};
