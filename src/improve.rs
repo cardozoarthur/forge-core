@@ -16,7 +16,7 @@ use crate::validation::validate_workflow;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
@@ -324,6 +324,55 @@ pub struct EventPolicyEquivalenceGate {
     pub validation_required: bool,
     pub promotion_allowed: bool,
     pub checks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventPolicyBenchmarkReport {
+    pub status: String,
+    pub schema_version: String,
+    pub workflow_id: String,
+    pub origin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommendation_id: Option<String>,
+    pub recommended_policy: String,
+    pub application_event_id: i64,
+    pub application_revision: u64,
+    pub benchmark: EventPolicyBenchmarkEvidence,
+    pub equivalence: EventPolicyBenchmarkEquivalence,
+    pub promotion_decision: EventPolicyPromotionDecision,
+    pub validation_status: String,
+    pub promotable: bool,
+    pub event_kind: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventPolicyBenchmarkEvidence {
+    pub validation_passed: bool,
+    pub rollback_ready: bool,
+    pub proposed_change_count: usize,
+    pub checked_task_count: usize,
+    pub failed_check_count: usize,
+    pub checks: Vec<String>,
+    pub failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventPolicyBenchmarkEquivalence {
+    pub status: String,
+    pub promotion_allowed: bool,
+    pub task_shape_preserved: bool,
+    pub executor_contract_applied: bool,
+    pub rollback_ready: bool,
+    pub validation_passed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventPolicyPromotionDecision {
+    pub status: String,
+    pub auto_promoted: bool,
+    pub requires_human_approval: bool,
+    pub promotion_gate: String,
+    pub reason: String,
 }
 
 pub fn rank_improvement_candidates(
@@ -1708,6 +1757,171 @@ pub fn apply_event_improvement_policy(
     })
 }
 
+pub fn benchmark_event_improvement_policy(
+    store: &ForgeStore,
+    workflow_id: &str,
+    recommendation_id: Option<&str>,
+    recommended_policy: Option<&str>,
+    origin: &str,
+) -> Result<EventPolicyBenchmarkReport> {
+    let workflow = store.load_workflow(workflow_id)?;
+    let events = store.load_workflow_events(workflow_id)?;
+    let Some(application_event) =
+        select_event_policy_application_event(&events, recommendation_id, recommended_policy)
+    else {
+        bail!("no applied event improvement policy found for workflow `{workflow_id}`");
+    };
+    let recommended_policy = json_string(&application_event.data, "recommended_policy")
+        .or_else(|| recommended_policy.map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+    let recommendation_id = json_string(&application_event.data, "recommendation_id")
+        .or_else(|| recommendation_id.map(str::to_string));
+    let application_revision = json_u64(&application_event.data, "revision").unwrap_or(0);
+    let proposed_changes = application_event
+        .data
+        .get("proposed_changes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let rollback_ready = application_event
+        .data
+        .get("rollback_plan")
+        .is_some_and(event_policy_application_rollback_ready);
+
+    let mut checks = Vec::new();
+    let mut failures = Vec::new();
+    for change in &proposed_changes {
+        let Some(task_id) = json_string(change, "task_id") else {
+            failures.push("proposed change without task_id".to_string());
+            continue;
+        };
+        let Some(task) = workflow.tasks.iter().find(|task| task.id == task_id) else {
+            failures.push(format!("task {task_id} no longer exists"));
+            continue;
+        };
+        checks.push(format!("task {task_id} exists"));
+        event_policy_check_task_change(task, change, &mut checks, &mut failures);
+    }
+
+    if proposed_changes.is_empty() {
+        failures.push("application event did not record proposed changes".to_string());
+    }
+    if !rollback_ready {
+        failures.push("rollback plan is missing or not ready".to_string());
+    } else {
+        checks.push("rollback plan is ready".to_string());
+    }
+
+    let validation = validate_workflow(&workflow);
+    if validation.promotable {
+        checks.push("workflow validation passed".to_string());
+    } else {
+        failures.push(format!(
+            "workflow validation is not promotable: {}",
+            validation.status
+        ));
+    }
+
+    let task_shape_preserved = !proposed_changes.is_empty()
+        && proposed_changes.iter().all(|change| {
+            json_string(change, "task_id")
+                .as_deref()
+                .is_some_and(|task_id| workflow.tasks.iter().any(|task| task.id == task_id))
+        });
+    let executor_contract_applied = failures.iter().all(|failure| {
+        !failure.contains("executor")
+            && !failure.contains("execution policy")
+            && !failure.contains("async policy")
+            && !failure.contains("context requirement count")
+            && !failure.contains("validation rule count")
+            && !failure.contains("version")
+    });
+    let promotion_allowed = validation.promotable
+        && rollback_ready
+        && task_shape_preserved
+        && executor_contract_applied
+        && failures.is_empty();
+    let equivalence_status = if promotion_allowed {
+        "equivalent"
+    } else {
+        "review_required"
+    };
+    let status = if promotion_allowed {
+        "event_policy_benchmark_validated"
+    } else {
+        "event_policy_benchmark_review_required"
+    };
+    let promotion_status = if promotion_allowed {
+        "promotion_ready"
+    } else {
+        "promotion_blocked"
+    };
+    let report = EventPolicyBenchmarkReport {
+        status: status.to_string(),
+        schema_version: "forge.improve.event_policy_benchmark.v1".to_string(),
+        workflow_id: workflow.id.clone(),
+        origin: origin.to_string(),
+        recommendation_id,
+        recommended_policy,
+        application_event_id: application_event.id,
+        application_revision,
+        benchmark: EventPolicyBenchmarkEvidence {
+            validation_passed: validation.promotable,
+            rollback_ready,
+            proposed_change_count: proposed_changes.len(),
+            checked_task_count: proposed_changes
+                .iter()
+                .filter_map(|change| json_string(change, "task_id"))
+                .filter(|task_id| workflow.tasks.iter().any(|task| task.id == *task_id))
+                .count(),
+            failed_check_count: failures.len(),
+            checks,
+            failures: failures.clone(),
+        },
+        equivalence: EventPolicyBenchmarkEquivalence {
+            status: equivalence_status.to_string(),
+            promotion_allowed,
+            task_shape_preserved,
+            executor_contract_applied,
+            rollback_ready,
+            validation_passed: validation.promotable,
+        },
+        promotion_decision: EventPolicyPromotionDecision {
+            status: promotion_status.to_string(),
+            auto_promoted: false,
+            requires_human_approval: true,
+            promotion_gate: "human_approval_after_benchmark".to_string(),
+            reason: if promotion_allowed {
+                "benchmark and validation evidence allow a later governed promotion; this command does not auto-promote".to_string()
+            } else {
+                "benchmark evidence is incomplete or validation failed; keep promotion blocked"
+                    .to_string()
+            },
+        },
+        validation_status: validation.status,
+        promotable: validation.promotable,
+        event_kind: "event_improvement_policy_benchmarked".to_string(),
+    };
+    store.record_event(
+        &workflow.id,
+        "event_improvement_policy_benchmarked",
+        &json!({
+            "schema_version": report.schema_version.clone(),
+            "origin": report.origin.clone(),
+            "recommendation_id": report.recommendation_id.clone(),
+            "recommended_policy": report.recommended_policy.clone(),
+            "application_event_id": report.application_event_id,
+            "application_revision": report.application_revision,
+            "benchmark": report.benchmark.clone(),
+            "equivalence": report.equivalence.clone(),
+            "promotion_decision": report.promotion_decision.clone(),
+            "validation_status": report.validation_status.clone(),
+            "promotable": report.promotable,
+        }),
+    )?;
+    Ok(report)
+}
+
 fn select_event_policy_recommendation(
     recommendations: &[EventImprovementRecommendation],
     recommendation_id: Option<&str>,
@@ -1730,6 +1944,135 @@ fn select_event_policy_recommendation(
                     .is_none_or(|policy| recommendation.recommended_policy == policy)
         })
         .cloned()
+}
+
+fn select_event_policy_application_event<'a>(
+    events: &'a [StoreEvent],
+    recommendation_id: Option<&str>,
+    recommended_policy: Option<&str>,
+) -> Option<&'a StoreEvent> {
+    let recommendation_id = recommendation_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let recommended_policy = recommended_policy
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    events.iter().rev().find(|event| {
+        event.kind == "event_improvement_policy_applied"
+            && recommendation_id.is_none_or(|id| {
+                json_string(&event.data, "recommendation_id").as_deref() == Some(id)
+            })
+            && recommended_policy.is_none_or(|policy| {
+                json_string(&event.data, "recommended_policy").as_deref() == Some(policy)
+            })
+    })
+}
+
+fn event_policy_application_rollback_ready(rollback_plan: &Value) -> bool {
+    let status_ready = json_string(rollback_plan, "status")
+        .is_some_and(|status| status == "rollback_ready_for_human_approval");
+    let change_count = json_u64(rollback_plan, "rollback_change_count").unwrap_or(0);
+    let changes_present = rollback_plan
+        .get("changes")
+        .and_then(Value::as_array)
+        .is_some_and(|changes| !changes.is_empty());
+    status_ready && change_count > 0 && changes_present
+}
+
+fn event_policy_check_task_change(
+    task: &AtomicTask,
+    change: &Value,
+    checks: &mut Vec<String>,
+    failures: &mut Vec<String>,
+) {
+    let task_id = task.id.as_str();
+    if json_u64(change, "new_version").is_some_and(|version| version == task.version) {
+        checks.push(format!("task {task_id} version matches proposed change"));
+    } else if let Some(version) = json_u64(change, "new_version") {
+        failures.push(format!(
+            "task {task_id} version {} does not match proposed version {version}",
+            task.version
+        ));
+    }
+    if json_string(change, "new_executor")
+        .as_deref()
+        .is_some_and(|executor| executor == executor_name(&task.executor))
+    {
+        checks.push(format!("task {task_id} executor contract applied"));
+    } else if let Some(executor) = json_string(change, "new_executor") {
+        failures.push(format!(
+            "task {task_id} executor {} does not match proposed executor {executor}",
+            executor_name(&task.executor)
+        ));
+    }
+    if json_string(change, "new_execution_policy_mode")
+        .as_deref()
+        .is_some_and(|mode| mode == task.execution_policy.mode)
+    {
+        checks.push(format!("task {task_id} execution policy mode applied"));
+    } else if let Some(mode) = json_string(change, "new_execution_policy_mode") {
+        failures.push(format!(
+            "task {task_id} execution policy mode {} does not match proposed mode {mode}",
+            task.execution_policy.mode
+        ));
+    }
+    if let Some(reuse_hint) = json_string(change, "new_execution_policy_reuse_hint") {
+        if reuse_hint == task.execution_policy.reuse_hint {
+            checks.push(format!(
+                "task {task_id} execution policy reuse hint applied"
+            ));
+        } else {
+            failures.push(format!(
+                "task {task_id} execution policy reuse hint {} does not match proposed hint {reuse_hint}",
+                task.execution_policy.reuse_hint
+            ));
+        }
+    }
+    if let Some(async_mode) = json_string(change, "new_async_policy_mode") {
+        if async_mode == task.async_policy.mode {
+            checks.push(format!("task {task_id} async policy mode applied"));
+        } else {
+            failures.push(format!(
+                "task {task_id} async policy mode {} does not match proposed mode {async_mode}",
+                task.async_policy.mode
+            ));
+        }
+    }
+    if let Some(context_count) = json_u64(change, "new_context_requirement_count") {
+        if task.context_requirements.len() as u64 >= context_count {
+            checks.push(format!(
+                "task {task_id} context requirement count is covered"
+            ));
+        } else {
+            failures.push(format!(
+                "task {task_id} context requirement count {} is below proposed count {context_count}",
+                task.context_requirements.len()
+            ));
+        }
+    }
+    if let Some(rule_count) = json_u64(change, "new_validation_rule_count") {
+        if task.validation_rules.len() as u64 >= rule_count {
+            checks.push(format!("task {task_id} validation rule count is covered"));
+        } else {
+            failures.push(format!(
+                "task {task_id} validation rule count {} is below proposed count {rule_count}",
+                task.validation_rules.len()
+            ));
+        }
+    }
+}
+
+fn json_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn json_u64(value: &Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(Value::as_u64)
 }
 
 fn apply_event_policy_recommendation_to_task(

@@ -8195,6 +8195,176 @@ fn improve_apply_event_policy_covers_retry_context_and_wait_policies() {
 }
 
 #[test]
+fn improve_benchmark_event_policy_validates_equivalence_before_promotion() {
+    use forge_core::graph::{self, ExecutorKind, TaskStatus};
+    use forge_core::intent;
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(intent::parse_intent(
+        "Benchmark an applied event policy before promotion",
+    ));
+    workflow.tasks = vec![graph::task(
+        "task-policy",
+        "Render repeatable partner report",
+        &[],
+        &[],
+        vec![],
+        "same partner report output",
+        (ExecutorKind::Ai, 2.0),
+    )];
+    workflow.tasks[0].status = TaskStatus::Completed;
+    workflow.tasks[0]
+        .work_item
+        .goal_validation
+        .definitively_ready = true;
+    store.save_workflow(&workflow).unwrap();
+    {
+        let connection = Connection::open(&store_path).unwrap();
+        for index in 0..3 {
+            let source_id = format!("event-policy-benchmark-{index}");
+            let created_at = format!("2026-06-10T13:{:02}:00Z", index * 5);
+            let data = serde_json::json!({
+                "node_id": "task-policy",
+                "addon_id": "forge.addon.reporting",
+                "duration_ms": 700,
+                "retry_count": 0,
+                "wait_seconds": 5,
+                "context": {
+                    "effective_budget": 1000,
+                    "routing_summary": {
+                        "selected_bytes": 900 + index,
+                        "remaining_budget": 100 - index
+                    },
+                    "memory_policy": {
+                        "memory_level": "standard",
+                        "memory_scope": "project"
+                    }
+                }
+            });
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO global_events (
+                        source, source_id, workflow_id, kind, origin, status,
+                        organization_id, brand_id, product_id, user_id, channel_id,
+                        tenant_context_json, data_json, created_at
+                    )
+                    VALUES (
+                        'event_policy_benchmark_seed', ?1, ?2, 'ai_executor_completed', 'codex', 'recorded',
+                        'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
+                        '{}', ?3, ?4
+                    )
+                    "#,
+                    rusqlite::params![source_id, workflow.id, data.to_string(), created_at],
+                )
+                .unwrap();
+        }
+    }
+
+    forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "apply-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--policy",
+            "prefer_deterministic_node",
+            "--apply",
+            "--approved-by",
+            "codex-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let benchmark_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "benchmark-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--policy",
+            "prefer_deterministic_node",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let benchmark: Value = serde_json::from_slice(&benchmark_output).unwrap();
+    assert_eq!(
+        benchmark["schema_version"],
+        "forge.improve.event_policy_benchmark.v1"
+    );
+    assert_eq!(benchmark["status"], "event_policy_benchmark_validated");
+    assert_eq!(benchmark["workflow_id"], workflow.id);
+    assert_eq!(benchmark["recommended_policy"], "prefer_deterministic_node");
+    assert_eq!(benchmark["equivalence"]["status"], "equivalent");
+    assert_eq!(benchmark["equivalence"]["promotion_allowed"], true);
+    assert_eq!(benchmark["benchmark"]["validation_passed"], true);
+    assert_eq!(benchmark["benchmark"]["rollback_ready"], true);
+    assert_eq!(benchmark["promotion_decision"]["status"], "promotion_ready");
+    assert_eq!(benchmark["promotion_decision"]["auto_promoted"], false);
+    assert_eq!(
+        benchmark["event_kind"],
+        "event_improvement_policy_benchmarked"
+    );
+
+    let mcp_input = serde_json::json!({
+        "workflow_id": workflow.id,
+        "recommended_policy": "prefer_deterministic_node",
+        "origin": "mcp-test"
+    });
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.improve.benchmark_event_policy",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.improve.event_policy_benchmark.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["promotion_decision"]["auto_promoted"],
+        false
+    );
+
+    let updated = ForgeStore::open(&store_path)
+        .unwrap()
+        .load_workflow(&workflow.id)
+        .unwrap();
+    assert_eq!(
+        updated.revisions.len(),
+        1,
+        "benchmarking must not auto-promote or create workflow revisions"
+    );
+}
+
+#[test]
 fn improve_candidates_rank_live_workflows_with_logs_and_parallel_opportunities() {
     use chrono::{Duration, Utc};
     use forge_core::graph::{self, ExecutorKind};

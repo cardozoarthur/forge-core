@@ -53,8 +53,8 @@ use crate::identity::{
     unlink_identity, update_identity_membership, IdentityLinkInput, IdentityMembershipUpdateInput,
 };
 use crate::improve::{
-    apply_event_improvement_policy, rank_improvement_candidates_with_filter,
-    ImprovementCandidateFilter,
+    apply_event_improvement_policy, benchmark_event_improvement_policy,
+    rank_improvement_candidates_with_filter, ImprovementCandidateFilter,
 };
 use crate::inspection::inspect_workflow_with_focus;
 use crate::interaction::{
@@ -187,6 +187,17 @@ struct ImproveApplyEventPolicyInput {
     recommended_policy: Option<String>,
     apply: Option<bool>,
     approved_by: Option<String>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImproveBenchmarkEventPolicyInput {
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    recommendation: Option<String>,
+    recommendation_id: Option<String>,
+    policy: Option<String>,
+    recommended_policy: Option<String>,
     origin: Option<String>,
 }
 
@@ -2200,6 +2211,31 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "json",
                 ],
                 ToolFlags::new(false, true),
+            ),
+            tool(
+                "forge.improve.benchmark_event_policy",
+                "Benchmark Event Improvement Policy",
+                "Validate the latest applied event-improvement policy against current workflow state, rollback readiness and validation evidence without auto-promoting.",
+                object_schema(
+                    &[
+                        ("workflow_id", "string", "workflow id"),
+                        ("recommendation_id", "string", "optional exact recommendation id"),
+                        ("recommended_policy", "string", "optional policy such as prefer_deterministic_node"),
+                        ("origin", "string", "origin label for audit events"),
+                    ],
+                    &["workflow_id"],
+                ),
+                "forge.improve.event_policy_benchmark.v1",
+                &[
+                    "forge",
+                    "improve",
+                    "benchmark-event-policy",
+                    "--workflow",
+                    "<workflow-id>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(false, false),
             ),
             tool(
                 "forge.interactive.home",
@@ -5331,6 +5367,25 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 recommended_policy.as_deref(),
                 input.apply.unwrap_or(false),
                 input.approved_by.as_deref(),
+                input.origin.as_deref().unwrap_or("mcp"),
+            )?)?
+        }
+        "forge.improve.benchmark_event_policy" => {
+            let input: ImproveBenchmarkEventPolicyInput = parse_input(input)?;
+            let workflow_id = input
+                .workflow_id
+                .or(input.workflow)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("forge.improve.benchmark_event_policy requires workflow_id")
+                })?;
+            let recommendation_id = input.recommendation_id.or(input.recommendation);
+            let recommended_policy = input.recommended_policy.or(input.policy);
+            serde_json::to_value(benchmark_event_improvement_policy(
+                store,
+                &workflow_id,
+                recommendation_id.as_deref(),
+                recommended_policy.as_deref(),
                 input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
