@@ -54,7 +54,8 @@ use crate::identity::{
 };
 use crate::improve::{
     apply_event_improvement_policy, benchmark_event_improvement_policy,
-    rank_improvement_candidates_with_filter, ImprovementCandidateFilter,
+    promote_event_improvement_policy, rank_improvement_candidates_with_filter,
+    ImprovementCandidateFilter,
 };
 use crate::inspection::inspect_workflow_with_focus;
 use crate::interaction::{
@@ -198,6 +199,18 @@ struct ImproveBenchmarkEventPolicyInput {
     recommendation_id: Option<String>,
     policy: Option<String>,
     recommended_policy: Option<String>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImprovePromoteEventPolicyInput {
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    recommendation: Option<String>,
+    recommendation_id: Option<String>,
+    policy: Option<String>,
+    recommended_policy: Option<String>,
+    approved_by: Option<String>,
     origin: Option<String>,
 }
 
@@ -2236,6 +2249,34 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "json",
                 ],
                 ToolFlags::new(false, false),
+            ),
+            tool(
+                "forge.improve.promote_event_policy",
+                "Promote Event Improvement Policy",
+                "Accept a validated event-policy benchmark through explicit human approval, recording a workflow revision and idempotent promotion event.",
+                object_schema(
+                    &[
+                        ("workflow_id", "string", "workflow id"),
+                        ("recommendation_id", "string", "optional exact recommendation id"),
+                        ("recommended_policy", "string", "optional policy such as prefer_deterministic_node"),
+                        ("approved_by", "string", "required human or operator approval"),
+                        ("origin", "string", "origin label for audit events"),
+                    ],
+                    &["workflow_id", "approved_by"],
+                ),
+                "forge.improve.event_policy_promotion.v1",
+                &[
+                    "forge",
+                    "improve",
+                    "promote-event-policy",
+                    "--workflow",
+                    "<workflow-id>",
+                    "--approved-by",
+                    "<operator>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(false, true),
             ),
             tool(
                 "forge.interactive.home",
@@ -5386,6 +5427,26 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &workflow_id,
                 recommendation_id.as_deref(),
                 recommended_policy.as_deref(),
+                input.origin.as_deref().unwrap_or("mcp"),
+            )?)?
+        }
+        "forge.improve.promote_event_policy" => {
+            let input: ImprovePromoteEventPolicyInput = parse_input(input)?;
+            let workflow_id = input
+                .workflow_id
+                .or(input.workflow)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("forge.improve.promote_event_policy requires workflow_id")
+                })?;
+            let recommendation_id = input.recommendation_id.or(input.recommendation);
+            let recommended_policy = input.recommended_policy.or(input.policy);
+            serde_json::to_value(promote_event_improvement_policy(
+                store,
+                &workflow_id,
+                recommendation_id.as_deref(),
+                recommended_policy.as_deref(),
+                input.approved_by.as_deref(),
                 input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }

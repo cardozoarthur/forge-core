@@ -8365,6 +8365,229 @@ fn improve_benchmark_event_policy_validates_equivalence_before_promotion() {
 }
 
 #[test]
+fn improve_promote_event_policy_requires_valid_benchmark_and_records_governed_revision() {
+    use forge_core::graph::{self, ExecutorKind, TaskStatus};
+    use forge_core::intent;
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(intent::parse_intent(
+        "Promote an event policy only after benchmark evidence",
+    ));
+    workflow.tasks = vec![graph::task(
+        "task-policy",
+        "Render repeatable partner report",
+        &[],
+        &[],
+        vec![],
+        "same partner report output",
+        (ExecutorKind::Ai, 2.0),
+    )];
+    workflow.tasks[0].status = TaskStatus::Completed;
+    workflow.tasks[0]
+        .work_item
+        .goal_validation
+        .definitively_ready = true;
+    store.save_workflow(&workflow).unwrap();
+    {
+        let connection = Connection::open(&store_path).unwrap();
+        for index in 0..3 {
+            let source_id = format!("event-policy-promote-{index}");
+            let created_at = format!("2026-06-10T14:{:02}:00Z", index * 5);
+            let data = serde_json::json!({
+                "node_id": "task-policy",
+                "addon_id": "forge.addon.reporting",
+                "duration_ms": 500,
+                "retry_count": 0,
+                "wait_seconds": 0,
+                "context": {
+                    "effective_budget": 1000,
+                    "routing_summary": {
+                        "selected_bytes": 800 + index,
+                        "remaining_budget": 200 - index
+                    },
+                    "memory_policy": {
+                        "memory_level": "standard",
+                        "memory_scope": "project"
+                    }
+                }
+            });
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO global_events (
+                        source, source_id, workflow_id, kind, origin, status,
+                        organization_id, brand_id, product_id, user_id, channel_id,
+                        tenant_context_json, data_json, created_at
+                    )
+                    VALUES (
+                        'event_policy_promote_seed', ?1, ?2, 'ai_executor_completed', 'codex', 'recorded',
+                        'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
+                        '{}', ?3, ?4
+                    )
+                    "#,
+                    rusqlite::params![source_id, workflow.id, data.to_string(), created_at],
+                )
+                .unwrap();
+        }
+    }
+
+    forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "apply-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--policy",
+            "prefer_deterministic_node",
+            "--apply",
+            "--approved-by",
+            "codex-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "benchmark-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--policy",
+            "prefer_deterministic_node",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "promote-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--policy",
+            "prefer_deterministic_node",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("requires --approved-by"));
+
+    let promotion_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "promote-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--policy",
+            "prefer_deterministic_node",
+            "--approved-by",
+            "arthur",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let promotion: Value = serde_json::from_slice(&promotion_output).unwrap();
+    assert_eq!(
+        promotion["schema_version"],
+        "forge.improve.event_policy_promotion.v1"
+    );
+    assert_eq!(promotion["status"], "event_policy_promotion_accepted");
+    assert_eq!(promotion["workflow_id"], workflow.id);
+    assert_eq!(promotion["recommended_policy"], "prefer_deterministic_node");
+    assert_eq!(promotion["approved_by"], "arthur");
+    assert_eq!(promotion["promoted"], true);
+    assert_eq!(promotion["auto_promoted"], false);
+    assert_eq!(promotion["benchmark"]["promotion_allowed"], true);
+    assert_eq!(promotion["benchmark"]["validation_passed"], true);
+    assert_eq!(promotion["benchmark"]["rollback_ready"], true);
+    assert_eq!(promotion["application_revision"], 1);
+    assert_eq!(promotion["revision"], 2);
+    assert_eq!(promotion["event_kind"], "event_improvement_policy_promoted");
+
+    let mcp_input = serde_json::json!({
+        "workflow_id": workflow.id,
+        "recommended_policy": "prefer_deterministic_node",
+        "approved_by": "mcp-operator",
+        "origin": "mcp-test"
+    });
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.improve.promote_event_policy",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.improve.event_policy_promotion.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["status"],
+        "event_policy_promotion_already_accepted"
+    );
+    assert_eq!(mcp_json["result"]["promoted"], false);
+    assert_eq!(mcp_json["result"]["revision"], 2);
+
+    let updated = ForgeStore::open(&store_path)
+        .unwrap()
+        .load_workflow(&workflow.id)
+        .unwrap();
+    assert_eq!(updated.revisions.len(), 2);
+    assert_eq!(
+        updated.revisions[1].change_type,
+        "event_improvement_policy_promoted"
+    );
+    let events = ForgeStore::open(&store_path)
+        .unwrap()
+        .load_workflow_events(&workflow.id)
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "event_improvement_policy_promoted")
+            .count(),
+        1,
+        "repeated promotion must be idempotent for the same benchmark"
+    );
+}
+
+#[test]
 fn improve_candidates_rank_live_workflows_with_logs_and_parallel_opportunities() {
     use chrono::{Duration, Utc};
     use forge_core::graph::{self, ExecutorKind};
@@ -10533,6 +10756,7 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
         "forge.workflow.inspect",
         "forge.events.timeline",
         "forge.improve.candidates",
+        "forge.improve.promote_event_policy",
         "forge.cost.ledger",
         "forge.memory.policy",
         "forge.memory.search",
@@ -10574,6 +10798,16 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
     assert_eq!(
         improve_candidates["input_schema"]["properties"]["workflow_ids"]["type"],
         "array"
+    );
+    let promote_event_policy = find_mcp_tool(&json, "forge.improve.promote_event_policy");
+    assert_eq!(
+        promote_event_policy["output_schema"],
+        "forge.improve.event_policy_promotion.v1"
+    );
+    assert_eq!(promote_event_policy["mutates_workflow"], true);
+    assert_eq!(
+        promote_event_policy["input_schema"]["properties"]["approved_by"]["type"],
+        "string"
     );
 
     let update_goal = find_mcp_tool(&json, "forge.workflow.update_goal");

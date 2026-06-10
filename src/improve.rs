@@ -375,6 +375,38 @@ pub struct EventPolicyPromotionDecision {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct EventPolicyPromotionReport {
+    pub status: String,
+    pub schema_version: String,
+    pub workflow_id: String,
+    pub origin: String,
+    pub approved_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommendation_id: Option<String>,
+    pub recommended_policy: String,
+    pub application_event_id: i64,
+    pub application_revision: u64,
+    pub benchmark_event_id: i64,
+    pub benchmark: EventPolicyPromotionBenchmarkSummary,
+    pub validation_status: String,
+    pub promoted: bool,
+    pub auto_promoted: bool,
+    pub revision: u64,
+    pub promotion_gate: String,
+    pub reason: String,
+    pub event_kind: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventPolicyPromotionBenchmarkSummary {
+    pub status: String,
+    pub promotion_allowed: bool,
+    pub validation_passed: bool,
+    pub rollback_ready: bool,
+    pub failed_check_count: u64,
+}
+
 pub fn rank_improvement_candidates(
     store: &ForgeStore,
     limit: usize,
@@ -1922,6 +1954,158 @@ pub fn benchmark_event_improvement_policy(
     Ok(report)
 }
 
+pub fn promote_event_improvement_policy(
+    store: &ForgeStore,
+    workflow_id: &str,
+    recommendation_id: Option<&str>,
+    recommended_policy: Option<&str>,
+    approved_by: Option<&str>,
+    origin: &str,
+) -> Result<EventPolicyPromotionReport> {
+    let approved_by = approved_by
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("forge improve promote-event-policy requires --approved-by")
+        })?;
+    let mut workflow = store.load_workflow(workflow_id)?;
+    let events = store.load_workflow_events(workflow_id)?;
+    let Some(benchmark_event) =
+        select_event_policy_benchmark_event(&events, recommendation_id, recommended_policy)
+    else {
+        bail!("no benchmarked event improvement policy found for workflow `{workflow_id}`");
+    };
+    let recommended_policy = json_string(&benchmark_event.data, "recommended_policy")
+        .or_else(|| recommended_policy.map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+    let recommendation_id = json_string(&benchmark_event.data, "recommendation_id")
+        .or_else(|| recommendation_id.map(str::to_string));
+    let application_event_id =
+        json_i64(&benchmark_event.data, "application_event_id").unwrap_or_default();
+    let application_revision = json_u64(&benchmark_event.data, "application_revision").unwrap_or(0);
+    let benchmark = event_policy_promotion_benchmark_summary(&benchmark_event.data);
+    let validation = validate_workflow(&workflow);
+
+    if let Some(existing_promotion) =
+        select_event_policy_promotion_event(&events, benchmark_event.id)
+    {
+        let revision = json_u64(&existing_promotion.data, "revision")
+            .or_else(|| workflow.revisions.last().map(|item| item.revision))
+            .unwrap_or(0);
+        return Ok(EventPolicyPromotionReport {
+            status: "event_policy_promotion_already_accepted".to_string(),
+            schema_version: "forge.improve.event_policy_promotion.v1".to_string(),
+            workflow_id: workflow.id,
+            origin: origin.to_string(),
+            approved_by: approved_by.to_string(),
+            recommendation_id,
+            recommended_policy,
+            application_event_id,
+            application_revision,
+            benchmark_event_id: benchmark_event.id,
+            benchmark,
+            validation_status: validation.status,
+            promoted: false,
+            auto_promoted: false,
+            revision,
+            promotion_gate: "already_promoted".to_string(),
+            reason: "event policy benchmark was already accepted through a governed promotion"
+                .to_string(),
+            event_kind: "event_improvement_policy_promoted".to_string(),
+        });
+    }
+
+    let promotion_allowed = benchmark.promotion_allowed
+        && benchmark.validation_passed
+        && benchmark.rollback_ready
+        && benchmark.failed_check_count == 0
+        && validation.promotable;
+    if !promotion_allowed {
+        return Ok(EventPolicyPromotionReport {
+            status: "event_policy_promotion_blocked".to_string(),
+            schema_version: "forge.improve.event_policy_promotion.v1".to_string(),
+            workflow_id: workflow.id,
+            origin: origin.to_string(),
+            approved_by: approved_by.to_string(),
+            recommendation_id,
+            recommended_policy,
+            application_event_id,
+            application_revision,
+            benchmark_event_id: benchmark_event.id,
+            benchmark,
+            validation_status: validation.status,
+            promoted: false,
+            auto_promoted: false,
+            revision: workflow
+                .revisions
+                .last()
+                .map(|item| item.revision)
+                .unwrap_or(0),
+            promotion_gate: "benchmark_validation_and_human_approval_required".to_string(),
+            reason: "benchmark evidence or current validation does not allow promotion".to_string(),
+            event_kind: "event_improvement_policy_promotion_blocked".to_string(),
+        });
+    }
+
+    let revision = workflow
+        .revisions
+        .last()
+        .map(|item| item.revision + 1)
+        .unwrap_or(1);
+    workflow.revisions.push(WorkflowRevision {
+        revision,
+        origin: origin.to_string(),
+        change_type: "event_improvement_policy_promoted".to_string(),
+        summary: format!(
+            "accepted benchmarked event improvement policy `{recommended_policy}` after approval by `{approved_by}`"
+        ),
+        created_at: Utc::now(),
+    });
+    store.save_workflow(&workflow)?;
+    store.record_event(
+        &workflow.id,
+        "event_improvement_policy_promoted",
+        &json!({
+            "schema_version": "forge.improve.event_policy_promotion.v1",
+            "revision": revision,
+            "origin": origin,
+            "approved_by": approved_by,
+            "recommendation_id": recommendation_id,
+            "recommended_policy": recommended_policy,
+            "application_event_id": application_event_id,
+            "application_revision": application_revision,
+            "benchmark_event_id": benchmark_event.id,
+            "benchmark": benchmark.clone(),
+            "validation_status": validation.status.clone(),
+            "promoted": true,
+            "auto_promoted": false,
+            "promotion_gate": "governed_human_approval_after_benchmark",
+        }),
+    )?;
+
+    Ok(EventPolicyPromotionReport {
+        status: "event_policy_promotion_accepted".to_string(),
+        schema_version: "forge.improve.event_policy_promotion.v1".to_string(),
+        workflow_id: workflow.id,
+        origin: origin.to_string(),
+        approved_by: approved_by.to_string(),
+        recommendation_id,
+        recommended_policy,
+        application_event_id,
+        application_revision,
+        benchmark_event_id: benchmark_event.id,
+        benchmark,
+        validation_status: validation.status,
+        promoted: true,
+        auto_promoted: false,
+        revision,
+        promotion_gate: "governed_human_approval_after_benchmark".to_string(),
+        reason: "benchmark evidence was accepted by a human operator and recorded as a workflow revision"
+            .to_string(),
+        event_kind: "event_improvement_policy_promoted".to_string(),
+    })
+}
+
 fn select_event_policy_recommendation(
     recommendations: &[EventImprovementRecommendation],
     recommendation_id: Option<&str>,
@@ -1966,6 +2150,52 @@ fn select_event_policy_application_event<'a>(
                 json_string(&event.data, "recommended_policy").as_deref() == Some(policy)
             })
     })
+}
+
+fn select_event_policy_benchmark_event<'a>(
+    events: &'a [StoreEvent],
+    recommendation_id: Option<&str>,
+    recommended_policy: Option<&str>,
+) -> Option<&'a StoreEvent> {
+    let recommendation_id = recommendation_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let recommended_policy = recommended_policy
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    events.iter().rev().find(|event| {
+        event.kind == "event_improvement_policy_benchmarked"
+            && recommendation_id.is_none_or(|id| {
+                json_string(&event.data, "recommendation_id").as_deref() == Some(id)
+            })
+            && recommended_policy.is_none_or(|policy| {
+                json_string(&event.data, "recommended_policy").as_deref() == Some(policy)
+            })
+    })
+}
+
+fn select_event_policy_promotion_event(
+    events: &[StoreEvent],
+    benchmark_event_id: i64,
+) -> Option<&StoreEvent> {
+    events.iter().rev().find(|event| {
+        event.kind == "event_improvement_policy_promoted"
+            && json_i64(&event.data, "benchmark_event_id") == Some(benchmark_event_id)
+    })
+}
+
+fn event_policy_promotion_benchmark_summary(
+    benchmark_data: &Value,
+) -> EventPolicyPromotionBenchmarkSummary {
+    let benchmark = benchmark_data.get("benchmark").unwrap_or(&Value::Null);
+    let equivalence = benchmark_data.get("equivalence").unwrap_or(&Value::Null);
+    EventPolicyPromotionBenchmarkSummary {
+        status: json_string(equivalence, "status").unwrap_or_else(|| "unknown".to_string()),
+        promotion_allowed: json_bool(equivalence, "promotion_allowed").unwrap_or(false),
+        validation_passed: json_bool(benchmark, "validation_passed").unwrap_or(false),
+        rollback_ready: json_bool(benchmark, "rollback_ready").unwrap_or(false),
+        failed_check_count: json_u64(benchmark, "failed_check_count").unwrap_or(u64::MAX),
+    }
 }
 
 fn event_policy_application_rollback_ready(rollback_plan: &Value) -> bool {
@@ -2069,6 +2299,14 @@ fn json_string(value: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn json_bool(value: &Value, key: &str) -> Option<bool> {
+    value.get(key).and_then(Value::as_bool)
+}
+
+fn json_i64(value: &Value, key: &str) -> Option<i64> {
+    value.get(key).and_then(Value::as_i64)
 }
 
 fn json_u64(value: &Value, key: &str) -> Option<u64> {
