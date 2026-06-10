@@ -2945,6 +2945,188 @@ fn event_observability_history_rolls_up_time_buckets_for_cli_and_mcp() {
 }
 
 #[test]
+fn event_improvement_policy_recommends_deterministic_and_context_repairs_for_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    {
+        let _store_handle = ForgeStore::open(&store).unwrap();
+    }
+    {
+        let connection = Connection::open(&store).unwrap();
+        connection
+            .execute_batch(
+                r#"
+                INSERT INTO global_events (
+                    source, source_id, workflow_id, kind, origin, status,
+                    organization_id, brand_id, product_id, user_id, channel_id,
+                    tenant_context_json, data_json, created_at
+                )
+                VALUES
+                (
+                    'policy_seed', 'policy-001', 'wf_policy',
+                    'ai_executor_completed', 'codex', 'recorded',
+                    'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
+                    '{}',
+                    '{"node_id":"node-render","addon_id":"forge.addon.content","duration_ms":500,"retry_count":0,"wait_seconds":5,"context":{"effective_budget":1000,"routing_summary":{"selected_bytes":950,"remaining_budget":50},"memory_policy":{"memory_level":"standard","memory_scope":"project"}}}',
+                    '2026-06-10T10:00:00Z'
+                ),
+                (
+                    'policy_seed', 'policy-002', 'wf_policy',
+                    'ai_executor_completed', 'codex', 'recorded',
+                    'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
+                    '{}',
+                    '{"node_id":"node-render","addon_id":"forge.addon.content","duration_ms":600,"retry_count":0,"wait_seconds":5,"context":{"effective_budget":1000,"routing_summary":{"selected_bytes":960,"remaining_budget":40},"memory_policy":{"memory_level":"standard","memory_scope":"project"}}}',
+                    '2026-06-10T10:05:00Z'
+                ),
+                (
+                    'policy_seed', 'policy-003', 'wf_policy',
+                    'ai_executor_completed', 'codex', 'recorded',
+                    'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
+                    '{}',
+                    '{"node_id":"node-render","addon_id":"forge.addon.content","duration_ms":700,"retry_count":0,"wait_seconds":5,"context":{"effective_budget":1000,"routing_summary":{"selected_bytes":940,"remaining_budget":60},"memory_policy":{"memory_level":"standard","memory_scope":"project"}}}',
+                    '2026-06-10T10:10:00Z'
+                ),
+                (
+                    'policy_seed', 'policy-004', 'wf_policy',
+                    'executor_retry_observed', 'opencode', 'recorded',
+                    'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
+                    '{}',
+                    '{"node_id":"node-payment","addon_id":"forge.addon.billing","duration_ms":100,"retry_count":2,"wait_seconds":40,"context":{"effective_budget":1000,"routing_summary":{"selected_bytes":700,"remaining_budget":300},"memory_policy":{"memory_level":"short_term","memory_scope":"organization"}}}',
+                    '2026-06-10T10:15:00Z'
+                ),
+                (
+                    'policy_seed', 'policy-005', 'wf_policy',
+                    'executor_retry_observed', 'opencode', 'recorded',
+                    'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
+                    '{}',
+                    '{"node_id":"node-payment","addon_id":"forge.addon.billing","duration_ms":100,"retry_count":2,"wait_seconds":40,"context":{"effective_budget":1000,"routing_summary":{"selected_bytes":720,"remaining_budget":280},"memory_policy":{"memory_level":"short_term","memory_scope":"organization"}}}',
+                    '2026-06-10T10:20:00Z'
+                );
+                "#,
+            )
+            .unwrap();
+    }
+    let _store_handle = ForgeStore::open(&store).unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "improvement-policy",
+            "--workflow",
+            "wf_policy",
+            "--min-events",
+            "2",
+            "--min-duration-ms",
+            "1000",
+            "--min-retries",
+            "3",
+            "--min-context-pressure-bps",
+            "9000",
+            "--min-wait-seconds",
+            "60",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.event_improvement_policy.v1");
+    assert_eq!(json["status"], "event_improvement_policy_recommended");
+    assert_eq!(json["index_source"], "sqlite_materialized");
+    assert_eq!(json["thresholds"]["min_event_count"], 2);
+    assert_eq!(json["summary"]["total_event_count"], 5);
+    assert_eq!(json["summary"]["max_context_pressure_bps"], 9600);
+    assert!(json["recommendation_count"].as_u64().unwrap() >= 4);
+
+    let recommendations = json["recommendations"].as_array().unwrap();
+    let deterministic = recommendations
+        .iter()
+        .find(|recommendation| {
+            recommendation["kind"] == "deterministic_node_candidate"
+                && recommendation["scope"] == "node"
+                && recommendation["node_ref"] == "node-render"
+        })
+        .unwrap();
+    assert_eq!(
+        deterministic["recommended_policy"],
+        "prefer_deterministic_node"
+    );
+    assert_eq!(deterministic["ai_signal_count"], 3);
+    assert_eq!(deterministic["total_duration_ms"], 1800);
+    assert!(deterministic["suggested_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command.as_array().unwrap()[1] == "workflow"));
+
+    let context_hotspot = recommendations
+        .iter()
+        .find(|recommendation| {
+            recommendation["kind"] == "context_pressure_hotspot"
+                && recommendation["scope"] == "node"
+                && recommendation["node_ref"] == "node-render"
+        })
+        .unwrap();
+    assert_eq!(
+        context_hotspot["recommended_policy"],
+        "tighten_context_routing"
+    );
+    assert_eq!(context_hotspot["max_context_pressure_bps"], 9600);
+
+    let retry_hotspot = recommendations
+        .iter()
+        .find(|recommendation| {
+            recommendation["kind"] == "retry_hotspot"
+                && recommendation["scope"] == "node"
+                && recommendation["node_ref"] == "node-payment"
+        })
+        .unwrap();
+    assert_eq!(retry_hotspot["total_retry_count"], 4);
+
+    let mcp_input = serde_json::json!({
+        "workflow_id": "wf_policy",
+        "min_events": 2,
+        "min_duration_ms": 1000,
+        "min_retries": 3,
+        "min_context_pressure_bps": 9000,
+        "min_wait_seconds": 60,
+        "limit": 2
+    });
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.events.improvement_policy",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.event_improvement_policy.v1"
+    );
+    assert_eq!(mcp_json["result"]["recommendation_count"], 2);
+    assert_eq!(
+        mcp_json["result"]["recommendations"][0]["workflow_id"],
+        "wf_policy"
+    );
+}
+
+#[test]
 fn tenant_index_tracks_async_run_resources() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

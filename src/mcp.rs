@@ -28,13 +28,13 @@ use crate::credential_vault::{
     CREDENTIAL_VAULT_COMMAND_SCHEMA,
 };
 use crate::event::{
-    build_event_observability_history, build_event_observability_index, build_event_service_plan,
-    build_global_event_timeline, build_workflow_event_stream, emit_event_egress,
-    ingest_inbound_event, list_event_services, list_inbound_event_inbox,
-    recover_stale_event_services, route_inbound_event, run_event_runtime_daemon,
-    run_event_runtime_reconcile, run_event_service_supervisor, run_event_webhook_ingress_service,
-    run_event_worker_service, run_inbound_event_worker_loop, scan_inbound_event_inbox,
-    EventEgressEmitInput, InboundEventIngestInput,
+    build_event_improvement_policy, build_event_observability_history,
+    build_event_observability_index, build_event_service_plan, build_global_event_timeline,
+    build_workflow_event_stream, emit_event_egress, ingest_inbound_event, list_event_services,
+    list_inbound_event_inbox, recover_stale_event_services, route_inbound_event,
+    run_event_runtime_daemon, run_event_runtime_reconcile, run_event_service_supervisor,
+    run_event_webhook_ingress_service, run_event_worker_service, run_inbound_event_worker_loop,
+    scan_inbound_event_inbox, EventEgressEmitInput, InboundEventIngestInput,
 };
 use crate::executor::load_executors;
 use crate::handoff::build_task_handoff;
@@ -625,6 +625,33 @@ struct EventObservabilityHistoryInput {
     addon_id: Option<String>,
     bucket: Option<String>,
     group_by: Option<String>,
+    limit: Option<usize>,
+    after_sequence: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventImprovementPolicyInput {
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    organization: Option<String>,
+    organization_id: Option<String>,
+    brand: Option<String>,
+    brand_id: Option<String>,
+    product: Option<String>,
+    product_id: Option<String>,
+    node: Option<String>,
+    node_ref: Option<String>,
+    addon: Option<String>,
+    addon_id: Option<String>,
+    min_events: Option<usize>,
+    min_event_count: Option<usize>,
+    min_duration_ms: Option<i64>,
+    min_total_duration_ms: Option<i64>,
+    min_retries: Option<i64>,
+    min_total_retry_count: Option<i64>,
+    min_context_pressure_bps: Option<i64>,
+    min_wait_seconds: Option<i64>,
+    min_total_wait_seconds: Option<i64>,
     limit: Option<usize>,
     after_sequence: Option<i64>,
 }
@@ -1450,6 +1477,46 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "forge",
                     "events",
                     "observability-history",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.events.improvement_policy",
+                "Recommend Event Improvement Policy",
+                "Return read-only improvement recommendations derived from normalized event observability signals such as repeated execution, duration, retries, waits and context pressure.",
+                object_schema(
+                    &[
+                        ("workflow_id", "string", "optional workflow id filter"),
+                        ("organization_id", "string", "optional organization filter"),
+                        ("brand_id", "string", "optional brand filter"),
+                        ("product_id", "string", "optional product filter"),
+                        ("node_ref", "string", "optional node/task reference filter"),
+                        ("addon_id", "string", "optional Addon id filter"),
+                        ("min_events", "integer", "minimum event count before a scope is considered"),
+                        ("min_duration_ms", "integer", "minimum total duration before repeated work is considered expensive"),
+                        ("min_retries", "integer", "minimum total retries before rework is recommended"),
+                        (
+                            "min_context_pressure_bps",
+                            "integer",
+                            "minimum context pressure in basis points before context routing repair is recommended",
+                        ),
+                        ("min_wait_seconds", "integer", "minimum total wait seconds before wait supervision is recommended"),
+                        ("limit", "integer", "optional recommendation limit"),
+                        (
+                            "after_sequence",
+                            "integer",
+                            "optional cursor; only includes records with store_sequence greater than this value",
+                        ),
+                    ],
+                    &[],
+                ),
+                "forge.event_improvement_policy.v1",
+                &[
+                    "forge",
+                    "events",
+                    "improvement-policy",
                     "--output",
                     "json",
                 ],
@@ -4571,6 +4638,31 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 addon_id.as_deref(),
                 input.bucket.as_deref(),
                 input.group_by.as_deref(),
+                input.limit,
+                input.after_sequence,
+            )?)?
+        }
+        "forge.events.improvement_policy" => {
+            let input: EventImprovementPolicyInput = parse_input(input)?;
+            let workflow_id = input.workflow_id.or(input.workflow);
+            let organization_id = input.organization_id.or(input.organization);
+            let brand_id = input.brand_id.or(input.brand);
+            let product_id = input.product_id.or(input.product);
+            let node_ref = input.node_ref.or(input.node);
+            let addon_id = input.addon_id.or(input.addon);
+            serde_json::to_value(build_event_improvement_policy(
+                store,
+                workflow_id.as_deref(),
+                organization_id.as_deref(),
+                brand_id.as_deref(),
+                product_id.as_deref(),
+                node_ref.as_deref(),
+                addon_id.as_deref(),
+                input.min_events.or(input.min_event_count),
+                input.min_duration_ms.or(input.min_total_duration_ms),
+                input.min_retries.or(input.min_total_retry_count),
+                input.min_context_pressure_bps,
+                input.min_wait_seconds.or(input.min_total_wait_seconds),
                 input.limit,
                 input.after_sequence,
             )?)?

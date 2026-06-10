@@ -54,6 +54,7 @@ pub const EVENT_ENVELOPE_SCHEMA_VERSION: &str = "forge.event_envelope.v1";
 pub const EVENT_TIMELINE_SCHEMA_VERSION: &str = "forge.event_timeline.v1";
 pub const EVENT_OBSERVABILITY_INDEX_SCHEMA_VERSION: &str = "forge.event_observability_index.v1";
 pub const EVENT_OBSERVABILITY_HISTORY_SCHEMA_VERSION: &str = "forge.event_observability_history.v1";
+pub const EVENT_IMPROVEMENT_POLICY_SCHEMA_VERSION: &str = "forge.event_improvement_policy.v1";
 pub const EVENT_INBOX_SCHEMA_VERSION: &str = "forge.event_inbox.v1";
 pub const EVENT_INGEST_SCHEMA_VERSION: &str = "forge.event_ingest.v1";
 pub const EVENT_ROUTE_SCHEMA_VERSION: &str = "forge.event_route.v1";
@@ -155,6 +156,18 @@ pub struct EventObservabilityHistoryReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct EventImprovementPolicyReport {
+    pub schema_version: String,
+    pub status: String,
+    pub index_source: String,
+    pub filters: EventImprovementPolicyFilters,
+    pub thresholds: EventImprovementPolicyThresholds,
+    pub summary: EventObservabilitySummary,
+    pub recommendation_count: usize,
+    pub recommendations: Vec<EventImprovementRecommendation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct EventObservabilityIndexFilters {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow_id: Option<String>,
@@ -194,6 +207,65 @@ pub struct EventObservabilityHistoryFilters {
     pub limit: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after_sequence: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventImprovementPolicyFilters {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brand_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_sequence: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventImprovementPolicyThresholds {
+    pub min_event_count: usize,
+    pub min_total_duration_ms: i64,
+    pub min_total_retry_count: i64,
+    pub min_context_pressure_bps: i64,
+    pub min_total_wait_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventImprovementRecommendation {
+    pub id: String,
+    pub kind: String,
+    pub priority: String,
+    pub scope: String,
+    pub workflow_id: String,
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_id: Option<String>,
+    pub event_count: usize,
+    pub ai_signal_count: usize,
+    pub total_duration_ms: i64,
+    pub total_retry_count: i64,
+    pub total_wait_seconds: i64,
+    pub total_selected_context_bytes: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_pressure_bps: Option<i64>,
+    pub first_event_sequence: i64,
+    pub last_event_sequence: i64,
+    pub recommended_policy: String,
+    pub recommended_action: String,
+    pub reason: String,
+    pub suggested_commands: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1258,6 +1330,81 @@ pub fn build_event_observability_history(
     })
 }
 
+pub fn build_event_improvement_policy(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    node_ref: Option<&str>,
+    addon_id: Option<&str>,
+    min_event_count: Option<usize>,
+    min_total_duration_ms: Option<i64>,
+    min_total_retry_count: Option<i64>,
+    min_context_pressure_bps: Option<i64>,
+    min_total_wait_seconds: Option<i64>,
+    limit: Option<usize>,
+    after_sequence: Option<i64>,
+) -> Result<EventImprovementPolicyReport> {
+    let thresholds = EventImprovementPolicyThresholds {
+        min_event_count: min_event_count.unwrap_or(3).max(1),
+        min_total_duration_ms: min_total_duration_ms.unwrap_or(1_000).max(0),
+        min_total_retry_count: min_total_retry_count.unwrap_or(2).max(0),
+        min_context_pressure_bps: min_context_pressure_bps.unwrap_or(8_500).clamp(0, 10_000),
+        min_total_wait_seconds: min_total_wait_seconds.unwrap_or(60).max(0),
+    };
+    let (mut records, index_source) = load_event_observability_records(
+        store,
+        workflow_id,
+        organization_id,
+        brand_id,
+        product_id,
+        node_ref,
+        addon_id,
+    )?;
+    records.sort_by_key(|event| event.store_sequence);
+    if let Some(after_sequence) = after_sequence {
+        records.retain(|event| event.store_sequence > after_sequence);
+    }
+    let summary = summarize_event_observability(&records);
+    let mut recommendations = build_event_improvement_recommendations(&records, &thresholds);
+    recommendations.sort_by(|left, right| {
+        event_improvement_priority_rank(&right.priority)
+            .cmp(&event_improvement_priority_rank(&left.priority))
+            .then_with(|| right.total_duration_ms.cmp(&left.total_duration_ms))
+            .then_with(|| right.total_retry_count.cmp(&left.total_retry_count))
+            .then_with(|| right.event_count.cmp(&left.event_count))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    if let Some(limit) = limit.filter(|limit| *limit > 0) {
+        recommendations.truncate(limit);
+    }
+    let status = if recommendations.is_empty() {
+        "event_improvement_policy_clear"
+    } else {
+        "event_improvement_policy_recommended"
+    };
+    Ok(EventImprovementPolicyReport {
+        schema_version: EVENT_IMPROVEMENT_POLICY_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        index_source,
+        filters: EventImprovementPolicyFilters {
+            workflow_id: normalize_text(workflow_id),
+            organization_id: normalize_text(organization_id),
+            brand_id: normalize_text(brand_id),
+            product_id: normalize_text(product_id),
+            node_ref: normalize_text(node_ref),
+            addon_id: normalize_text(addon_id),
+            limit: limit.filter(|limit| *limit > 0),
+            after_sequence,
+        },
+        thresholds,
+        summary,
+        recommendation_count: recommendations.len(),
+        recommendations,
+    })
+}
+
 fn load_event_observability_records(
     store: &ForgeStore,
     workflow_id: Option<&str>,
@@ -1828,6 +1975,344 @@ fn event_observability_history_group_id(
             .unwrap_or_else(|| "_no_addon".to_string()),
         _ => "_all".to_string(),
     }
+}
+
+#[derive(Default)]
+struct EventImprovementPolicyBucket {
+    scope: String,
+    workflow_id: String,
+    organization_id: String,
+    brand_id: String,
+    product_id: String,
+    node_ref: Option<String>,
+    addon_id: Option<String>,
+    event_count: usize,
+    ai_signal_count: usize,
+    total_duration_ms: i64,
+    total_retry_count: i64,
+    total_wait_seconds: i64,
+    total_selected_context_bytes: i64,
+    max_context_pressure_bps: Option<i64>,
+    first_event_sequence: i64,
+    last_event_sequence: i64,
+    kinds: Vec<String>,
+}
+
+fn build_event_improvement_recommendations(
+    records: &[EventObservabilityRecord],
+    thresholds: &EventImprovementPolicyThresholds,
+) -> Vec<EventImprovementRecommendation> {
+    let mut recommendations = Vec::new();
+    recommendations.extend(build_scoped_event_improvement_recommendations(
+        records, thresholds, "node",
+    ));
+    recommendations.extend(build_scoped_event_improvement_recommendations(
+        records, thresholds, "addon",
+    ));
+    recommendations
+}
+
+fn build_scoped_event_improvement_recommendations(
+    records: &[EventObservabilityRecord],
+    thresholds: &EventImprovementPolicyThresholds,
+    scope: &str,
+) -> Vec<EventImprovementRecommendation> {
+    let mut buckets: BTreeMap<String, EventImprovementPolicyBucket> = BTreeMap::new();
+    for record in records {
+        let key = match scope {
+            "node" => {
+                let Some(node_ref) = record.node_ref.as_deref() else {
+                    continue;
+                };
+                format!("{}|{}", record.workflow_id, node_ref)
+            }
+            "addon" => {
+                let Some(addon_id) = record.addon_id.as_deref() else {
+                    continue;
+                };
+                format!("{}|{}", record.workflow_id, addon_id)
+            }
+            _ => continue,
+        };
+        let bucket = buckets.entry(key).or_default();
+        if bucket.scope.is_empty() {
+            bucket.scope = scope.to_string();
+        }
+        bucket.workflow_id = record.workflow_id.clone();
+        bucket.organization_id = record.organization_id.clone();
+        bucket.brand_id = record.brand_id.clone();
+        bucket.product_id = record.product_id.clone();
+        if bucket.node_ref.is_none() {
+            bucket.node_ref = record.node_ref.clone();
+        }
+        if bucket.addon_id.is_none() {
+            bucket.addon_id = record.addon_id.clone();
+        }
+        accumulate_event_improvement_bucket(bucket, record);
+    }
+
+    let mut recommendations = Vec::new();
+    for mut bucket in buckets.into_values() {
+        bucket.kinds.sort();
+        bucket.kinds.dedup();
+        if bucket.event_count < thresholds.min_event_count {
+            continue;
+        }
+        if scope == "node"
+            && (bucket.ai_signal_count > 0
+                || bucket.total_selected_context_bytes > 0
+                || bucket.total_duration_ms >= thresholds.min_total_duration_ms)
+            && bucket.total_duration_ms >= thresholds.min_total_duration_ms
+        {
+            recommendations.push(event_improvement_recommendation(
+                &bucket,
+                thresholds,
+                "deterministic_node_candidate",
+                "prefer_deterministic_node",
+                "Substituir trabalho repetitivo por command node, worker de Addon ou subworkflow determinístico quando a equivalência puder ser validada.",
+            ));
+        }
+        if bucket.total_retry_count >= thresholds.min_total_retry_count
+            && thresholds.min_total_retry_count > 0
+        {
+            recommendations.push(event_improvement_recommendation(
+                &bucket,
+                thresholds,
+                "retry_hotspot",
+                "add_validation_or_rework_gate",
+                "Adicionar validação/rework antes da execução ou revisar o contrato do node/Addon que está repetindo tentativas.",
+            ));
+        }
+        if bucket
+            .max_context_pressure_bps
+            .is_some_and(|pressure| pressure >= thresholds.min_context_pressure_bps)
+        {
+            recommendations.push(event_improvement_recommendation(
+                &bucket,
+                thresholds,
+                "context_pressure_hotspot",
+                "tighten_context_routing",
+                "Reduzir contexto enviado ao executor com shard mais específico, compressão, cache ou memória governada por busca explícita.",
+            ));
+        }
+        if bucket.total_wait_seconds >= thresholds.min_total_wait_seconds
+            && thresholds.min_total_wait_seconds > 0
+        {
+            recommendations.push(event_improvement_recommendation(
+                &bucket,
+                thresholds,
+                "wait_hotspot",
+                "supervise_wait_or_external_dependency",
+                "Mover espera recorrente para worker/schedule supervisionado e registrar recovery quando a dependência externa degradar.",
+            ));
+        }
+    }
+    recommendations
+}
+
+fn accumulate_event_improvement_bucket(
+    bucket: &mut EventImprovementPolicyBucket,
+    record: &EventObservabilityRecord,
+) {
+    bucket.event_count += 1;
+    if event_has_ai_signal(record) {
+        bucket.ai_signal_count += 1;
+    }
+    if let Some(duration_ms) = record.duration_ms {
+        bucket.total_duration_ms += duration_ms;
+    }
+    if let Some(retry_count) = record.retry_count {
+        bucket.total_retry_count += retry_count;
+    }
+    if let Some(wait_seconds) = record.wait_seconds {
+        bucket.total_wait_seconds += wait_seconds;
+    }
+    if let Some(selected_context_bytes) = record.selected_context_bytes {
+        bucket.total_selected_context_bytes += selected_context_bytes;
+    }
+    if let Some(context_pressure_bps) = record.context_pressure_bps {
+        max_i64_option(&mut bucket.max_context_pressure_bps, context_pressure_bps);
+    }
+    if bucket.first_event_sequence == 0 {
+        bucket.first_event_sequence = record.store_sequence;
+    } else {
+        bucket.first_event_sequence = bucket.first_event_sequence.min(record.store_sequence);
+    }
+    bucket.last_event_sequence = bucket.last_event_sequence.max(record.store_sequence);
+    bucket.kinds.push(record.kind.clone());
+}
+
+fn event_improvement_recommendation(
+    bucket: &EventImprovementPolicyBucket,
+    thresholds: &EventImprovementPolicyThresholds,
+    kind: &str,
+    recommended_policy: &str,
+    recommended_action: &str,
+) -> EventImprovementRecommendation {
+    let priority = event_improvement_priority(bucket, thresholds, kind);
+    let target = bucket
+        .node_ref
+        .as_deref()
+        .or(bucket.addon_id.as_deref())
+        .unwrap_or("_workflow");
+    EventImprovementRecommendation {
+        id: format!(
+            "event_policy:{}:{}:{}:{}",
+            kind, bucket.workflow_id, bucket.scope, target
+        ),
+        kind: kind.to_string(),
+        priority,
+        scope: bucket.scope.clone(),
+        workflow_id: bucket.workflow_id.clone(),
+        organization_id: bucket.organization_id.clone(),
+        brand_id: bucket.brand_id.clone(),
+        product_id: bucket.product_id.clone(),
+        node_ref: bucket.node_ref.clone(),
+        addon_id: bucket.addon_id.clone(),
+        event_count: bucket.event_count,
+        ai_signal_count: bucket.ai_signal_count,
+        total_duration_ms: bucket.total_duration_ms,
+        total_retry_count: bucket.total_retry_count,
+        total_wait_seconds: bucket.total_wait_seconds,
+        total_selected_context_bytes: bucket.total_selected_context_bytes,
+        max_context_pressure_bps: bucket.max_context_pressure_bps,
+        first_event_sequence: bucket.first_event_sequence,
+        last_event_sequence: bucket.last_event_sequence,
+        recommended_policy: recommended_policy.to_string(),
+        recommended_action: recommended_action.to_string(),
+        reason: event_improvement_reason(bucket, thresholds, kind),
+        suggested_commands: event_improvement_suggested_commands(bucket, recommended_policy),
+    }
+}
+
+fn event_improvement_priority(
+    bucket: &EventImprovementPolicyBucket,
+    thresholds: &EventImprovementPolicyThresholds,
+    kind: &str,
+) -> String {
+    let critical_context = bucket
+        .max_context_pressure_bps
+        .is_some_and(|pressure| pressure >= 9_500);
+    let high_retry = thresholds.min_total_retry_count > 0
+        && bucket.total_retry_count >= thresholds.min_total_retry_count.saturating_mul(2);
+    let high_duration = thresholds.min_total_duration_ms > 0
+        && bucket.total_duration_ms >= thresholds.min_total_duration_ms.saturating_mul(2);
+    let high_wait = thresholds.min_total_wait_seconds > 0
+        && bucket.total_wait_seconds >= thresholds.min_total_wait_seconds.saturating_mul(2);
+    if critical_context || high_retry || high_duration || high_wait {
+        "critical".to_string()
+    } else if matches!(
+        kind,
+        "retry_hotspot" | "context_pressure_hotspot" | "deterministic_node_candidate"
+    ) {
+        "high".to_string()
+    } else {
+        "medium".to_string()
+    }
+}
+
+fn event_improvement_priority_rank(priority: &str) -> usize {
+    match priority {
+        "critical" => 3,
+        "high" => 2,
+        "medium" => 1,
+        _ => 0,
+    }
+}
+
+fn event_improvement_reason(
+    bucket: &EventImprovementPolicyBucket,
+    thresholds: &EventImprovementPolicyThresholds,
+    kind: &str,
+) -> String {
+    let target = bucket
+        .node_ref
+        .as_deref()
+        .or(bucket.addon_id.as_deref())
+        .unwrap_or("_workflow");
+    match kind {
+        "deterministic_node_candidate" => format!(
+            "{target} teve {} eventos, {} ms acumulados e {} sinais de executor/IA; limite mínimo: {} eventos e {} ms.",
+            bucket.event_count,
+            bucket.total_duration_ms,
+            bucket.ai_signal_count,
+            thresholds.min_event_count,
+            thresholds.min_total_duration_ms
+        ),
+        "retry_hotspot" => format!(
+            "{target} acumulou {} retries; limite mínimo: {}.",
+            bucket.total_retry_count, thresholds.min_total_retry_count
+        ),
+        "context_pressure_hotspot" => format!(
+            "{target} atingiu pressão máxima de contexto de {} bps; limite mínimo: {} bps.",
+            bucket.max_context_pressure_bps.unwrap_or_default(),
+            thresholds.min_context_pressure_bps
+        ),
+        "wait_hotspot" => format!(
+            "{target} acumulou {} segundos de espera; limite mínimo: {} segundos.",
+            bucket.total_wait_seconds, thresholds.min_total_wait_seconds
+        ),
+        _ => format!("{target} excedeu uma política de melhoria baseada em eventos."),
+    }
+}
+
+fn event_improvement_suggested_commands(
+    bucket: &EventImprovementPolicyBucket,
+    recommended_policy: &str,
+) -> Vec<Vec<String>> {
+    let mut commands = vec![vec![
+        "forge".to_string(),
+        "events".to_string(),
+        "observability".to_string(),
+        "--workflow".to_string(),
+        bucket.workflow_id.clone(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]];
+    if let Some(node_ref) = bucket.node_ref.as_deref() {
+        commands[0].push("--node".to_string());
+        commands[0].push(node_ref.to_string());
+    }
+    if let Some(addon_id) = bucket.addon_id.as_deref() {
+        commands[0].push("--addon".to_string());
+        commands[0].push(addon_id.to_string());
+    }
+    if recommended_policy == "prefer_deterministic_node" {
+        if let Some(node_ref) = bucket.node_ref.as_deref() {
+            commands.push(vec![
+                "forge".to_string(),
+                "workflow".to_string(),
+                "update-node-brain".to_string(),
+                "--workflow".to_string(),
+                bucket.workflow_id.clone(),
+                "--task".to_string(),
+                node_ref.to_string(),
+                "--default-brain".to_string(),
+                "command".to_string(),
+                "--origin".to_string(),
+                "event_improvement_policy".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]);
+        }
+    }
+    commands
+}
+
+fn event_has_ai_signal(record: &EventObservabilityRecord) -> bool {
+    let haystack = [
+        record.kind.as_str(),
+        record.category.as_str(),
+        record.origin.as_str(),
+        record.source.as_str(),
+    ]
+    .join(" ")
+    .to_ascii_lowercase();
+    [
+        "ai", "codex", "opencode", "gemini", "claude", "executor", "llm",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle))
 }
 
 pub fn ingest_inbound_event(

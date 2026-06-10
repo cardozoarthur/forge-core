@@ -38,13 +38,14 @@ use forge_core::credential_vault::{
     run_records as run_credential_vault_records,
 };
 use forge_core::event::{
-    build_event_observability_history, build_event_observability_index, build_event_service_plan,
-    build_global_event_timeline, build_workflow_event_stream, emit_event_egress,
-    ingest_inbound_event, list_event_services, list_inbound_event_inbox,
-    recover_stale_event_services, route_inbound_event, run_event_runtime_daemon,
-    run_event_runtime_reconcile, run_event_service_supervisor, run_event_webhook_ingress_server,
-    run_event_webhook_ingress_service, run_event_worker_service, run_inbound_event_worker_loop,
-    scan_inbound_event_inbox, EventEgressEmitInput, InboundEventIngestInput,
+    build_event_improvement_policy, build_event_observability_history,
+    build_event_observability_index, build_event_service_plan, build_global_event_timeline,
+    build_workflow_event_stream, emit_event_egress, ingest_inbound_event, list_event_services,
+    list_inbound_event_inbox, recover_stale_event_services, route_inbound_event,
+    run_event_runtime_daemon, run_event_runtime_reconcile, run_event_service_supervisor,
+    run_event_webhook_ingress_server, run_event_webhook_ingress_service, run_event_worker_service,
+    run_inbound_event_worker_loop, scan_inbound_event_inbox, EventEgressEmitInput,
+    InboundEventIngestInput,
 };
 use forge_core::execution::run_simulated;
 use forge_core::executor::{
@@ -982,6 +983,36 @@ enum EventCommands {
         bucket: String,
         #[arg(long = "group-by", default_value = "none")]
         group_by: String,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long = "after-sequence")]
+        after_sequence: Option<i64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ImprovementPolicy {
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long)]
+        organization: Option<String>,
+        #[arg(long)]
+        brand: Option<String>,
+        #[arg(long)]
+        product: Option<String>,
+        #[arg(long)]
+        node: Option<String>,
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long = "min-events")]
+        min_events: Option<usize>,
+        #[arg(long = "min-duration-ms")]
+        min_duration_ms: Option<i64>,
+        #[arg(long = "min-retries")]
+        min_retries: Option<i64>,
+        #[arg(long = "min-context-pressure-bps")]
+        min_context_pressure_bps: Option<i64>,
+        #[arg(long = "min-wait-seconds")]
+        min_wait_seconds: Option<i64>,
         #[arg(long)]
         limit: Option<usize>,
         #[arg(long = "after-sequence")]
@@ -3160,6 +3191,42 @@ fn run() -> Result<i32> {
                     addon.as_deref(),
                     Some(bucket.as_str()),
                     Some(group_by.as_str()),
+                    limit,
+                    after_sequence,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            EventCommands::ImprovementPolicy {
+                workflow,
+                organization,
+                brand,
+                product,
+                node,
+                addon,
+                min_events,
+                min_duration_ms,
+                min_retries,
+                min_context_pressure_bps,
+                min_wait_seconds,
+                limit,
+                after_sequence,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_event_improvement_policy(
+                    &store,
+                    workflow.as_deref(),
+                    organization.as_deref(),
+                    brand.as_deref(),
+                    product.as_deref(),
+                    node.as_deref(),
+                    addon.as_deref(),
+                    min_events,
+                    min_duration_ms,
+                    min_retries,
+                    min_context_pressure_bps,
+                    min_wait_seconds,
                     limit,
                     after_sequence,
                 )?;
