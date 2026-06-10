@@ -2462,6 +2462,89 @@ fn event_envelopes_project_normalized_observability_metrics() {
         timeline_observed["observability"]["wait_state"],
         "waiting_for_partner"
     );
+
+    let observability_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "observability",
+            "--workflow",
+            workflow_id,
+            "--node",
+            "node-payment",
+            "--addon",
+            "forge.addon.payment",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let observability_json: Value = serde_json::from_slice(&observability_output).unwrap();
+    assert_eq!(
+        observability_json["schema_version"],
+        "forge.event_observability_index.v1"
+    );
+    assert_eq!(
+        observability_json["status"],
+        "event_observability_index_loaded"
+    );
+    assert_eq!(observability_json["summary"]["total_event_count"], 1);
+    assert_eq!(observability_json["summary"]["node_event_count"], 1);
+    assert_eq!(observability_json["summary"]["addon_event_count"], 1);
+    assert_eq!(observability_json["summary"]["total_duration_ms"], 245);
+    assert_eq!(observability_json["summary"]["total_retry_count"], 2);
+    assert_eq!(observability_json["summary"]["total_wait_seconds"], 30);
+    assert_eq!(observability_json["nodes"][0]["node_ref"], "node-payment");
+    assert_eq!(
+        observability_json["nodes"][0]["addon_id"],
+        "forge.addon.payment"
+    );
+    assert_eq!(
+        observability_json["addons"][0]["addon_id"],
+        "forge.addon.payment"
+    );
+    assert_eq!(
+        observability_json["events"][0]["wait_state"],
+        "waiting_for_partner"
+    );
+
+    let mcp_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "node_ref": "node-payment",
+        "addon_id": "forge.addon.payment",
+        "limit": 1
+    });
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.events.observability",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.event_observability_index.v1"
+    );
+    assert_eq!(mcp_json["result"]["event_count"], 1);
+    assert_eq!(
+        mcp_json["result"]["events"][0]["store_sequence"],
+        observability_json["events"][0]["store_sequence"]
+    );
 }
 
 #[test]

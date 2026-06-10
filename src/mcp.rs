@@ -28,12 +28,12 @@ use crate::credential_vault::{
     CREDENTIAL_VAULT_COMMAND_SCHEMA,
 };
 use crate::event::{
-    build_event_service_plan, build_global_event_timeline, build_workflow_event_stream,
-    emit_event_egress, ingest_inbound_event, list_event_services, list_inbound_event_inbox,
-    recover_stale_event_services, route_inbound_event, run_event_runtime_daemon,
-    run_event_runtime_reconcile, run_event_service_supervisor, run_event_webhook_ingress_service,
-    run_event_worker_service, run_inbound_event_worker_loop, scan_inbound_event_inbox,
-    EventEgressEmitInput, InboundEventIngestInput,
+    build_event_observability_index, build_event_service_plan, build_global_event_timeline,
+    build_workflow_event_stream, emit_event_egress, ingest_inbound_event, list_event_services,
+    list_inbound_event_inbox, recover_stale_event_services, route_inbound_event,
+    run_event_runtime_daemon, run_event_runtime_reconcile, run_event_service_supervisor,
+    run_event_webhook_ingress_service, run_event_worker_service, run_inbound_event_worker_loop,
+    scan_inbound_event_inbox, EventEgressEmitInput, InboundEventIngestInput,
 };
 use crate::executor::load_executors;
 use crate::handoff::build_task_handoff;
@@ -586,6 +586,24 @@ struct EventTimelineInput {
     brand_id: Option<String>,
     product: Option<String>,
     product_id: Option<String>,
+    limit: Option<usize>,
+    after_sequence: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventObservabilityInput {
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    organization: Option<String>,
+    organization_id: Option<String>,
+    brand: Option<String>,
+    brand_id: Option<String>,
+    product: Option<String>,
+    product_id: Option<String>,
+    node: Option<String>,
+    node_ref: Option<String>,
+    addon: Option<String>,
+    addon_id: Option<String>,
     limit: Option<usize>,
     after_sequence: Option<i64>,
 }
@@ -1352,6 +1370,31 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ),
                 "forge.event_timeline.v1",
                 &["forge", "events", "timeline", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.events.observability",
+                "List Event Observability Index",
+                "Return a normalized event observability index grouped by tenant, workflow, node and Addon, with duration, retry and wait metrics.",
+                object_schema(
+                    &[
+                        ("workflow_id", "string", "optional workflow id filter"),
+                        ("organization_id", "string", "optional organization filter"),
+                        ("brand_id", "string", "optional brand filter"),
+                        ("product_id", "string", "optional product filter"),
+                        ("node_ref", "string", "optional node/task reference filter"),
+                        ("addon_id", "string", "optional Addon id filter"),
+                        ("limit", "integer", "optional latest event limit"),
+                        (
+                            "after_sequence",
+                            "integer",
+                            "optional cursor; returns records with store_sequence greater than this value",
+                        ),
+                    ],
+                    &[],
+                ),
+                "forge.event_observability_index.v1",
+                &["forge", "events", "observability", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -4428,6 +4471,26 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 organization_id.as_deref(),
                 brand_id.as_deref(),
                 product_id.as_deref(),
+                input.limit,
+                input.after_sequence,
+            )?)?
+        }
+        "forge.events.observability" => {
+            let input: EventObservabilityInput = parse_input(input)?;
+            let workflow_id = input.workflow_id.or(input.workflow);
+            let organization_id = input.organization_id.or(input.organization);
+            let brand_id = input.brand_id.or(input.brand);
+            let product_id = input.product_id.or(input.product);
+            let node_ref = input.node_ref.or(input.node);
+            let addon_id = input.addon_id.or(input.addon);
+            serde_json::to_value(build_event_observability_index(
+                store,
+                workflow_id.as_deref(),
+                organization_id.as_deref(),
+                brand_id.as_deref(),
+                product_id.as_deref(),
+                node_ref.as_deref(),
+                addon_id.as_deref(),
                 input.limit,
                 input.after_sequence,
             )?)?

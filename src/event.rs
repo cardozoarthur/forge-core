@@ -50,6 +50,7 @@ use uuid::Uuid;
 pub const EVENT_STREAM_SCHEMA_VERSION: &str = "forge.event_stream.v1";
 pub const EVENT_ENVELOPE_SCHEMA_VERSION: &str = "forge.event_envelope.v1";
 pub const EVENT_TIMELINE_SCHEMA_VERSION: &str = "forge.event_timeline.v1";
+pub const EVENT_OBSERVABILITY_INDEX_SCHEMA_VERSION: &str = "forge.event_observability_index.v1";
 pub const EVENT_INBOX_SCHEMA_VERSION: &str = "forge.event_inbox.v1";
 pub const EVENT_INGEST_SCHEMA_VERSION: &str = "forge.event_ingest.v1";
 pub const EVENT_ROUTE_SCHEMA_VERSION: &str = "forge.event_route.v1";
@@ -121,6 +122,137 @@ pub struct EventTimelinePage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<i64>,
     pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventObservabilityIndexReport {
+    pub schema_version: String,
+    pub status: String,
+    pub filters: EventObservabilityIndexFilters,
+    pub page: EventTimelinePage,
+    pub summary: EventObservabilitySummary,
+    pub tenants: Vec<EventObservabilityTenantSummary>,
+    pub workflows: Vec<EventObservabilityWorkflowSummary>,
+    pub nodes: Vec<EventObservabilityNodeSummary>,
+    pub addons: Vec<EventObservabilityAddonSummary>,
+    pub event_count: usize,
+    pub events: Vec<EventObservabilityRecord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventObservabilityIndexFilters {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brand_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_sequence: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct EventObservabilitySummary {
+    pub total_event_count: usize,
+    pub node_event_count: usize,
+    pub addon_event_count: usize,
+    pub duration_event_count: usize,
+    pub total_duration_ms: i64,
+    pub retry_event_count: usize,
+    pub total_retry_count: i64,
+    pub wait_event_count: usize,
+    pub total_wait_seconds: i64,
+    pub severity_counts: Vec<EventObservabilityCount>,
+    pub category_counts: Vec<EventObservabilityCount>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventObservabilityCount {
+    pub id: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventObservabilityTenantSummary {
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    pub event_count: usize,
+    pub workflow_count: usize,
+    pub node_count: usize,
+    pub addon_count: usize,
+    pub total_duration_ms: i64,
+    pub total_retry_count: i64,
+    pub total_wait_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventObservabilityWorkflowSummary {
+    pub workflow_id: String,
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    pub event_count: usize,
+    pub node_count: usize,
+    pub addon_count: usize,
+    pub total_duration_ms: i64,
+    pub total_retry_count: i64,
+    pub total_wait_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventObservabilityNodeSummary {
+    pub workflow_id: String,
+    pub node_ref: String,
+    pub addon_id: Option<String>,
+    pub event_count: usize,
+    pub kinds: Vec<String>,
+    pub total_duration_ms: i64,
+    pub total_retry_count: i64,
+    pub total_wait_seconds: i64,
+    pub last_event_sequence: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventObservabilityAddonSummary {
+    pub addon_id: String,
+    pub event_count: usize,
+    pub workflow_count: usize,
+    pub node_count: usize,
+    pub total_duration_ms: i64,
+    pub total_retry_count: i64,
+    pub total_wait_seconds: i64,
+    pub last_event_sequence: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventObservabilityRecord {
+    pub event_id: String,
+    pub store_sequence: i64,
+    pub workflow_id: String,
+    pub kind: String,
+    pub category: String,
+    pub severity: String,
+    pub origin: String,
+    pub source: String,
+    pub occurred_at: String,
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    pub node_ref: Option<String>,
+    pub addon_id: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub retry_count: Option<i64>,
+    pub wait_state: Option<String>,
+    pub wait_seconds: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -904,6 +1036,314 @@ pub fn build_global_event_timeline(
         event_count: events.len(),
         events,
     })
+}
+
+pub fn build_event_observability_index(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    node_ref: Option<&str>,
+    addon_id: Option<&str>,
+    limit: Option<usize>,
+    after_sequence: Option<i64>,
+) -> Result<EventObservabilityIndexReport> {
+    let timeline = build_global_event_timeline(
+        store,
+        workflow_id,
+        organization_id,
+        brand_id,
+        product_id,
+        None,
+        None,
+    )?;
+    let mut records = timeline
+        .events
+        .into_iter()
+        .filter(|event| filter_matches_optional(node_ref, event.observability.node_ref.as_deref()))
+        .filter(|event| filter_matches_optional(addon_id, event.observability.addon_id.as_deref()))
+        .map(event_observability_record)
+        .collect::<Vec<_>>();
+    records.sort_by_key(|event| event.store_sequence);
+    let summary = summarize_event_observability(&records);
+    let tenants = summarize_event_observability_tenants(&records);
+    let workflows = summarize_event_observability_workflows(&records);
+    let nodes = summarize_event_observability_nodes(&records);
+    let addons = summarize_event_observability_addons(&records);
+    let (events, page) = select_observability_page(records, limit, after_sequence);
+    Ok(EventObservabilityIndexReport {
+        schema_version: EVENT_OBSERVABILITY_INDEX_SCHEMA_VERSION.to_string(),
+        status: "event_observability_index_loaded".to_string(),
+        filters: EventObservabilityIndexFilters {
+            workflow_id: normalize_text(workflow_id),
+            organization_id: normalize_text(organization_id),
+            brand_id: normalize_text(brand_id),
+            product_id: normalize_text(product_id),
+            node_ref: normalize_text(node_ref),
+            addon_id: normalize_text(addon_id),
+            limit,
+            after_sequence,
+        },
+        page,
+        summary,
+        tenants,
+        workflows,
+        nodes,
+        addons,
+        event_count: events.len(),
+        events,
+    })
+}
+
+fn event_observability_record(event: WorkflowEventEnvelope) -> EventObservabilityRecord {
+    EventObservabilityRecord {
+        event_id: event.event_id,
+        store_sequence: event.store_sequence,
+        workflow_id: event.workflow_id,
+        kind: event.kind,
+        category: event.category,
+        severity: event.severity,
+        origin: event.origin,
+        source: event.source,
+        occurred_at: event.occurred_at,
+        organization_id: event.tenant_context.organization.id,
+        brand_id: event.tenant_context.brand.id,
+        product_id: event.tenant_context.product.id,
+        node_ref: event.observability.node_ref,
+        addon_id: event.observability.addon_id,
+        duration_ms: event.observability.duration_ms,
+        retry_count: event.observability.retry_count,
+        wait_state: event.observability.wait_state,
+        wait_seconds: event.observability.wait_seconds,
+    }
+}
+
+fn summarize_event_observability(
+    records: &[EventObservabilityRecord],
+) -> EventObservabilitySummary {
+    let mut severity_counts = BTreeMap::new();
+    let mut category_counts = BTreeMap::new();
+    let mut summary = EventObservabilitySummary {
+        total_event_count: records.len(),
+        ..Default::default()
+    };
+    for record in records {
+        if record.node_ref.is_some() {
+            summary.node_event_count += 1;
+        }
+        if record.addon_id.is_some() {
+            summary.addon_event_count += 1;
+        }
+        if let Some(duration_ms) = record.duration_ms {
+            summary.duration_event_count += 1;
+            summary.total_duration_ms += duration_ms;
+        }
+        if let Some(retry_count) = record.retry_count {
+            summary.retry_event_count += 1;
+            summary.total_retry_count += retry_count;
+        }
+        if record.wait_state.is_some() || record.wait_seconds.is_some() {
+            summary.wait_event_count += 1;
+        }
+        if let Some(wait_seconds) = record.wait_seconds {
+            summary.total_wait_seconds += wait_seconds;
+        }
+        *severity_counts.entry(record.severity.clone()).or_insert(0) += 1;
+        *category_counts.entry(record.category.clone()).or_insert(0) += 1;
+    }
+    summary.severity_counts = count_entries(severity_counts);
+    summary.category_counts = count_entries(category_counts);
+    summary
+}
+
+#[derive(Default)]
+struct EventObservabilityBucket {
+    event_count: usize,
+    workflows: Vec<String>,
+    nodes: Vec<String>,
+    addons: Vec<String>,
+    total_duration_ms: i64,
+    total_retry_count: i64,
+    total_wait_seconds: i64,
+    kinds: Vec<String>,
+    last_event_sequence: i64,
+    organization_id: String,
+    brand_id: String,
+    product_id: String,
+    workflow_id: String,
+    node_ref: String,
+    addon_id: Option<String>,
+}
+
+fn summarize_event_observability_tenants(
+    records: &[EventObservabilityRecord],
+) -> Vec<EventObservabilityTenantSummary> {
+    let mut buckets: BTreeMap<String, EventObservabilityBucket> = BTreeMap::new();
+    for record in records {
+        let key = format!(
+            "{}|{}|{}",
+            record.organization_id, record.brand_id, record.product_id
+        );
+        let bucket = buckets.entry(key).or_default();
+        bucket.organization_id = record.organization_id.clone();
+        bucket.brand_id = record.brand_id.clone();
+        bucket.product_id = record.product_id.clone();
+        accumulate_observability_bucket(bucket, record);
+    }
+    buckets
+        .into_values()
+        .map(|mut bucket| {
+            bucket.workflows.sort();
+            bucket.workflows.dedup();
+            bucket.nodes.sort();
+            bucket.nodes.dedup();
+            bucket.addons.sort();
+            bucket.addons.dedup();
+            EventObservabilityTenantSummary {
+                organization_id: bucket.organization_id,
+                brand_id: bucket.brand_id,
+                product_id: bucket.product_id,
+                event_count: bucket.event_count,
+                workflow_count: bucket.workflows.len(),
+                node_count: bucket.nodes.len(),
+                addon_count: bucket.addons.len(),
+                total_duration_ms: bucket.total_duration_ms,
+                total_retry_count: bucket.total_retry_count,
+                total_wait_seconds: bucket.total_wait_seconds,
+            }
+        })
+        .collect()
+}
+
+fn summarize_event_observability_workflows(
+    records: &[EventObservabilityRecord],
+) -> Vec<EventObservabilityWorkflowSummary> {
+    let mut buckets: BTreeMap<String, EventObservabilityBucket> = BTreeMap::new();
+    for record in records {
+        let bucket = buckets.entry(record.workflow_id.clone()).or_default();
+        bucket.workflow_id = record.workflow_id.clone();
+        bucket.organization_id = record.organization_id.clone();
+        bucket.brand_id = record.brand_id.clone();
+        bucket.product_id = record.product_id.clone();
+        accumulate_observability_bucket(bucket, record);
+    }
+    buckets
+        .into_values()
+        .map(|mut bucket| {
+            bucket.nodes.sort();
+            bucket.nodes.dedup();
+            bucket.addons.sort();
+            bucket.addons.dedup();
+            EventObservabilityWorkflowSummary {
+                workflow_id: bucket.workflow_id,
+                organization_id: bucket.organization_id,
+                brand_id: bucket.brand_id,
+                product_id: bucket.product_id,
+                event_count: bucket.event_count,
+                node_count: bucket.nodes.len(),
+                addon_count: bucket.addons.len(),
+                total_duration_ms: bucket.total_duration_ms,
+                total_retry_count: bucket.total_retry_count,
+                total_wait_seconds: bucket.total_wait_seconds,
+            }
+        })
+        .collect()
+}
+
+fn summarize_event_observability_nodes(
+    records: &[EventObservabilityRecord],
+) -> Vec<EventObservabilityNodeSummary> {
+    let mut buckets: BTreeMap<String, EventObservabilityBucket> = BTreeMap::new();
+    for record in records {
+        let Some(node_ref) = record.node_ref.as_deref() else {
+            continue;
+        };
+        let key = format!("{}|{}", record.workflow_id, node_ref);
+        let bucket = buckets.entry(key).or_default();
+        bucket.workflow_id = record.workflow_id.clone();
+        bucket.node_ref = node_ref.to_string();
+        if bucket.addon_id.is_none() {
+            bucket.addon_id = record.addon_id.clone();
+        }
+        accumulate_observability_bucket(bucket, record);
+    }
+    buckets
+        .into_values()
+        .map(|mut bucket| {
+            bucket.kinds.sort();
+            bucket.kinds.dedup();
+            EventObservabilityNodeSummary {
+                workflow_id: bucket.workflow_id,
+                node_ref: bucket.node_ref,
+                addon_id: bucket.addon_id,
+                event_count: bucket.event_count,
+                kinds: bucket.kinds,
+                total_duration_ms: bucket.total_duration_ms,
+                total_retry_count: bucket.total_retry_count,
+                total_wait_seconds: bucket.total_wait_seconds,
+                last_event_sequence: bucket.last_event_sequence,
+            }
+        })
+        .collect()
+}
+
+fn summarize_event_observability_addons(
+    records: &[EventObservabilityRecord],
+) -> Vec<EventObservabilityAddonSummary> {
+    let mut buckets: BTreeMap<String, EventObservabilityBucket> = BTreeMap::new();
+    for record in records {
+        let Some(addon_id) = record.addon_id.as_deref() else {
+            continue;
+        };
+        let bucket = buckets.entry(addon_id.to_string()).or_default();
+        bucket.addon_id = Some(addon_id.to_string());
+        accumulate_observability_bucket(bucket, record);
+    }
+    buckets
+        .into_values()
+        .map(|mut bucket| {
+            bucket.workflows.sort();
+            bucket.workflows.dedup();
+            bucket.nodes.sort();
+            bucket.nodes.dedup();
+            EventObservabilityAddonSummary {
+                addon_id: bucket.addon_id.unwrap_or_default(),
+                event_count: bucket.event_count,
+                workflow_count: bucket.workflows.len(),
+                node_count: bucket.nodes.len(),
+                total_duration_ms: bucket.total_duration_ms,
+                total_retry_count: bucket.total_retry_count,
+                total_wait_seconds: bucket.total_wait_seconds,
+                last_event_sequence: bucket.last_event_sequence,
+            }
+        })
+        .collect()
+}
+
+fn accumulate_observability_bucket(
+    bucket: &mut EventObservabilityBucket,
+    record: &EventObservabilityRecord,
+) {
+    bucket.event_count += 1;
+    bucket.workflows.push(record.workflow_id.clone());
+    if let Some(node_ref) = &record.node_ref {
+        bucket.nodes.push(node_ref.clone());
+    }
+    if let Some(addon_id) = &record.addon_id {
+        bucket.addons.push(addon_id.clone());
+    }
+    if let Some(duration_ms) = record.duration_ms {
+        bucket.total_duration_ms += duration_ms;
+    }
+    if let Some(retry_count) = record.retry_count {
+        bucket.total_retry_count += retry_count;
+    }
+    if let Some(wait_seconds) = record.wait_seconds {
+        bucket.total_wait_seconds += wait_seconds;
+    }
+    bucket.kinds.push(record.kind.clone());
+    bucket.last_event_sequence = bucket.last_event_sequence.max(record.store_sequence);
 }
 
 pub fn ingest_inbound_event(
@@ -4914,6 +5354,54 @@ fn select_timeline_page(
             has_more,
         },
     )
+}
+
+fn select_observability_page(
+    events: Vec<EventObservabilityRecord>,
+    limit: Option<usize>,
+    after_sequence: Option<i64>,
+) -> (Vec<EventObservabilityRecord>, EventTimelinePage) {
+    let normalized_limit = limit.filter(|limit| *limit > 0);
+    let mut has_more = false;
+    let selected = if let Some(after_sequence) = after_sequence {
+        let filtered = events
+            .into_iter()
+            .filter(|event| event.store_sequence > after_sequence)
+            .collect::<Vec<_>>();
+        match normalized_limit {
+            Some(limit) => {
+                has_more = filtered.len() > limit;
+                filtered.into_iter().take(limit).collect::<Vec<_>>()
+            }
+            None => filtered,
+        }
+    } else {
+        if let Some(limit) = normalized_limit {
+            has_more = events.len() > limit;
+            let start = events.len().saturating_sub(limit);
+            events.into_iter().skip(start).collect::<Vec<_>>()
+        } else {
+            events
+        }
+    };
+    let next_cursor = selected.last().map(|event| event.store_sequence);
+    (
+        selected,
+        EventTimelinePage {
+            schema_version: "forge.event_timeline.page.v1".to_string(),
+            after_sequence,
+            limit: normalized_limit,
+            next_cursor,
+            has_more,
+        },
+    )
+}
+
+fn count_entries(counts: BTreeMap<String, usize>) -> Vec<EventObservabilityCount> {
+    counts
+        .into_iter()
+        .map(|(id, count)| EventObservabilityCount { id, count })
+        .collect()
 }
 
 fn workflow_matches_tenant(
