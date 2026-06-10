@@ -31,7 +31,7 @@ use forge_core::cluster::{
     place_task_on_cluster, register_cluster_node, ClusterNodeInput,
 };
 use forge_core::context::build_context_package_with_checkpoint;
-use forge_core::cost::build_cost_ledger;
+use forge_core::cost::{build_cost_ledger, materialize_cost_ledger_index};
 use forge_core::credential_vault::{
     run_describe as run_credential_vault_describe, run_exec as run_credential_vault_exec,
     run_key_init as run_credential_vault_key_init, run_panel as run_credential_vault_panel,
@@ -348,6 +348,24 @@ enum CostCommands {
         brand: Option<String>,
         #[arg(long)]
         product: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Materialize {
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long)]
+        organization: Option<String>,
+        #[arg(long)]
+        brand: Option<String>,
+        #[arg(long)]
+        product: Option<String>,
+        #[arg(long = "source-kind")]
+        source_kind: Option<String>,
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -4776,6 +4794,30 @@ fn run() -> Result<i32> {
                     organization.as_deref(),
                     brand.as_deref(),
                     product.as_deref(),
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            CostCommands::Materialize {
+                workflow,
+                organization,
+                brand,
+                product,
+                source_kind,
+                addon,
+                limit,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = materialize_cost_ledger_index(
+                    &store,
+                    workflow.as_deref(),
+                    organization.as_deref(),
+                    brand.as_deref(),
+                    product.as_deref(),
+                    source_kind.as_deref(),
+                    addon.as_deref(),
+                    limit,
                 )?;
                 print_response(output, &report)?;
                 Ok(0)

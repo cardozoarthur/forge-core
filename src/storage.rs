@@ -79,6 +79,50 @@ pub struct StoredEventObservabilityRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct CostLedgerIndexWrite {
+    pub row_key: String,
+    pub source_kind: String,
+    pub workflow_id: String,
+    pub task_id: Option<String>,
+    pub event_id: Option<i64>,
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    pub addon_id: Option<String>,
+    pub executor: Option<String>,
+    pub model_call_required: bool,
+    pub model_call_avoided: bool,
+    pub estimated_task_cost_usd: f64,
+    pub observed_event_cost_usd: f64,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredCostLedgerIndexRecord {
+    pub row_key: String,
+    pub source_kind: String,
+    pub workflow_id: String,
+    pub task_id: Option<String>,
+    pub event_id: Option<i64>,
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    pub addon_id: Option<String>,
+    pub executor: Option<String>,
+    pub model_call_required: bool,
+    pub model_call_avoided: bool,
+    pub estimated_task_cost_usd: f64,
+    pub observed_event_cost_usd: f64,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub data: serde_json::Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct InboundEventRecord {
     pub id: String,
     pub origin: String,
@@ -492,6 +536,33 @@ impl ForgeStore {
                 ON event_observability_index (node_ref, global_event_id);
             CREATE INDEX IF NOT EXISTS idx_event_observability_addon
                 ON event_observability_index (addon_id, global_event_id);
+            CREATE TABLE IF NOT EXISTS cost_ledger_index (
+                row_key TEXT PRIMARY KEY,
+                source_kind TEXT NOT NULL,
+                workflow_id TEXT NOT NULL,
+                task_id TEXT,
+                event_id INTEGER,
+                organization_id TEXT NOT NULL,
+                brand_id TEXT NOT NULL,
+                product_id TEXT NOT NULL,
+                addon_id TEXT,
+                executor TEXT,
+                model_call_required INTEGER NOT NULL,
+                model_call_avoided INTEGER NOT NULL,
+                estimated_task_cost_usd REAL NOT NULL,
+                observed_event_cost_usd REAL NOT NULL,
+                tokens_in INTEGER NOT NULL,
+                tokens_out INTEGER NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_cost_ledger_workflow
+                ON cost_ledger_index (workflow_id, source_kind);
+            CREATE INDEX IF NOT EXISTS idx_cost_ledger_tenant
+                ON cost_ledger_index (organization_id, brand_id, product_id, source_kind);
+            CREATE INDEX IF NOT EXISTS idx_cost_ledger_addon
+                ON cost_ledger_index (addon_id, source_kind);
             CREATE TABLE IF NOT EXISTS event_inbox (
                 id TEXT PRIMARY KEY,
                 origin TEXT NOT NULL,
@@ -1459,6 +1530,138 @@ impl ForgeStore {
                 addon_filter
             ],
             stored_event_observability_from_row,
+        )?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
+    pub fn replace_cost_ledger_index_records(
+        &self,
+        workflow_ids: &[String],
+        records: &[CostLedgerIndexWrite],
+    ) -> Result<usize> {
+        for workflow_id in workflow_ids {
+            self.connection.execute(
+                "DELETE FROM cost_ledger_index WHERE workflow_id = ?1",
+                params![workflow_id],
+            )?;
+        }
+        for record in records {
+            self.connection.execute(
+                r#"
+                INSERT INTO cost_ledger_index (
+                    row_key,
+                    source_kind,
+                    workflow_id,
+                    task_id,
+                    event_id,
+                    organization_id,
+                    brand_id,
+                    product_id,
+                    addon_id,
+                    executor,
+                    model_call_required,
+                    model_call_avoided,
+                    estimated_task_cost_usd,
+                    observed_event_cost_usd,
+                    tokens_in,
+                    tokens_out,
+                    data_json,
+                    updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, CURRENT_TIMESTAMP)
+                ON CONFLICT(row_key) DO UPDATE SET
+                    source_kind=excluded.source_kind,
+                    workflow_id=excluded.workflow_id,
+                    task_id=excluded.task_id,
+                    event_id=excluded.event_id,
+                    organization_id=excluded.organization_id,
+                    brand_id=excluded.brand_id,
+                    product_id=excluded.product_id,
+                    addon_id=excluded.addon_id,
+                    executor=excluded.executor,
+                    model_call_required=excluded.model_call_required,
+                    model_call_avoided=excluded.model_call_avoided,
+                    estimated_task_cost_usd=excluded.estimated_task_cost_usd,
+                    observed_event_cost_usd=excluded.observed_event_cost_usd,
+                    tokens_in=excluded.tokens_in,
+                    tokens_out=excluded.tokens_out,
+                    data_json=excluded.data_json,
+                    updated_at=CURRENT_TIMESTAMP
+                "#,
+                params![
+                    record.row_key,
+                    record.source_kind,
+                    record.workflow_id,
+                    record.task_id,
+                    record.event_id,
+                    record.organization_id,
+                    record.brand_id,
+                    record.product_id,
+                    record.addon_id,
+                    record.executor,
+                    record.model_call_required,
+                    record.model_call_avoided,
+                    record.estimated_task_cost_usd,
+                    record.observed_event_cost_usd,
+                    record.tokens_in,
+                    record.tokens_out,
+                    serde_json::to_string(&record.data)?,
+                ],
+            )?;
+        }
+        Ok(records.len())
+    }
+
+    pub fn load_cost_ledger_index(
+        &self,
+        workflow_id: Option<&str>,
+        organization_id: Option<&str>,
+        brand_id: Option<&str>,
+        product_id: Option<&str>,
+        source_kind: Option<&str>,
+        addon_id: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<StoredCostLedgerIndexRecord>> {
+        let workflow_filter = normalize_optional_filter(workflow_id);
+        let organization_filter = normalize_optional_filter(organization_id);
+        let brand_filter = normalize_optional_filter(brand_id);
+        let product_filter = normalize_optional_filter(product_id);
+        let source_kind_filter = normalize_optional_filter(source_kind);
+        let addon_filter = normalize_optional_filter(addon_id);
+        let limit = limit.filter(|limit| *limit > 0).unwrap_or(500);
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT row_key, source_kind, workflow_id, task_id, event_id,
+                   organization_id, brand_id, product_id, addon_id, executor,
+                   model_call_required, model_call_avoided,
+                   estimated_task_cost_usd, observed_event_cost_usd,
+                   tokens_in, tokens_out, data_json, created_at, updated_at
+            FROM cost_ledger_index
+            WHERE (?1 IS NULL OR workflow_id = ?1)
+              AND (?2 IS NULL OR organization_id = ?2)
+              AND (?3 IS NULL OR brand_id = ?3)
+              AND (?4 IS NULL OR product_id = ?4)
+              AND (?5 IS NULL OR source_kind = ?5)
+              AND (?6 IS NULL OR addon_id = ?6)
+            ORDER BY updated_at DESC, row_key ASC
+            LIMIT ?7
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![
+                workflow_filter,
+                organization_filter,
+                brand_filter,
+                product_filter,
+                source_kind_filter,
+                addon_filter,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            stored_cost_ledger_index_from_row,
         )?;
         let mut records = Vec::new();
         for row in rows {
@@ -3919,6 +4122,39 @@ fn stored_event_observability_from_row(
             )
         })?,
         created_at: row.get(24)?,
+    })
+}
+
+fn stored_cost_ledger_index_from_row(
+    row: &Row<'_>,
+) -> rusqlite::Result<StoredCostLedgerIndexRecord> {
+    let data_json = row.get::<_, String>(16)?;
+    Ok(StoredCostLedgerIndexRecord {
+        row_key: row.get(0)?,
+        source_kind: row.get(1)?,
+        workflow_id: row.get(2)?,
+        task_id: row.get(3)?,
+        event_id: row.get(4)?,
+        organization_id: row.get(5)?,
+        brand_id: row.get(6)?,
+        product_id: row.get(7)?,
+        addon_id: row.get(8)?,
+        executor: row.get(9)?,
+        model_call_required: row.get(10)?,
+        model_call_avoided: row.get(11)?,
+        estimated_task_cost_usd: row.get(12)?,
+        observed_event_cost_usd: row.get(13)?,
+        tokens_in: row.get(14)?,
+        tokens_out: row.get(15)?,
+        data: serde_json::from_str(&data_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                16,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        created_at: row.get(17)?,
+        updated_at: row.get(18)?,
     })
 }
 

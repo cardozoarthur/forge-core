@@ -18232,6 +18232,84 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
         0.12
     );
 
+    let materialized_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "materialize",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let materialized: Value = serde_json::from_slice(&materialized_output).unwrap();
+    assert_eq!(materialized["schema_version"], "forge.cost_ledger_index.v1");
+    assert_eq!(materialized["status"], "cost_ledger_index_materialized");
+    let expected_planned_rows = status_json["tasks"].as_array().unwrap().len() as u64;
+    let expected_total_rows = expected_planned_rows + 1;
+    assert_eq!(materialized["materialized_row_count"], expected_total_rows);
+    assert_eq!(materialized["row_count"], expected_total_rows);
+    assert_eq!(
+        materialized["summary"]["planned_task_row_count"],
+        expected_planned_rows
+    );
+    assert_eq!(materialized["summary"]["observed_event_row_count"], 1);
+    assert_eq!(
+        materialized["summary"]["observed_event_cost_total_usd"],
+        0.12
+    );
+    assert_eq!(materialized["summary"]["observed_tokens_in_total"], 1200);
+    assert!(materialized["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| { row["source_kind"] == "planned_task" && row["workflow_id"] == workflow_id }));
+    assert!(materialized["rows"].as_array().unwrap().iter().any(|row| {
+        row["source_kind"] == "observed_event"
+            && row["event_id"] == promoted_event.id
+            && row["tokens_out"] == 220
+    }));
+
+    let mcp_materialize_input =
+        format!(r#"{{"workflow_id":"{workflow_id}","source_kind":"observed_event","limit":10}}"#);
+    let mcp_materialize_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.cost.materialize",
+            "--input",
+            &mcp_materialize_input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_materialized: Value = serde_json::from_slice(&mcp_materialize_output).unwrap();
+    assert_eq!(
+        mcp_materialized["result"]["schema_version"],
+        "forge.cost_ledger_index.v1"
+    );
+    assert_eq!(
+        mcp_materialized["result"]["materialized_row_count"],
+        expected_total_rows
+    );
+    assert_eq!(mcp_materialized["result"]["row_count"], 1);
+    assert_eq!(
+        mcp_materialized["result"]["rows"][0]["source_kind"],
+        "observed_event"
+    );
+
     let timeline_output = forge()
         .args([
             "--store",

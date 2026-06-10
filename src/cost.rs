@@ -1,10 +1,12 @@
 use crate::graph::{AtomicTask, ExecutorKind, Workflow};
-use crate::storage::{ForgeStore, StoreEvent};
+use crate::storage::{CostLedgerIndexWrite, ForgeStore, StoreEvent, StoredCostLedgerIndexRecord};
 use anyhow::Result;
 use serde::Serialize;
+use serde_json::json;
 use std::collections::BTreeMap;
 
 pub const COST_LEDGER_SCHEMA_VERSION: &str = "forge.cost_ledger.v1";
+pub const COST_LEDGER_INDEX_SCHEMA_VERSION: &str = "forge.cost_ledger_index.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CostLedgerReport {
@@ -114,6 +116,74 @@ pub struct CostLedgerObservedEvent {
     pub tokens_out: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CostLedgerIndexReport {
+    pub schema_version: String,
+    pub status: String,
+    pub filters: CostLedgerIndexFilters,
+    pub summary: CostLedgerIndexSummary,
+    pub materialized_row_count: usize,
+    pub row_count: usize,
+    pub rows: Vec<CostLedgerIndexRow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CostLedgerIndexFilters {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brand_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CostLedgerIndexSummary {
+    pub total_row_count: usize,
+    pub planned_task_row_count: usize,
+    pub observed_event_row_count: usize,
+    pub workflow_count: usize,
+    pub estimated_task_cost_total_usd: f64,
+    pub observed_event_cost_total_usd: f64,
+    pub observed_tokens_in_total: i64,
+    pub observed_tokens_out_total: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CostLedgerIndexRow {
+    pub row_key: String,
+    pub source_kind: String,
+    pub workflow_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<i64>,
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executor: Option<String>,
+    pub model_call_required: bool,
+    pub model_call_avoided: bool,
+    pub estimated_task_cost_usd: f64,
+    pub observed_event_cost_usd: f64,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub data: serde_json::Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Default)]
 struct SummaryBucket {
     workflow_ids: Vec<String>,
@@ -159,6 +229,196 @@ pub fn build_cost_ledger(
         addons,
         workflows: ledger_workflows,
     })
+}
+
+pub fn materialize_cost_ledger_index(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    source_kind: Option<&str>,
+    addon_id: Option<&str>,
+    limit: Option<usize>,
+) -> Result<CostLedgerIndexReport> {
+    let ledger = build_cost_ledger(store, workflow_id, organization_id, brand_id, product_id)?;
+    let workflow_ids = ledger
+        .workflows
+        .iter()
+        .map(|workflow| workflow.workflow_id.clone())
+        .collect::<Vec<_>>();
+    let writes = cost_ledger_index_writes(&ledger);
+    let materialized_row_count = store.replace_cost_ledger_index_records(&workflow_ids, &writes)?;
+    let records = store.load_cost_ledger_index(
+        workflow_id,
+        organization_id,
+        brand_id,
+        product_id,
+        source_kind,
+        addon_id,
+        limit,
+    )?;
+    Ok(cost_ledger_index_report_from_records(
+        "cost_ledger_index_materialized",
+        workflow_id,
+        organization_id,
+        brand_id,
+        product_id,
+        source_kind,
+        addon_id,
+        limit,
+        materialized_row_count,
+        records,
+    ))
+}
+
+fn cost_ledger_index_writes(report: &CostLedgerReport) -> Vec<CostLedgerIndexWrite> {
+    let mut writes = Vec::new();
+    for workflow in &report.workflows {
+        for node in &workflow.nodes {
+            writes.push(CostLedgerIndexWrite {
+                row_key: format!("planned:{}:{}", workflow.workflow_id, node.task_id),
+                source_kind: "planned_task".to_string(),
+                workflow_id: workflow.workflow_id.clone(),
+                task_id: Some(node.task_id.clone()),
+                event_id: None,
+                organization_id: workflow.organization_id.clone(),
+                brand_id: workflow.brand_id.clone(),
+                product_id: workflow.product_id.clone(),
+                addon_id: node.addon_id.clone(),
+                executor: Some(node.executor.clone()),
+                model_call_required: node.model_call_required,
+                model_call_avoided: node.model_call_avoided,
+                estimated_task_cost_usd: node.estimated_task_cost_usd,
+                observed_event_cost_usd: 0.0,
+                tokens_in: 0,
+                tokens_out: 0,
+                data: json!({
+                    "title": node.title,
+                    "status": node.status,
+                    "execution_policy_mode": node.execution_policy_mode,
+                    "cost_model": node.cost_model,
+                }),
+            });
+        }
+        for event in &workflow.observed_events {
+            let node = event
+                .task_id
+                .as_deref()
+                .and_then(|task_id| workflow.nodes.iter().find(|node| node.task_id == task_id));
+            writes.push(CostLedgerIndexWrite {
+                row_key: format!("observed:{}:{}", workflow.workflow_id, event.event_id),
+                source_kind: "observed_event".to_string(),
+                workflow_id: workflow.workflow_id.clone(),
+                task_id: event.task_id.clone(),
+                event_id: Some(event.event_id),
+                organization_id: workflow.organization_id.clone(),
+                brand_id: workflow.brand_id.clone(),
+                product_id: workflow.product_id.clone(),
+                addon_id: node.and_then(|node| node.addon_id.clone()),
+                executor: node.map(|node| node.executor.clone()),
+                model_call_required: node
+                    .map(|node| node.model_call_required)
+                    .unwrap_or_default(),
+                model_call_avoided: node.map(|node| node.model_call_avoided).unwrap_or_default(),
+                estimated_task_cost_usd: 0.0,
+                observed_event_cost_usd: event.estimated_usd,
+                tokens_in: event.tokens_in,
+                tokens_out: event.tokens_out,
+                data: json!({
+                    "event_kind": event.event_kind,
+                    "event_created_at": event.created_at,
+                }),
+            });
+        }
+    }
+    writes
+}
+
+fn cost_ledger_index_report_from_records(
+    status: &str,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    source_kind: Option<&str>,
+    addon_id: Option<&str>,
+    limit: Option<usize>,
+    materialized_row_count: usize,
+    records: Vec<StoredCostLedgerIndexRecord>,
+) -> CostLedgerIndexReport {
+    let rows = records
+        .into_iter()
+        .map(cost_ledger_index_row)
+        .collect::<Vec<_>>();
+    let summary = summarize_cost_ledger_index_rows(&rows);
+    CostLedgerIndexReport {
+        schema_version: COST_LEDGER_INDEX_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        filters: CostLedgerIndexFilters {
+            workflow_id: normalize_filter(workflow_id),
+            organization_id: normalize_filter(organization_id),
+            brand_id: normalize_filter(brand_id),
+            product_id: normalize_filter(product_id),
+            source_kind: normalize_filter(source_kind),
+            addon_id: normalize_filter(addon_id),
+            limit: limit.filter(|limit| *limit > 0),
+        },
+        summary,
+        materialized_row_count,
+        row_count: rows.len(),
+        rows,
+    }
+}
+
+fn cost_ledger_index_row(record: StoredCostLedgerIndexRecord) -> CostLedgerIndexRow {
+    CostLedgerIndexRow {
+        row_key: record.row_key,
+        source_kind: record.source_kind,
+        workflow_id: record.workflow_id,
+        task_id: record.task_id,
+        event_id: record.event_id,
+        organization_id: record.organization_id,
+        brand_id: record.brand_id,
+        product_id: record.product_id,
+        addon_id: record.addon_id,
+        executor: record.executor,
+        model_call_required: record.model_call_required,
+        model_call_avoided: record.model_call_avoided,
+        estimated_task_cost_usd: normalize_money(record.estimated_task_cost_usd),
+        observed_event_cost_usd: normalize_money(record.observed_event_cost_usd),
+        tokens_in: record.tokens_in,
+        tokens_out: record.tokens_out,
+        data: record.data,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+    }
+}
+
+fn summarize_cost_ledger_index_rows(rows: &[CostLedgerIndexRow]) -> CostLedgerIndexSummary {
+    let mut summary = CostLedgerIndexSummary {
+        total_row_count: rows.len(),
+        ..CostLedgerIndexSummary::default()
+    };
+    let mut workflow_ids = Vec::new();
+    for row in rows {
+        if !workflow_ids.contains(&row.workflow_id) {
+            workflow_ids.push(row.workflow_id.clone());
+        }
+        match row.source_kind.as_str() {
+            "planned_task" => summary.planned_task_row_count += 1,
+            "observed_event" => summary.observed_event_row_count += 1,
+            _ => {}
+        }
+        summary.estimated_task_cost_total_usd += row.estimated_task_cost_usd;
+        summary.observed_event_cost_total_usd += row.observed_event_cost_usd;
+        summary.observed_tokens_in_total += row.tokens_in;
+        summary.observed_tokens_out_total += row.tokens_out;
+    }
+    summary.workflow_count = workflow_ids.len();
+    summary.estimated_task_cost_total_usd = normalize_money(summary.estimated_task_cost_total_usd);
+    summary.observed_event_cost_total_usd = normalize_money(summary.observed_event_cost_total_usd);
+    summary
 }
 
 fn build_workflow_cost_ledger(
