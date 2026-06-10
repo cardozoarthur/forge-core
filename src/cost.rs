@@ -1,12 +1,16 @@
 use crate::graph::{AtomicTask, ExecutorKind, Workflow};
 use crate::storage::{CostLedgerIndexWrite, ForgeStore, StoreEvent, StoredCostLedgerIndexRecord};
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
+use chrono::{
+    DateTime, Datelike, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Timelike, Utc,
+};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
 
 pub const COST_LEDGER_SCHEMA_VERSION: &str = "forge.cost_ledger.v1";
 pub const COST_LEDGER_INDEX_SCHEMA_VERSION: &str = "forge.cost_ledger_index.v1";
+pub const COST_LEDGER_HISTORY_SCHEMA_VERSION: &str = "forge.cost_ledger_history.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CostLedgerReport {
@@ -184,6 +188,49 @@ pub struct CostLedgerIndexRow {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CostLedgerHistoryReport {
+    pub schema_version: String,
+    pub status: String,
+    pub index_source: String,
+    pub filters: CostLedgerHistoryFilters,
+    pub summary: CostLedgerIndexSummary,
+    pub bucket_count: usize,
+    pub buckets: Vec<CostLedgerHistoryBucket>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CostLedgerHistoryFilters {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brand_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_id: Option<String>,
+    pub bucket: String,
+    pub group_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CostLedgerHistoryBucket {
+    pub bucket: String,
+    pub bucket_start: String,
+    pub bucket_end: String,
+    pub group_by: String,
+    pub group_id: String,
+    pub summary: CostLedgerIndexSummary,
+    pub first_row_key: String,
+    pub last_row_key: String,
+}
+
 #[derive(Default)]
 struct SummaryBucket {
     workflow_ids: Vec<String>,
@@ -270,6 +317,62 @@ pub fn materialize_cost_ledger_index(
         materialized_row_count,
         records,
     ))
+}
+
+pub fn build_cost_ledger_history(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    source_kind: Option<&str>,
+    addon_id: Option<&str>,
+    bucket: Option<&str>,
+    group_by: Option<&str>,
+    limit: Option<usize>,
+) -> Result<CostLedgerHistoryReport> {
+    let bucket = normalize_cost_history_bucket(bucket)?;
+    let group_by = normalize_cost_history_group_by(group_by)?;
+    let mut rows = store
+        .load_cost_ledger_index(
+            workflow_id,
+            organization_id,
+            brand_id,
+            product_id,
+            source_kind,
+            addon_id,
+            None,
+        )?
+        .into_iter()
+        .map(cost_ledger_index_row)
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        cost_ledger_row_timestamp(left)
+            .cmp(&cost_ledger_row_timestamp(right))
+            .then_with(|| left.row_key.cmp(&right.row_key))
+    });
+    let summary = summarize_cost_ledger_index_rows(&rows);
+    let buckets = build_cost_ledger_history_buckets(&rows, &bucket, &group_by, limit)?;
+
+    Ok(CostLedgerHistoryReport {
+        schema_version: COST_LEDGER_HISTORY_SCHEMA_VERSION.to_string(),
+        status: "cost_ledger_history_loaded".to_string(),
+        index_source: "sqlite_materialized".to_string(),
+        filters: CostLedgerHistoryFilters {
+            workflow_id: normalize_filter(workflow_id),
+            organization_id: normalize_filter(organization_id),
+            brand_id: normalize_filter(brand_id),
+            product_id: normalize_filter(product_id),
+            source_kind: normalize_filter(source_kind),
+            addon_id: normalize_filter(addon_id),
+            bucket,
+            group_by,
+            limit: limit.filter(|limit| *limit > 0),
+        },
+        summary,
+        bucket_count: buckets.len(),
+        buckets,
+    })
 }
 
 fn cost_ledger_index_writes(report: &CostLedgerReport) -> Vec<CostLedgerIndexWrite> {
@@ -419,6 +522,164 @@ fn summarize_cost_ledger_index_rows(rows: &[CostLedgerIndexRow]) -> CostLedgerIn
     summary.estimated_task_cost_total_usd = normalize_money(summary.estimated_task_cost_total_usd);
     summary.observed_event_cost_total_usd = normalize_money(summary.observed_event_cost_total_usd);
     summary
+}
+
+fn build_cost_ledger_history_buckets(
+    rows: &[CostLedgerIndexRow],
+    bucket: &str,
+    group_by: &str,
+    limit: Option<usize>,
+) -> Result<Vec<CostLedgerHistoryBucket>> {
+    let mut buckets: BTreeMap<String, CostLedgerHistoryAccumulator> = BTreeMap::new();
+    for row in rows {
+        let occurred_at = parse_cost_history_time(&cost_ledger_row_timestamp(row))?;
+        let (bucket_start, bucket_end) = cost_history_bucket_bounds(occurred_at, bucket)?;
+        let group_id = cost_history_group_id(row, group_by);
+        let key = format!("{bucket_start}|{group_by}|{group_id}");
+        let accumulator = buckets
+            .entry(key)
+            .or_insert_with(|| CostLedgerHistoryAccumulator {
+                bucket: bucket.to_string(),
+                bucket_start: bucket_start.clone(),
+                bucket_end: bucket_end.clone(),
+                group_by: group_by.to_string(),
+                group_id: group_id.clone(),
+                rows: Vec::new(),
+            });
+        accumulator.rows.push(row.clone());
+    }
+
+    let mut history = buckets
+        .into_values()
+        .map(|mut bucket| {
+            bucket.rows.sort_by(|left, right| {
+                cost_ledger_row_timestamp(left)
+                    .cmp(&cost_ledger_row_timestamp(right))
+                    .then_with(|| left.row_key.cmp(&right.row_key))
+            });
+            let first_row_key = bucket
+                .rows
+                .first()
+                .map(|row| row.row_key.clone())
+                .unwrap_or_default();
+            let last_row_key = bucket
+                .rows
+                .last()
+                .map(|row| row.row_key.clone())
+                .unwrap_or_default();
+            CostLedgerHistoryBucket {
+                bucket: bucket.bucket,
+                bucket_start: bucket.bucket_start,
+                bucket_end: bucket.bucket_end,
+                group_by: bucket.group_by,
+                group_id: bucket.group_id,
+                summary: summarize_cost_ledger_index_rows(&bucket.rows),
+                first_row_key,
+                last_row_key,
+            }
+        })
+        .collect::<Vec<_>>();
+    history.sort_by(|left, right| {
+        left.bucket_start
+            .cmp(&right.bucket_start)
+            .then_with(|| left.group_by.cmp(&right.group_by))
+            .then_with(|| left.group_id.cmp(&right.group_id))
+    });
+    if let Some(limit) = limit.filter(|limit| *limit > 0) {
+        let start = history.len().saturating_sub(limit);
+        history = history.into_iter().skip(start).collect();
+    }
+    Ok(history)
+}
+
+struct CostLedgerHistoryAccumulator {
+    bucket: String,
+    bucket_start: String,
+    bucket_end: String,
+    group_by: String,
+    group_id: String,
+    rows: Vec<CostLedgerIndexRow>,
+}
+
+fn normalize_cost_history_bucket(bucket: Option<&str>) -> Result<String> {
+    let bucket = normalize_filter(bucket).unwrap_or_else(|| "day".to_string());
+    match bucket.as_str() {
+        "hour" | "day" => Ok(bucket),
+        _ => bail!("cost history bucket must be `hour` or `day`"),
+    }
+}
+
+fn normalize_cost_history_group_by(group_by: Option<&str>) -> Result<String> {
+    let group_by = normalize_filter(group_by).unwrap_or_else(|| "none".to_string());
+    match group_by.as_str() {
+        "none" | "tenant" | "workflow" | "source_kind" | "addon" | "executor" => Ok(group_by),
+        _ => bail!(
+            "cost history group_by must be one of `none`, `tenant`, `workflow`, `source_kind`, `addon` or `executor`"
+        ),
+    }
+}
+
+fn cost_ledger_row_timestamp(row: &CostLedgerIndexRow) -> String {
+    row.data
+        .get("event_created_at")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| row.updated_at.clone())
+}
+
+fn parse_cost_history_time(value: &str) -> Result<DateTime<Utc>> {
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
+        return Ok(parsed.with_timezone(&Utc));
+    }
+    let naive = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").with_context(|| {
+        format!("cost ledger timestamp `{value}` must be RFC3339 or SQLite UTC")
+    })?;
+    Ok(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
+}
+
+fn cost_history_bucket_bounds(
+    occurred_at: DateTime<Utc>,
+    bucket: &str,
+) -> Result<(String, String)> {
+    let date = NaiveDate::from_ymd_opt(occurred_at.year(), occurred_at.month(), occurred_at.day())
+        .with_context(|| "failed to derive cost bucket date")?;
+    let start_naive = match bucket {
+        "hour" => date
+            .and_hms_opt(occurred_at.hour(), 0, 0)
+            .with_context(|| "failed to derive hourly cost bucket")?,
+        "day" => date
+            .and_hms_opt(0, 0, 0)
+            .with_context(|| "failed to derive daily cost bucket")?,
+        _ => bail!("cost history bucket must be `hour` or `day`"),
+    };
+    let start = DateTime::<Utc>::from_naive_utc_and_offset(start_naive, Utc);
+    let end = match bucket {
+        "hour" => start + ChronoDuration::hours(1),
+        "day" => start + ChronoDuration::days(1),
+        _ => bail!("cost history bucket must be `hour` or `day`"),
+    };
+    Ok((start.to_rfc3339(), end.to_rfc3339()))
+}
+
+fn cost_history_group_id(row: &CostLedgerIndexRow, group_by: &str) -> String {
+    match group_by {
+        "tenant" => format!(
+            "{}|{}|{}",
+            row.organization_id, row.brand_id, row.product_id
+        ),
+        "workflow" => row.workflow_id.clone(),
+        "source_kind" => row.source_kind.clone(),
+        "addon" => row
+            .addon_id
+            .clone()
+            .unwrap_or_else(|| "_no_addon".to_string()),
+        "executor" => row
+            .executor
+            .clone()
+            .unwrap_or_else(|| "_no_executor".to_string()),
+        _ => "_all".to_string(),
+    }
 }
 
 fn build_workflow_cost_ledger(

@@ -31,7 +31,9 @@ use forge_core::cluster::{
     place_task_on_cluster, register_cluster_node, ClusterNodeInput,
 };
 use forge_core::context::build_context_package_with_checkpoint;
-use forge_core::cost::{build_cost_ledger, materialize_cost_ledger_index};
+use forge_core::cost::{
+    build_cost_ledger, build_cost_ledger_history, materialize_cost_ledger_index,
+};
 use forge_core::credential_vault::{
     run_describe as run_credential_vault_describe, run_exec as run_credential_vault_exec,
     run_key_init as run_credential_vault_key_init, run_panel as run_credential_vault_panel,
@@ -364,6 +366,28 @@ enum CostCommands {
         source_kind: Option<String>,
         #[arg(long)]
         addon: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    History {
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long)]
+        organization: Option<String>,
+        #[arg(long)]
+        brand: Option<String>,
+        #[arg(long)]
+        product: Option<String>,
+        #[arg(long = "source-kind")]
+        source_kind: Option<String>,
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long, default_value = "day")]
+        bucket: String,
+        #[arg(long = "group-by", default_value = "none")]
+        group_by: String,
         #[arg(long)]
         limit: Option<usize>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -4817,6 +4841,34 @@ fn run() -> Result<i32> {
                     product.as_deref(),
                     source_kind.as_deref(),
                     addon.as_deref(),
+                    limit,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            CostCommands::History {
+                workflow,
+                organization,
+                brand,
+                product,
+                source_kind,
+                addon,
+                bucket,
+                group_by,
+                limit,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_cost_ledger_history(
+                    &store,
+                    workflow.as_deref(),
+                    organization.as_deref(),
+                    brand.as_deref(),
+                    product.as_deref(),
+                    source_kind.as_deref(),
+                    addon.as_deref(),
+                    Some(&bucket),
+                    Some(&group_by),
                     limit,
                 )?;
                 print_response(output, &report)?;

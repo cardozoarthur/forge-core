@@ -22,7 +22,7 @@ use crate::aws_ops::{
 };
 use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{build_context_package_with_checkpoint, DEFAULT_CONTEXT_BUDGET};
-use crate::cost::{build_cost_ledger, materialize_cost_ledger_index};
+use crate::cost::{build_cost_ledger, build_cost_ledger_history, materialize_cost_ledger_index};
 use crate::credential_vault::{
     run_describe as run_credential_vault_describe, run_records as run_credential_vault_records,
     CREDENTIAL_VAULT_COMMAND_SCHEMA,
@@ -681,6 +681,24 @@ struct CostLedgerMaterializeInput {
     source_kind: Option<String>,
     addon: Option<String>,
     addon_id: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CostLedgerHistoryInput {
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    organization: Option<String>,
+    organization_id: Option<String>,
+    brand: Option<String>,
+    brand_id: Option<String>,
+    product: Option<String>,
+    product_id: Option<String>,
+    source_kind: Option<String>,
+    addon: Option<String>,
+    addon_id: Option<String>,
+    bucket: Option<String>,
+    group_by: Option<String>,
     limit: Option<usize>,
 }
 
@@ -2024,6 +2042,28 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.cost_ledger_index.v1",
                 &["forge", "cost", "materialize", "--output", "json"],
                 ToolFlags::new(false, true),
+            ),
+            tool(
+                "forge.cost.history",
+                "List Cost Ledger History",
+                "Read time-bucketed cost rollups from the normalized cost ledger index.",
+                object_schema(
+                    &[
+                        ("workflow_id", "string", "optional workflow id filter"),
+                        ("organization_id", "string", "optional organization filter"),
+                        ("brand_id", "string", "optional brand filter"),
+                        ("product_id", "string", "optional product filter"),
+                        ("source_kind", "string", "planned_task|observed_event filter"),
+                        ("addon_id", "string", "optional Addon id filter"),
+                        ("bucket", "string", "hour|day bucket, default day"),
+                        ("group_by", "string", "none|tenant|workflow|source_kind|addon|executor"),
+                        ("limit", "integer", "optional bucket limit"),
+                    ],
+                    &[],
+                ),
+                "forge.cost_ledger_history.v1",
+                &["forge", "cost", "history", "--output", "json"],
+                ToolFlags::new(true, false),
             ),
             tool(
                 "forge.improve.candidates",
@@ -5069,6 +5109,26 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 product_id.as_deref(),
                 input.source_kind.as_deref(),
                 addon_id.as_deref(),
+                input.limit,
+            )?)?
+        }
+        "forge.cost.history" => {
+            let input: CostLedgerHistoryInput = parse_input(input)?;
+            let workflow_id = input.workflow_id.or(input.workflow);
+            let organization_id = input.organization_id.or(input.organization);
+            let brand_id = input.brand_id.or(input.brand);
+            let product_id = input.product_id.or(input.product);
+            let addon_id = input.addon_id.or(input.addon);
+            serde_json::to_value(build_cost_ledger_history(
+                store,
+                workflow_id.as_deref(),
+                organization_id.as_deref(),
+                brand_id.as_deref(),
+                product_id.as_deref(),
+                input.source_kind.as_deref(),
+                addon_id.as_deref(),
+                input.bucket.as_deref(),
+                input.group_by.as_deref(),
                 input.limit,
             )?)?
         }

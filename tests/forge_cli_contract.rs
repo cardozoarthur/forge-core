@@ -18310,6 +18310,89 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
         "observed_event"
     );
 
+    let cost_history_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "history",
+            "--workflow",
+            workflow_id,
+            "--bucket",
+            "day",
+            "--group-by",
+            "source_kind",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cost_history: Value = serde_json::from_slice(&cost_history_output).unwrap();
+    assert_eq!(
+        cost_history["schema_version"],
+        "forge.cost_ledger_history.v1"
+    );
+    assert_eq!(cost_history["status"], "cost_ledger_history_loaded");
+    assert_eq!(cost_history["index_source"], "sqlite_materialized");
+    assert_eq!(
+        cost_history["summary"]["total_row_count"],
+        expected_total_rows
+    );
+    assert_eq!(cost_history["summary"]["observed_event_row_count"], 1);
+    assert_eq!(cost_history["summary"]["observed_tokens_out_total"], 220);
+    assert_eq!(cost_history["bucket_count"], 2);
+    assert!(cost_history["buckets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|bucket| {
+            bucket["group_id"] == "planned_task"
+                && bucket["summary"]["planned_task_row_count"] == expected_planned_rows
+        }));
+    assert!(cost_history["buckets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|bucket| {
+            bucket["group_id"] == "observed_event"
+                && bucket["summary"]["observed_event_cost_total_usd"] == 0.12
+        }));
+
+    let mcp_history_input = format!(
+        r#"{{"workflow_id":"{workflow_id}","source_kind":"observed_event","group_by":"workflow"}}"#
+    );
+    let mcp_history_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.cost.history",
+            "--input",
+            &mcp_history_input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_history: Value = serde_json::from_slice(&mcp_history_output).unwrap();
+    assert_eq!(
+        mcp_history["result"]["schema_version"],
+        "forge.cost_ledger_history.v1"
+    );
+    assert_eq!(mcp_history["result"]["bucket_count"], 1);
+    assert_eq!(mcp_history["result"]["buckets"][0]["group_id"], workflow_id);
+    assert_eq!(
+        mcp_history["result"]["summary"]["observed_event_cost_total_usd"],
+        0.12
+    );
+
     let timeline_output = forge()
         .args([
             "--store",
