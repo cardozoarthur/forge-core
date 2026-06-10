@@ -13,6 +13,7 @@ pub const COST_LEDGER_INDEX_SCHEMA_VERSION: &str = "forge.cost_ledger_index.v1";
 pub const COST_LEDGER_HISTORY_SCHEMA_VERSION: &str = "forge.cost_ledger_history.v1";
 pub const COST_LEDGER_MAINTENANCE_SCHEMA_VERSION: &str = "forge.cost_ledger_maintenance.v1";
 pub const COST_LEDGER_DAEMON_SCHEMA_VERSION: &str = "forge.cost_ledger_daemon.v1";
+pub const COST_LEDGER_RETENTION_SCHEMA_VERSION: &str = "forge.cost_ledger_retention.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CostLedgerReport {
@@ -304,6 +305,51 @@ pub struct CostLedgerDaemonCycle {
     pub global_event_id: i64,
     pub slept_after_seconds: u64,
     pub maintenance: CostLedgerMaintenanceReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CostLedgerRetentionReport {
+    pub schema_version: String,
+    pub status: String,
+    pub filters: CostLedgerRetentionFilters,
+    pub cutoff_updated_before: String,
+    pub candidate_row_count: usize,
+    pub deleted_row_count: usize,
+    pub candidates: Vec<CostLedgerIndexRow>,
+    pub governance: CostLedgerRetentionGovernance,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CostLedgerRetentionFilters {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brand_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_id: Option<String>,
+    pub retention_days: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CostLedgerRetentionGovernance {
+    pub mode: String,
+    pub apply_requested: bool,
+    pub approval_required: bool,
+    pub approval_recorded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approved_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub confirm: bool,
+    pub destructive_actions_performed: bool,
 }
 
 #[derive(Default)]
@@ -662,6 +708,120 @@ pub fn run_cost_ledger_daemon(
             "use external runtime supervisors for unbounded service lifetime".to_string(),
         ],
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn apply_cost_ledger_retention(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    source_kind: Option<&str>,
+    addon_id: Option<&str>,
+    retention_days: Option<i64>,
+    limit: Option<usize>,
+    apply: bool,
+    approved_by: Option<&str>,
+    reason: Option<&str>,
+    confirm: bool,
+    origin: &str,
+) -> Result<CostLedgerRetentionReport> {
+    let retention_days = retention_days
+        .filter(|days| *days > 0)
+        .ok_or_else(|| anyhow::anyhow!("cost retention requires --retention-days > 0"))?;
+    let cutoff = Utc::now() - ChronoDuration::days(retention_days);
+    let cutoff_updated_before = cutoff.to_rfc3339();
+    let candidates = store
+        .load_cost_ledger_retention_candidates(
+            workflow_id,
+            organization_id,
+            brand_id,
+            product_id,
+            source_kind,
+            addon_id,
+            &cutoff_updated_before,
+            limit,
+        )?
+        .into_iter()
+        .map(cost_ledger_index_row)
+        .collect::<Vec<_>>();
+    let approved_by = approved_by.and_then(|value| normalize_filter(Some(value)));
+    let reason = reason.and_then(|value| normalize_filter(Some(value)));
+    let approval_recorded = approved_by.is_some() && reason.is_some() && confirm;
+    let mut deleted_row_count = 0;
+    let status = if apply && approval_recorded {
+        let row_keys = candidates
+            .iter()
+            .map(|candidate| candidate.row_key.clone())
+            .collect::<Vec<_>>();
+        deleted_row_count = store.delete_cost_ledger_index_rows(&row_keys)?;
+        "cost_ledger_retention_applied"
+    } else if apply {
+        "cost_ledger_retention_blocked_missing_approval"
+    } else {
+        "cost_ledger_retention_planned"
+    };
+    let governance = CostLedgerRetentionGovernance {
+        mode: if apply && approval_recorded {
+            "physical_delete".to_string()
+        } else if apply {
+            "blocked".to_string()
+        } else {
+            "plan_only".to_string()
+        },
+        apply_requested: apply,
+        approval_required: true,
+        approval_recorded,
+        approved_by,
+        reason,
+        confirm,
+        destructive_actions_performed: deleted_row_count > 0,
+    };
+    let report = CostLedgerRetentionReport {
+        schema_version: COST_LEDGER_RETENTION_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        filters: CostLedgerRetentionFilters {
+            workflow_id: normalize_filter(workflow_id),
+            organization_id: normalize_filter(organization_id),
+            brand_id: normalize_filter(brand_id),
+            product_id: normalize_filter(product_id),
+            source_kind: normalize_filter(source_kind),
+            addon_id: normalize_filter(addon_id),
+            retention_days,
+            limit: limit.filter(|limit| *limit > 0),
+        },
+        cutoff_updated_before,
+        candidate_row_count: candidates.len(),
+        deleted_row_count,
+        candidates,
+        governance,
+    };
+    let tenant_context =
+        cost_daemon_tenant_context(store, workflow_id, organization_id, brand_id, product_id)?;
+    store.record_global_event(
+        "cost_ledger_retention",
+        &format!("cost-ledger-retention-{}", Utc::now().timestamp_millis()),
+        workflow_id,
+        if deleted_row_count > 0 {
+            "cost_ledger_retention_applied"
+        } else {
+            "cost_ledger_retention_evaluated"
+        },
+        origin,
+        "recorded",
+        &json!({
+            "schema_version": &report.schema_version,
+            "status": &report.status,
+            "filters": &report.filters,
+            "cutoff_updated_before": &report.cutoff_updated_before,
+            "candidate_row_count": report.candidate_row_count,
+            "deleted_row_count": report.deleted_row_count,
+            "governance": &report.governance,
+        }),
+        &tenant_context,
+    )?;
+    Ok(report)
 }
 
 fn cost_ledger_index_writes(report: &CostLedgerReport) -> Vec<CostLedgerIndexWrite> {

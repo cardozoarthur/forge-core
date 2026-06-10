@@ -23,8 +23,8 @@ use crate::aws_ops::{
 use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{build_context_package_with_checkpoint, DEFAULT_CONTEXT_BUDGET};
 use crate::cost::{
-    build_cost_ledger, build_cost_ledger_history, maintain_cost_ledger,
-    materialize_cost_ledger_index, run_cost_ledger_daemon,
+    apply_cost_ledger_retention, build_cost_ledger, build_cost_ledger_history,
+    maintain_cost_ledger, materialize_cost_ledger_index, run_cost_ledger_daemon,
 };
 use crate::credential_vault::{
     run_describe as run_credential_vault_describe, run_records as run_credential_vault_records,
@@ -812,6 +812,28 @@ struct CostLedgerDaemonInput {
     max_cycles: Option<usize>,
     interval_seconds: Option<u64>,
     idle_exit: Option<bool>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CostLedgerRetentionInput {
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    organization: Option<String>,
+    organization_id: Option<String>,
+    brand: Option<String>,
+    brand_id: Option<String>,
+    product: Option<String>,
+    product_id: Option<String>,
+    source_kind: Option<String>,
+    addon: Option<String>,
+    addon_id: Option<String>,
+    retention_days: Option<i64>,
+    limit: Option<usize>,
+    apply: Option<bool>,
+    approved_by: Option<String>,
+    reason: Option<String>,
+    confirm: Option<bool>,
     origin: Option<String>,
 }
 
@@ -2226,6 +2248,32 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ),
                 "forge.cost_ledger_daemon.v1",
                 &["forge", "cost", "daemon", "--output", "json"],
+                ToolFlags::new(false, true),
+            ),
+            tool(
+                "forge.cost.retention",
+                "Apply Cost Ledger Retention",
+                "Plan or execute approval-gated physical deletion of stale normalized cost ledger rows after a retention window.",
+                object_schema(
+                    &[
+                        ("workflow_id", "string", "optional workflow id filter"),
+                        ("organization_id", "string", "optional organization filter"),
+                        ("brand_id", "string", "optional brand filter"),
+                        ("product_id", "string", "optional product filter"),
+                        ("source_kind", "string", "planned_task|observed_event filter"),
+                        ("addon_id", "string", "optional Addon id filter"),
+                        ("retention_days", "integer", "required positive retention window"),
+                        ("limit", "integer", "optional candidate row limit"),
+                        ("apply", "boolean", "request physical deletion"),
+                        ("approved_by", "string", "required when apply is true"),
+                        ("reason", "string", "required when apply is true"),
+                        ("confirm", "boolean", "required true when apply is true"),
+                        ("origin", "string", "audit origin for retention event"),
+                    ],
+                    &[],
+                ),
+                "forge.cost_ledger_retention.v1",
+                &["forge", "cost", "retention", "--output", "json"],
                 ToolFlags::new(false, true),
             ),
             tool(
@@ -5452,6 +5500,31 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.max_cycles.unwrap_or(1),
                 input.interval_seconds.unwrap_or(300),
                 input.idle_exit.unwrap_or(false),
+                &origin,
+            )?)?
+        }
+        "forge.cost.retention" => {
+            let input: CostLedgerRetentionInput = parse_input(input)?;
+            let workflow_id = input.workflow_id.or(input.workflow);
+            let organization_id = input.organization_id.or(input.organization);
+            let brand_id = input.brand_id.or(input.brand);
+            let product_id = input.product_id.or(input.product);
+            let addon_id = input.addon_id.or(input.addon);
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(apply_cost_ledger_retention(
+                store,
+                workflow_id.as_deref(),
+                organization_id.as_deref(),
+                brand_id.as_deref(),
+                product_id.as_deref(),
+                input.source_kind.as_deref(),
+                addon_id.as_deref(),
+                input.retention_days,
+                input.limit,
+                input.apply.unwrap_or(false),
+                input.approved_by.as_deref(),
+                input.reason.as_deref(),
+                input.confirm.unwrap_or(false),
                 &origin,
             )?)?
         }

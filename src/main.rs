@@ -32,8 +32,8 @@ use forge_core::cluster::{
 };
 use forge_core::context::build_context_package_with_checkpoint;
 use forge_core::cost::{
-    build_cost_ledger, build_cost_ledger_history, maintain_cost_ledger,
-    materialize_cost_ledger_index, run_cost_ledger_daemon,
+    apply_cost_ledger_retention, build_cost_ledger, build_cost_ledger_history,
+    maintain_cost_ledger, materialize_cost_ledger_index, run_cost_ledger_daemon,
 };
 use forge_core::credential_vault::{
     run_describe as run_credential_vault_describe, run_exec as run_credential_vault_exec,
@@ -449,6 +449,36 @@ enum CostCommands {
         interval_seconds: u64,
         #[arg(long = "idle-exit")]
         idle_exit: bool,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Retention {
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long)]
+        organization: Option<String>,
+        #[arg(long)]
+        brand: Option<String>,
+        #[arg(long)]
+        product: Option<String>,
+        #[arg(long = "source-kind")]
+        source_kind: Option<String>,
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long = "retention-days")]
+        retention_days: Option<i64>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long = "approved-by")]
+        approved_by: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        confirm: bool,
         #[arg(long, default_value = "forge_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -5176,6 +5206,42 @@ fn run() -> Result<i32> {
                     max_cycles,
                     interval_seconds,
                     idle_exit,
+                    &origin,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            CostCommands::Retention {
+                workflow,
+                organization,
+                brand,
+                product,
+                source_kind,
+                addon,
+                retention_days,
+                limit,
+                apply,
+                approved_by,
+                reason,
+                confirm,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = apply_cost_ledger_retention(
+                    &store,
+                    workflow.as_deref(),
+                    organization.as_deref(),
+                    brand.as_deref(),
+                    product.as_deref(),
+                    source_kind.as_deref(),
+                    addon.as_deref(),
+                    retention_days,
+                    limit,
+                    apply,
+                    approved_by.as_deref(),
+                    reason.as_deref(),
+                    confirm,
                     &origin,
                 )?;
                 print_response(output, &report)?;

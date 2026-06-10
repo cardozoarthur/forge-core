@@ -1736,6 +1736,74 @@ impl ForgeStore {
         Ok(records)
     }
 
+    pub fn load_cost_ledger_retention_candidates(
+        &self,
+        workflow_id: Option<&str>,
+        organization_id: Option<&str>,
+        brand_id: Option<&str>,
+        product_id: Option<&str>,
+        source_kind: Option<&str>,
+        addon_id: Option<&str>,
+        updated_before: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<StoredCostLedgerIndexRecord>> {
+        let workflow_filter = normalize_optional_filter(workflow_id);
+        let organization_filter = normalize_optional_filter(organization_id);
+        let brand_filter = normalize_optional_filter(brand_id);
+        let product_filter = normalize_optional_filter(product_id);
+        let source_kind_filter = normalize_optional_filter(source_kind);
+        let addon_filter = normalize_optional_filter(addon_id);
+        let limit = limit.filter(|limit| *limit > 0).unwrap_or(500);
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT row_key, source_kind, workflow_id, task_id, event_id,
+                   organization_id, brand_id, product_id, addon_id, executor,
+                   model_call_required, model_call_avoided,
+                   estimated_task_cost_usd, observed_event_cost_usd,
+                   tokens_in, tokens_out, data_json, created_at, updated_at
+            FROM cost_ledger_index
+            WHERE datetime(updated_at) < datetime(?1)
+              AND (?2 IS NULL OR workflow_id = ?2)
+              AND (?3 IS NULL OR organization_id = ?3)
+              AND (?4 IS NULL OR brand_id = ?4)
+              AND (?5 IS NULL OR product_id = ?5)
+              AND (?6 IS NULL OR source_kind = ?6)
+              AND (?7 IS NULL OR addon_id = ?7)
+            ORDER BY updated_at ASC, row_key ASC
+            LIMIT ?8
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![
+                updated_before,
+                workflow_filter,
+                organization_filter,
+                brand_filter,
+                product_filter,
+                source_kind_filter,
+                addon_filter,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            stored_cost_ledger_index_from_row,
+        )?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
+    pub fn delete_cost_ledger_index_rows(&self, row_keys: &[String]) -> Result<usize> {
+        let mut deleted = 0;
+        for row_key in row_keys {
+            deleted += self.connection.execute(
+                "DELETE FROM cost_ledger_index WHERE row_key = ?1",
+                params![row_key],
+            )?;
+        }
+        Ok(deleted)
+    }
+
     pub fn save_headroom_blob(
         &self,
         record: &HeadroomBlobWrite,

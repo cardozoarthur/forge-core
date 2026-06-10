@@ -11076,6 +11076,7 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
         "forge.improve.candidates",
         "forge.improve.promote_event_policy",
         "forge.cost.daemon",
+        "forge.cost.retention",
         "forge.cost.ledger",
         "forge.memory.policy",
         "forge.memory.search",
@@ -19999,6 +20000,154 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
             && event.data["cycle"] == 1
             && event.data["status"] == "cost_ledger_daemon_cycle_completed"
     }));
+
+    let stale_row_key = "observed:stale-cost-retention:999";
+    {
+        let connection = Connection::open(&store).unwrap();
+        connection
+            .execute(
+                r#"
+                INSERT INTO cost_ledger_index (
+                    row_key, source_kind, workflow_id, task_id, event_id,
+                    organization_id, brand_id, product_id, addon_id, executor,
+                    model_call_required, model_call_avoided,
+                    estimated_task_cost_usd, observed_event_cost_usd,
+                    tokens_in, tokens_out, data_json, created_at, updated_at
+                )
+                VALUES (
+                    ?1, 'observed_event', 'wf_stale_cost_retention', NULL, 999,
+                    'default-org', 'default-brand', 'default-product', NULL, NULL,
+                    1, 0, 0.0, 1.23,
+                    10, 20, '{}', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z'
+                )
+                "#,
+                rusqlite::params![stale_row_key],
+            )
+            .unwrap();
+    }
+
+    let retention_plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "retention",
+            "--organization",
+            "default-org",
+            "--retention-days",
+            "31",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let retention_plan: Value = serde_json::from_slice(&retention_plan_output).unwrap();
+    assert_eq!(
+        retention_plan["schema_version"],
+        "forge.cost_ledger_retention.v1"
+    );
+    assert_eq!(retention_plan["status"], "cost_ledger_retention_planned");
+    assert_eq!(retention_plan["candidate_row_count"], 1);
+    assert_eq!(retention_plan["deleted_row_count"], 0);
+    assert_eq!(retention_plan["governance"]["approval_required"], true);
+    assert_eq!(retention_plan["candidates"][0]["row_key"], stale_row_key);
+
+    let retention_apply_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "retention",
+            "--organization",
+            "default-org",
+            "--retention-days",
+            "31",
+            "--apply",
+            "--approved-by",
+            "codex-test",
+            "--reason",
+            "Prune stale Cost OS rows after validated retention window.",
+            "--confirm",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let retention_apply: Value = serde_json::from_slice(&retention_apply_output).unwrap();
+    assert_eq!(retention_apply["status"], "cost_ledger_retention_applied");
+    assert_eq!(retention_apply["deleted_row_count"], 1);
+    assert_eq!(retention_apply["governance"]["approval_recorded"], true);
+    assert_eq!(retention_apply["governance"]["approved_by"], "codex-test");
+    {
+        let connection = Connection::open(&store).unwrap();
+        let remaining: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM cost_ledger_index WHERE row_key = ?1",
+                rusqlite::params![stale_row_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    let stale_mcp_row_key = "observed:stale-cost-retention-mcp:1000";
+    {
+        let connection = Connection::open(&store).unwrap();
+        connection
+            .execute(
+                r#"
+                INSERT INTO cost_ledger_index (
+                    row_key, source_kind, workflow_id, task_id, event_id,
+                    organization_id, brand_id, product_id, addon_id, executor,
+                    model_call_required, model_call_avoided,
+                    estimated_task_cost_usd, observed_event_cost_usd,
+                    tokens_in, tokens_out, data_json, created_at, updated_at
+                )
+                VALUES (
+                    ?1, 'observed_event', 'wf_stale_cost_retention_mcp', NULL, 1000,
+                    'default-org', 'default-brand', 'default-product', NULL, NULL,
+                    1, 0, 0.0, 2.34,
+                    30, 40, '{}', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z'
+                )
+                "#,
+                rusqlite::params![stale_mcp_row_key],
+            )
+            .unwrap();
+    }
+    let mcp_retention_input = r#"{"organization_id":"default-org","retention_days":31,"apply":true,"approved_by":"mcp-test","reason":"Prune stale Cost OS rows through MCP.","confirm":true}"#;
+    let mcp_retention_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.cost.retention",
+            "--input",
+            mcp_retention_input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_retention: Value = serde_json::from_slice(&mcp_retention_output).unwrap();
+    assert_eq!(
+        mcp_retention["result"]["schema_version"],
+        "forge.cost_ledger_retention.v1"
+    );
+    assert_eq!(
+        mcp_retention["result"]["status"],
+        "cost_ledger_retention_applied"
+    );
+    assert_eq!(mcp_retention["result"]["deleted_row_count"], 1);
 
     let timeline_output = forge()
         .args([

@@ -120,11 +120,13 @@ forge improve benchmark-event-policy --workflow <workflow-id> --policy prefer_de
 forge improve promote-event-policy --workflow <workflow-id> --policy prefer_deterministic_node --approved-by <operator> --output json
 forge cost maintain --workflow <workflow-id> --bucket day --group-by source_kind --retention-days 31 --output json
 forge cost daemon --workflow <workflow-id> --bucket day --group-by workflow --max-cycles 2 --interval-seconds 300 --retention-days 31 --output json
+forge cost retention --organization <organization-id> --retention-days 31 --apply --approved-by <operator> --reason "Validated retention window." --confirm --output json
 forge mcp tools --output json
 forge mcp call forge.improve.candidates --input '{"limit":10}' --output json
 forge mcp call forge.improve.benchmark_event_policy --input '{"workflow_id":"<workflow-id>","recommended_policy":"prefer_deterministic_node"}' --output json
 forge mcp call forge.improve.promote_event_policy --input '{"workflow_id":"<workflow-id>","recommended_policy":"prefer_deterministic_node","approved_by":"<operator>"}' --output json
 forge mcp call forge.cost.daemon --input '{"workflow_id":"<workflow-id>","max_cycles":1,"interval_seconds":0}' --output json
+forge mcp call forge.cost.retention --input '{"organization_id":"<organization-id>","retention_days":31,"apply":true,"approved_by":"<operator>","reason":"Validated retention window.","confirm":true}' --output json
 forge mcp call forge.interactive.home --output json
 forge brains --output json
 forge mcp call forge.brain_router --output json
