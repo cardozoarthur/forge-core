@@ -2386,7 +2386,19 @@ fn event_envelopes_project_normalized_observability_metrics() {
                 "duration_ms": 245,
                 "retry_count": "2",
                 "wait_seconds": 30,
-                "state": "waiting_for_partner"
+                "state": "waiting_for_partner",
+                "context": {
+                    "effective_budget": 1000,
+                    "context_bytes": 875,
+                    "routing_summary": {
+                        "remaining_budget": 125,
+                        "budget_utilization_bps": 8750
+                    },
+                    "memory_policy": {
+                        "memory_level": "standard",
+                        "memory_scope": "project"
+                    }
+                }
             }),
         )
         .unwrap();
@@ -2427,6 +2439,13 @@ fn event_envelopes_project_normalized_observability_metrics() {
         "waiting_for_partner"
     );
     assert_eq!(observed["observability"]["wait_seconds"], 30);
+    assert_eq!(observed["observability"]["context_budget_bytes"], 1000);
+    assert_eq!(observed["observability"]["selected_context_bytes"], 875);
+    assert_eq!(observed["observability"]["context_remaining_bytes"], 125);
+    assert_eq!(observed["observability"]["context_pressure_bps"], 8750);
+    assert_eq!(observed["observability"]["context_pressure_state"], "high");
+    assert_eq!(observed["observability"]["memory_level"], "standard");
+    assert_eq!(observed["observability"]["memory_scope"], "project");
 
     let timeline_output = forge()
         .args([
@@ -2461,6 +2480,14 @@ fn event_envelopes_project_normalized_observability_metrics() {
     assert_eq!(
         timeline_observed["observability"]["wait_state"],
         "waiting_for_partner"
+    );
+    assert_eq!(
+        timeline_observed["observability"]["context_pressure_bps"],
+        8750
+    );
+    assert_eq!(
+        timeline_observed["observability"]["memory_level"],
+        "standard"
     );
 
     let observability_output = forge()
@@ -2499,19 +2526,55 @@ fn event_envelopes_project_normalized_observability_metrics() {
     assert_eq!(observability_json["summary"]["total_duration_ms"], 245);
     assert_eq!(observability_json["summary"]["total_retry_count"], 2);
     assert_eq!(observability_json["summary"]["total_wait_seconds"], 30);
+    assert_eq!(observability_json["summary"]["context_event_count"], 1);
+    assert_eq!(
+        observability_json["summary"]["context_pressure_event_count"],
+        1
+    );
+    assert_eq!(
+        observability_json["summary"]["total_context_budget_bytes"],
+        1000
+    );
+    assert_eq!(
+        observability_json["summary"]["total_selected_context_bytes"],
+        875
+    );
+    assert_eq!(
+        observability_json["summary"]["total_context_remaining_bytes"],
+        125
+    );
+    assert_eq!(
+        observability_json["summary"]["max_context_pressure_bps"],
+        8750
+    );
+    assert_eq!(observability_json["summary"]["memory_event_count"], 1);
     assert_eq!(observability_json["nodes"][0]["node_ref"], "node-payment");
     assert_eq!(
         observability_json["nodes"][0]["addon_id"],
         "forge.addon.payment"
     );
     assert_eq!(
+        observability_json["nodes"][0]["max_context_pressure_bps"],
+        8750
+    );
+    assert_eq!(observability_json["nodes"][0]["memory_event_count"], 1);
+    assert_eq!(
         observability_json["addons"][0]["addon_id"],
         "forge.addon.payment"
+    );
+    assert_eq!(
+        observability_json["addons"][0]["max_context_pressure_bps"],
+        8750
     );
     assert_eq!(
         observability_json["events"][0]["wait_state"],
         "waiting_for_partner"
     );
+    assert_eq!(
+        observability_json["events"][0]["context_pressure_bps"],
+        8750
+    );
+    assert_eq!(observability_json["events"][0]["memory_scope"], "project");
     let materialized_records = store_handle
         .load_event_observability_index(
             Some(workflow_id),
@@ -2528,6 +2591,22 @@ fn event_envelopes_project_normalized_observability_metrics() {
     assert_eq!(
         materialized_records[0].wait_state.as_deref(),
         Some("waiting_for_partner")
+    );
+    assert_eq!(materialized_records[0].context_budget_bytes, Some(1000));
+    assert_eq!(materialized_records[0].selected_context_bytes, Some(875));
+    assert_eq!(materialized_records[0].context_remaining_bytes, Some(125));
+    assert_eq!(materialized_records[0].context_pressure_bps, Some(8750));
+    assert_eq!(
+        materialized_records[0].context_pressure_state.as_deref(),
+        Some("high")
+    );
+    assert_eq!(
+        materialized_records[0].memory_level.as_deref(),
+        Some("standard")
+    );
+    assert_eq!(
+        materialized_records[0].memory_scope.as_deref(),
+        Some("project")
     );
 
     let mcp_input = serde_json::json!({
@@ -2591,6 +2670,27 @@ fn event_observability_index_backfills_existing_global_events_on_migration() {
                     data_json TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE event_observability_index (
+                    global_event_id INTEGER PRIMARY KEY,
+                    workflow_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
+                    brand_id TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    node_ref TEXT,
+                    addon_id TEXT,
+                    duration_ms INTEGER,
+                    retry_count INTEGER,
+                    wait_state TEXT,
+                    wait_seconds INTEGER,
+                    data_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 INSERT INTO global_events (
                     source, source_id, workflow_id, kind, origin, status,
                     organization_id, brand_id, product_id, user_id, channel_id,
@@ -2601,7 +2701,19 @@ fn event_observability_index_backfills_existing_global_events_on_migration() {
                     'legacy_wait_retry_observed', 'legacy_runner', 'recorded',
                     'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
                     '{}',
-                    '{"node_id":"legacy-node","addon_id":"forge.addon.legacy","duration_ms":77,"retry_count":1,"wait_seconds":9,"state":"waiting_for_backfill"}',
+                    '{"node_id":"legacy-node","addon_id":"forge.addon.legacy","duration_ms":77,"retry_count":1,"wait_seconds":9,"state":"waiting_for_backfill","context":{"effective_budget":900,"routing_summary":{"selected_bytes":810,"remaining_budget":90},"memory_policy":{"memory_level":"short_term","memory_scope":"organization"}}}',
+                    '2026-06-10T12:00:00Z'
+                );
+                INSERT INTO event_observability_index (
+                    global_event_id, workflow_id, kind, category, severity, origin, source,
+                    organization_id, brand_id, product_id, node_ref, addon_id,
+                    duration_ms, retry_count, wait_state, wait_seconds, data_json, created_at
+                )
+                VALUES (
+                    1, 'wf_legacy', 'legacy_wait_retry_observed', 'operational', 'info',
+                    'legacy_runner', 'legacy_import', 'org-demo', 'brand-demo', 'product-demo',
+                    'legacy-node', 'forge.addon.legacy', 77, 1, 'waiting_for_backfill', 9,
+                    '{"legacy":"already_materialized_without_context_columns"}',
                     '2026-06-10T12:00:00Z'
                 );
                 "#,
@@ -2624,6 +2736,16 @@ fn event_observability_index_backfills_existing_global_events_on_migration() {
     assert_eq!(records[0].duration_ms, Some(77));
     assert_eq!(records[0].retry_count, Some(1));
     assert_eq!(records[0].wait_seconds, Some(9));
+    assert_eq!(records[0].context_budget_bytes, Some(900));
+    assert_eq!(records[0].selected_context_bytes, Some(810));
+    assert_eq!(records[0].context_remaining_bytes, Some(90));
+    assert_eq!(records[0].context_pressure_bps, Some(9000));
+    assert_eq!(
+        records[0].context_pressure_state.as_deref(),
+        Some("critical")
+    );
+    assert_eq!(records[0].memory_level.as_deref(), Some("short_term"));
+    assert_eq!(records[0].memory_scope.as_deref(), Some("organization"));
 
     let observability_output = forge()
         .args([
@@ -2654,9 +2776,19 @@ fn event_observability_index_backfills_existing_global_events_on_migration() {
     let observability_json: Value = serde_json::from_slice(&observability_output).unwrap();
     assert_eq!(observability_json["index_source"], "sqlite_materialized");
     assert_eq!(observability_json["summary"]["total_event_count"], 1);
+    assert_eq!(observability_json["summary"]["context_event_count"], 1);
+    assert_eq!(
+        observability_json["summary"]["max_context_pressure_bps"],
+        9000
+    );
+    assert_eq!(observability_json["summary"]["memory_event_count"], 1);
     assert_eq!(
         observability_json["events"][0]["wait_state"],
         "waiting_for_backfill"
+    );
+    assert_eq!(
+        observability_json["events"][0]["context_pressure_state"],
+        "critical"
     );
 }
 

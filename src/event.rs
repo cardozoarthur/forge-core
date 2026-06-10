@@ -171,6 +171,14 @@ pub struct EventObservabilitySummary {
     pub total_retry_count: i64,
     pub wait_event_count: usize,
     pub total_wait_seconds: i64,
+    pub context_event_count: usize,
+    pub context_pressure_event_count: usize,
+    pub total_context_budget_bytes: i64,
+    pub total_selected_context_bytes: i64,
+    pub total_context_remaining_bytes: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_pressure_bps: Option<i64>,
+    pub memory_event_count: usize,
     pub severity_counts: Vec<EventObservabilityCount>,
     pub category_counts: Vec<EventObservabilityCount>,
 }
@@ -193,6 +201,14 @@ pub struct EventObservabilityTenantSummary {
     pub total_duration_ms: i64,
     pub total_retry_count: i64,
     pub total_wait_seconds: i64,
+    pub context_event_count: usize,
+    pub context_pressure_event_count: usize,
+    pub total_context_budget_bytes: i64,
+    pub total_selected_context_bytes: i64,
+    pub total_context_remaining_bytes: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_pressure_bps: Option<i64>,
+    pub memory_event_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -207,6 +223,14 @@ pub struct EventObservabilityWorkflowSummary {
     pub total_duration_ms: i64,
     pub total_retry_count: i64,
     pub total_wait_seconds: i64,
+    pub context_event_count: usize,
+    pub context_pressure_event_count: usize,
+    pub total_context_budget_bytes: i64,
+    pub total_selected_context_bytes: i64,
+    pub total_context_remaining_bytes: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_pressure_bps: Option<i64>,
+    pub memory_event_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -219,6 +243,14 @@ pub struct EventObservabilityNodeSummary {
     pub total_duration_ms: i64,
     pub total_retry_count: i64,
     pub total_wait_seconds: i64,
+    pub context_event_count: usize,
+    pub context_pressure_event_count: usize,
+    pub total_context_budget_bytes: i64,
+    pub total_selected_context_bytes: i64,
+    pub total_context_remaining_bytes: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_pressure_bps: Option<i64>,
+    pub memory_event_count: usize,
     pub last_event_sequence: i64,
 }
 
@@ -231,6 +263,14 @@ pub struct EventObservabilityAddonSummary {
     pub total_duration_ms: i64,
     pub total_retry_count: i64,
     pub total_wait_seconds: i64,
+    pub context_event_count: usize,
+    pub context_pressure_event_count: usize,
+    pub total_context_budget_bytes: i64,
+    pub total_selected_context_bytes: i64,
+    pub total_context_remaining_bytes: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_pressure_bps: Option<i64>,
+    pub memory_event_count: usize,
     pub last_event_sequence: i64,
 }
 
@@ -254,6 +294,13 @@ pub struct EventObservabilityRecord {
     pub retry_count: Option<i64>,
     pub wait_state: Option<String>,
     pub wait_seconds: Option<i64>,
+    pub context_budget_bytes: Option<i64>,
+    pub selected_context_bytes: Option<i64>,
+    pub context_remaining_bytes: Option<i64>,
+    pub context_pressure_bps: Option<i64>,
+    pub context_pressure_state: Option<String>,
+    pub memory_level: Option<String>,
+    pub memory_scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -928,6 +975,20 @@ pub struct EventObservability {
     pub wait_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_budget_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_context_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_remaining_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_pressure_bps: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_pressure_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_scope: Option<String>,
 }
 
 pub fn build_workflow_event_stream(
@@ -1139,6 +1200,13 @@ fn event_observability_record(event: WorkflowEventEnvelope) -> EventObservabilit
         retry_count: event.observability.retry_count,
         wait_state: event.observability.wait_state,
         wait_seconds: event.observability.wait_seconds,
+        context_budget_bytes: event.observability.context_budget_bytes,
+        selected_context_bytes: event.observability.selected_context_bytes,
+        context_remaining_bytes: event.observability.context_remaining_bytes,
+        context_pressure_bps: event.observability.context_pressure_bps,
+        context_pressure_state: event.observability.context_pressure_state,
+        memory_level: event.observability.memory_level,
+        memory_scope: event.observability.memory_scope,
     }
 }
 
@@ -1164,6 +1232,13 @@ fn event_observability_record_from_store(
         retry_count: record.retry_count,
         wait_state: record.wait_state,
         wait_seconds: record.wait_seconds,
+        context_budget_bytes: record.context_budget_bytes,
+        selected_context_bytes: record.selected_context_bytes,
+        context_remaining_bytes: record.context_remaining_bytes,
+        context_pressure_bps: record.context_pressure_bps,
+        context_pressure_state: record.context_pressure_state,
+        memory_level: record.memory_level,
+        memory_scope: record.memory_scope,
     }
 }
 
@@ -1197,6 +1272,30 @@ fn summarize_event_observability(
         if let Some(wait_seconds) = record.wait_seconds {
             summary.total_wait_seconds += wait_seconds;
         }
+        if record.context_budget_bytes.is_some()
+            || record.selected_context_bytes.is_some()
+            || record.context_remaining_bytes.is_some()
+            || record.context_pressure_bps.is_some()
+            || record.context_pressure_state.is_some()
+        {
+            summary.context_event_count += 1;
+        }
+        if let Some(context_budget_bytes) = record.context_budget_bytes {
+            summary.total_context_budget_bytes += context_budget_bytes;
+        }
+        if let Some(selected_context_bytes) = record.selected_context_bytes {
+            summary.total_selected_context_bytes += selected_context_bytes;
+        }
+        if let Some(context_remaining_bytes) = record.context_remaining_bytes {
+            summary.total_context_remaining_bytes += context_remaining_bytes;
+        }
+        if let Some(context_pressure_bps) = record.context_pressure_bps {
+            summary.context_pressure_event_count += 1;
+            max_i64_option(&mut summary.max_context_pressure_bps, context_pressure_bps);
+        }
+        if record.memory_level.is_some() || record.memory_scope.is_some() {
+            summary.memory_event_count += 1;
+        }
         *severity_counts.entry(record.severity.clone()).or_insert(0) += 1;
         *category_counts.entry(record.category.clone()).or_insert(0) += 1;
     }
@@ -1214,6 +1313,13 @@ struct EventObservabilityBucket {
     total_duration_ms: i64,
     total_retry_count: i64,
     total_wait_seconds: i64,
+    context_event_count: usize,
+    context_pressure_event_count: usize,
+    total_context_budget_bytes: i64,
+    total_selected_context_bytes: i64,
+    total_context_remaining_bytes: i64,
+    max_context_pressure_bps: Option<i64>,
+    memory_event_count: usize,
     kinds: Vec<String>,
     last_event_sequence: i64,
     organization_id: String,
@@ -1259,6 +1365,13 @@ fn summarize_event_observability_tenants(
                 total_duration_ms: bucket.total_duration_ms,
                 total_retry_count: bucket.total_retry_count,
                 total_wait_seconds: bucket.total_wait_seconds,
+                context_event_count: bucket.context_event_count,
+                context_pressure_event_count: bucket.context_pressure_event_count,
+                total_context_budget_bytes: bucket.total_context_budget_bytes,
+                total_selected_context_bytes: bucket.total_selected_context_bytes,
+                total_context_remaining_bytes: bucket.total_context_remaining_bytes,
+                max_context_pressure_bps: bucket.max_context_pressure_bps,
+                memory_event_count: bucket.memory_event_count,
             }
         })
         .collect()
@@ -1294,6 +1407,13 @@ fn summarize_event_observability_workflows(
                 total_duration_ms: bucket.total_duration_ms,
                 total_retry_count: bucket.total_retry_count,
                 total_wait_seconds: bucket.total_wait_seconds,
+                context_event_count: bucket.context_event_count,
+                context_pressure_event_count: bucket.context_pressure_event_count,
+                total_context_budget_bytes: bucket.total_context_budget_bytes,
+                total_selected_context_bytes: bucket.total_selected_context_bytes,
+                total_context_remaining_bytes: bucket.total_context_remaining_bytes,
+                max_context_pressure_bps: bucket.max_context_pressure_bps,
+                memory_event_count: bucket.memory_event_count,
             }
         })
         .collect()
@@ -1330,6 +1450,13 @@ fn summarize_event_observability_nodes(
                 total_duration_ms: bucket.total_duration_ms,
                 total_retry_count: bucket.total_retry_count,
                 total_wait_seconds: bucket.total_wait_seconds,
+                context_event_count: bucket.context_event_count,
+                context_pressure_event_count: bucket.context_pressure_event_count,
+                total_context_budget_bytes: bucket.total_context_budget_bytes,
+                total_selected_context_bytes: bucket.total_selected_context_bytes,
+                total_context_remaining_bytes: bucket.total_context_remaining_bytes,
+                max_context_pressure_bps: bucket.max_context_pressure_bps,
+                memory_event_count: bucket.memory_event_count,
                 last_event_sequence: bucket.last_event_sequence,
             }
         })
@@ -1363,6 +1490,13 @@ fn summarize_event_observability_addons(
                 total_duration_ms: bucket.total_duration_ms,
                 total_retry_count: bucket.total_retry_count,
                 total_wait_seconds: bucket.total_wait_seconds,
+                context_event_count: bucket.context_event_count,
+                context_pressure_event_count: bucket.context_pressure_event_count,
+                total_context_budget_bytes: bucket.total_context_budget_bytes,
+                total_selected_context_bytes: bucket.total_selected_context_bytes,
+                total_context_remaining_bytes: bucket.total_context_remaining_bytes,
+                max_context_pressure_bps: bucket.max_context_pressure_bps,
+                memory_event_count: bucket.memory_event_count,
                 last_event_sequence: bucket.last_event_sequence,
             }
         })
@@ -1390,8 +1524,36 @@ fn accumulate_observability_bucket(
     if let Some(wait_seconds) = record.wait_seconds {
         bucket.total_wait_seconds += wait_seconds;
     }
+    if record.context_budget_bytes.is_some()
+        || record.selected_context_bytes.is_some()
+        || record.context_remaining_bytes.is_some()
+        || record.context_pressure_bps.is_some()
+        || record.context_pressure_state.is_some()
+    {
+        bucket.context_event_count += 1;
+    }
+    if let Some(context_budget_bytes) = record.context_budget_bytes {
+        bucket.total_context_budget_bytes += context_budget_bytes;
+    }
+    if let Some(selected_context_bytes) = record.selected_context_bytes {
+        bucket.total_selected_context_bytes += selected_context_bytes;
+    }
+    if let Some(context_remaining_bytes) = record.context_remaining_bytes {
+        bucket.total_context_remaining_bytes += context_remaining_bytes;
+    }
+    if let Some(context_pressure_bps) = record.context_pressure_bps {
+        bucket.context_pressure_event_count += 1;
+        max_i64_option(&mut bucket.max_context_pressure_bps, context_pressure_bps);
+    }
+    if record.memory_level.is_some() || record.memory_scope.is_some() {
+        bucket.memory_event_count += 1;
+    }
     bucket.kinds.push(record.kind.clone());
     bucket.last_event_sequence = bucket.last_event_sequence.max(record.store_sequence);
+}
+
+fn max_i64_option(target: &mut Option<i64>, value: i64) {
+    *target = Some(target.map_or(value, |current| current.max(value)));
 }
 
 pub fn ingest_inbound_event(
@@ -6257,6 +6419,55 @@ fn global_event_envelope(event: StoredGlobalEventRecord) -> WorkflowEventEnvelop
 }
 
 pub(crate) fn build_event_observability(kind: &str, data: &Value) -> EventObservability {
+    let context_budget_bytes = extract_observability_i64(
+        data,
+        &[
+            "context_budget_bytes",
+            "effective_budget_bytes",
+            "effective_context_budget_bytes",
+            "effective_budget",
+            "budget_bytes",
+            "requested_budget",
+        ],
+    );
+    let context_remaining_bytes = extract_observability_i64(
+        data,
+        &[
+            "context_remaining_bytes",
+            "remaining_context_bytes",
+            "remaining_budget_bytes",
+            "remaining_budget",
+        ],
+    );
+    let selected_context_bytes = extract_observability_i64(
+        data,
+        &[
+            "selected_context_bytes",
+            "context_bytes",
+            "selected_bytes",
+            "content_bytes",
+        ],
+    )
+    .or_else(|| derive_selected_context_bytes(context_budget_bytes, context_remaining_bytes));
+    let context_pressure_bps = extract_observability_i64(
+        data,
+        &[
+            "context_pressure_bps",
+            "context_utilization_bps",
+            "budget_utilization_bps",
+        ],
+    )
+    .or_else(|| derive_context_pressure_bps(context_budget_bytes, selected_context_bytes));
+    let context_pressure_state = extract_observability_string(
+        data,
+        &[
+            "context_pressure_state",
+            "budget_status",
+            "route_status",
+            "routing_quality_status",
+        ],
+    )
+    .or_else(|| derive_context_pressure_state(context_pressure_bps));
     EventObservability {
         schema_version: "forge.event_observability.v1".to_string(),
         node_ref: extract_observability_string(data, &["node_id", "node", "task_id", "task"]),
@@ -6285,7 +6496,50 @@ pub(crate) fn build_event_observability(kind: &str, data: &Value) -> EventObserv
                 "backoff_seconds",
             ],
         ),
+        context_budget_bytes,
+        selected_context_bytes,
+        context_remaining_bytes,
+        context_pressure_bps,
+        context_pressure_state,
+        memory_level: extract_observability_string(data, &["memory_level"]),
+        memory_scope: extract_observability_string(data, &["memory_scope"]),
     }
+}
+
+fn derive_selected_context_bytes(
+    context_budget_bytes: Option<i64>,
+    context_remaining_bytes: Option<i64>,
+) -> Option<i64> {
+    let budget = context_budget_bytes?;
+    let remaining = context_remaining_bytes?;
+    Some(budget.saturating_sub(remaining).max(0))
+}
+
+fn derive_context_pressure_bps(
+    context_budget_bytes: Option<i64>,
+    selected_context_bytes: Option<i64>,
+) -> Option<i64> {
+    let budget = context_budget_bytes?;
+    if budget <= 0 {
+        return None;
+    }
+    let selected = selected_context_bytes?.max(0) as i128;
+    let budget = budget as i128;
+    Some(((selected * 10_000) / budget).min(10_000) as i64)
+}
+
+fn derive_context_pressure_state(context_pressure_bps: Option<i64>) -> Option<String> {
+    let pressure = context_pressure_bps?;
+    Some(
+        if pressure >= 9_000 {
+            "critical"
+        } else if pressure >= 7_500 {
+            "high"
+        } else {
+            "normal"
+        }
+        .to_string(),
+    )
 }
 
 fn extract_wait_state(kind: &str, data: &Value) -> Option<String> {
@@ -6348,6 +6602,28 @@ fn extract_observability_i64(data: &Value, keys: &[&str]) -> Option<i64> {
 
 fn observability_value_candidates(data: &Value) -> Vec<&Value> {
     let mut candidates = value_candidates(data);
+    for _ in 0..2 {
+        let roots = candidates.clone();
+        for candidate in roots {
+            for key in [
+                "context",
+                "context_route",
+                "routing_summary",
+                "routing_quality",
+                "routing_repair",
+                "routing_economy",
+                "budget_plan",
+                "selection_receipt",
+                "replay_manifest",
+                "memory_policy",
+                "operating_context",
+            ] {
+                if let Some(value) = candidate.get(key) {
+                    candidates.push(value);
+                }
+            }
+        }
+    }
     for key in [
         "summary",
         "health",

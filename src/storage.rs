@@ -67,6 +67,13 @@ pub struct StoredEventObservabilityRecord {
     pub retry_count: Option<i64>,
     pub wait_state: Option<String>,
     pub wait_seconds: Option<i64>,
+    pub context_budget_bytes: Option<i64>,
+    pub selected_context_bytes: Option<i64>,
+    pub context_remaining_bytes: Option<i64>,
+    pub context_pressure_bps: Option<i64>,
+    pub context_pressure_state: Option<String>,
+    pub memory_level: Option<String>,
+    pub memory_scope: Option<String>,
     pub data: serde_json::Value,
     pub created_at: String,
 }
@@ -466,6 +473,13 @@ impl ForgeStore {
                 retry_count INTEGER,
                 wait_state TEXT,
                 wait_seconds INTEGER,
+                context_budget_bytes INTEGER,
+                selected_context_bytes INTEGER,
+                context_remaining_bytes INTEGER,
+                context_pressure_bps INTEGER,
+                context_pressure_state TEXT,
+                memory_level TEXT,
+                memory_scope TEXT,
                 data_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -768,8 +782,42 @@ impl ForgeStore {
             );
             "#,
         )?;
+        self.ensure_event_observability_context_columns()?;
         self.backfill_event_observability_index()?;
         self.ensure_memory_promotion_tenant_columns()?;
+        Ok(())
+    }
+
+    fn ensure_event_observability_context_columns(&self) -> Result<()> {
+        for (column, sql_type) in [
+            ("context_budget_bytes", "INTEGER"),
+            ("selected_context_bytes", "INTEGER"),
+            ("context_remaining_bytes", "INTEGER"),
+            ("context_pressure_bps", "INTEGER"),
+            ("context_pressure_state", "TEXT"),
+            ("memory_level", "TEXT"),
+            ("memory_scope", "TEXT"),
+        ] {
+            if !self.table_has_column("event_observability_index", column)? {
+                let result = self.connection.execute(
+                    &format!(
+                        "ALTER TABLE event_observability_index ADD COLUMN {column} {sql_type}"
+                    ),
+                    [],
+                );
+                if let Err(error) = result {
+                    if !error.to_string().contains("duplicate column name") {
+                        return Err(error.into());
+                    }
+                }
+            }
+        }
+        self.connection.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_event_observability_context_pressure
+                ON event_observability_index (context_pressure_bps, global_event_id);
+            "#,
+        )?;
         Ok(())
     }
 
@@ -1387,7 +1435,10 @@ impl ForgeStore {
             r#"
             SELECT global_event_id, workflow_id, kind, category, severity, origin, source,
                    organization_id, brand_id, product_id, node_ref, addon_id,
-                   duration_ms, retry_count, wait_state, wait_seconds, data_json, created_at
+                   duration_ms, retry_count, wait_state, wait_seconds,
+                   context_budget_bytes, selected_context_bytes, context_remaining_bytes,
+                   context_pressure_bps, context_pressure_state, memory_level, memory_scope,
+                   data_json, created_at
             FROM event_observability_index
             WHERE (?1 IS NULL OR workflow_id = ?1)
               AND (?2 IS NULL OR organization_id = ?2)
@@ -1424,8 +1475,6 @@ impl ForgeStore {
                        g.organization_id, g.brand_id, g.product_id, g.user_id, g.channel_id,
                        g.tenant_context_json, g.data_json, g.created_at
                 FROM global_events g
-                LEFT JOIN event_observability_index o ON o.global_event_id = g.id
-                WHERE o.global_event_id IS NULL
                 ORDER BY g.id ASC
                 "#,
             )?;
@@ -1631,11 +1680,18 @@ impl ForgeStore {
                 retry_count,
                 wait_state,
                 wait_seconds,
+                context_budget_bytes,
+                selected_context_bytes,
+                context_remaining_bytes,
+                context_pressure_bps,
+                context_pressure_state,
+                memory_level,
+                memory_scope,
                 data_json,
                 created_at,
                 updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, CURRENT_TIMESTAMP)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, CURRENT_TIMESTAMP)
             ON CONFLICT(global_event_id) DO UPDATE SET
                 workflow_id=excluded.workflow_id,
                 kind=excluded.kind,
@@ -1652,6 +1708,13 @@ impl ForgeStore {
                 retry_count=excluded.retry_count,
                 wait_state=excluded.wait_state,
                 wait_seconds=excluded.wait_seconds,
+                context_budget_bytes=excluded.context_budget_bytes,
+                selected_context_bytes=excluded.selected_context_bytes,
+                context_remaining_bytes=excluded.context_remaining_bytes,
+                context_pressure_bps=excluded.context_pressure_bps,
+                context_pressure_state=excluded.context_pressure_state,
+                memory_level=excluded.memory_level,
+                memory_scope=excluded.memory_scope,
                 data_json=excluded.data_json,
                 created_at=excluded.created_at,
                 updated_at=CURRENT_TIMESTAMP
@@ -1673,6 +1736,13 @@ impl ForgeStore {
                 observability.retry_count,
                 observability.wait_state,
                 observability.wait_seconds,
+                observability.context_budget_bytes,
+                observability.selected_context_bytes,
+                observability.context_remaining_bytes,
+                observability.context_pressure_bps,
+                observability.context_pressure_state,
+                observability.memory_level,
+                observability.memory_scope,
                 serde_json::to_string(data)?,
                 created_at,
             ],
@@ -3816,7 +3886,7 @@ fn stored_global_event_from_row(row: &Row<'_>) -> rusqlite::Result<StoredGlobalE
 fn stored_event_observability_from_row(
     row: &Row<'_>,
 ) -> rusqlite::Result<StoredEventObservabilityRecord> {
-    let data_json = row.get::<_, String>(16)?;
+    let data_json = row.get::<_, String>(23)?;
     Ok(StoredEventObservabilityRecord {
         global_event_id: row.get(0)?,
         workflow_id: row.get(1)?,
@@ -3834,14 +3904,21 @@ fn stored_event_observability_from_row(
         retry_count: row.get(13)?,
         wait_state: row.get(14)?,
         wait_seconds: row.get(15)?,
+        context_budget_bytes: row.get(16)?,
+        selected_context_bytes: row.get(17)?,
+        context_remaining_bytes: row.get(18)?,
+        context_pressure_bps: row.get(19)?,
+        context_pressure_state: row.get(20)?,
+        memory_level: row.get(21)?,
+        memory_scope: row.get(22)?,
         data: serde_json::from_str(&data_json).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                16,
+                23,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
         })?,
-        created_at: row.get(17)?,
+        created_at: row.get(24)?,
     })
 }
 
