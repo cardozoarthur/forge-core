@@ -1,12 +1,16 @@
 use crate::artifact::hex_sha256;
 use crate::storage::{ForgeStore, HeadroomBlobWrite, StoredHeadroomBlobRecord};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 pub const TOKEN_HEADROOM_SCHEMA_VERSION: &str = "forge.harness.token_headroom.v1";
 pub const CLI_WRAPPER_PLAN_SCHEMA_VERSION: &str = "forge.harness.cli_wrapper_plan.v1";
 pub const HEADROOM_RETRIEVAL_SCHEMA_VERSION: &str = "forge.harness.headroom_retrieval.v1";
+pub const CLI_HARNESS_EXEC_SCHEMA_VERSION: &str = "forge.harness.exec_receipt.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenHeadroomReport {
@@ -55,6 +59,34 @@ pub struct CliWrapperEnvVar {
     pub name: String,
     pub value: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CliHarnessExecReceipt {
+    pub schema_version: String,
+    pub status: String,
+    pub executor: String,
+    pub command: Vec<String>,
+    pub command_sha256: String,
+    pub cwd: String,
+    pub forge_first: bool,
+    pub dry_run: bool,
+    pub allow_exec: bool,
+    pub execution_mode: String,
+    pub resolved_executable: Option<String>,
+    pub resolution_status: String,
+    pub wrapper_plan: CliWrapperPlanReport,
+    pub safety_checks: Vec<String>,
+    pub executed: bool,
+    pub success: Option<bool>,
+    pub exit_code: Option<i32>,
+    pub stdout_bytes: Option<usize>,
+    pub stderr_bytes: Option<usize>,
+    pub stdout_sha256: Option<String>,
+    pub stderr_sha256: Option<String>,
+    pub stdout_excerpt: Option<String>,
+    pub stderr_excerpt: Option<String>,
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -300,6 +332,16 @@ pub fn build_cli_wrapper_plan(
     if forge_first {
         launch_command.push("--forge-first".to_string());
     }
+    if let Some(workflow_id) = workflow_id.filter(|value| !value.trim().is_empty()) {
+        launch_command.push("--workflow".to_string());
+        launch_command.push(workflow_id.to_string());
+    }
+    if let Some(run_id) = run_id.filter(|value| !value.trim().is_empty()) {
+        launch_command.push("--run".to_string());
+        launch_command.push(run_id.to_string());
+    }
+    launch_command.push("--context-budget".to_string());
+    launch_command.push(context_budget.to_string());
     launch_command.push("--".to_string());
     launch_command.extend(command.clone());
 
@@ -326,6 +368,159 @@ pub fn build_cli_wrapper_plan(
             "This plan is non-destructive; actual exec remains a separate guarded harness action".to_string(),
         ],
     }
+}
+
+pub fn run_cli_harness_exec(
+    executor: &str,
+    command: &[String],
+    forge_first: bool,
+    workflow_id: Option<&str>,
+    run_id: Option<&str>,
+    context_budget: usize,
+    token_headroom: bool,
+    dry_run: bool,
+    allow_exec: bool,
+    cwd: Option<&Path>,
+) -> Result<CliHarnessExecReceipt> {
+    let wrapper_plan = build_cli_wrapper_plan(
+        executor,
+        command,
+        forge_first,
+        workflow_id,
+        run_id,
+        context_budget,
+        token_headroom,
+    );
+    let command = wrapper_plan.command.clone();
+    let cwd_path = cwd
+        .map(Path::to_path_buf)
+        .unwrap_or(env::current_dir().context("failed to read current directory")?);
+    let cwd_display = cwd_path.display().to_string();
+    let (resolved_executable, resolution_status) = resolve_executable(command.first(), &cwd_path);
+    let command_sha256 = hex_sha256(command.join("\0").as_bytes());
+    let safety_checks = vec![
+        "dry_run is the default; real execution requires --execute and --allow-exec".to_string(),
+        "resolved executable is recorded before running the child process".to_string(),
+        "Forge env overlay is applied only to the child process".to_string(),
+        "stdout and stderr are summarized by bytes, sha256 and bounded excerpts".to_string(),
+        "workflow/run lineage and token-headroom settings stay explicit in the receipt".to_string(),
+    ];
+
+    if dry_run {
+        return Ok(exec_receipt(
+            wrapper_plan,
+            command,
+            command_sha256,
+            cwd_display,
+            forge_first,
+            dry_run,
+            allow_exec,
+            "dry_run",
+            resolved_executable,
+            resolution_status,
+            "harness_exec_dry_run",
+            safety_checks,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+    if !allow_exec {
+        return Ok(exec_receipt(
+            wrapper_plan,
+            command,
+            command_sha256,
+            cwd_display,
+            forge_first,
+            dry_run,
+            allow_exec,
+            "blocked",
+            resolved_executable,
+            resolution_status,
+            "harness_exec_blocked_without_allow_exec",
+            safety_checks,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+    let Some(executable) = resolved_executable.clone() else {
+        return Ok(exec_receipt(
+            wrapper_plan,
+            command,
+            command_sha256,
+            cwd_display,
+            forge_first,
+            dry_run,
+            allow_exec,
+            "blocked",
+            resolved_executable,
+            resolution_status,
+            "harness_exec_blocked_missing_executable",
+            safety_checks,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
+    };
+
+    let mut child = Command::new(&executable);
+    child.args(command.iter().skip(1));
+    child.current_dir(&cwd_path);
+    for env_var in &wrapper_plan.env {
+        child.env(&env_var.name, &env_var.value);
+    }
+    let output = child
+        .output()
+        .with_context(|| format!("failed to execute harness child `{executable}`"))?;
+    let success = output.status.success();
+    let stdout_excerpt = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr_excerpt = String::from_utf8_lossy(&output.stderr).to_string();
+    Ok(exec_receipt(
+        wrapper_plan,
+        command,
+        command_sha256,
+        cwd_display,
+        forge_first,
+        dry_run,
+        allow_exec,
+        "guarded_exec",
+        resolved_executable,
+        resolution_status,
+        if success {
+            "harness_exec_completed"
+        } else {
+            "harness_exec_failed"
+        },
+        safety_checks,
+        true,
+        Some(success),
+        output.status.code(),
+        Some(output.stdout.len()),
+        Some(output.stderr.len()),
+        Some(hex_sha256(&output.stdout)),
+        Some(hex_sha256(&output.stderr)),
+        Some(bounded_excerpt(&stdout_excerpt, 4000)),
+        Some(bounded_excerpt(&stderr_excerpt, 4000)),
+    ))
 }
 
 fn headroom_retrieval_report(
@@ -373,6 +568,109 @@ fn parse_headroom_ref(value: &str) -> Result<String> {
         bail!("headroom retrieval ref does not include a hash");
     }
     Ok(sha.to_string())
+}
+
+fn exec_receipt(
+    wrapper_plan: CliWrapperPlanReport,
+    command: Vec<String>,
+    command_sha256: String,
+    cwd: String,
+    forge_first: bool,
+    dry_run: bool,
+    allow_exec: bool,
+    execution_mode: &str,
+    resolved_executable: Option<String>,
+    resolution_status: String,
+    status: &str,
+    safety_checks: Vec<String>,
+    executed: bool,
+    success: Option<bool>,
+    exit_code: Option<i32>,
+    stdout_bytes: Option<usize>,
+    stderr_bytes: Option<usize>,
+    stdout_sha256: Option<String>,
+    stderr_sha256: Option<String>,
+    stdout_excerpt: Option<String>,
+    stderr_excerpt: Option<String>,
+) -> CliHarnessExecReceipt {
+    let executor = wrapper_plan.executor.clone();
+    CliHarnessExecReceipt {
+        schema_version: CLI_HARNESS_EXEC_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        executor,
+        command,
+        command_sha256,
+        cwd,
+        forge_first,
+        dry_run,
+        allow_exec,
+        execution_mode: execution_mode.to_string(),
+        resolved_executable,
+        resolution_status,
+        wrapper_plan,
+        safety_checks,
+        executed,
+        success,
+        exit_code,
+        stdout_bytes,
+        stderr_bytes,
+        stdout_sha256,
+        stderr_sha256,
+        stdout_excerpt,
+        stderr_excerpt,
+        notes: vec![
+            "Harness exec is a Forge-owned receipt for brain CLI invocation, not process interception.".to_string(),
+            "Use dry-run receipts to validate wrapper shape before opting into guarded execution.".to_string(),
+        ],
+    }
+}
+
+fn resolve_executable(command: Option<&String>, cwd: &Path) -> (Option<String>, String) {
+    let Some(command) = command
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return (None, "command_empty".to_string());
+    };
+    let candidate = Path::new(command);
+    if candidate.components().count() > 1 {
+        let path = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            cwd.join(candidate)
+        };
+        if path.is_file() {
+            return (
+                Some(canonical_or_display(path)),
+                "executable_resolved_by_path".to_string(),
+            );
+        }
+        return (None, "executable_missing".to_string());
+    }
+    if let Some(paths) = env::var_os("PATH") {
+        for dir in env::split_paths(&paths) {
+            let path = dir.join(command);
+            if path.is_file() {
+                return (
+                    Some(canonical_or_display(path)),
+                    "executable_resolved_from_path".to_string(),
+                );
+            }
+        }
+    }
+    (None, "executable_missing".to_string())
+}
+
+fn canonical_or_display(path: PathBuf) -> String {
+    path.canonicalize().unwrap_or(path).display().to_string()
+}
+
+fn bounded_excerpt(value: &str, max_chars: usize) -> String {
+    let mut excerpt = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        excerpt.push_str("\n[forge excerpt truncated]");
+    }
+    excerpt
 }
 
 fn usize_to_i64(value: usize) -> i64 {

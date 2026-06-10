@@ -40,7 +40,7 @@ use crate::executor::load_executors;
 use crate::handoff::build_task_handoff;
 use crate::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, persist_token_headroom_report,
-    retrieve_headroom_blob,
+    retrieve_headroom_blob, run_cli_harness_exec,
 };
 use crate::identity::{
     audit_tenant_index, ensure_workflow_policy, evaluate_tenant_policy_for_action,
@@ -370,6 +370,23 @@ struct HarnessWrapPlanInput {
     run_id: Option<String>,
     context_budget: Option<usize>,
     token_headroom: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HarnessExecInput {
+    executor: String,
+    command: Option<Vec<String>>,
+    cmd: Option<Vec<String>>,
+    forge_first: Option<bool>,
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    run: Option<String>,
+    run_id: Option<String>,
+    context_budget: Option<usize>,
+    token_headroom: Option<bool>,
+    dry_run: Option<bool>,
+    allow_exec: Option<bool>,
+    cwd: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4270,6 +4287,26 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.harness.exec",
+                "Execute Forge Harness Receipt",
+                "Return a dry-run or explicitly guarded execution receipt for a Forge-first brain CLI invocation, including executable resolution, env overlay and bounded output hashes.",
+                object_schema(&[
+                    ("executor", "string", "codex|claude|gemini|opencode"),
+                    ("command", "array", "command argv to launch under the harness"),
+                    ("forge_first", "boolean", "prefer Forge context routing before native CLI defaults"),
+                    ("workflow_id", "string", "optional workflow lineage"),
+                    ("run_id", "string", "optional async run lineage"),
+                    ("context_budget", "integer", "context byte budget"),
+                    ("token_headroom", "boolean", "enable token-headroom env"),
+                    ("dry_run", "boolean", "default true; false requests guarded execution"),
+                    ("allow_exec", "boolean", "must be true together with dry_run=false before executing"),
+                    ("cwd", "string", "optional child working directory"),
+                ], &["executor"]),
+                "forge.harness.exec_receipt.v1",
+                &["forge", "harness", "exec", "--executor", "<executor>", "--", "<cmd>"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
                 "forge.task.handoff",
                 "Acquire Task Handoff",
                 "Acquire a bounded executor handoff packet for an authorized task executor.",
@@ -6405,6 +6442,25 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.context_budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
                 input.token_headroom.unwrap_or(true),
             ))?
+        }
+        "forge.harness.exec" => {
+            let input: HarnessExecInput = parse_input(input)?;
+            let command = input.command.or(input.cmd).unwrap_or_default();
+            let workflow_id = input.workflow_id.or(input.workflow);
+            let run_id = input.run_id.or(input.run);
+            let cwd = input.cwd.as_deref().map(std::path::Path::new);
+            serde_json::to_value(run_cli_harness_exec(
+                &input.executor,
+                &command,
+                input.forge_first.unwrap_or(true),
+                workflow_id.as_deref(),
+                run_id.as_deref(),
+                input.context_budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
+                input.token_headroom.unwrap_or(true),
+                input.dry_run.unwrap_or(true),
+                input.allow_exec.unwrap_or(false),
+                cwd,
+            )?)?
         }
         "forge.task.handoff" => {
             let input: TaskHandoffInput = parse_input(input)?;

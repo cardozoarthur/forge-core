@@ -226,6 +226,80 @@ fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environme
     assert!(env
         .iter()
         .any(|item| item["name"] == "FORGE_TOKEN_HEADROOM" && item["value"] == "enabled"));
+
+    let exec_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "exec",
+            "--executor",
+            "codex",
+            "--forge-first",
+            "--workflow",
+            "wf_demo",
+            "--run",
+            "run_demo",
+            "--context-budget",
+            "2048",
+            "--",
+            "definitely-not-a-real-forge-test-cli",
+            "--version",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let exec_json: Value = serde_json::from_slice(&exec_output).unwrap();
+    assert_eq!(exec_json["schema_version"], "forge.harness.exec_receipt.v1");
+    assert_eq!(exec_json["status"], "harness_exec_dry_run");
+    assert_eq!(exec_json["executor"], "codex");
+    assert_eq!(exec_json["dry_run"], true);
+    assert_eq!(exec_json["allow_exec"], false);
+    assert_eq!(exec_json["executed"], false);
+    assert_eq!(exec_json["resolution_status"], "executable_missing");
+    assert_eq!(
+        exec_json["wrapper_plan"]["schema_version"],
+        "forge.harness.cli_wrapper_plan.v1"
+    );
+    let exec_env = exec_json["wrapper_plan"]["env"].as_array().unwrap();
+    assert!(exec_env
+        .iter()
+        .any(|item| item["name"] == "FORGE_RUN_ID" && item["value"] == "run_demo"));
+
+    let mcp_exec_input = serde_json::json!({
+        "executor": "opencode",
+        "command": ["definitely-not-a-real-forge-test-cli", "--help"],
+        "forge_first": true,
+        "workflow_id": "wf_demo",
+        "dry_run": true,
+        "allow_exec": false
+    });
+    let mcp_exec_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.exec",
+            "--input",
+            &mcp_exec_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_exec: Value = serde_json::from_slice(&mcp_exec_output).unwrap();
+    assert_eq!(
+        mcp_exec["result"]["schema_version"],
+        "forge.harness.exec_receipt.v1"
+    );
+    assert_eq!(mcp_exec["result"]["status"], "harness_exec_dry_run");
+    assert_eq!(mcp_exec["result"]["executed"], false);
 }
 
 #[cfg(unix)]
