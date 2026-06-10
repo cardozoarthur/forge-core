@@ -24,8 +24,8 @@ use crate::schedule::{
     ScheduleWorkerStatusReport,
 };
 use crate::storage::{
-    EventServiceWrite, ForgeStore, InboundEventRecord, StoreEvent, StoredEventServiceRecord,
-    StoredGlobalEventRecord,
+    EventServiceWrite, ForgeStore, InboundEventRecord, StoreEvent, StoredEventObservabilityRecord,
+    StoredEventServiceRecord, StoredGlobalEventRecord,
 };
 use crate::workflow::{
     attach_workflow_artifact, complete_workflow, pause_workflow, resume_workflow,
@@ -128,6 +128,7 @@ pub struct EventTimelinePage {
 pub struct EventObservabilityIndexReport {
     pub schema_version: String,
     pub status: String,
+    pub index_source: String,
     pub filters: EventObservabilityIndexFilters,
     pub page: EventTimelinePage,
     pub summary: EventObservabilitySummary,
@@ -1049,22 +1050,43 @@ pub fn build_event_observability_index(
     limit: Option<usize>,
     after_sequence: Option<i64>,
 ) -> Result<EventObservabilityIndexReport> {
-    let timeline = build_global_event_timeline(
-        store,
-        workflow_id,
-        organization_id,
-        brand_id,
-        product_id,
-        None,
-        None,
-    )?;
-    let mut records = timeline
-        .events
+    let mut records = store
+        .load_event_observability_index(
+            workflow_id,
+            organization_id,
+            brand_id,
+            product_id,
+            node_ref,
+            addon_id,
+        )?
         .into_iter()
-        .filter(|event| filter_matches_optional(node_ref, event.observability.node_ref.as_deref()))
-        .filter(|event| filter_matches_optional(addon_id, event.observability.addon_id.as_deref()))
-        .map(event_observability_record)
+        .map(event_observability_record_from_store)
         .collect::<Vec<_>>();
+    let index_source = if records.is_empty() {
+        let timeline = build_global_event_timeline(
+            store,
+            workflow_id,
+            organization_id,
+            brand_id,
+            product_id,
+            None,
+            None,
+        )?;
+        records = timeline
+            .events
+            .into_iter()
+            .filter(|event| {
+                filter_matches_optional(node_ref, event.observability.node_ref.as_deref())
+            })
+            .filter(|event| {
+                filter_matches_optional(addon_id, event.observability.addon_id.as_deref())
+            })
+            .map(event_observability_record)
+            .collect::<Vec<_>>();
+        "derived_timeline".to_string()
+    } else {
+        "sqlite_materialized".to_string()
+    };
     records.sort_by_key(|event| event.store_sequence);
     let summary = summarize_event_observability(&records);
     let tenants = summarize_event_observability_tenants(&records);
@@ -1075,6 +1097,7 @@ pub fn build_event_observability_index(
     Ok(EventObservabilityIndexReport {
         schema_version: EVENT_OBSERVABILITY_INDEX_SCHEMA_VERSION.to_string(),
         status: "event_observability_index_loaded".to_string(),
+        index_source,
         filters: EventObservabilityIndexFilters {
             workflow_id: normalize_text(workflow_id),
             organization_id: normalize_text(organization_id),
@@ -1116,6 +1139,31 @@ fn event_observability_record(event: WorkflowEventEnvelope) -> EventObservabilit
         retry_count: event.observability.retry_count,
         wait_state: event.observability.wait_state,
         wait_seconds: event.observability.wait_seconds,
+    }
+}
+
+fn event_observability_record_from_store(
+    record: StoredEventObservabilityRecord,
+) -> EventObservabilityRecord {
+    EventObservabilityRecord {
+        event_id: format!("evtg_{}", record.global_event_id),
+        store_sequence: record.global_event_id,
+        workflow_id: record.workflow_id,
+        kind: record.kind,
+        category: record.category,
+        severity: record.severity,
+        origin: record.origin,
+        source: record.source,
+        occurred_at: record.created_at,
+        organization_id: record.organization_id,
+        brand_id: record.brand_id,
+        product_id: record.product_id,
+        node_ref: record.node_ref,
+        addon_id: record.addon_id,
+        duration_ms: record.duration_ms,
+        retry_count: record.retry_count,
+        wait_state: record.wait_state,
+        wait_seconds: record.wait_seconds,
     }
 }
 
@@ -6208,7 +6256,7 @@ fn global_event_envelope(event: StoredGlobalEventRecord) -> WorkflowEventEnvelop
     }
 }
 
-fn build_event_observability(kind: &str, data: &Value) -> EventObservability {
+pub(crate) fn build_event_observability(kind: &str, data: &Value) -> EventObservability {
     EventObservability {
         schema_version: "forge.event_observability.v1".to_string(),
         node_ref: extract_observability_string(data, &["node_id", "node", "task_id", "task"]),
@@ -6393,7 +6441,7 @@ fn value_candidates(data: &Value) -> Vec<&Value> {
     candidates
 }
 
-fn categorize_event(kind: &str) -> String {
+pub(crate) fn categorize_event(kind: &str) -> String {
     let lower = kind.to_ascii_lowercase();
     if lower.starts_with("workflow_") || lower.contains("goal") {
         "workflow".to_string()
@@ -6417,7 +6465,7 @@ fn categorize_event(kind: &str) -> String {
     }
 }
 
-fn infer_severity(kind: &str, data: &Value) -> String {
+pub(crate) fn infer_severity(kind: &str, data: &Value) -> String {
     let lower = kind.to_ascii_lowercase();
     let status = data
         .get("status")

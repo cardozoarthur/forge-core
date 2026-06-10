@@ -2492,6 +2492,7 @@ fn event_envelopes_project_normalized_observability_metrics() {
         observability_json["status"],
         "event_observability_index_loaded"
     );
+    assert_eq!(observability_json["index_source"], "sqlite_materialized");
     assert_eq!(observability_json["summary"]["total_event_count"], 1);
     assert_eq!(observability_json["summary"]["node_event_count"], 1);
     assert_eq!(observability_json["summary"]["addon_event_count"], 1);
@@ -2510,6 +2511,23 @@ fn event_envelopes_project_normalized_observability_metrics() {
     assert_eq!(
         observability_json["events"][0]["wait_state"],
         "waiting_for_partner"
+    );
+    let materialized_records = store_handle
+        .load_event_observability_index(
+            Some(workflow_id),
+            None,
+            None,
+            None,
+            Some("node-payment"),
+            Some("forge.addon.payment"),
+        )
+        .unwrap();
+    assert_eq!(materialized_records.len(), 1);
+    assert_eq!(materialized_records[0].duration_ms, Some(245));
+    assert_eq!(materialized_records[0].retry_count, Some(2));
+    assert_eq!(
+        materialized_records[0].wait_state.as_deref(),
+        Some("waiting_for_partner")
     );
 
     let mcp_input = serde_json::json!({
@@ -2544,6 +2562,101 @@ fn event_envelopes_project_normalized_observability_metrics() {
     assert_eq!(
         mcp_json["result"]["events"][0]["store_sequence"],
         observability_json["events"][0]["store_sequence"]
+    );
+}
+
+#[test]
+fn event_observability_index_backfills_existing_global_events_on_migration() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    {
+        let connection = Connection::open(&store).unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE global_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    workflow_id TEXT,
+                    kind TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
+                    brand_id TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    tenant_context_json TEXT NOT NULL,
+                    data_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO global_events (
+                    source, source_id, workflow_id, kind, origin, status,
+                    organization_id, brand_id, product_id, user_id, channel_id,
+                    tenant_context_json, data_json, created_at
+                )
+                VALUES (
+                    'legacy_import', 'legacy-001', 'wf_legacy',
+                    'legacy_wait_retry_observed', 'legacy_runner', 'recorded',
+                    'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
+                    '{}',
+                    '{"node_id":"legacy-node","addon_id":"forge.addon.legacy","duration_ms":77,"retry_count":1,"wait_seconds":9,"state":"waiting_for_backfill"}',
+                    '2026-06-10T12:00:00Z'
+                );
+                "#,
+            )
+            .unwrap();
+    }
+
+    let store_handle = ForgeStore::open(&store).unwrap();
+    let records = store_handle
+        .load_event_observability_index(
+            Some("wf_legacy"),
+            Some("org-demo"),
+            Some("brand-demo"),
+            Some("product-demo"),
+            Some("legacy-node"),
+            Some("forge.addon.legacy"),
+        )
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].duration_ms, Some(77));
+    assert_eq!(records[0].retry_count, Some(1));
+    assert_eq!(records[0].wait_seconds, Some(9));
+
+    let observability_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "observability",
+            "--workflow",
+            "wf_legacy",
+            "--organization",
+            "org-demo",
+            "--brand",
+            "brand-demo",
+            "--product",
+            "product-demo",
+            "--node",
+            "legacy-node",
+            "--addon",
+            "forge.addon.legacy",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let observability_json: Value = serde_json::from_slice(&observability_output).unwrap();
+    assert_eq!(observability_json["index_source"], "sqlite_materialized");
+    assert_eq!(observability_json["summary"]["total_event_count"], 1);
+    assert_eq!(
+        observability_json["events"][0]["wait_state"],
+        "waiting_for_backfill"
     );
 }
 

@@ -1,4 +1,5 @@
 use crate::checkpoint::TaskCheckpoint;
+use crate::event::{build_event_observability, categorize_event, infer_severity};
 use crate::graph::Workflow;
 use crate::intent::OperatingContextSpec;
 use anyhow::{Context, Result};
@@ -44,6 +45,28 @@ pub struct StoredGlobalEventRecord {
     pub user_id: String,
     pub channel_id: String,
     pub tenant_context: serde_json::Value,
+    pub data: serde_json::Value,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredEventObservabilityRecord {
+    pub global_event_id: i64,
+    pub workflow_id: String,
+    pub kind: String,
+    pub category: String,
+    pub severity: String,
+    pub origin: String,
+    pub source: String,
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    pub node_ref: Option<String>,
+    pub addon_id: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub retry_count: Option<i64>,
+    pub wait_state: Option<String>,
+    pub wait_seconds: Option<i64>,
     pub data: serde_json::Value,
     pub created_at: String,
 }
@@ -426,6 +449,35 @@ impl ForgeStore {
                 ON global_events (organization_id, brand_id, product_id, id);
             CREATE INDEX IF NOT EXISTS idx_global_events_kind
                 ON global_events (kind, id);
+            CREATE TABLE IF NOT EXISTS event_observability_index (
+                global_event_id INTEGER PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                category TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                origin TEXT NOT NULL,
+                source TEXT NOT NULL,
+                organization_id TEXT NOT NULL,
+                brand_id TEXT NOT NULL,
+                product_id TEXT NOT NULL,
+                node_ref TEXT,
+                addon_id TEXT,
+                duration_ms INTEGER,
+                retry_count INTEGER,
+                wait_state TEXT,
+                wait_seconds INTEGER,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_event_observability_workflow
+                ON event_observability_index (workflow_id, global_event_id);
+            CREATE INDEX IF NOT EXISTS idx_event_observability_tenant
+                ON event_observability_index (organization_id, brand_id, product_id, global_event_id);
+            CREATE INDEX IF NOT EXISTS idx_event_observability_node
+                ON event_observability_index (node_ref, global_event_id);
+            CREATE INDEX IF NOT EXISTS idx_event_observability_addon
+                ON event_observability_index (addon_id, global_event_id);
             CREATE TABLE IF NOT EXISTS event_inbox (
                 id TEXT PRIMARY KEY,
                 origin TEXT NOT NULL,
@@ -716,6 +768,7 @@ impl ForgeStore {
             );
             "#,
         )?;
+        self.backfill_event_observability_index()?;
         self.ensure_memory_promotion_tenant_columns()?;
         Ok(())
     }
@@ -1315,6 +1368,91 @@ impl ForgeStore {
         Ok(events)
     }
 
+    pub fn load_event_observability_index(
+        &self,
+        workflow_id: Option<&str>,
+        organization_id: Option<&str>,
+        brand_id: Option<&str>,
+        product_id: Option<&str>,
+        node_ref: Option<&str>,
+        addon_id: Option<&str>,
+    ) -> Result<Vec<StoredEventObservabilityRecord>> {
+        let workflow_filter = normalize_optional_filter(workflow_id);
+        let organization_filter = normalize_optional_filter(organization_id);
+        let brand_filter = normalize_optional_filter(brand_id);
+        let product_filter = normalize_optional_filter(product_id);
+        let node_filter = normalize_optional_filter(node_ref);
+        let addon_filter = normalize_optional_filter(addon_id);
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT global_event_id, workflow_id, kind, category, severity, origin, source,
+                   organization_id, brand_id, product_id, node_ref, addon_id,
+                   duration_ms, retry_count, wait_state, wait_seconds, data_json, created_at
+            FROM event_observability_index
+            WHERE (?1 IS NULL OR workflow_id = ?1)
+              AND (?2 IS NULL OR organization_id = ?2)
+              AND (?3 IS NULL OR brand_id = ?3)
+              AND (?4 IS NULL OR product_id = ?4)
+              AND (?5 IS NULL OR node_ref = ?5)
+              AND (?6 IS NULL OR addon_id = ?6)
+            ORDER BY global_event_id ASC
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![
+                workflow_filter,
+                organization_filter,
+                brand_filter,
+                product_filter,
+                node_filter,
+                addon_filter
+            ],
+            stored_event_observability_from_row,
+        )?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
+    fn backfill_event_observability_index(&self) -> Result<()> {
+        let records = {
+            let mut statement = self.connection.prepare(
+                r#"
+                SELECT g.id, g.source, g.source_id, g.workflow_id, g.kind, g.origin, g.status,
+                       g.organization_id, g.brand_id, g.product_id, g.user_id, g.channel_id,
+                       g.tenant_context_json, g.data_json, g.created_at
+                FROM global_events g
+                LEFT JOIN event_observability_index o ON o.global_event_id = g.id
+                WHERE o.global_event_id IS NULL
+                ORDER BY g.id ASC
+                "#,
+            )?;
+            let rows = statement.query_map([], stored_global_event_from_row)?;
+            let mut records = Vec::new();
+            for row in rows {
+                records.push(row?);
+            }
+            records
+        };
+        for record in records {
+            self.upsert_event_observability_index_record(
+                record.id,
+                record.workflow_id.as_deref(),
+                &record.kind,
+                &record.origin,
+                &record.source,
+                &record.organization_id,
+                &record.brand_id,
+                &record.product_id,
+                &record.data,
+                &record.created_at,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn try_save_event_service(&self, service: EventServiceWrite<'_>) -> Result<bool> {
         let changed = self.connection.execute(
             r#"
@@ -1460,6 +1598,88 @@ impl ForgeStore {
         Ok(services)
     }
 
+    fn upsert_event_observability_index_record(
+        &self,
+        global_event_id: i64,
+        workflow_id: Option<&str>,
+        kind: &str,
+        origin: &str,
+        source: &str,
+        organization_id: &str,
+        brand_id: &str,
+        product_id: &str,
+        data: &serde_json::Value,
+        created_at: &str,
+    ) -> Result<()> {
+        let observability = build_event_observability(kind, data);
+        self.connection.execute(
+            r#"
+            INSERT INTO event_observability_index (
+                global_event_id,
+                workflow_id,
+                kind,
+                category,
+                severity,
+                origin,
+                source,
+                organization_id,
+                brand_id,
+                product_id,
+                node_ref,
+                addon_id,
+                duration_ms,
+                retry_count,
+                wait_state,
+                wait_seconds,
+                data_json,
+                created_at,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, CURRENT_TIMESTAMP)
+            ON CONFLICT(global_event_id) DO UPDATE SET
+                workflow_id=excluded.workflow_id,
+                kind=excluded.kind,
+                category=excluded.category,
+                severity=excluded.severity,
+                origin=excluded.origin,
+                source=excluded.source,
+                organization_id=excluded.organization_id,
+                brand_id=excluded.brand_id,
+                product_id=excluded.product_id,
+                node_ref=excluded.node_ref,
+                addon_id=excluded.addon_id,
+                duration_ms=excluded.duration_ms,
+                retry_count=excluded.retry_count,
+                wait_state=excluded.wait_state,
+                wait_seconds=excluded.wait_seconds,
+                data_json=excluded.data_json,
+                created_at=excluded.created_at,
+                updated_at=CURRENT_TIMESTAMP
+            "#,
+            params![
+                global_event_id,
+                workflow_id.unwrap_or("_global"),
+                kind,
+                categorize_event(kind),
+                infer_severity(kind, data),
+                origin,
+                source,
+                organization_id,
+                brand_id,
+                product_id,
+                observability.node_ref,
+                observability.addon_id,
+                observability.duration_ms,
+                observability.retry_count,
+                observability.wait_state,
+                observability.wait_seconds,
+                serde_json::to_string(data)?,
+                created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
     fn insert_global_event(
         &self,
         source: &str,
@@ -1470,7 +1690,7 @@ impl ForgeStore {
         status: &str,
         data: &serde_json::Value,
         tenant_context: &serde_json::Value,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let organization_id = tenant_context_identity_id(tenant_context, "organization");
         let brand_id = tenant_context_identity_id(tenant_context, "brand");
         let product_id = tenant_context_identity_id(tenant_context, "product");
@@ -1501,7 +1721,25 @@ impl ForgeStore {
                 serde_json::to_string(data)?,
             ],
         )?;
-        Ok(())
+        let global_event_id = self.connection.last_insert_rowid();
+        let created_at: String = self.connection.query_row(
+            "SELECT created_at FROM global_events WHERE id = ?1",
+            params![global_event_id],
+            |row| row.get(0),
+        )?;
+        self.upsert_event_observability_index_record(
+            global_event_id,
+            workflow_id,
+            kind,
+            origin,
+            source,
+            &organization_id,
+            &brand_id,
+            &product_id,
+            data,
+            &created_at,
+        )?;
+        Ok(global_event_id)
     }
 
     pub fn record_global_event(
@@ -1524,8 +1762,7 @@ impl ForgeStore {
             status,
             data,
             tenant_context,
-        )?;
-        Ok(self.connection.last_insert_rowid())
+        )
     }
 
     pub fn load_workflow_events(&self, workflow_id: &str) -> Result<Vec<StoreEvent>> {
@@ -3540,6 +3777,79 @@ fn stored_event_service_from_row(row: &Row<'_>) -> rusqlite::Result<StoredEventS
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
     })
+}
+
+fn stored_global_event_from_row(row: &Row<'_>) -> rusqlite::Result<StoredGlobalEventRecord> {
+    let tenant_context_json = row.get::<_, String>(12)?;
+    let data_json = row.get::<_, String>(13)?;
+    Ok(StoredGlobalEventRecord {
+        id: row.get(0)?,
+        source: row.get(1)?,
+        source_id: row.get(2)?,
+        workflow_id: row.get(3)?,
+        kind: row.get(4)?,
+        origin: row.get(5)?,
+        status: row.get(6)?,
+        organization_id: row.get(7)?,
+        brand_id: row.get(8)?,
+        product_id: row.get(9)?,
+        user_id: row.get(10)?,
+        channel_id: row.get(11)?,
+        tenant_context: serde_json::from_str(&tenant_context_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                12,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        data: serde_json::from_str(&data_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                13,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        created_at: row.get(14)?,
+    })
+}
+
+fn stored_event_observability_from_row(
+    row: &Row<'_>,
+) -> rusqlite::Result<StoredEventObservabilityRecord> {
+    let data_json = row.get::<_, String>(16)?;
+    Ok(StoredEventObservabilityRecord {
+        global_event_id: row.get(0)?,
+        workflow_id: row.get(1)?,
+        kind: row.get(2)?,
+        category: row.get(3)?,
+        severity: row.get(4)?,
+        origin: row.get(5)?,
+        source: row.get(6)?,
+        organization_id: row.get(7)?,
+        brand_id: row.get(8)?,
+        product_id: row.get(9)?,
+        node_ref: row.get(10)?,
+        addon_id: row.get(11)?,
+        duration_ms: row.get(12)?,
+        retry_count: row.get(13)?,
+        wait_state: row.get(14)?,
+        wait_seconds: row.get(15)?,
+        data: serde_json::from_str(&data_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                16,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        created_at: row.get(17)?,
+    })
+}
+
+fn normalize_optional_filter(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn tenant_context_identity_id(tenant_context: &serde_json::Value, key: &str) -> String {
