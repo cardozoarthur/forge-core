@@ -1,4 +1,5 @@
 use crate::artifact::write_json_artifact;
+use crate::event::{build_event_improvement_policy, EventImprovementRecommendation};
 use crate::graph::{
     AtomicTask, ExecutionPolicySpec, ExecutorKind, TaskStatus, Workflow, WorkflowRevision,
 };
@@ -32,6 +33,16 @@ pub struct ImprovementProposal {
     pub candidate_changes: Vec<String>,
     pub evolution_domains: Vec<String>,
     pub metrics_used: Vec<String>,
+    pub event_improvement_policy: ImprovementProposalEventPolicy,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ImprovementProposalEventPolicy {
+    pub schema_version: String,
+    pub status: String,
+    pub index_source: String,
+    pub recommendation_count: usize,
+    pub recommendations: Vec<EventImprovementRecommendation>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1916,6 +1927,29 @@ pub fn generate_improvement(
 ) -> Result<ImprovementProposal> {
     let validation = validate_workflow(workflow);
     let target_version = target_version.unwrap_or_else(|| "next".to_string());
+    let event_policy_report = build_event_improvement_policy(
+        store,
+        Some(&workflow.id),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(5),
+        None,
+    )?;
+    let event_improvement_policy = ImprovementProposalEventPolicy {
+        schema_version: event_policy_report.schema_version.clone(),
+        status: event_policy_report.status.clone(),
+        index_source: event_policy_report.index_source.clone(),
+        recommendation_count: event_policy_report.recommendation_count,
+        recommendations: event_policy_report.recommendations.clone(),
+    };
     let relative_path = format!(
         "artifacts/{}/improvement-{}.json",
         workflow.id,
@@ -1929,12 +1963,42 @@ pub fn generate_improvement(
         "validation_governance".to_string(),
         "executor_policy".to_string(),
     ];
-    let candidate_changes = vec![
+    let mut candidate_changes = vec![
         "evolve task structure with backlog state, subtasks, impediments, ownership and acceptance criteria".to_string(),
         "version prompt packets so executor instructions can be benchmarked and rolled back".to_string(),
         "add process-level workflow policies for Scrum/SAFe-style planning, blocked work and promotion readiness".to_string(),
         "generate a strong changelog for every version with validation evidence, risk notes and migration guidance".to_string(),
     ];
+    if event_improvement_policy.recommendation_count > 0 {
+        for recommendation in &event_improvement_policy.recommendations {
+            let target = recommendation
+                .node_ref
+                .as_deref()
+                .or(recommendation.addon_id.as_deref())
+                .unwrap_or("_workflow");
+            candidate_changes.push(format!(
+                "evaluate event policy `{}` for {} `{}` with controlled benchmark evidence before changing runtime behavior",
+                recommendation.recommended_policy, recommendation.scope, target
+            ));
+        }
+    }
+    let mut metrics_used = vec![
+        "completion_rate".to_string(),
+        "recovery_rate".to_string(),
+        "context_efficiency".to_string(),
+        "validation_pass_rate".to_string(),
+        "execution_latency".to_string(),
+        "blocked_work_age".to_string(),
+        "impediment_resolution_rate".to_string(),
+        "prompt_regression_rate".to_string(),
+    ];
+    if event_improvement_policy.recommendation_count > 0 {
+        metrics_used.extend([
+            "event_observability_policy".to_string(),
+            "event_policy_recommendation_count".to_string(),
+            "event_policy_priority".to_string(),
+        ]);
+    }
     let payload = json!({
         "workflow_id": workflow.id,
         "generated_at": Utc::now().to_rfc3339(),
@@ -1944,17 +2008,9 @@ pub fn generate_improvement(
         "target_version": target_version,
         "baseline_validation_status": validation.status,
         "evolution_domains": evolution_domains,
-        "metrics_used": [
-            "completion_rate",
-            "recovery_rate",
-            "context_efficiency",
-            "validation_pass_rate",
-            "execution_latency",
-            "blocked_work_age",
-            "impediment_resolution_rate",
-            "prompt_regression_rate"
-        ],
+        "metrics_used": metrics_used,
         "candidate_changes": candidate_changes,
+        "event_improvement_policy": &event_improvement_policy,
         "safety": {
             "unrestricted_self_modification": false,
             "requires_validation_before_promotion": true
@@ -1967,7 +2023,12 @@ pub fn generate_improvement(
     }
     fs::write(
         &changelog_full_path,
-        render_changelog(&target_version, workflow, &candidate_changes),
+        render_changelog(
+            &target_version,
+            workflow,
+            &candidate_changes,
+            &event_improvement_policy,
+        ),
     )?;
     store.record_event(
         &workflow.id,
@@ -1975,7 +2036,8 @@ pub fn generate_improvement(
         &json!({
             "artifact_path": relative_path,
             "changelog_path": changelog_path,
-            "sha256": sha256
+            "sha256": sha256,
+            "event_policy_recommendation_count": event_improvement_policy.recommendation_count
         }),
     )?;
 
@@ -1989,16 +2051,8 @@ pub fn generate_improvement(
         changelog_path,
         candidate_changes,
         evolution_domains,
-        metrics_used: vec![
-            "completion_rate".to_string(),
-            "recovery_rate".to_string(),
-            "context_efficiency".to_string(),
-            "validation_pass_rate".to_string(),
-            "execution_latency".to_string(),
-            "blocked_work_age".to_string(),
-            "impediment_resolution_rate".to_string(),
-            "prompt_regression_rate".to_string(),
-        ],
+        metrics_used,
+        event_improvement_policy,
     })
 }
 
@@ -2006,7 +2060,9 @@ fn render_changelog(
     target_version: &str,
     workflow: &Workflow,
     candidate_changes: &[String],
+    event_improvement_policy: &ImprovementProposalEventPolicy,
 ) -> String {
+    let event_policy_section = render_event_policy_changelog_section(event_improvement_policy);
     format!(
         r#"# Forge Core {target_version} Changelog
 
@@ -2034,6 +2090,8 @@ This candidate version evolves Forge structurally instead of only tuning prompts
 
 {}
 
+{}
+
 ## Validation
 
 - `auto_promoted=false`
@@ -2045,6 +2103,40 @@ This candidate version evolves Forge structurally instead of only tuning prompts
             .iter()
             .map(|change| format!("- {change}"))
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n"),
+        event_policy_section
+    )
+}
+
+fn render_event_policy_changelog_section(
+    event_improvement_policy: &ImprovementProposalEventPolicy,
+) -> String {
+    if event_improvement_policy.recommendation_count == 0 {
+        return "## Event Improvement Policy\n\n- No event policy recommendations were selected for this experiment.".to_string();
+    }
+    let recommendations = event_improvement_policy
+        .recommendations
+        .iter()
+        .map(|recommendation| {
+            let target = recommendation
+                .node_ref
+                .as_deref()
+                .or(recommendation.addon_id.as_deref())
+                .unwrap_or("_workflow");
+            format!(
+                "- `{}` for {} `{}`: {}",
+                recommendation.recommended_policy,
+                recommendation.scope,
+                target,
+                recommendation.reason
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "## Event Improvement Policy\n\n- Source: `{}`\n- Recommendations: `{}`\n{}",
+        event_improvement_policy.index_source,
+        event_improvement_policy.recommendation_count,
+        recommendations
     )
 }

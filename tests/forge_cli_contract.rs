@@ -7602,6 +7602,48 @@ fn improve_creates_controlled_experiment_and_never_promotes_without_validation()
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
     let workflow_id = json["workflow_id"].as_str().unwrap();
+    {
+        let connection = Connection::open(&store).unwrap();
+        for (index, selected_bytes) in [950, 960, 940].iter().enumerate() {
+            let source_id = format!("improve-policy-{index}");
+            let created_at = format!("2026-06-10T10:{:02}:00Z", index * 5);
+            let data = serde_json::json!({
+                "node_id": "task-policy",
+                "addon_id": "forge.addon.harness",
+                "duration_ms": 600,
+                "retry_count": 0,
+                "wait_seconds": 5,
+                "context": {
+                    "effective_budget": 1000,
+                    "routing_summary": {
+                        "selected_bytes": selected_bytes,
+                        "remaining_budget": 1000 - selected_bytes
+                    },
+                    "memory_policy": {
+                        "memory_level": "standard",
+                        "memory_scope": "project"
+                    }
+                }
+            });
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO global_events (
+                        source, source_id, workflow_id, kind, origin, status,
+                        organization_id, brand_id, product_id, user_id, channel_id,
+                        tenant_context_json, data_json, created_at
+                    )
+                    VALUES (
+                        'improve_policy_seed', ?1, ?2, 'ai_executor_completed', 'codex', 'recorded',
+                        'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
+                        '{}', ?3, ?4
+                    )
+                    "#,
+                    rusqlite::params![source_id, workflow_id, data.to_string(), created_at],
+                )
+                .unwrap();
+        }
+    }
 
     let improve_output = forge()
         .args([
@@ -7646,10 +7688,46 @@ fn improve_creates_controlled_experiment_and_never_promotes_without_validation()
         .unwrap()
         .iter()
         .any(|change| change.as_str().unwrap().contains("impediments")));
+    assert_eq!(
+        improvement["event_improvement_policy"]["schema_version"],
+        "forge.event_improvement_policy.v1"
+    );
+    assert_eq!(
+        improvement["event_improvement_policy"]["status"],
+        "event_improvement_policy_recommended"
+    );
+    assert!(
+        improvement["event_improvement_policy"]["recommendation_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(improvement["metrics_used"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("event_observability_policy".to_string())));
+    assert!(improvement["candidate_changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|change| change
+            .as_str()
+            .unwrap()
+            .contains("prefer_deterministic_node")));
     assert!(temp
         .path()
         .join(improvement["artifact_path"].as_str().unwrap())
         .exists());
+    let artifact = fs::read_to_string(
+        temp.path()
+            .join(improvement["artifact_path"].as_str().unwrap()),
+    )
+    .unwrap();
+    let artifact_json: Value = serde_json::from_str(&artifact).unwrap();
+    assert_eq!(
+        artifact_json["event_improvement_policy"]["schema_version"],
+        "forge.event_improvement_policy.v1"
+    );
     let changelog = fs::read_to_string(
         temp.path()
             .join(improvement["changelog_path"].as_str().unwrap()),
@@ -7658,6 +7736,8 @@ fn improve_creates_controlled_experiment_and_never_promotes_without_validation()
     assert!(changelog.contains("# Forge Core 0.2.0 Changelog"));
     assert!(changelog.contains("Task Structure"));
     assert!(changelog.contains("Prompt System"));
+    assert!(changelog.contains("Event Improvement Policy"));
+    assert!(changelog.contains("prefer_deterministic_node"));
 }
 
 #[test]
