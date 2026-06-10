@@ -1,11 +1,13 @@
 use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{
     build_context_package_with_checkpoint, ContextContinuationPlan, ContextDelta,
-    ContextHandoffBlocker, ContextPackage, ContextPersonaSourceModelSummary, ContextRoutingQuality,
+    ContextHandoffBlocker, ContextMemoryPolicy, ContextPackage, ContextPersonaSourceModelSummary,
+    ContextRoutingQuality,
 };
 use crate::graph::{
     ExecutionPolicySpec, ExecutorKind, NodeBrainRoutingSpec, PersonaRoutingSpec, ValidationRule,
 };
+use crate::identity::ensure_workflow_policy;
 use crate::lease::{acquire_task_lease, TaskLease};
 use crate::storage::ForgeStore;
 use anyhow::{bail, Result};
@@ -55,6 +57,7 @@ pub struct ExecutorHandoffPacket {
     pub context_bytes: usize,
     pub context_routing_quality: ContextRoutingQuality,
     pub context_delta: ContextDelta,
+    pub memory_policy: ContextMemoryPolicy,
     pub handoff_ready: bool,
     pub handoff_status: String,
     pub handoff_blockers: Vec<ContextHandoffBlocker>,
@@ -118,6 +121,7 @@ pub fn build_task_handoff(
         bail!("executor cannot be empty");
     }
 
+    ensure_workflow_policy(store, workflow_id, "task handoff")?;
     let workflow = store.load_workflow(workflow_id)?;
     let task = workflow
         .tasks
@@ -247,6 +251,7 @@ impl ExecutorHandoffPacket {
             context_bytes: parts.context.context_bytes,
             context_routing_quality: parts.context.routing_quality.clone(),
             context_delta: parts.context.context_delta.clone(),
+            memory_policy: parts.context.memory_policy.clone(),
             handoff_ready: parts.context.handoff_ready,
             handoff_status: parts.context.handoff_status.clone(),
             handoff_blockers: parts.context.handoff_blockers.clone(),

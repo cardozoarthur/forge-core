@@ -1,8 +1,12 @@
+use crate::addon::{
+    CAP_ASYNC_RUNTIME, CAP_DAILY_GOAL_RESEARCH, CAP_HACKATHON_FACTORY,
+    CAP_WORKFLOW_AUTOMATION_RESEARCH,
+};
 use crate::intent::IntentSpec;
 use crate::ir;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -367,6 +371,26 @@ fn node_brain_routing_schema_version() -> String {
     "forge.node_brain_routing.v1".to_string()
 }
 
+fn workflow_runtime_schema_version() -> String {
+    "forge.workflow_runtime.v1".to_string()
+}
+
+fn default_workflow_runtime_kind() -> String {
+    "ephemeral_workflow".to_string()
+}
+
+fn default_workflow_runtime_lifetime() -> String {
+    "finite_goal_bound".to_string()
+}
+
+fn default_workflow_runtime_ephemeral() -> bool {
+    true
+}
+
+fn default_workflow_runtime_scale_to_zero() -> String {
+    "scale_to_zero_after_completion".to_string()
+}
+
 pub fn node_brain_routing_for_executor(executor: &ExecutorKind) -> NodeBrainRoutingSpec {
     let mut routing = NodeBrainRoutingSpec::default();
     match executor {
@@ -491,6 +515,54 @@ pub struct WorkflowRevision {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowRuntimeSpec {
+    #[serde(default = "workflow_runtime_schema_version")]
+    pub schema_version: String,
+    #[serde(default = "default_workflow_runtime_kind")]
+    pub lifecycle_kind: String,
+    #[serde(default = "default_workflow_runtime_lifetime")]
+    pub expected_lifetime: String,
+    #[serde(default)]
+    pub persistent: bool,
+    #[serde(default = "default_workflow_runtime_ephemeral")]
+    pub ephemeral: bool,
+    #[serde(default)]
+    pub can_become_persistent: bool,
+    #[serde(default = "default_workflow_runtime_scale_to_zero")]
+    pub scale_to_zero_policy: String,
+}
+
+impl Default for WorkflowRuntimeSpec {
+    fn default() -> Self {
+        Self {
+            schema_version: workflow_runtime_schema_version(),
+            lifecycle_kind: default_workflow_runtime_kind(),
+            expected_lifetime: default_workflow_runtime_lifetime(),
+            persistent: false,
+            ephemeral: true,
+            can_become_persistent: true,
+            scale_to_zero_policy: default_workflow_runtime_scale_to_zero(),
+        }
+    }
+}
+
+impl WorkflowRuntimeSpec {
+    pub fn from_intent(intent: &IntentSpec) -> Self {
+        let lifecycle_kind = intent.workflow_mode.kind.clone();
+        let persistent = lifecycle_kind == "persistent_workflow";
+        Self {
+            schema_version: workflow_runtime_schema_version(),
+            lifecycle_kind,
+            expected_lifetime: intent.workflow_mode.expected_lifetime.clone(),
+            persistent,
+            ephemeral: !persistent,
+            can_become_persistent: intent.workflow_mode.can_become_persistent,
+            scale_to_zero_policy: intent.workflow_mode.scale_to_zero_policy.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProductDecision {
     pub id: String,
     pub title: String,
@@ -524,6 +596,8 @@ pub struct Workflow {
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub intent: IntentSpec,
+    #[serde(default)]
+    pub runtime: WorkflowRuntimeSpec,
     pub tasks: Vec<AtomicTask>,
     #[serde(default)]
     pub artifacts: Vec<ArtifactRecord>,
@@ -546,6 +620,7 @@ pub fn create_workflow(intent: IntentSpec) -> Workflow {
         initial_goal: Some(intent.goal.clone()),
         status: "pending".to_string(),
         created_at: Utc::now(),
+        runtime: WorkflowRuntimeSpec::from_intent(&intent),
         intent,
         tasks,
         artifacts: Vec::new(),
@@ -570,6 +645,10 @@ fn schedule_schema_version() -> String {
 
 fn schedule_kind_cron() -> String {
     "cron".to_string()
+}
+
+fn schedule_kind_wait_until() -> String {
+    "wait_until".to_string()
 }
 
 fn default_missed_run_policy() -> String {
@@ -606,6 +685,87 @@ fn human_form_schema_version() -> String {
 
 fn human_decision_schema_version() -> String {
     "forge.human_decision.v1".to_string()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkflowExtensionPlannerPhase {
+    TaskExpansion,
+    PolicyMutation,
+}
+
+struct WorkflowExtensionPlanner {
+    extension_id: &'static str,
+    capability_id: &'static str,
+    phase: WorkflowExtensionPlannerPhase,
+    textual_guard: fn(&str) -> bool,
+    apply: fn(&mut Vec<AtomicTask>, &IntentSpec),
+}
+
+fn workflow_extension_planners() -> Vec<WorkflowExtensionPlanner> {
+    vec![
+        WorkflowExtensionPlanner {
+            extension_id: "n8n_primitive_research",
+            capability_id: CAP_WORKFLOW_AUTOMATION_RESEARCH,
+            phase: WorkflowExtensionPlannerPhase::TaskExpansion,
+            textual_guard: requires_n8n_research,
+            apply: append_n8n_primitive_research_tasks,
+        },
+        WorkflowExtensionPlanner {
+            extension_id: "hackathon_factory",
+            capability_id: CAP_HACKATHON_FACTORY,
+            phase: WorkflowExtensionPlannerPhase::TaskExpansion,
+            textual_guard: requires_hackathon_factory,
+            apply: append_hackathon_factory_extension,
+        },
+        WorkflowExtensionPlanner {
+            extension_id: "daily_goal_research",
+            capability_id: CAP_DAILY_GOAL_RESEARCH,
+            phase: WorkflowExtensionPlannerPhase::TaskExpansion,
+            textual_guard: requires_daily_goal_research,
+            apply: append_daily_goal_research_extension,
+        },
+        WorkflowExtensionPlanner {
+            extension_id: "async_runtime_policy",
+            capability_id: CAP_ASYNC_RUNTIME,
+            phase: WorkflowExtensionPlannerPhase::PolicyMutation,
+            textual_guard: requires_async_runtime,
+            apply: apply_async_runtime_policy_extension,
+        },
+    ]
+}
+
+fn planner_enabled(planner: &WorkflowExtensionPlanner, intent: &IntentSpec) -> bool {
+    if extension_or_capability(intent, planner.extension_id, planner.capability_id) {
+        return true;
+    }
+    legacy_intent_without_capability_resolution(intent) && (planner.textual_guard)(&intent.goal)
+}
+
+fn legacy_intent_without_capability_resolution(intent: &IntentSpec) -> bool {
+    intent.required_capabilities.is_empty()
+        && intent
+            .capability_resolution
+            .required_capabilities
+            .is_empty()
+        && intent.capability_resolution.workflow_extensions.is_empty()
+        && intent
+            .capability_resolution
+            .available_capabilities
+            .is_empty()
+}
+
+fn apply_workflow_extension_planners(
+    planners: &[WorkflowExtensionPlanner],
+    phase: WorkflowExtensionPlannerPhase,
+    tasks: &mut Vec<AtomicTask>,
+    intent: &IntentSpec,
+) {
+    for planner in planners
+        .iter()
+        .filter(|planner| planner.phase == phase && planner_enabled(planner, intent))
+    {
+        (planner.apply)(tasks, intent);
+    }
 }
 
 pub fn task(
@@ -745,8 +905,12 @@ fn work_item(
 pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
     let local_code_policy = local_code_execution_policy(&intent.goal);
     let windows_software_policy = windows_software_execution_policy(&intent.goal);
-    let autonomous_extensions_required =
-        requires_autonomous_extensions(&intent.goal) && !requires_daily_goal_research(&intent.goal);
+    let extension_planners = workflow_extension_planners();
+    let autonomous_extensions_required = requires_autonomous_extensions(&intent.goal)
+        && !extension_planners
+            .iter()
+            .find(|planner| planner.extension_id == "daily_goal_research")
+            .is_some_and(|planner| planner_enabled(planner, intent));
     let mut tasks = vec![
         task(
             "task-001",
@@ -845,73 +1009,18 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         ),
     ];
 
-    if requires_n8n_research(&intent.goal) {
-        let catalog_id = next_task_id(&tasks);
-        let catalog = task(
-            &catalog_id,
-            "Catalog n8n workflow primitives",
-            &["task-002"],
-            &[
-                "n8n source documentation",
-                "n8n node package inventory",
-                "workflow primitive taxonomy",
-            ],
-            vec![rule(
-                "research_catalog",
-                "catalog covers loop, condition, router, merge, wait, code, execute-subworkflow, trigger, retry, error, transform and human approval patterns",
-                None,
-            )],
-            "n8n node and pattern catalog artifact",
-            (ExecutorKind::Ai, 0.018),
-        );
-        tasks.push(catalog);
-
-        let evaluation_id = next_task_id(&tasks);
-        let catalog_dependency = [catalog_id.as_str()];
-        let evaluation = task(
-            &evaluation_id,
-            "Evaluate Forge primitive candidates",
-            &catalog_dependency,
-            &[
-                "n8n research catalog",
-                "Forge DAG semantics",
-                "context routing requirements",
-                "resumability and observability goals",
-            ],
-            vec![
-                rule(
-                    "promotion_guard",
-                    "only promote concepts that improve validated DAG execution, context routing, resumability, observability or operator clarity",
-                    None,
-                ),
-                rule(
-                    "license_guard",
-                    "external source code and licenses are not copied blindly into Forge",
-                    None,
-                ),
-            ],
-            "Forge primitive promotion recommendation",
-            (ExecutorKind::Ai, 0.012),
-        );
-        tasks.push(evaluation);
-
-        if let Some(graph_task) = tasks.iter_mut().find(|task| task.id == "task-003") {
-            if !graph_task.dependencies.contains(&evaluation_id) {
-                graph_task.dependencies.push(evaluation_id);
-            }
-            graph_task
-                .context_requirements
-                .push("Forge primitive promotion recommendation".to_string());
-        }
-    }
-
-    if requires_hackathon_factory(&intent.goal) {
-        append_hackathon_factory_tasks(&mut tasks);
-    }
-
-    if requires_daily_goal_research(&intent.goal) {
-        append_daily_goal_research_tasks(&mut tasks, intent);
-    }
+    apply_workflow_extension_planners(
+        &extension_planners,
+        WorkflowExtensionPlannerPhase::TaskExpansion,
+        &mut tasks,
+        intent,
+    );
+    let handled_task_extensions = enabled_planner_extension_ids(
+        &extension_planners,
+        WorkflowExtensionPlannerPhase::TaskExpansion,
+        intent,
+    );
+    append_manifest_workflow_extension_tasks(&mut tasks, intent, &handled_task_extensions);
 
     if !autonomous_extensions_required {
         let loop_kind = detect_loop_kind(&intent.goal);
@@ -992,21 +1101,44 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         immediate.human_required = false;
         tasks.push(immediate);
 
+        let wait_until_at = detect_wait_until_at(&intent.goal);
+        let wait_is_one_shot =
+            wait_until_at.is_some() && !intent.goal.to_lowercase().contains("cron");
         let mut wait = task(
             "task-010",
-            "Wait for scheduled continuation",
+            if wait_is_one_shot {
+                "Wait until scheduled continuation"
+            } else {
+                "Wait for scheduled continuation"
+            },
             &["task-009"],
             &["schedule", "workflow state"],
-            vec![rule("schedule", "cron trigger is persisted", None)],
+            vec![rule(
+                "schedule",
+                if wait_is_one_shot {
+                    "wait_until trigger is persisted"
+                } else {
+                    "cron trigger is persisted"
+                },
+                None,
+            )],
             "Scheduled wakeup record",
             (ExecutorKind::Wait, 0.0),
         );
         wait.schedule = Some(ScheduleSpec {
             schema_version: schedule_schema_version(),
-            kind: schedule_kind_cron(),
-            cron: detect_cron(&intent.goal),
+            kind: if wait_is_one_shot {
+                schedule_kind_wait_until()
+            } else {
+                schedule_kind_cron()
+            },
+            cron: if wait_is_one_shot {
+                String::new()
+            } else {
+                detect_cron(&intent.goal)
+            },
             timezone: "UTC".to_string(),
-            next_run_at: Some(Utc::now() + Duration::hours(1)),
+            next_run_at: Some(wait_until_at.unwrap_or_else(|| Utc::now() + Duration::hours(1))),
             missed_run_policy: default_missed_run_policy(),
             run_history: Vec::new(),
             scale_to_zero_when_idle: true,
@@ -1049,21 +1181,205 @@ pub fn build_tasks(intent: &IntentSpec) -> Vec<AtomicTask> {
         }
     }
 
-    if requires_async_runtime(&intent.goal) {
-        for task in &mut tasks {
-            task.async_policy = AsyncPolicy {
-                mode: "async".to_string(),
-                resume_strategy: "event_or_poll".to_string(),
-                run_substrates: vec![
-                    "docker".to_string(),
-                    "kubernetes".to_string(),
-                    "knative".to_string(),
-                ],
-            };
-        }
-    }
+    apply_workflow_extension_planners(
+        &extension_planners,
+        WorkflowExtensionPlannerPhase::PolicyMutation,
+        &mut tasks,
+        intent,
+    );
 
     tasks
+}
+
+fn enabled_planner_extension_ids(
+    planners: &[WorkflowExtensionPlanner],
+    phase: WorkflowExtensionPlannerPhase,
+    intent: &IntentSpec,
+) -> BTreeSet<String> {
+    planners
+        .iter()
+        .filter(|planner| planner.phase == phase && planner_enabled(planner, intent))
+        .map(|planner| planner.extension_id.to_string())
+        .collect()
+}
+
+fn append_manifest_workflow_extension_tasks(
+    tasks: &mut Vec<AtomicTask>,
+    intent: &IntentSpec,
+    handled_extensions: &BTreeSet<String>,
+) {
+    let mut seen = handled_extensions.clone();
+    for extension in &intent.capability_resolution.workflow_extensions {
+        if !seen.insert(extension.id.clone()) {
+            continue;
+        }
+        let task_id = next_task_id(tasks);
+        let dependency = if tasks.iter().any(|task| task.id == "task-003") {
+            "task-003"
+        } else {
+            "task-002"
+        };
+        let context_requirements = vec![
+            "goal",
+            "Addon manifest",
+            "capability resolution",
+            "workflow extension declaration",
+        ];
+        let expected_output = format!("Addon extension {} execution plan", extension.id);
+        let mut addon_task = task(
+            &task_id,
+            &format!(
+                "Apply Addon workflow extension: {}",
+                humanize_extension_id(&extension.id)
+            ),
+            &[dependency],
+            &context_requirements,
+            vec![rule(
+                "addon_extension",
+                &format!(
+                    "extension {} from Addon {} is represented as an auditable Forge task without Core domain-specific code",
+                    extension.id, extension.source_addon
+                ),
+                None,
+            )],
+            &expected_output,
+            (addon_extension_executor_kind(extension), 0.006),
+        );
+        addon_task.context_requirements.extend([
+            format!("source Addon {}", extension.source_addon),
+            format!("source Addon version {}", extension.source_addon_version),
+            format!("source capability {}", extension.source_capability),
+            format!("extension kind {}", extension.kind),
+            extension.description.clone(),
+        ]);
+        for contract in intent
+            .capability_resolution
+            .runtime_contracts
+            .iter()
+            .filter(|contract| {
+                contract.source_addon == extension.source_addon
+                    && contract.source_capability == extension.source_capability
+                    && (contract.workflow_extension_id == extension.id
+                        || contract.workflow_extension_id.is_empty())
+            })
+        {
+            addon_task.context_requirements.push(format!(
+                "runtime contract {} ({}) via {}",
+                contract.id, contract.contract_type, contract.runtime
+            ));
+            if !contract.entrypoint.is_empty() {
+                addon_task.context_requirements.push(format!(
+                    "runtime contract entrypoint {}",
+                    contract.entrypoint
+                ));
+            }
+        }
+        addon_task.execution_policy.reuse_hint = format!("addon_extension:{}", extension.id);
+        addon_task.execution_policy.selection_reason =
+            "manifest-driven Addon workflow extension".to_string();
+        addon_task.execution_policy.validation_gate = "addon_extension_validation".to_string();
+        tasks.push(addon_task);
+    }
+}
+
+fn addon_extension_executor_kind(
+    extension: &crate::addon::WorkflowExtensionActivation,
+) -> ExecutorKind {
+    match extension.kind.as_str() {
+        "notification" => ExecutorKind::Notification,
+        "command" | "deterministic" | "deterministic_command" => ExecutorKind::Command,
+        _ => ExecutorKind::Mixed,
+    }
+}
+
+fn humanize_extension_id(extension_id: &str) -> String {
+    extension_id.replace(['_', '-'], " ")
+}
+
+fn append_n8n_primitive_research_tasks(tasks: &mut Vec<AtomicTask>, _intent: &IntentSpec) {
+    let catalog_id = next_task_id(tasks);
+    let catalog = task(
+        &catalog_id,
+        "Catalog n8n workflow primitives",
+        &["task-002"],
+        &[
+            "n8n source documentation",
+            "n8n node package inventory",
+            "workflow primitive taxonomy",
+        ],
+        vec![rule(
+            "research_catalog",
+            "catalog covers loop, condition, router, merge, wait, code, execute-subworkflow, trigger, retry, error, transform and human approval patterns",
+            None,
+        )],
+        "n8n node and pattern catalog artifact",
+        (ExecutorKind::Ai, 0.018),
+    );
+    tasks.push(catalog);
+
+    let evaluation_id = next_task_id(tasks);
+    let catalog_dependency = [catalog_id.as_str()];
+    let evaluation = task(
+        &evaluation_id,
+        "Evaluate Forge primitive candidates",
+        &catalog_dependency,
+        &[
+            "n8n research catalog",
+            "Forge DAG semantics",
+            "context routing requirements",
+            "resumability and observability goals",
+        ],
+        vec![
+            rule(
+                "promotion_guard",
+                "only promote concepts that improve validated DAG execution, context routing, resumability, observability or operator clarity",
+                None,
+            ),
+            rule(
+                "license_guard",
+                "external source code and licenses are not copied blindly into Forge",
+                None,
+            ),
+        ],
+        "Forge primitive promotion recommendation",
+        (ExecutorKind::Ai, 0.012),
+    );
+    tasks.push(evaluation);
+
+    if let Some(graph_task) = tasks.iter_mut().find(|task| task.id == "task-003") {
+        if !graph_task.dependencies.contains(&evaluation_id) {
+            graph_task.dependencies.push(evaluation_id);
+        }
+        graph_task
+            .context_requirements
+            .push("Forge primitive promotion recommendation".to_string());
+    }
+}
+
+fn append_hackathon_factory_extension(tasks: &mut Vec<AtomicTask>, _intent: &IntentSpec) {
+    append_hackathon_factory_tasks(tasks);
+}
+
+fn append_daily_goal_research_extension(tasks: &mut Vec<AtomicTask>, intent: &IntentSpec) {
+    append_daily_goal_research_tasks(tasks, intent);
+}
+
+fn apply_async_runtime_policy_extension(tasks: &mut Vec<AtomicTask>, _intent: &IntentSpec) {
+    for task in tasks {
+        task.async_policy = AsyncPolicy {
+            mode: "async".to_string(),
+            resume_strategy: "event_or_poll".to_string(),
+            run_substrates: vec![
+                "docker".to_string(),
+                "kubernetes".to_string(),
+                "knative".to_string(),
+            ],
+        };
+    }
+}
+
+fn extension_or_capability(intent: &IntentSpec, extension_id: &str, capability_id: &str) -> bool {
+    intent.workflow_extension_enabled(extension_id) || intent.has_capability(capability_id)
 }
 
 fn append_hackathon_factory_tasks(tasks: &mut Vec<AtomicTask>) {
@@ -1944,12 +2260,35 @@ fn requires_async_runtime(goal: &str) -> bool {
 fn requires_autonomous_extensions(goal: &str) -> bool {
     let lower = goal.to_lowercase();
     lower.contains("cron")
+        || requires_wait_until(goal)
         || lower.contains("friday")
         || lower.contains("sexta")
         || lower.contains("email")
         || lower.contains("without ai")
         || lower.contains("sem ia")
         || lower.contains("não dependa de ia")
+}
+
+fn requires_wait_until(goal: &str) -> bool {
+    let lower = goal.to_lowercase();
+    lower.contains("wait until")
+        || lower.contains("sleep until")
+        || lower.contains("esperar até")
+        || lower.contains("aguardar até")
+        || lower.contains("aguarde até")
+}
+
+fn detect_wait_until_at(goal: &str) -> Option<DateTime<Utc>> {
+    if !requires_wait_until(goal) {
+        return None;
+    }
+    goal.split_whitespace()
+        .map(|token| token.trim_matches(|ch: char| matches!(ch, ',' | ';' | ')' | '(' | '.')))
+        .find_map(|token| {
+            DateTime::parse_from_rfc3339(token)
+                .map(|parsed| parsed.with_timezone(&Utc))
+                .ok()
+        })
 }
 
 fn detect_cron(goal: &str) -> String {
@@ -2050,4 +2389,36 @@ fn loop_node_task(id: &str, dependencies: &[&str], kind: String) -> AtomicTask {
         state: "active".to_string(),
     });
     t
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::intent::parse_intent;
+
+    #[test]
+    fn workflow_extension_planner_registry_covers_first_party_builders() {
+        let planners = workflow_extension_planners();
+        let planner_ids = planners
+            .iter()
+            .map(|planner| planner.extension_id)
+            .collect::<Vec<_>>();
+        for expected in [
+            "n8n_primitive_research",
+            "hackathon_factory",
+            "daily_goal_research",
+            "async_runtime_policy",
+        ] {
+            assert!(planner_ids.contains(&expected));
+        }
+
+        let intent = parse_intent(
+            "Create daily Goal research workflow for Goals: hackathon in America/Sao_Paulo",
+        );
+        let daily = planners
+            .iter()
+            .find(|planner| planner.extension_id == "daily_goal_research")
+            .expect("daily Goal research planner is registered");
+        assert!(planner_enabled(daily, &intent));
+    }
 }

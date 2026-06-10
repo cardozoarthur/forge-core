@@ -1,4 +1,7 @@
+use crate::cost::build_cost_ledger;
+use crate::event::build_global_event_timeline;
 use crate::executor::load_executors;
+use crate::memory::memory_policy_report;
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
@@ -52,9 +55,71 @@ pub struct InteractiveDashboard {
     pub repository_context: String,
     pub estimated_costs: String,
     pub scheduler_worker_status: String,
+    pub workflow_focus: Vec<InteractiveWorkflowCard>,
+    pub schedule_panel: InteractiveSchedulePanel,
+    pub event_panel: InteractiveEventPanel,
+    pub cost_panel: InteractiveCostPanel,
+    pub context_memory_panel: InteractiveContextMemoryPanel,
     pub attention_actions: Vec<String>,
     pub useful_next_commands: Vec<String>,
     pub quick_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowCard {
+    pub workflow_id: String,
+    pub goal: String,
+    pub lifecycle_state: String,
+    pub operator_action: String,
+    pub context_action: String,
+    pub quality_action: String,
+    pub tasks: String,
+    pub schedule: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveSchedulePanel {
+    pub status: String,
+    pub due_workflows: usize,
+    pub runnable_due_workflows: usize,
+    pub blocked_due_workflows: usize,
+    pub cron_nodes: usize,
+    pub wait_until_nodes: usize,
+    pub delay_nodes: usize,
+    pub scale_to_zero_workflows: usize,
+    pub next_wakeup_at: Option<String>,
+    pub sleep_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveEventPanel {
+    pub status: String,
+    pub total_event_count: usize,
+    pub visible_event_count: usize,
+    pub latest_events: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveCostPanel {
+    pub status: String,
+    pub workflow_count: usize,
+    pub node_count: usize,
+    pub ai_node_count: usize,
+    pub deterministic_node_count: usize,
+    pub model_call_avoided_node_count: usize,
+    pub estimated_task_cost_total_usd: f64,
+    pub observed_event_cost_total_usd: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveContextMemoryPanel {
+    pub status: String,
+    pub ready_for_handoff: usize,
+    pub blocked_tasks: usize,
+    pub context_budget_pressure: usize,
+    pub memory_policy_status: String,
+    pub memory_level_count: usize,
+    pub temporary_memory_rule: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -215,10 +280,11 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
         format!("usable runtimes: {}", runtimes.usable.join(", "))
     };
 
-    let scheduler_worker_status = build_schedule_worker_status(store, "forge-scheduler", 1, 300)
-        .ok()
+    let scheduler_worker = build_schedule_worker_status(store, "forge-scheduler", 1, 300).ok();
+    let scheduler_worker_status = scheduler_worker
+        .as_ref()
         .map(|ws| {
-            let s = ws.summary;
+            let s = &ws.summary;
             let due = s.runnable_due_workflows;
             let idle = s.idle_workflows;
             let capacity = ws.worker_pool.available_workers;
@@ -234,6 +300,130 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             format!("{due} due, {idle} idle, capacity {capacity}, next {sleep}")
         })
         .unwrap_or_else(|| "no scheduled workflows".to_string());
+    let schedule_panel = scheduler_worker
+        .as_ref()
+        .map(|ws| {
+            let summary = &ws.summary;
+            InteractiveSchedulePanel {
+                status: ws.status.clone(),
+                due_workflows: summary.due_workflows,
+                runnable_due_workflows: summary.runnable_due_workflows,
+                blocked_due_workflows: summary.blocked_due_workflows,
+                cron_nodes: summary.cron_nodes,
+                wait_until_nodes: summary.wait_until_nodes,
+                delay_nodes: summary.delay_nodes,
+                scale_to_zero_workflows: summary.scale_to_zero_workflows,
+                next_wakeup_at: ws.sleep.next_wakeup_at.clone(),
+                sleep_seconds: ws.sleep.sleep_seconds,
+            }
+        })
+        .unwrap_or_else(|| InteractiveSchedulePanel {
+            status: "no_scheduled_workflows".to_string(),
+            due_workflows: 0,
+            runnable_due_workflows: 0,
+            blocked_due_workflows: 0,
+            cron_nodes: 0,
+            wait_until_nodes: 0,
+            delay_nodes: 0,
+            scale_to_zero_workflows: 0,
+            next_wakeup_at: None,
+            sleep_seconds: 0,
+        });
+    let workflow_focus = workflows
+        .workflows
+        .iter()
+        .take(8)
+        .map(|workflow| InteractiveWorkflowCard {
+            workflow_id: workflow.workflow_id.clone(),
+            goal: truncate_display(&workflow.current_goal, 96),
+            lifecycle_state: workflow.lifecycle_state.clone(),
+            operator_action: workflow.runtime.operator_action.clone(),
+            context_action: workflow
+                .context_action_refs
+                .first()
+                .map(|action| action.action.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            quality_action: workflow.quality_action.action.clone(),
+            tasks: format!(
+                "{} total, {} pending, {} blocked, {} failed",
+                workflow.task_summary.total,
+                workflow.task_summary.pending,
+                workflow.task_summary.blocked,
+                workflow.task_summary.failed
+            ),
+            schedule: format!(
+                "{} scheduled, {} due, next {}",
+                workflow.schedule_summary.scheduled_nodes,
+                workflow.schedule_summary.due_nodes,
+                workflow
+                    .schedule_summary
+                    .next_run_at
+                    .as_deref()
+                    .unwrap_or("none")
+            ),
+        })
+        .collect::<Vec<_>>();
+    let event_panel = build_global_event_timeline(store, None, None, None, None, Some(5), None)
+        .ok()
+        .map(|timeline| InteractiveEventPanel {
+            status: timeline.status,
+            total_event_count: timeline.total_event_count,
+            visible_event_count: timeline.event_count,
+            latest_events: timeline
+                .events
+                .iter()
+                .rev()
+                .take(5)
+                .map(|event| format!("{} {} {}", event.occurred_at, event.workflow_id, event.kind))
+                .collect(),
+        })
+        .unwrap_or_else(|| InteractiveEventPanel {
+            status: "event_timeline_unavailable".to_string(),
+            total_event_count: 0,
+            visible_event_count: 0,
+            latest_events: Vec::new(),
+        });
+    let cost_panel = build_cost_ledger(store, None, None, None, None)
+        .ok()
+        .map(|ledger| {
+            let summary = ledger.summary;
+            InteractiveCostPanel {
+                status: ledger.status,
+                workflow_count: summary.workflow_count,
+                node_count: summary.node_count,
+                ai_node_count: summary.ai_node_count,
+                deterministic_node_count: summary.deterministic_node_count,
+                model_call_avoided_node_count: summary.model_call_avoided_node_count,
+                estimated_task_cost_total_usd: summary.estimated_task_cost_total_usd,
+                observed_event_cost_total_usd: summary.observed_event_cost_total_usd,
+            }
+        })
+        .unwrap_or_else(|| InteractiveCostPanel {
+            status: "cost_ledger_unavailable".to_string(),
+            workflow_count: 0,
+            node_count: 0,
+            ai_node_count: 0,
+            deterministic_node_count: 0,
+            model_call_avoided_node_count: 0,
+            estimated_task_cost_total_usd: 0.0,
+            observed_event_cost_total_usd: 0.0,
+        });
+    let memory_policy = memory_policy_report(store);
+    let temporary_memory_rule = memory_policy
+        .interface_policy
+        .iter()
+        .find(|policy| policy.default_scope == "processing")
+        .map(|policy| policy.retention.clone())
+        .unwrap_or_else(|| "processing memory is temporary until promoted".to_string());
+    let context_memory_panel = InteractiveContextMemoryPanel {
+        status: "context_memory_ready".to_string(),
+        ready_for_handoff: workflows.summary.context_actions.ready_for_handoff,
+        blocked_tasks: workflows.summary.context_actions.blocked_tasks,
+        context_budget_pressure: workflows.summary.context_quality.budget_pressure,
+        memory_policy_status: memory_policy.status,
+        memory_level_count: memory_policy.memory_levels.len(),
+        temporary_memory_rule,
+    };
 
     Ok(InteractiveHomeReport {
         status: "interactive_home_ready".to_string(),
@@ -264,6 +454,11 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             estimated_costs: "available per workflow via /costs or forge run --simulate"
                 .to_string(),
             scheduler_worker_status,
+            workflow_focus,
+            schedule_panel,
+            event_panel,
+            cost_panel,
+            context_memory_panel,
             attention_actions,
             useful_next_commands: vec![
                 "forge list".to_string(),
@@ -454,6 +649,29 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     } else {
         d.attention_actions.join(" | ")
     };
+    let workflow_focus = if d.workflow_focus.is_empty() {
+        "none".to_string()
+    } else {
+        d.workflow_focus
+            .iter()
+            .map(|workflow| {
+                format!(
+                    "{} [{}] {} / {} / {}",
+                    workflow.workflow_id,
+                    workflow.lifecycle_state,
+                    workflow.operator_action,
+                    workflow.goal,
+                    workflow.tasks
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let latest_events = if d.event_panel.latest_events.is_empty() {
+        "none".to_string()
+    } else {
+        d.event_panel.latest_events.join(" | ")
+    };
     let run_ids_line = if d.active_run_ids.is_empty() {
         String::new()
     } else {
@@ -477,6 +695,11 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Shell entrypoints: {shell_entrypoints}\n\
          Runtime/node status: {runtime_node_status}\n\
          Scheduler worker status: {scheduler_worker_status}\n\
+         Workflow focus: {workflow_focus}\n\
+         Schedule panel: {schedule_status}; due {schedule_due}, runnable {schedule_runnable}, cron {schedule_cron}, wait_until {schedule_wait_until}, next {schedule_next}\n\
+         Event timeline: {event_status}; visible {event_visible}/{event_total}; latest {latest_events}\n\
+         Cost panel: {cost_status}; workflows {cost_workflows}, nodes {cost_nodes}, estimated ${cost_estimated:.4}, observed ${cost_observed:.4}\n\
+         Context/memory panel: ready {context_ready}, blocked {context_blocked}, budget pressure {context_budget_pressure}, memory {memory_policy_status}\n\
          Repository context: {repository_context}\n\
          Estimated costs: {estimated_costs}\n\
          Attention actions: {attention_actions}\n\
@@ -500,12 +723,49 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         shell_entrypoints = shell_entrypoints,
         runtime_node_status = d.runtime_node_status,
         scheduler_worker_status = d.scheduler_worker_status,
+        workflow_focus = workflow_focus,
+        schedule_status = d.schedule_panel.status,
+        schedule_due = d.schedule_panel.due_workflows,
+        schedule_runnable = d.schedule_panel.runnable_due_workflows,
+        schedule_cron = d.schedule_panel.cron_nodes,
+        schedule_wait_until = d.schedule_panel.wait_until_nodes,
+        schedule_next = d
+            .schedule_panel
+            .next_wakeup_at
+            .as_deref()
+            .unwrap_or("none"),
+        event_status = d.event_panel.status,
+        event_visible = d.event_panel.visible_event_count,
+        event_total = d.event_panel.total_event_count,
+        latest_events = latest_events,
+        cost_status = d.cost_panel.status,
+        cost_workflows = d.cost_panel.workflow_count,
+        cost_nodes = d.cost_panel.node_count,
+        cost_estimated = d.cost_panel.estimated_task_cost_total_usd,
+        cost_observed = d.cost_panel.observed_event_cost_total_usd,
+        context_ready = d.context_memory_panel.ready_for_handoff,
+        context_blocked = d.context_memory_panel.blocked_tasks,
+        context_budget_pressure = d.context_memory_panel.context_budget_pressure,
+        memory_policy_status = d.context_memory_panel.memory_policy_status,
         repository_context = d.repository_context,
         estimated_costs = d.estimated_costs,
         attention_actions = attention_actions,
         quick_actions = quick_actions,
         next_commands = next_commands,
     )
+}
+
+fn truncate_display(value: &str, max_chars: usize) -> String {
+    let total_chars = value.chars().count();
+    if total_chars <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 3 {
+        return value.chars().take(max_chars).collect();
+    }
+    let mut truncated: String = value.chars().take(max_chars - 3).collect();
+    truncated.push_str("...");
+    truncated
 }
 
 fn build_attention_actions(attention_runs: &[&crate::request::RequestListRow]) -> Vec<String> {

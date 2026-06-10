@@ -1,3 +1,8 @@
+use crate::addon::{
+    addon_observability_report, default_addon_dirs, list_addon_views,
+    load_addon_catalog_from_store, AddonObservabilityReport, AddonViewReport,
+};
+use crate::identity::ensure_workflow_policy;
 use crate::improve::{rank_improvement_candidates, OrchestratorImprovementCandidatesReport};
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
@@ -47,6 +52,8 @@ pub struct OpsSnapshot {
     pub registry: WorkflowRegistryReport,
     pub improvement_candidates: OrchestratorImprovementCandidatesReport,
     pub modifier_lane: OpsModifierLane,
+    pub addon_observability: AddonObservabilityReport,
+    pub addon_views: AddonViewReport,
     pub visual_workflows: Vec<OpsWorkflowVisual>,
     pub actions: Vec<OpsActionSpec>,
 }
@@ -226,12 +233,23 @@ pub struct OpsHttpResponse {
 }
 
 pub fn build_ops_snapshot(store: &ForgeStore) -> Result<OpsSnapshot> {
+    let addon_dirs = default_addon_dirs();
+    build_ops_snapshot_with_addon_dirs(store, &addon_dirs)
+}
+
+pub fn build_ops_snapshot_with_addon_dirs(
+    store: &ForgeStore,
+    addon_dirs: &[PathBuf],
+) -> Result<OpsSnapshot> {
     let registry = list_workflows_with_filters(
         store,
         WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
     )?;
     let improvement_candidates = rank_improvement_candidates(store, 10)?;
     let modifier_lane = load_modifier_lane(store)?;
+    let addon_catalog = load_addon_catalog_from_store(store, addon_dirs)?;
+    let addon_observability = addon_observability_report(store, &addon_catalog, None, None, 1000)?;
+    let addon_views = list_addon_views(&addon_catalog, None, Some("ops_console"), Some("enabled"));
     let visual_workflows = build_visual_workflows(store)?;
     Ok(OpsSnapshot {
         status: "ok".to_string(),
@@ -252,6 +270,8 @@ pub fn build_ops_snapshot(store: &ForgeStore) -> Result<OpsSnapshot> {
         registry,
         improvement_candidates,
         modifier_lane,
+        addon_observability,
+        addon_views,
         visual_workflows,
         actions: ops_actions(),
     })
@@ -478,6 +498,7 @@ pub fn create_modifier_proposal(
     store: &ForgeStore,
     input: OpsModifierProposalInput<'_>,
 ) -> Result<OpsModifierProposalReport> {
+    ensure_workflow_policy(store, input.workflow_id, "ops modifier proposal")?;
     let workflow = store.load_workflow(input.workflow_id)?;
     let task_id = clean_optional(input.task_id);
 
@@ -554,6 +575,7 @@ pub fn apply_modifier_proposal(
             proposal.status
         );
     }
+    ensure_workflow_policy(store, &proposal.workflow_id, "ops modifier apply")?;
 
     let applied_at = Utc::now().to_rfc3339();
     let (revision, mutation) = match proposal.target_kind.as_str() {
@@ -774,6 +796,16 @@ fn ops_design_token(
 }
 
 pub fn serve_ops_console(store_path: PathBuf, host: &str, port: u16) -> Result<OpsServeReport> {
+    let addon_dirs = default_addon_dirs();
+    serve_ops_console_with_addon_dirs(store_path, host, port, &addon_dirs)
+}
+
+pub fn serve_ops_console_with_addon_dirs(
+    store_path: PathBuf,
+    host: &str,
+    port: u16,
+    addon_dirs: &[PathBuf],
+) -> Result<OpsServeReport> {
     let listener = TcpListener::bind((host, port))
         .with_context(|| format!("failed to bind Forge ops server on {host}:{port}"))?;
     let addr = listener.local_addr()?;
@@ -790,7 +822,7 @@ pub fn serve_ops_console(store_path: PathBuf, host: &str, port: u16) -> Result<O
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                if let Err(error) = handle_stream(&store_path, &mut stream) {
+                if let Err(error) = handle_stream(&store_path, addon_dirs, &mut stream) {
                     let response = error_response(500, "Internal Server Error", &error.to_string());
                     let _ = stream.write_all(&response.to_http_bytes());
                 }
@@ -803,30 +835,49 @@ pub fn serve_ops_console(store_path: PathBuf, host: &str, port: u16) -> Result<O
 }
 
 pub fn handle_ops_http_request(store: &ForgeStore, request: &str) -> OpsHttpResponse {
-    match route_ops_http_request(store, request) {
+    let addon_dirs = default_addon_dirs();
+    handle_ops_http_request_with_addon_dirs(store, request, &addon_dirs)
+}
+
+pub fn handle_ops_http_request_with_addon_dirs(
+    store: &ForgeStore,
+    request: &str,
+    addon_dirs: &[PathBuf],
+) -> OpsHttpResponse {
+    match route_ops_http_request(store, request, addon_dirs) {
         Ok(response) => response,
         Err(error) => error_response(400, "Bad Request", &error.to_string()),
     }
 }
 
-fn handle_stream(store_path: &PathBuf, stream: &mut TcpStream) -> Result<()> {
+fn handle_stream(
+    store_path: &PathBuf,
+    addon_dirs: &[PathBuf],
+    stream: &mut TcpStream,
+) -> Result<()> {
     let mut buffer = vec![0; MAX_HTTP_REQUEST_BYTES];
     let bytes_read = stream.read(&mut buffer)?;
     let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
     let store = ForgeStore::open(store_path)?;
-    let response = handle_ops_http_request(&store, &request);
+    let response = handle_ops_http_request_with_addon_dirs(&store, &request, addon_dirs);
     stream.write_all(&response.to_http_bytes())?;
     Ok(())
 }
 
-fn route_ops_http_request(store: &ForgeStore, request: &str) -> Result<OpsHttpResponse> {
+fn route_ops_http_request(
+    store: &ForgeStore,
+    request: &str,
+    addon_dirs: &[PathBuf],
+) -> Result<OpsHttpResponse> {
     let parsed = ParsedRequest::parse(request)?;
     match (parsed.method.as_str(), parsed.path.as_str()) {
         ("GET", "/") => {
-            let snapshot = build_ops_snapshot(store)?;
+            let snapshot = build_ops_snapshot_with_addon_dirs(store, addon_dirs)?;
             Ok(html_response(render_ops_html(&snapshot)))
         }
-        ("GET", "/api/snapshot") => json_response(&build_ops_snapshot(store)?),
+        ("GET", "/api/snapshot") => {
+            json_response(&build_ops_snapshot_with_addon_dirs(store, addon_dirs)?)
+        }
         ("POST", "/api/run/drive") => {
             let run_id = parsed.required("run_id")?;
             let executor = parsed
@@ -1113,10 +1164,12 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
             workflow.run_ids.join(", ")
         };
         rows.push_str(&format!(
-            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}/{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}/{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             escape_html(&workflow.workflow_id),
             escape_html(&workflow.workflow_status),
             escape_html(&workflow.lifecycle_state),
+            escape_html(&workflow.runtime.lifecycle_kind),
+            escape_html(&workflow.runtime.operator_action),
             workflow.task_summary.completed,
             workflow.task_summary.total,
             workflow.active_run_count,
@@ -1207,6 +1260,117 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
     if visual_sections.is_empty() {
         visual_sections.push_str("<p>Nenhum workflow visual disponível.</p>");
     }
+    let mut addon_view_cards = String::new();
+    let mut addon_view_rows = String::new();
+    for entry in &snapshot.addon_views.views {
+        let layout = &entry.view.layout;
+        let zone = if layout.zone.trim().is_empty() {
+            "main"
+        } else {
+            layout.zone.as_str()
+        };
+        let width = if layout.width.trim().is_empty() {
+            "auto"
+        } else {
+            layout.width.as_str()
+        };
+        let density = if layout.density.trim().is_empty() {
+            "standard"
+        } else {
+            layout.density.as_str()
+        };
+        let mut bindings = String::new();
+        for binding in &entry.view.data_bindings {
+            bindings.push_str(&format!(
+                "<li><code>{}</code> via <code>{}</code> <span>{}</span></li>",
+                escape_html(&binding.id),
+                escape_html(&binding.source),
+                escape_html(&binding.scope),
+            ));
+        }
+        if bindings.is_empty() {
+            bindings.push_str("<li>Nenhum binding declarado.</li>");
+        }
+        let mut actions = String::new();
+        for action in &entry.view.actions {
+            actions.push_str(&format!(
+                "<li><code>{}</code> {} <span>{} {}</span></li>",
+                escape_html(&action.id),
+                escape_html(&action.label),
+                escape_html(&action.method),
+                escape_html(&action.target),
+            ));
+        }
+        if actions.is_empty() {
+            actions.push_str("<li>Nenhuma ação declarada.</li>");
+        }
+        addon_view_cards.push_str(&format!(
+            "<section class=\"addon-view-card\"><div class=\"addon-view-head\"><div><h3>{}</h3><code>{}</code></div><span>{}</span></div><div class=\"design-strip\"><span>addon: {}</span><span>tipo: {}</span><span>zona: {}</span><span>ordem: {}</span><span>largura: {}</span><span>densidade: {}</span></div><p>{}</p><div class=\"visual-panels\"><div><h4>Data bindings</h4><ul class=\"compact-list\">{}</ul></div><div><h4>Ações</h4><ul class=\"compact-list\">{}</ul></div></div></section>",
+            escape_html(&entry.view.title),
+            escape_html(&entry.view.id),
+            escape_html(&entry.view.surface),
+            escape_html(&entry.addon_id),
+            escape_html(&entry.view.view_type),
+            escape_html(zone),
+            entry.view.layout.order,
+            escape_html(width),
+            escape_html(density),
+            escape_html(&entry.view.component),
+            bindings,
+            actions,
+        ));
+        addon_view_rows.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{}</td><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            escape_html(&entry.addon_id),
+            escape_html(&entry.addon_name),
+            escape_html(&entry.view.id),
+            escape_html(&entry.view.title),
+            escape_html(&entry.view.surface),
+            escape_html(&entry.view.view_type),
+            escape_html(zone),
+        ));
+    }
+    if addon_view_cards.is_empty() {
+        addon_view_cards.push_str("<p>Nenhuma view ativa de Addon para o console ops.</p>");
+    }
+    if addon_view_rows.is_empty() {
+        addon_view_rows.push_str(
+            "<tr><td colspan=\"7\">Nenhuma view ativa de Addon para o console ops.</td></tr>",
+        );
+    }
+    let mut addon_observability_rows = String::new();
+    for entry in &snapshot.addon_observability.addons {
+        let consumed = if entry.event_flow.consumed_event_types.is_empty() {
+            "none".to_string()
+        } else {
+            entry.event_flow.consumed_event_types.join(", ")
+        };
+        let emitted = if entry.event_flow.emitted_event_types.is_empty() {
+            "none".to_string()
+        } else {
+            entry.event_flow.emitted_event_types.join(", ")
+        };
+        addon_observability_rows.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}/{}/{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            escape_html(&entry.addon_id),
+            escape_html(&entry.addon_lifecycle),
+            entry.capability_count,
+            entry.permission_count,
+            entry.runtime_contract_count,
+            entry.event_adapter_count,
+            entry.dispatches.queued_count,
+            entry.dispatches.blocked_count,
+            entry.dispatches.needs_external_worker_count,
+            escape_html(&entry.permission_gate.status),
+            escape_html(&truncate(&consumed, 120)),
+            escape_html(&truncate(&emitted, 120)),
+        ));
+    }
+    if addon_observability_rows.is_empty() {
+        addon_observability_rows.push_str(
+            "<tr><td colspan=\"10\">Nenhum Addon encontrado no catálogo ativo.</td></tr>",
+        );
+    }
     let mut proposal_rows = String::new();
     for proposal in &snapshot.modifier_lane.proposals {
         let target = proposal
@@ -1263,6 +1427,9 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
     .task-card {{ border: 1px solid #d9deea; border-radius: 8px; padding: 12px; background: #fbfcfe; }}
     .task-card p {{ margin: 8px 0; color: #4b5563; }}
     .task-card ul {{ margin: 8px 0 0; padding-left: 18px; }}
+    .addon-view-card {{ margin: 16px 0; padding: 16px; background: white; border: 1px solid #d9deea; border-radius: 8px; }}
+    .addon-view-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: start; }}
+    .addon-view-head h3 {{ margin: 0 0 4px; font-size: 15px; }}
     .task-head, .task-meta, .design-strip {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
     .task-head {{ justify-content: space-between; }}
     .task-meta, .design-strip {{ color: #5f6b7a; font-size: 12px; }}
@@ -1278,18 +1445,37 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
   <div class="summary">
     <span class="pill">workflows: {}</span>
     <span class="pill">running: {}</span>
+    <span class="pill">persistentes: {}</span>
+    <span class="pill">efêmeros: {}</span>
     <span class="pill">generated: {}</span>
     <span class="pill">local-only: {}</span>
     <span class="pill">modifier pending: {}</span>
+    <span class="pill">addons: {}</span>
+    <span class="pill">addons enabled: {}</span>
+    <span class="pill">addons unauthorized: {}</span>
+    <span class="pill">addon views: {}</span>
   </div>
   <h2>Workflows</h2>
   <table>
-    <thead><tr><th>Workflow</th><th>Status</th><th>Lifecycle</th><th>Tasks</th><th>Active runs</th><th>Runs</th><th>Outcome</th><th>Goal</th></tr></thead>
+    <thead><tr><th>Workflow</th><th>Status</th><th>Lifecycle</th><th>Runtime</th><th>Ação runtime</th><th>Tasks</th><th>Active runs</th><th>Runs</th><th>Outcome</th><th>Goal</th></tr></thead>
     <tbody>{}</tbody>
   </table>
   <h2>Visualização operacional</h2>
   <p class="section-note">Tarefas e subtarefas em formato visual, com resumo do workspace criativo para whiteboard, telas, componentes, páginas, tokens e colaboração humano+IA.</p>
   {}
+  <h2>Views de Addons</h2>
+  <p class="section-note">Composição dinâmica de UI/TUI/Ops declarada por Addons ativos para esta superfície.</p>
+  {}
+  <table>
+    <thead><tr><th>Addon</th><th>Nome</th><th>View</th><th>Título</th><th>Surface</th><th>Tipo</th><th>Zona</th></tr></thead>
+    <tbody>{}</tbody>
+  </table>
+  <h2>Observabilidade de Addons</h2>
+  <p class="section-note">Visão consolidada de lifecycle, capabilities, permissões, contratos runtime, adapters de evento e uso do dispatch ledger por Addon.</p>
+  <table>
+    <thead><tr><th>Addon</th><th>Lifecycle</th><th>Capabilities</th><th>Permissões</th><th>Contratos runtime</th><th>Event adapters</th><th>Dispatch queued/blocked/worker</th><th>Permission gate</th><th>Eventos consumidos</th><th>Eventos emitidos</th></tr></thead>
+    <tbody>{}</tbody>
+  </table>
   <h2>Lane modificadora</h2>
   <p class="section-note">Trilha separada para uma IA estratégica ou operador humano propor mudanças de objetivo e nodes sem interromper a operação.</p>
   <table>
@@ -1360,11 +1546,20 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
 </html>"#,
         snapshot.registry.summary.total,
         snapshot.registry.summary.running,
+        snapshot.registry.summary.runtime.persistent_workflows,
+        snapshot.registry.summary.runtime.ephemeral_workflows,
         snapshot.generated_at,
         snapshot.mode.local_only_by_default,
         snapshot.modifier_lane.pending_count,
+        snapshot.addon_observability.addon_count,
+        snapshot.addon_observability.enabled_count,
+        snapshot.addon_observability.unauthorized_count,
+        snapshot.addon_views.view_count,
         rows,
         visual_sections,
+        addon_view_cards,
+        addon_view_rows,
+        addon_observability_rows,
         proposal_rows
     )
 }

@@ -1,4 +1,5 @@
 use crate::artifact::{hex_sha256, write_json_artifact};
+use crate::identity::ensure_workflow_policy;
 use crate::storage::ForgeStore;
 use crate::workflow::attach_workflow_artifact;
 use crate::workflow::ArtifactAttachReport;
@@ -83,6 +84,7 @@ pub fn build_patch_plan(
     intent: &str,
     origin: &str,
 ) -> Result<PatchPlanReport> {
+    ensure_workflow_policy(store, workflow_id, "patch plan")?;
     let intent = intent.trim();
     if intent.is_empty() {
         bail!("patch intent is required");
@@ -352,6 +354,7 @@ pub fn build_patch_apply(
     plan_artifact_path: Option<&str>,
     validation_commands: Option<&[String]>,
 ) -> Result<PatchApplyReport> {
+    ensure_workflow_policy(store, workflow_id, "patch apply")?;
     if paths.is_empty() {
         bail!("at least one patch path is required");
     }
@@ -465,6 +468,7 @@ pub fn build_patch_revert(
     origin: &str,
     _validation_commands: Option<&[String]>,
 ) -> Result<PatchRevertReport> {
+    ensure_workflow_policy(store, workflow_id, "patch revert")?;
     let apply_bytes = fs::read(apply_artifact_path)
         .with_context(|| format!("failed to read apply artifact: {apply_artifact_path}"))?;
     let apply_artifact_ref = PatchApplyArtifactRef {

@@ -216,6 +216,7 @@ mod tests {
             deliverables: vec![],
             risks: vec![],
             unknowns: vec![],
+            ..IntentSpec::default()
         };
         let mut workflow = create_workflow(intent);
         workflow.tasks.clear();

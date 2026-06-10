@@ -1,8 +1,11 @@
+use crate::addon::{default_addon_dirs, load_addon_catalog_from_store};
 use crate::artifact::copy_artifact;
 use crate::graph::{
     node_brain_routing_for_executor, ArtifactRecord, ExecutorKind, NodeBrainAgentSlotSpec,
     NodeBrainRoutingSpec, TaskStatus, Workflow, WorkflowRevision,
 };
+use crate::identity::ensure_workflow_policy;
+use crate::intent::parse_intent_with_catalog_and_context;
 use crate::ir::{
     preview_token_change_impact, resolve_token_collection, CollaborationAuditEvent,
     CollaborationComment, CollaborationConflictEvent, CollaborationPatchEvent,
@@ -11,6 +14,7 @@ use crate::ir::{
     TokenCollection, TokenImpactPreview, TokenResolutionReport,
 };
 use crate::storage::ForgeStore;
+use crate::validation::{validate_workflow, ValidationReport};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -25,6 +29,24 @@ pub struct WorkflowGoalUpdateReport {
     pub previous_goal: String,
     pub new_goal: String,
     pub revision: u64,
+    pub previous_deliverable_count: usize,
+    pub new_deliverable_count: usize,
+    pub added_deliverables: Vec<String>,
+    pub removed_deliverables: Vec<String>,
+    pub previous_capabilities: Vec<String>,
+    pub new_capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowStatusUpdateReport {
+    pub status: String,
+    pub workflow_id: String,
+    pub origin: String,
+    pub previous_status: String,
+    pub new_status: String,
+    pub revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation: Option<ValidationReport>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +162,7 @@ pub fn record_product_decision(
     workflow_id: &str,
     input: ProductDecisionInput,
 ) -> Result<ProductDecisionReport> {
+    ensure_workflow_policy(store, workflow_id, "record product decision")?;
     let mut workflow = store.load_workflow(workflow_id)?;
     let decision_id = format!("dec_{}", Uuid::new_v4().to_string().replace('-', ""));
     let revision = push_revision(
@@ -187,15 +210,37 @@ pub fn update_workflow_goal(
     goal: &str,
     origin: &str,
 ) -> Result<WorkflowGoalUpdateReport> {
+    ensure_workflow_policy(store, workflow_id, "workflow goal update")?;
     let mut workflow = store.load_workflow(workflow_id)?;
     let previous_goal = workflow.goal.clone();
+    let previous_intent = workflow.intent.clone();
+    let previous_deliverables = previous_intent.deliverables.clone();
+    let previous_capabilities = previous_intent
+        .required_capabilities
+        .iter()
+        .map(|capability| capability.id.clone())
+        .collect::<Vec<_>>();
+    let addon_catalog = load_addon_catalog_from_store(store, &default_addon_dirs())?;
+    let new_intent = parse_intent_with_catalog_and_context(
+        goal,
+        &addon_catalog,
+        previous_intent.operating_context,
+    );
+    let new_deliverables = new_intent.deliverables.clone();
+    let new_capabilities = new_intent
+        .required_capabilities
+        .iter()
+        .map(|capability| capability.id.clone())
+        .collect::<Vec<_>>();
+    let added_deliverables = diff_added(&previous_deliverables, &new_deliverables);
+    let removed_deliverables = diff_removed(&previous_deliverables, &new_deliverables);
     workflow.goal = goal.to_string();
-    workflow.intent.goal = goal.to_string();
+    workflow.intent = new_intent;
     let revision = push_revision(
         &mut workflow.revisions,
         origin,
         "goal_update",
-        &format!("goal changed from `{previous_goal}` to `{goal}`"),
+        &format!("goal changed from `{previous_goal}` to `{goal}` and intent was reparsed"),
     );
     store.save_workflow(&workflow)?;
     store.record_event(
@@ -205,7 +250,13 @@ pub fn update_workflow_goal(
             "origin": origin,
             "previous_goal": previous_goal,
             "new_goal": goal,
-            "revision": revision
+            "revision": revision,
+            "previous_deliverable_count": previous_deliverables.len(),
+            "new_deliverable_count": new_deliverables.len(),
+            "added_deliverables": added_deliverables,
+            "removed_deliverables": removed_deliverables,
+            "previous_capabilities": previous_capabilities,
+            "new_capabilities": new_capabilities
         }),
     )?;
 
@@ -216,7 +267,127 @@ pub fn update_workflow_goal(
         previous_goal,
         new_goal: goal.to_string(),
         revision,
+        previous_deliverable_count: previous_deliverables.len(),
+        new_deliverable_count: new_deliverables.len(),
+        added_deliverables,
+        removed_deliverables,
+        previous_capabilities,
+        new_capabilities,
     })
+}
+
+pub fn pause_workflow(
+    store: &ForgeStore,
+    workflow_id: &str,
+    origin: &str,
+) -> Result<WorkflowStatusUpdateReport> {
+    set_workflow_status(
+        store,
+        workflow_id,
+        "paused",
+        origin,
+        "workflow_paused",
+        None,
+    )
+}
+
+pub fn resume_workflow(
+    store: &ForgeStore,
+    workflow_id: &str,
+    origin: &str,
+) -> Result<WorkflowStatusUpdateReport> {
+    let workflow = store.load_workflow(workflow_id)?;
+    let status = resumed_workflow_status(&workflow);
+    set_workflow_status(
+        store,
+        workflow_id,
+        &status,
+        origin,
+        "workflow_resumed",
+        None,
+    )
+}
+
+pub fn complete_workflow(
+    store: &ForgeStore,
+    workflow_id: &str,
+    origin: &str,
+) -> Result<WorkflowStatusUpdateReport> {
+    let workflow = store.load_workflow(workflow_id)?;
+    let validation = validate_workflow(&workflow);
+    if !validation.promotable {
+        bail!(
+            "workflow {workflow_id} is not validation-ready for completion: {} failed rule(s)",
+            validation.failed_rules.len()
+        );
+    }
+    set_workflow_status(
+        store,
+        workflow_id,
+        "completed",
+        origin,
+        "workflow_completed",
+        Some(validation),
+    )
+}
+
+fn set_workflow_status(
+    store: &ForgeStore,
+    workflow_id: &str,
+    new_status: &str,
+    origin: &str,
+    event_kind: &str,
+    validation: Option<ValidationReport>,
+) -> Result<WorkflowStatusUpdateReport> {
+    ensure_workflow_policy(store, workflow_id, event_kind)?;
+    let mut workflow = store.load_workflow(workflow_id)?;
+    let previous_status = workflow.status.clone();
+    workflow.status = new_status.to_string();
+    let revision = push_revision(
+        &mut workflow.revisions,
+        origin,
+        event_kind,
+        &format!("workflow status changed from `{previous_status}` to `{new_status}`"),
+    );
+    store.save_workflow(&workflow)?;
+    store.record_event(
+        workflow_id,
+        event_kind,
+        &serde_json::json!({
+            "origin": origin,
+            "previous_status": previous_status,
+            "new_status": new_status,
+            "revision": revision,
+            "validation": validation,
+        }),
+    )?;
+    Ok(WorkflowStatusUpdateReport {
+        status: event_kind.to_string(),
+        workflow_id: workflow_id.to_string(),
+        origin: origin.to_string(),
+        previous_status,
+        new_status: new_status.to_string(),
+        revision,
+        validation,
+    })
+}
+
+fn resumed_workflow_status(workflow: &crate::graph::Workflow) -> String {
+    if workflow
+        .tasks
+        .iter()
+        .any(|task| matches!(task.status, TaskStatus::Running))
+    {
+        "running".to_string()
+    } else if workflow
+        .tasks
+        .iter()
+        .all(|task| matches!(task.status, TaskStatus::Completed))
+    {
+        "completed".to_string()
+    } else {
+        "running".to_string()
+    }
 }
 
 pub fn update_workflow_task(
@@ -224,6 +395,7 @@ pub fn update_workflow_task(
     workflow_id: &str,
     input: WorkflowTaskUpdateInput<'_>,
 ) -> Result<WorkflowTaskUpdateReport> {
+    ensure_workflow_policy(store, workflow_id, "workflow task update")?;
     let mut workflow = store.load_workflow(workflow_id)?;
     let Some(task) = workflow
         .tasks
@@ -336,6 +508,7 @@ pub fn update_workflow_node_brain_routing(
     workflow_id: &str,
     input: WorkflowNodeBrainRoutingUpdateInput,
 ) -> Result<WorkflowNodeBrainRoutingUpdateReport> {
+    ensure_workflow_policy(store, workflow_id, "workflow node brain update")?;
     let mut workflow = store.load_workflow(workflow_id)?;
     let task_index = workflow
         .tasks
@@ -514,6 +687,7 @@ pub fn attach_workflow_artifact(
     kind: &str,
     origin: &str,
 ) -> Result<ArtifactAttachReport> {
+    ensure_workflow_policy(store, workflow_id, "workflow artifact attach")?;
     let mut workflow = store.load_workflow(workflow_id)?;
     let (relative_path, sha256, bytes) =
         copy_artifact(&store.base_dir(), workflow_id, source_path, kind)?;
@@ -567,6 +741,7 @@ pub fn validate_child_subflow_binding(
     child_task_id: &str,
     origin: &str,
 ) -> Result<SubflowValidationReport> {
+    ensure_workflow_policy(store, workflow_id, "validate child subflow binding")?;
     let child_workflow = store.load_workflow(child_workflow_id)?;
     let child_task = child_workflow
         .tasks
@@ -717,6 +892,27 @@ fn ensure_unique_value(values: &mut Vec<String>, value: &str) {
     }
 }
 
+fn diff_added(previous: &[String], next: &[String]) -> Vec<String> {
+    next.iter()
+        .filter(|value| !contains_case_insensitive(previous, value))
+        .cloned()
+        .collect()
+}
+
+fn diff_removed(previous: &[String], next: &[String]) -> Vec<String> {
+    previous
+        .iter()
+        .filter(|value| !contains_case_insensitive(next, value))
+        .cloned()
+        .collect()
+}
+
+fn contains_case_insensitive(values: &[String], needle: &str) -> bool {
+    values
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case(needle))
+}
+
 fn push_revision(
     revisions: &mut Vec<WorkflowRevision>,
     origin: &str,
@@ -837,6 +1033,7 @@ pub fn attach_creative_artifact(
     artifact: CreativeArtifact,
     origin: &str,
 ) -> Result<CreativeArtifactAttachReport> {
+    ensure_workflow_policy(store, workflow_id, "creative artifact attach")?;
     let mut workflow = store.load_workflow(workflow_id)?;
     workflow.creative_artifacts.push(artifact);
     let summary = workflow.creative_artifacts.last().unwrap();
@@ -924,6 +1121,7 @@ pub fn record_creative_collaboration_event(
     request: CreativeCollaborationEventRequest,
 ) -> Result<CreativeCollaborationEventReport> {
     let workflow_id = request.workflow_id;
+    ensure_workflow_policy(store, &workflow_id, "creative collaboration event")?;
     let artifact_id = request.artifact_id;
     let event_kind = request.event_kind;
     let actor = request.actor;
@@ -1090,6 +1288,7 @@ pub fn set_workflow_token_collection(
     token_collection: TokenCollection,
     origin: &str,
 ) -> Result<TokenCollectionReport> {
+    ensure_workflow_policy(store, workflow_id, "workflow token collection set")?;
     let mut workflow = store.load_workflow(workflow_id)?;
     workflow.token_collection = Some(token_collection);
     let revision = push_revision(
@@ -1156,6 +1355,7 @@ pub fn patch_workflow_token(
     value: &str,
     origin: &str,
 ) -> Result<TokenPatchReport> {
+    ensure_workflow_policy(store, workflow_id, "workflow token patch")?;
     let mut workflow = store.load_workflow(workflow_id)?;
     let creative_artifacts = workflow.creative_artifacts.clone();
     let (collection_name, old_value, impact_preview) = {

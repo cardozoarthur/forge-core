@@ -1,3 +1,4 @@
+use crate::identity::ensure_workflow_policy;
 use crate::storage::{ForgeStore, TaskLeaseWrite};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -44,6 +45,7 @@ pub fn acquire_task_lease(
     executor: &str,
     ttl_seconds: u64,
 ) -> Result<TaskLeaseAcquireReport> {
+    ensure_workflow_policy(store, workflow_id, "task lease acquire")?;
     ensure_task_exists(store, workflow_id, task_id)?;
     if executor.trim().is_empty() {
         bail!("executor cannot be empty");
@@ -121,6 +123,7 @@ pub fn release_task_lease(
     lease_id: &str,
     executor: &str,
 ) -> Result<TaskLeaseReleaseReport> {
+    ensure_workflow_policy(store, workflow_id, "task lease release")?;
     ensure_task_exists(store, workflow_id, task_id)?;
     let released = store.delete_task_lease(workflow_id, task_id, lease_id)?;
     let current_lease = load_current_lease(store, workflow_id, task_id)?;

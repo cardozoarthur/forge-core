@@ -2,6 +2,7 @@ use crate::graph::{
     AtomicTask, HumanChoiceOption, HumanDecisionRecord, HumanFormField, HumanFormSchema,
     HumanInteractionSpec, TaskStatus, Workflow, WorkflowRevision,
 };
+use crate::identity::ensure_workflow_policy;
 use crate::storage::ForgeStore;
 use anyhow::{bail, Context, Result};
 use chrono::{Duration, Utc};
@@ -146,6 +147,7 @@ pub fn create_choice_interaction(
     store: &ForgeStore,
     request: CreateChoiceInteractionRequest<'_>,
 ) -> Result<HumanInteractionReport> {
+    ensure_workflow_policy(store, request.workflow_id, "create human interaction")?;
     let kind = normalize_choice_kind(request.kind)?;
     let parsed_choices = parse_choices(request.choices)?;
     if parsed_choices.is_empty() {
@@ -175,6 +177,7 @@ pub fn create_form_interaction(
     timeout_seconds: Option<u64>,
     origin: &str,
 ) -> Result<HumanInteractionReport> {
+    ensure_workflow_policy(store, workflow_id, "create human interaction")?;
     let fields = parse_form_fields(fields)?;
     if fields.is_empty() {
         bail!("at least one --field is required for a human form interaction");
@@ -210,6 +213,7 @@ pub fn answer_human_interaction(
     rationale: Option<&str>,
     origin: &str,
 ) -> Result<HumanInteractionReport> {
+    ensure_workflow_policy(store, workflow_id, "answer human interaction")?;
     let mut workflow = store.load_workflow(workflow_id)?;
     let parsed_fields = parse_field_values(field_values)?;
     let workflow_goal = workflow.goal.clone();
@@ -298,6 +302,7 @@ pub fn expire_human_interaction(
     task_id: &str,
     origin: &str,
 ) -> Result<HumanInteractionReport> {
+    ensure_workflow_policy(store, workflow_id, "expire human interaction")?;
     let mut workflow = store.load_workflow(workflow_id)?;
     let (interaction, task_status) = {
         let task = workflow_task_mut(&mut workflow, task_id)?;

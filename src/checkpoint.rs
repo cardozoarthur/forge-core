@@ -1,3 +1,4 @@
+use crate::identity::ensure_workflow_policy;
 use crate::storage::ForgeStore;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
@@ -40,6 +41,7 @@ pub fn record_task_checkpoint(
     store: &ForgeStore,
     request: TaskCheckpointRequest<'_>,
 ) -> Result<TaskCheckpointReport> {
+    ensure_workflow_policy(store, request.workflow_id, "task checkpoint")?;
     let workflow = store.load_workflow(request.workflow_id)?;
     if !workflow.tasks.iter().any(|task| task.id == request.task_id) {
         bail!(

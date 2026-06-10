@@ -30,6 +30,7 @@ const REGISTRY_CONTEXT_ACTION_CATALOG_SCHEMA_VERSION: &str =
 const REGISTRY_QUALITY_ACTION_CATALOG_SCHEMA_VERSION: &str =
     "forge.registry_quality_action_catalog.v1";
 const REGISTRY_RUN_ACTIVITY_SCHEMA_VERSION: &str = "forge.registry_run_activity.v1";
+const REGISTRY_WORKFLOW_RUNTIME_SCHEMA_VERSION: &str = "forge.registry_workflow_runtime.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowRegistryReport {
@@ -67,6 +68,7 @@ pub struct WorkflowRegistrySummary {
     pub total: usize,
     pub running: usize,
     pub non_running: usize,
+    pub runtime: RegistryWorkflowRuntimeSummary,
     pub run_activity: RegistryRunActivitySummary,
     pub reusable_subflows: usize,
     pub execution_policy: RegistryExecutionPolicySummary,
@@ -89,6 +91,7 @@ pub struct WorkflowRegistryRow {
     pub workflow_status: String,
     pub lifecycle_state: String,
     pub running: bool,
+    pub runtime: RegistryWorkflowRuntimeState,
     pub workflow_revision: u64,
     pub artifact_count: usize,
     pub product_decision_count: usize,
@@ -131,6 +134,34 @@ pub struct RegistryRunActivitySummary {
     pub missing_heartbeat: usize,
     pub inactive: usize,
     pub not_running: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RegistryWorkflowRuntimeSummary {
+    pub schema_version: String,
+    pub workflows: usize,
+    pub persistent_workflows: usize,
+    pub ephemeral_workflows: usize,
+    pub promotable_to_persistent: usize,
+    pub scale_to_zero_after_completion: usize,
+    pub idle_waiting_for_events: usize,
+    pub keep_warm: usize,
+    pub currently_running: usize,
+    pub currently_scaled_to_zero: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RegistryWorkflowRuntimeState {
+    pub schema_version: String,
+    pub lifecycle_kind: String,
+    pub expected_lifetime: String,
+    pub persistent: bool,
+    pub ephemeral: bool,
+    pub can_become_persistent: bool,
+    pub scale_to_zero_policy: String,
+    pub operational_state: String,
+    pub operator_action: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -347,6 +378,12 @@ pub fn list_workflows_with_filters(
             total.add(&row.run_activity);
             total
         });
+    let runtime = rows
+        .iter()
+        .fold(RegistryWorkflowRuntimeSummary::empty(), |mut total, row| {
+            total.add_state(&row.runtime);
+            total
+        });
     let reusable_subflows = rows.iter().map(|row| row.reusable_subflows.len()).sum();
     let execution_policy =
         rows.iter()
@@ -388,6 +425,7 @@ pub fn list_workflows_with_filters(
         total: rows.len(),
         running,
         non_running: rows.len().saturating_sub(running),
+        runtime,
         run_activity,
         reusable_subflows,
         execution_policy,
@@ -772,6 +810,9 @@ fn registry_row(
     let task_summary = summarize_tasks(workflow);
     let lifecycle_state = derive_lifecycle_state(workflow, &task_summary);
     let running = lifecycle_state == "running";
+    let schedule_summary = summarize_schedules(&workflow.tasks);
+    let runtime =
+        RegistryWorkflowRuntimeState::from_workflow(workflow, &lifecycle_state, &schedule_summary);
     let workflow_revision = workflow
         .revisions
         .last()
@@ -781,7 +822,6 @@ fn registry_row(
     let execution_policy = RegistryExecutionPolicySummary::from_workflow(workflow);
     let context_quality = RegistryContextQualitySummary::from_handoff_summary(handoff_summary);
     let quality_action = RegistryQualityAction::from_summaries(handoff_summary, &context_quality);
-    let schedule_summary = summarize_schedules(&workflow.tasks);
     let loop_summary = summarize_loops(&workflow.tasks);
     let human_interaction_summary = summarize_human_interactions(&workflow.tasks);
     let outcome_status = assess_workflow_outcome_metadata(workflow);
@@ -798,6 +838,7 @@ fn registry_row(
         workflow_status: workflow.status.clone(),
         lifecycle_state,
         running,
+        runtime,
         workflow_revision,
         artifact_count: workflow.artifacts.len(),
         product_decision_count: workflow.product_decisions.len(),
@@ -901,6 +942,82 @@ impl RegistryRunActivitySummary {
         self.missing_heartbeat += other.missing_heartbeat;
         self.inactive += other.inactive;
         self.not_running += other.not_running;
+    }
+}
+
+impl RegistryWorkflowRuntimeSummary {
+    fn empty() -> Self {
+        Self {
+            schema_version: REGISTRY_WORKFLOW_RUNTIME_SCHEMA_VERSION.to_string(),
+            workflows: 0,
+            persistent_workflows: 0,
+            ephemeral_workflows: 0,
+            promotable_to_persistent: 0,
+            scale_to_zero_after_completion: 0,
+            idle_waiting_for_events: 0,
+            keep_warm: 0,
+            currently_running: 0,
+            currently_scaled_to_zero: 0,
+        }
+    }
+
+    fn add_state(&mut self, state: &RegistryWorkflowRuntimeState) {
+        self.workflows += 1;
+        if state.persistent {
+            self.persistent_workflows += 1;
+        }
+        if state.ephemeral {
+            self.ephemeral_workflows += 1;
+        }
+        if state.can_become_persistent {
+            self.promotable_to_persistent += 1;
+        }
+
+        match state.scale_to_zero_policy.as_str() {
+            "scale_to_zero_after_completion" => self.scale_to_zero_after_completion += 1,
+            "idle_waiting_for_events" => self.idle_waiting_for_events += 1,
+            "keep_warm" => self.keep_warm += 1,
+            _ => {}
+        }
+
+        match state.operational_state.as_str() {
+            "active" => self.currently_running += 1,
+            "scaled_to_zero" => self.currently_scaled_to_zero += 1,
+            _ => {}
+        }
+    }
+}
+
+impl RegistryWorkflowRuntimeState {
+    fn from_workflow(
+        workflow: &Workflow,
+        lifecycle_state: &str,
+        schedule_summary: &ScheduleSummary,
+    ) -> Self {
+        let runtime = &workflow.runtime;
+        let operational_state =
+            workflow_runtime_operational_state(runtime, lifecycle_state, schedule_summary);
+        let operator_action = workflow_runtime_operator_action(
+            runtime,
+            lifecycle_state,
+            &operational_state,
+            schedule_summary,
+        );
+        let reason =
+            workflow_runtime_reason(runtime, lifecycle_state, &operator_action, schedule_summary);
+
+        Self {
+            schema_version: REGISTRY_WORKFLOW_RUNTIME_SCHEMA_VERSION.to_string(),
+            lifecycle_kind: runtime.lifecycle_kind.clone(),
+            expected_lifetime: runtime.expected_lifetime.clone(),
+            persistent: runtime.persistent,
+            ephemeral: runtime.ephemeral,
+            can_become_persistent: runtime.can_become_persistent,
+            scale_to_zero_policy: runtime.scale_to_zero_policy.clone(),
+            operational_state,
+            operator_action,
+            reason,
+        }
     }
 }
 
@@ -1356,6 +1473,104 @@ fn derive_lifecycle_state(workflow: &Workflow, task_summary: &RegistryTaskStatus
         return "completed".to_string();
     }
     "idle".to_string()
+}
+
+fn workflow_runtime_operational_state(
+    runtime: &crate::graph::WorkflowRuntimeSpec,
+    lifecycle_state: &str,
+    schedule_summary: &ScheduleSummary,
+) -> String {
+    if schedule_summary.scheduled_nodes > 0 && schedule_summary.due_nodes > 0 {
+        return "scheduled_due".to_string();
+    }
+    if lifecycle_state == "idle" && schedule_summary.scheduled_nodes > 0 {
+        return "idle_waiting_for_schedule".to_string();
+    }
+    match lifecycle_state {
+        "running" => "active".to_string(),
+        "failed" | "blocked" => "needs_attention".to_string(),
+        "scaled_to_zero" => "scaled_to_zero".to_string(),
+        "idle" if runtime.persistent => "idle_waiting_for_events".to_string(),
+        "completed" => "completed".to_string(),
+        _ => "idle".to_string(),
+    }
+}
+
+fn workflow_runtime_operator_action(
+    runtime: &crate::graph::WorkflowRuntimeSpec,
+    lifecycle_state: &str,
+    operational_state: &str,
+    schedule_summary: &ScheduleSummary,
+) -> String {
+    if schedule_summary.scheduled_nodes > 0 {
+        if schedule_summary.due_nodes > 0 {
+            return "run_due_schedule".to_string();
+        }
+        if matches!(
+            operational_state,
+            "idle_waiting_for_schedule" | "scaled_to_zero"
+        ) {
+            return "sleep_until_schedule".to_string();
+        }
+    }
+    match operational_state {
+        "active" => "monitor_active_run".to_string(),
+        "needs_attention" => "repair_workflow".to_string(),
+        "idle_waiting_for_events" => "keep_event_listener_ready".to_string(),
+        "scaled_to_zero" if runtime.persistent => "wake_on_event".to_string(),
+        "scaled_to_zero" => "archive_or_reuse".to_string(),
+        "idle" if runtime.ephemeral && runtime.can_become_persistent => {
+            "run_or_promote_if_recurring".to_string()
+        }
+        "completed" if lifecycle_state == "completed" => {
+            "review_completion_or_scale_down".to_string()
+        }
+        _ => "observe".to_string(),
+    }
+}
+
+fn workflow_runtime_reason(
+    runtime: &crate::graph::WorkflowRuntimeSpec,
+    lifecycle_state: &str,
+    operator_action: &str,
+    schedule_summary: &ScheduleSummary,
+) -> String {
+    match operator_action {
+        "monitor_active_run" => "workflow has active runtime work".to_string(),
+        "repair_workflow" => format!(
+            "workflow lifecycle is {lifecycle_state}; operator should repair before promotion"
+        ),
+        "run_due_schedule" => {
+            format!(
+                "workflow has {} due scheduled node(s); schedule scan should lease and execute it",
+                schedule_summary.due_nodes
+            )
+        }
+        "sleep_until_schedule" => {
+            "workflow is waiting for its next Forge-owned schedule wakeup".to_string()
+        }
+        "keep_event_listener_ready" => {
+            "persistent workflow is idle but expected to react to future events".to_string()
+        }
+        "wake_on_event" => {
+            "persistent workflow is scaled to zero and should wake from an event".to_string()
+        }
+        "archive_or_reuse" => {
+            "ephemeral workflow finished and can remain scaled to zero for reuse or audit"
+                .to_string()
+        }
+        "run_or_promote_if_recurring" => {
+            "ephemeral workflow is idle; promote only if a recurring/event source appears"
+                .to_string()
+        }
+        "review_completion_or_scale_down" => {
+            "completed workflow is not yet represented as scaled-to-zero".to_string()
+        }
+        _ if runtime.scale_to_zero_policy == "keep_warm" => {
+            "runtime policy asks Forge to keep this workflow warm".to_string()
+        }
+        _ => "no runtime intervention is required".to_string(),
+    }
 }
 
 fn reusable_subflows(workflow: &Workflow, lifecycle_state: &str) -> Vec<ReusableSubflowRef> {

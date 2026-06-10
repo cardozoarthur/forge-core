@@ -1,6 +1,23 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use forge_core::adapter::validate_executor_response_file;
+use forge_core::addon::{
+    addon_observability_report, authorize_addon_permission, claim_addon_runtime_contract_dispatch,
+    complete_addon_runtime_contract_dispatch, create_addon_migration_workflow,
+    create_addon_package_lock, default_addon_dirs, disable_addon, downgrade_addon, enable_addon,
+    enqueue_addon_planner_dispatch, enqueue_addon_runtime_contract_dispatch,
+    evaluate_addon_runtime_contract_policy, execute_addon_planning_strategy,
+    execute_addon_runtime_contract_dispatch, fetch_addon_package, install_addon,
+    install_addon_package, list_addon_capability_index, list_addon_event_adapters,
+    list_addon_marketplace, list_addon_permission_authorizations, list_addon_planner_registry,
+    list_addon_runtime_contract_dispatches, list_addon_runtime_contracts,
+    list_addon_runtime_workers, list_addon_trust_store, list_addon_views, list_installed_addons,
+    load_addon_catalog_from_store, package_addon, publish_addon_package,
+    register_addon_runtime_worker, resolve_goal_capabilities_with_registry_sync,
+    resolve_goal_capabilities_with_store, revoke_addon_permission,
+    run_addon_runtime_contract_dispatch, sync_addon_package_registry, trust_addon_package_key,
+    uninstall_addon, upgrade_addon, validate_addon_catalog,
+};
 use forge_core::artifact::list_workflow_artifacts;
 use forge_core::aws_ops::{
     run_check as run_aws_ops_check, run_inventory as run_aws_ops_inventory,
@@ -14,10 +31,19 @@ use forge_core::cluster::{
     place_task_on_cluster, register_cluster_node, ClusterNodeInput,
 };
 use forge_core::context::build_context_package_with_checkpoint;
+use forge_core::cost::build_cost_ledger;
 use forge_core::credential_vault::{
     run_describe as run_credential_vault_describe, run_exec as run_credential_vault_exec,
     run_key_init as run_credential_vault_key_init, run_panel as run_credential_vault_panel,
     run_records as run_credential_vault_records,
+};
+use forge_core::event::{
+    build_event_service_plan, build_global_event_timeline, build_workflow_event_stream,
+    emit_event_egress, ingest_inbound_event, list_event_services, list_inbound_event_inbox,
+    recover_stale_event_services, route_inbound_event, run_event_runtime_daemon,
+    run_event_runtime_reconcile, run_event_service_supervisor, run_event_webhook_ingress_server,
+    run_event_webhook_ingress_service, run_event_worker_service, run_inbound_event_worker_loop,
+    scan_inbound_event_inbox, EventEgressEmitInput, InboundEventIngestInput,
 };
 use forge_core::execution::run_simulated;
 use forge_core::executor::{
@@ -25,13 +51,21 @@ use forge_core::executor::{
 };
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff;
+use forge_core::harness::{analyze_token_headroom, build_cli_wrapper_plan};
+use forge_core::identity::{
+    audit_tenant_index, ensure_operating_context_policy, ensure_workflow_policy,
+    evaluate_tenant_policy_for_action, inspect_project_operating_context, link_identity,
+    list_identity_links, list_identity_memberships, list_identity_registry, list_tenant_index,
+    load_project_operating_context, resolve_identity, sync_project_operating_context,
+    unlink_identity, update_identity_membership, IdentityLinkInput, IdentityMembershipUpdateInput,
+};
 use forge_core::improve::{
     generate_improvement, normalize_avoidable_ai_costs,
     normalize_avoidable_ai_costs_for_candidates, rank_improvement_candidates_with_filter,
     ImprovementCandidateFilter,
 };
 use forge_core::inspection::inspect_workflow_with_focus;
-use forge_core::intent::parse_intent;
+use forge_core::intent::parse_intent_with_catalog_and_context;
 use forge_core::interaction::{
     answer_human_interaction, create_choice_interaction, create_form_interaction,
     expire_human_interaction, list_human_interactions, summarize_human_interactions,
@@ -44,7 +78,11 @@ use forge_core::interactive::{
 use forge_core::ir::{CreativeArtifact, TokenCollection};
 use forge_core::lease::{acquire_task_lease, release_task_lease};
 use forge_core::mcp::{call_mcp_tool, mcp_tools_manifest};
-use forge_core::memory::{memory_policy_report, search_memory, MemorySearchOptions};
+use forge_core::memory::{
+    list_memory_promotions, memory_cleanup_report, memory_policy_report, memory_retention_report,
+    promote_memory, search_memory, MemoryCleanupOptions, MemoryPromotionOptions,
+    MemoryRetentionOptions, MemorySearchOptions,
+};
 use forge_core::milestone::{
     build_milestone_export_demo, build_milestone_manifest, build_milestone_research,
     build_milestone_status, build_replacement_cli_demo,
@@ -53,7 +91,7 @@ use forge_core::multimodal::{
     build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
     build_multimodal_status, evaluate_multimodal_guard,
 };
-use forge_core::ops::{build_ops_snapshot, serve_ops_console};
+use forge_core::ops::{build_ops_snapshot_with_addon_dirs, serve_ops_console_with_addon_dirs};
 use forge_core::patch::{build_patch_apply, build_patch_plan, build_patch_revert};
 use forge_core::registry::{
     attach_reuse_candidates_as_child_subflows, context_action_catalog, find_reuse_candidates,
@@ -88,6 +126,7 @@ use forge_core::workflow::{
     CreativeCollaborationEventRequest, ProductDecisionInput, WorkflowNodeBrainRoutingUpdateInput,
 };
 use serde::Serialize;
+use serde_json::Value;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -105,6 +144,8 @@ enum Commands {
     Plan {
         #[arg(long)]
         goal: String,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -178,6 +219,26 @@ enum Commands {
         workflow: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
+    },
+    Events {
+        #[command(subcommand)]
+        command: EventCommands,
+    },
+    Identity {
+        #[command(subcommand)]
+        command: IdentityCommands,
+    },
+    Addons {
+        #[command(subcommand)]
+        command: AddonCommands,
+    },
+    Harness {
+        #[command(subcommand)]
+        command: HarnessCommands,
+    },
+    Cost {
+        #[command(subcommand)]
+        command: CostCommands,
     },
     Skill {
         #[command(subcommand)]
@@ -275,6 +336,22 @@ enum Commands {
 }
 
 #[derive(Debug, Subcommand)]
+enum CostCommands {
+    Ledger {
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long)]
+        organization: Option<String>,
+        #[arg(long)]
+        brand: Option<String>,
+        #[arg(long)]
+        product: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum SkillCommands {
     Install {
         #[arg(long, default_value = ".")]
@@ -297,8 +374,1129 @@ enum SkillCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum HarnessCommands {
+    TokenHeadroom {
+        #[arg(long)]
+        content: String,
+        #[arg(long = "kind")]
+        content_kind: Option<String>,
+        #[arg(long = "budget-tokens", default_value_t = 0)]
+        budget_tokens: usize,
+        #[arg(long, default_value = "cli")]
+        source: String,
+        #[arg(long, default_value_t = true)]
+        reversible: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    WrapPlan {
+        #[arg(long)]
+        executor: String,
+        #[arg(long = "cmd")]
+        command: Vec<String>,
+        #[arg(long = "forge-first")]
+        forge_first: bool,
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
+        #[arg(long = "run")]
+        run_id: Option<String>,
+        #[arg(long = "context-budget", default_value_t = 1200)]
+        context_budget: usize,
+        #[arg(long = "token-headroom", default_value_t = true)]
+        token_headroom: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AddonCommands {
+    Installed {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Capabilities {
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        capability: Option<String>,
+        #[arg(long)]
+        lifecycle: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Observability {
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        lifecycle: Option<String>,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long = "dispatch-limit", default_value_t = 1000)]
+        dispatch_limit: usize,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Permissions {
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        permission: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    AuthorizePermission {
+        #[arg(long)]
+        addon: String,
+        #[arg(long)]
+        permission: String,
+        #[arg(long, default_value = "medium")]
+        risk: String,
+        #[arg(long = "approved-by", default_value = "human")]
+        approved_by: String,
+        #[arg(long, default_value = "cli")]
+        source: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    RevokePermission {
+        #[arg(long)]
+        addon: String,
+        #[arg(long)]
+        permission: String,
+        #[arg(long = "approved-by", default_value = "human")]
+        approved_by: String,
+        #[arg(long, default_value = "cli")]
+        source: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Catalog {
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Contracts {
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long = "type")]
+        contract_type: Option<String>,
+        #[arg(long)]
+        capability: Option<String>,
+        #[arg(long)]
+        lifecycle: Option<String>,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Planners {
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        capability: Option<String>,
+        #[arg(long = "workflow-extension")]
+        workflow_extension: Option<String>,
+        #[arg(long)]
+        lifecycle: Option<String>,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ContractPolicy {
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        contract: Option<String>,
+        #[arg(long = "type")]
+        contract_type: Option<String>,
+        #[arg(long)]
+        capability: Option<String>,
+        #[arg(long)]
+        lifecycle: Option<String>,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Views {
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        surface: Option<String>,
+        #[arg(long)]
+        lifecycle: Option<String>,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    DispatchContract {
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        contract: String,
+        #[arg(long, default_value = "{}")]
+        input: String,
+        #[arg(long, default_value = "cli")]
+        source: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    DispatchPlanner {
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        contract: String,
+        #[arg(long)]
+        goal: String,
+        #[arg(long = "constraint")]
+        constraints: Vec<String>,
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
+        #[arg(long = "task")]
+        task_id: Option<String>,
+        #[arg(long, default_value = "{}")]
+        context: String,
+        #[arg(long, default_value = "cli")]
+        source: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ExecutePlanner {
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        contract: String,
+        #[arg(long)]
+        worker: String,
+        #[arg(long)]
+        goal: String,
+        #[arg(long = "constraint")]
+        constraints: Vec<String>,
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
+        #[arg(long = "task")]
+        task_id: Option<String>,
+        #[arg(long, default_value = "{}")]
+        context: String,
+        #[arg(long = "lease-seconds", default_value_t = 300)]
+        lease_seconds: u64,
+        #[arg(long, default_value = "cli")]
+        source: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Dispatches {
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        contract: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    RunDispatch {
+        #[arg(long)]
+        dispatch: String,
+        #[arg(long, default_value = "cli")]
+        worker: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ExecuteDispatch {
+        #[arg(long)]
+        dispatch: String,
+        #[arg(long)]
+        worker: String,
+        #[arg(long = "lease-seconds", default_value_t = 300)]
+        lease_seconds: u64,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ClaimDispatch {
+        #[arg(long)]
+        dispatch: String,
+        #[arg(long)]
+        worker: String,
+        #[arg(long = "lease-seconds", default_value_t = 300)]
+        lease_seconds: u64,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    CompleteDispatch {
+        #[arg(long)]
+        dispatch: String,
+        #[arg(long)]
+        worker: String,
+        #[arg(long, default_value = "completed")]
+        status: String,
+        #[arg(long, default_value = "{}")]
+        result: String,
+        #[arg(long)]
+        signature: Option<String>,
+        #[arg(long, default_value = "{}")]
+        attestation: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    RegisterWorker {
+        #[arg(long)]
+        worker: String,
+        #[arg(long)]
+        runtime: String,
+        #[arg(long, default_value = "available")]
+        status: String,
+        #[arg(long = "trust-level", default_value = "local")]
+        trust_level: String,
+        #[arg(long, default_value = "cli")]
+        source: String,
+        #[arg(long, default_value = "{}")]
+        data: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Workers {
+        #[arg(long)]
+        runtime: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long = "trust-level")]
+        trust_level: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Resolve {
+        #[arg(long)]
+        goal: String,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long = "registry-source")]
+        registry_sources: Vec<String>,
+        #[arg(long = "registry-cache-dir")]
+        registry_cache_dir: Option<PathBuf>,
+        #[arg(long = "allow-remote-registry")]
+        allow_remote_registry: bool,
+        #[arg(long = "registry-max-bytes", default_value_t = 10 * 1024 * 1024)]
+        registry_max_bytes: u64,
+        #[arg(long = "registry-max-packages", default_value_t = 50)]
+        registry_max_packages: usize,
+        #[arg(long = "registry-lock")]
+        registry_lock_path: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Validate {
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Install {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Package {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long)]
+        repository: Option<String>,
+        #[arg(long, default_value = "stable")]
+        channel: String,
+        #[arg(long)]
+        signature: Option<String>,
+        #[arg(long = "public-key")]
+        public_key: Option<String>,
+        #[arg(long = "package-path")]
+        package_path: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    TrustKey {
+        #[arg(long)]
+        repository: String,
+        #[arg(long, default_value = "stable")]
+        channel: String,
+        #[arg(long = "public-key")]
+        public_key: String,
+        #[arg(long = "trust-level", default_value = "trusted")]
+        trust_level: String,
+        #[arg(long = "approved-by", default_value = "human")]
+        approved_by: String,
+        #[arg(long, default_value = "cli")]
+        source: String,
+        #[arg(long, default_value = "{}")]
+        data: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    TrustStore {
+        #[arg(long)]
+        repository: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long = "public-key")]
+        public_key: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    PublishPackage {
+        #[arg(long = "package")]
+        package_path: PathBuf,
+        #[arg(long, default_value = "cli")]
+        source: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    FetchPackage {
+        #[arg(long)]
+        source: String,
+        #[arg(long = "cache-dir")]
+        cache_dir: Option<PathBuf>,
+        #[arg(long = "expected-sha256")]
+        expected_sha256: Option<String>,
+        #[arg(long = "lock")]
+        lock_path: Option<PathBuf>,
+        #[arg(long = "allow-remote")]
+        allow_remote: bool,
+        #[arg(long = "max-bytes", default_value_t = 10 * 1024 * 1024)]
+        max_bytes: u64,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    SyncRegistry {
+        #[arg(long)]
+        source: String,
+        #[arg(long = "cache-dir")]
+        cache_dir: Option<PathBuf>,
+        #[arg(long = "lock")]
+        lock_path: Option<PathBuf>,
+        #[arg(long = "allow-remote")]
+        allow_remote: bool,
+        #[arg(long = "max-bytes", default_value_t = 10 * 1024 * 1024)]
+        max_bytes: u64,
+        #[arg(long = "max-packages", default_value_t = 50)]
+        max_packages: usize,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    PackageLock {
+        #[arg(long)]
+        repository: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        write: Option<PathBuf>,
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Marketplace {
+        #[arg(long)]
+        repository: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    InstallPackage {
+        #[arg(long = "package")]
+        package_path: PathBuf,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long = "lock")]
+        lock_path: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    MigrationWorkflow {
+        #[arg(long = "from-manifest")]
+        from_manifest: PathBuf,
+        #[arg(long = "to-manifest")]
+        to_manifest: PathBuf,
+        #[arg(long, default_value = "upgrade")]
+        action: String,
+        #[arg(long, default_value = "cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Upgrade {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Downgrade {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Enable {
+        id: String,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Disable {
+        id: String,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Uninstall {
+        id: String,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EventCommands {
+    List {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Timeline {
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long)]
+        organization: Option<String>,
+        #[arg(long)]
+        brand: Option<String>,
+        #[arg(long)]
+        product: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long = "after-sequence")]
+        after_sequence: Option<i64>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Ingest {
+        #[arg(long)]
+        origin: String,
+        #[arg(long)]
+        action: String,
+        #[arg(long)]
+        input: Option<String>,
+        #[arg(long = "input-file")]
+        input_file: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Inbox {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Scan {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Worker {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long = "max-cycles", default_value_t = 1)]
+        max_cycles: usize,
+        #[arg(long = "interval-seconds", default_value_t = 300)]
+        interval_seconds: u64,
+        #[arg(long = "idle-exit")]
+        idle_exit: bool,
+        #[arg(long = "stop-file")]
+        stop_file: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ServicePlan {
+        #[arg(long = "kind")]
+        service_kind: String,
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long = "max-cycles", default_value_t = 1)]
+        max_cycles: usize,
+        #[arg(long = "interval-seconds", default_value_t = 300)]
+        interval_seconds: u64,
+        #[arg(long = "idle-exit")]
+        idle_exit: bool,
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+        #[arg(long, default_value = "/webhook")]
+        path: String,
+        #[arg(long)]
+        origin: Option<String>,
+        #[arg(long)]
+        action: Option<String>,
+        #[arg(long)]
+        schema: Option<String>,
+        #[arg(long)]
+        route: bool,
+        #[arg(long = "max-requests", default_value_t = 1)]
+        max_requests: usize,
+        #[arg(long = "max-body-bytes", default_value_t = 65_536)]
+        max_body_bytes: usize,
+        #[arg(long = "hmac-secret-env")]
+        hmac_secret_env: Option<String>,
+        #[arg(long = "signature-header", default_value = "X-Forge-Signature")]
+        signature_header: String,
+        #[arg(long = "lease-seconds", default_value_t = 300)]
+        lease_seconds: u64,
+        #[arg(long = "heartbeat-seconds", default_value_t = 60)]
+        heartbeat_seconds: u64,
+        #[arg(long = "backoff-initial-seconds", default_value_t = 5)]
+        backoff_initial_seconds: u64,
+        #[arg(long = "backoff-max-seconds", default_value_t = 300)]
+        backoff_max_seconds: u64,
+        #[arg(long = "shutdown-grace-seconds", default_value_t = 30)]
+        shutdown_grace_seconds: u64,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ServiceRun {
+        #[arg(long = "kind", default_value = "worker")]
+        service_kind: String,
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long = "max-cycles", default_value_t = 1)]
+        max_cycles: usize,
+        #[arg(long = "interval-seconds", default_value_t = 300)]
+        interval_seconds: u64,
+        #[arg(long = "idle-exit")]
+        idle_exit: bool,
+        #[arg(long = "stop-file")]
+        stop_file: Option<PathBuf>,
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+        #[arg(long, default_value = "/webhook")]
+        path: String,
+        #[arg(long)]
+        origin: Option<String>,
+        #[arg(long)]
+        action: Option<String>,
+        #[arg(long)]
+        schema: Option<String>,
+        #[arg(long)]
+        route: bool,
+        #[arg(long = "max-requests", default_value_t = 1)]
+        max_requests: usize,
+        #[arg(long = "max-body-bytes", default_value_t = 65_536)]
+        max_body_bytes: usize,
+        #[arg(long = "hmac-secret-env")]
+        hmac_secret_env: Option<String>,
+        #[arg(long = "signature-header", default_value = "X-Forge-Signature")]
+        signature_header: String,
+        #[arg(long = "lease-owner", default_value = "forge.event_service_manager")]
+        lease_owner: String,
+        #[arg(long = "lease-seconds", default_value_t = 300)]
+        lease_seconds: u64,
+        #[arg(long = "heartbeat-seconds", default_value_t = 60)]
+        heartbeat_seconds: u64,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ServiceSupervise {
+        #[arg(long = "kind", default_value = "worker")]
+        service_kind: String,
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long = "max-cycles", default_value_t = 1)]
+        max_cycles: usize,
+        #[arg(long = "interval-seconds", default_value_t = 300)]
+        interval_seconds: u64,
+        #[arg(long = "idle-exit")]
+        idle_exit: bool,
+        #[arg(long = "stop-file")]
+        stop_file: Option<PathBuf>,
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+        #[arg(long, default_value = "/webhook")]
+        path: String,
+        #[arg(long)]
+        origin: Option<String>,
+        #[arg(long)]
+        action: Option<String>,
+        #[arg(long)]
+        schema: Option<String>,
+        #[arg(long)]
+        route: bool,
+        #[arg(long = "max-requests", default_value_t = 1)]
+        max_requests: usize,
+        #[arg(long = "max-body-bytes", default_value_t = 65_536)]
+        max_body_bytes: usize,
+        #[arg(long = "hmac-secret-env")]
+        hmac_secret_env: Option<String>,
+        #[arg(long = "signature-header", default_value = "X-Forge-Signature")]
+        signature_header: String,
+        #[arg(long = "lease-owner", default_value = "forge.event_service_supervisor")]
+        lease_owner: String,
+        #[arg(long = "lease-seconds", default_value_t = 300)]
+        lease_seconds: u64,
+        #[arg(long = "heartbeat-seconds", default_value_t = 60)]
+        heartbeat_seconds: u64,
+        #[arg(long = "max-runs", default_value_t = 1)]
+        max_runs: usize,
+        #[arg(long = "backoff-initial-seconds", default_value_t = 5)]
+        backoff_initial_seconds: u64,
+        #[arg(long = "backoff-max-seconds", default_value_t = 300)]
+        backoff_max_seconds: u64,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    RuntimeReconcile {
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long = "service-limit", default_value_t = 20)]
+        service_limit: usize,
+        #[arg(long)]
+        execute: bool,
+        #[arg(long = "max-cycles", default_value_t = 1)]
+        max_cycles: usize,
+        #[arg(long = "interval-seconds", default_value_t = 300)]
+        interval_seconds: u64,
+        #[arg(long = "idle-exit")]
+        idle_exit: bool,
+        #[arg(long = "recover-stale-services")]
+        recover_stale_services: bool,
+        #[arg(long = "stop-file")]
+        stop_file: Option<PathBuf>,
+        #[arg(long = "lease-owner", default_value = "forge.event_runtime_reconcile")]
+        lease_owner: String,
+        #[arg(long = "lease-seconds", default_value_t = 300)]
+        lease_seconds: u64,
+        #[arg(long = "heartbeat-seconds", default_value_t = 60)]
+        heartbeat_seconds: u64,
+        #[arg(long = "max-runs", default_value_t = 1)]
+        max_runs: usize,
+        #[arg(long = "backoff-initial-seconds", default_value_t = 5)]
+        backoff_initial_seconds: u64,
+        #[arg(long = "backoff-max-seconds", default_value_t = 300)]
+        backoff_max_seconds: u64,
+        #[arg(long = "scan-schedules")]
+        scan_schedules: bool,
+        #[arg(long = "schedule-executor", default_value = "forge-runtime-scheduler")]
+        schedule_executor: String,
+        #[arg(long = "schedule-max-workers", default_value_t = 1)]
+        schedule_max_workers: usize,
+        #[arg(long = "schedule-ttl-seconds", default_value_t = 300)]
+        schedule_ttl_seconds: u64,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    RuntimeDaemon {
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long = "service-limit", default_value_t = 20)]
+        service_limit: usize,
+        #[arg(long)]
+        execute: bool,
+        #[arg(long = "max-cycles", default_value_t = 1)]
+        max_cycles: usize,
+        #[arg(long = "interval-seconds", default_value_t = 300)]
+        interval_seconds: u64,
+        #[arg(long = "idle-exit")]
+        idle_exit: bool,
+        #[arg(long = "continuous")]
+        continuous: bool,
+        #[arg(long = "cycle-retention", default_value_t = 100)]
+        cycle_retention: usize,
+        #[arg(long = "recover-stale-services")]
+        recover_stale_services: bool,
+        #[arg(long = "stop-file")]
+        stop_file: Option<PathBuf>,
+        #[arg(long = "lease-owner", default_value = "forge.event_runtime_daemon")]
+        lease_owner: String,
+        #[arg(long = "lease-seconds", default_value_t = 300)]
+        lease_seconds: u64,
+        #[arg(long = "heartbeat-seconds", default_value_t = 60)]
+        heartbeat_seconds: u64,
+        #[arg(long = "max-runs", default_value_t = 1)]
+        max_runs: usize,
+        #[arg(long = "backoff-initial-seconds", default_value_t = 5)]
+        backoff_initial_seconds: u64,
+        #[arg(long = "backoff-max-seconds", default_value_t = 300)]
+        backoff_max_seconds: u64,
+        #[arg(long = "scan-schedules")]
+        scan_schedules: bool,
+        #[arg(long = "schedule-executor", default_value = "forge-runtime-scheduler")]
+        schedule_executor: String,
+        #[arg(long = "schedule-max-workers", default_value_t = 1)]
+        schedule_max_workers: usize,
+        #[arg(long = "schedule-ttl-seconds", default_value_t = 300)]
+        schedule_ttl_seconds: u64,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Services {
+        #[arg(long = "kind")]
+        service_kind: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ServicesRecover {
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long = "kind")]
+        service_kind: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    WebhookIngress {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+        #[arg(long, default_value = "/webhook")]
+        path: String,
+        #[arg(long)]
+        origin: String,
+        #[arg(long)]
+        action: String,
+        #[arg(long, default_value = "webhook")]
+        transport: String,
+        #[arg(long)]
+        schema: Option<String>,
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long)]
+        route: bool,
+        #[arg(long = "max-requests", default_value_t = 1)]
+        max_requests: usize,
+        #[arg(long = "max-body-bytes", default_value_t = 65_536)]
+        max_body_bytes: usize,
+        #[arg(long = "hmac-secret-env")]
+        hmac_secret_env: Option<String>,
+        #[arg(long = "signature-header", default_value = "X-Forge-Signature")]
+        signature_header: String,
+        #[arg(long = "stop-file")]
+        stop_file: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Adapters {
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        transport: Option<String>,
+        #[arg(long)]
+        direction: Option<String>,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Emit {
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long = "adapter")]
+        adapter_id: String,
+        #[arg(long = "event-type")]
+        event_type: String,
+        #[arg(long)]
+        action: String,
+        #[arg(long, default_value = "forge")]
+        origin: String,
+        #[arg(long, default_value = "{}")]
+        payload: String,
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Route {
+        #[arg(long = "event")]
+        event_id: String,
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IdentityCommands {
+    Context {
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Sync {
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Registry {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Memberships {
+        #[arg(long = "subject-scope")]
+        subject_scope: Option<String>,
+        #[arg(long = "subject")]
+        subject_id: Option<String>,
+        #[arg(long = "organization")]
+        organization_id: Option<String>,
+        #[arg(long = "brand")]
+        brand_id: Option<String>,
+        #[arg(long = "product")]
+        product_id: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    MembershipUpdate {
+        #[arg(long = "subject-scope", default_value = "user")]
+        subject_scope: String,
+        #[arg(long = "subject")]
+        subject_id: String,
+        #[arg(long = "organization")]
+        organization_id: String,
+        #[arg(long = "brand")]
+        brand_id: String,
+        #[arg(long = "product")]
+        product_id: String,
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long = "grant")]
+        grant_permissions: Vec<String>,
+        #[arg(long = "revoke-grant")]
+        revoke_grants: Vec<String>,
+        #[arg(long = "deny")]
+        deny_permissions: Vec<String>,
+        #[arg(long = "remove-deny")]
+        remove_denies: Vec<String>,
+        #[arg(long = "expires-at")]
+        expires_at: Option<String>,
+        #[arg(long = "clear-expires-at")]
+        clear_expires_at: bool,
+        #[arg(long = "not-before")]
+        not_before: Option<String>,
+        #[arg(long = "clear-not-before")]
+        clear_not_before: bool,
+        #[arg(long, default_value = "forge_cli")]
+        source: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Link {
+        #[arg(long = "left-scope")]
+        left_scope: String,
+        #[arg(long = "left-id")]
+        left_id: String,
+        #[arg(long = "right-scope")]
+        right_scope: String,
+        #[arg(long = "right-id")]
+        right_id: String,
+        #[arg(long = "type", default_value = "same_person")]
+        link_type: String,
+        #[arg(long, default_value = "forge_cli")]
+        source: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Unlink {
+        #[arg(long = "left-scope")]
+        left_scope: String,
+        #[arg(long = "left-id")]
+        left_id: String,
+        #[arg(long = "right-scope")]
+        right_scope: String,
+        #[arg(long = "right-id")]
+        right_id: String,
+        #[arg(long = "type", default_value = "same_person")]
+        link_type: String,
+        #[arg(long, default_value = "forge_cli")]
+        source: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Links {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Resolve {
+        #[arg(long)]
+        scope: String,
+        #[arg(long)]
+        id: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    TenantIndex {
+        #[arg(long = "resource-type")]
+        resource_type: Option<String>,
+        #[arg(long = "organization")]
+        organization_id: Option<String>,
+        #[arg(long = "brand")]
+        brand_id: Option<String>,
+        #[arg(long = "product")]
+        product_id: Option<String>,
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    TenantAudit {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    TenantPolicy {
+        #[arg(long = "workflow")]
+        workflow_id: String,
+        #[arg(long, default_value = "audit")]
+        mode: String,
+        #[arg(long, default_value = "tenant policy")]
+        action: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum OpsCommands {
     Snapshot {
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -307,6 +1505,8 @@ enum OpsCommands {
         host: String,
         #[arg(long, default_value_t = 8765)]
         port: u16,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
     },
 }
 
@@ -1135,22 +2335,130 @@ enum MemoryCommands {
     Search {
         #[arg(long)]
         query: String,
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
         #[arg(long = "scope")]
         scopes: Vec<String>,
         #[arg(long, default_value = "private")]
         audience: String,
         #[arg(long)]
         visibility: Option<String>,
+        #[arg(long = "memory-level", default_value = "standard")]
+        memory_level: String,
         #[arg(long = "run")]
         run_id: Option<String>,
+        #[arg(long = "organization")]
+        organization_id: Option<String>,
         #[arg(long, default_value_t = 10)]
         limit: usize,
         #[arg(long = "global-root")]
         global_root: Option<PathBuf>,
+        #[arg(long = "organization-root")]
+        organization_root: Option<PathBuf>,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
         #[arg(long = "processing-root")]
         processing_root: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Promote {
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
+        #[arg(long = "from-scope")]
+        from_scope: String,
+        #[arg(long = "to-scope")]
+        to_scope: String,
+        #[arg(long = "source-path")]
+        source_path: PathBuf,
+        #[arg(long = "source-start-line")]
+        source_start_line: Option<usize>,
+        #[arg(long = "source-end-line")]
+        source_end_line: Option<usize>,
+        #[arg(long)]
+        summary: String,
+        #[arg(long = "approved-by")]
+        approved_by: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value = "internal")]
+        visibility: String,
+        #[arg(long)]
+        shareability: Option<String>,
+        #[arg(long = "organization")]
+        organization_id: Option<String>,
+        #[arg(long = "global-root")]
+        global_root: Option<PathBuf>,
+        #[arg(long = "organization-root")]
+        organization_root: Option<PathBuf>,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Promotions {
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
+        #[arg(long = "from-scope")]
+        from_scope: Option<String>,
+        #[arg(long = "to-scope")]
+        to_scope: Option<String>,
+        #[arg(long = "approved-by")]
+        approved_by: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Retention {
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
+        #[arg(long = "scope")]
+        scopes: Vec<String>,
+        #[arg(long = "run")]
+        run_id: Option<String>,
+        #[arg(long = "organization")]
+        organization_id: Option<String>,
+        #[arg(long = "global-root")]
+        global_root: Option<PathBuf>,
+        #[arg(long = "organization-root")]
+        organization_root: Option<PathBuf>,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
+        #[arg(long = "processing-root")]
+        processing_root: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Cleanup {
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
+        #[arg(long = "scope")]
+        scopes: Vec<String>,
+        #[arg(long = "run")]
+        run_id: Option<String>,
+        #[arg(long = "organization")]
+        organization_id: Option<String>,
+        #[arg(long = "global-root")]
+        global_root: Option<PathBuf>,
+        #[arg(long = "organization-root")]
+        organization_root: Option<PathBuf>,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
+        #[arg(long = "processing-root")]
+        processing_root: Option<PathBuf>,
+        #[arg(long, default_value = "archive")]
+        mode: String,
+        #[arg(long = "archive-root")]
+        archive_root: Option<PathBuf>,
+        #[arg(long = "approved-by")]
+        approved_by: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        confirm: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -1469,9 +2777,19 @@ fn run() -> Result<i32> {
         return run_interactive_repl(&cli.store);
     };
     match command {
-        Commands::Plan { goal, output } => {
+        Commands::Plan {
+            goal,
+            addon_dirs,
+            output,
+        } => {
             let store = ForgeStore::open(cli.store)?;
-            let intent = parse_intent(&goal);
+            let project_root = std::env::current_dir()?;
+            let dirs = addon_dirs_or_default(addon_dirs);
+            let addon_catalog = load_addon_catalog_from_store(&store, &dirs)?;
+            let operating_context = load_project_operating_context(&project_root)?;
+            ensure_operating_context_policy(&store, &operating_context, "plan")?;
+            let intent =
+                parse_intent_with_catalog_and_context(&goal, &addon_catalog, operating_context);
             let mut workflow = create_workflow(intent);
             let reuse_candidates = find_reuse_candidates(&store, &workflow)?;
             let attached_subflows =
@@ -1486,6 +2804,7 @@ fn run() -> Result<i32> {
                 "status": "planned",
                 "workflow_id": workflow.id,
                 "goal": workflow.goal,
+                "runtime": workflow.runtime,
                 "tasks": workflow.tasks,
                 "intent": workflow.intent,
                 "reuse_candidates": reuse_candidates,
@@ -1572,6 +2891,7 @@ fn run() -> Result<i32> {
                 "workflow_id": workflow.id,
                 "status": workflow.status,
                 "goal": workflow.goal,
+                "runtime": workflow.runtime,
                 "tasks": workflow.tasks,
                 "artifacts": workflow.artifacts,
                 "creative_artifacts": creative_summaries,
@@ -1591,6 +2911,7 @@ fn run() -> Result<i32> {
             output,
         } => {
             let store = ForgeStore::open(cli.store)?;
+            ensure_workflow_policy(&store, &workflow, "context request")?;
             let workflow = store.load_workflow(&workflow)?;
             let latest_checkpoint = load_latest_task_checkpoint(&store, &workflow.id, &task)?;
             let context =
@@ -1711,6 +3032,1587 @@ fn run() -> Result<i32> {
             print_response(output, &response)?;
             Ok(0)
         }
+        Commands::Events { command } => match command {
+            EventCommands::List {
+                workflow,
+                limit,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_workflow_event_stream(&store, &workflow, limit)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            EventCommands::Timeline {
+                workflow,
+                organization,
+                brand,
+                product,
+                limit,
+                after_sequence,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_global_event_timeline(
+                    &store,
+                    workflow.as_deref(),
+                    organization.as_deref(),
+                    brand.as_deref(),
+                    product.as_deref(),
+                    limit,
+                    after_sequence,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            EventCommands::Ingest {
+                origin,
+                action,
+                input,
+                input_file,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let data = read_mcp_input(input, input_file)?;
+                let report = ingest_inbound_event(
+                    &store,
+                    InboundEventIngestInput {
+                        origin,
+                        action,
+                        data,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            EventCommands::Inbox {
+                status,
+                limit,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_inbound_event_inbox(&store, status.as_deref(), limit)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            EventCommands::Scan {
+                status,
+                limit,
+                project_root,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report =
+                    scan_inbound_event_inbox(&store, &project_root, status.as_deref(), limit)?;
+                print_response(output, &report)?;
+                Ok(if report.failed_count > 0 { 1 } else { 0 })
+            }
+            EventCommands::Worker {
+                status,
+                limit,
+                project_root,
+                max_cycles,
+                interval_seconds,
+                idle_exit,
+                stop_file,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = run_inbound_event_worker_loop(
+                    &store,
+                    &project_root,
+                    status.as_deref(),
+                    limit,
+                    max_cycles,
+                    interval_seconds,
+                    idle_exit,
+                    stop_file.as_deref(),
+                )?;
+                print_response(output, &report)?;
+                Ok(if report.failed_count > 0 { 1 } else { 0 })
+            }
+            EventCommands::ServicePlan {
+                service_kind,
+                project_root,
+                status,
+                limit,
+                max_cycles,
+                interval_seconds,
+                idle_exit,
+                host,
+                port,
+                path,
+                origin,
+                action,
+                schema,
+                route,
+                max_requests,
+                max_body_bytes,
+                hmac_secret_env,
+                signature_header,
+                lease_seconds,
+                heartbeat_seconds,
+                backoff_initial_seconds,
+                backoff_max_seconds,
+                shutdown_grace_seconds,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_event_service_plan(
+                    &store,
+                    &project_root,
+                    &service_kind,
+                    status.as_deref(),
+                    limit,
+                    max_cycles,
+                    interval_seconds,
+                    idle_exit,
+                    &host,
+                    port,
+                    &path,
+                    origin.as_deref(),
+                    action.as_deref(),
+                    schema.as_deref(),
+                    route,
+                    max_requests,
+                    max_body_bytes,
+                    hmac_secret_env.as_deref(),
+                    &signature_header,
+                    lease_seconds,
+                    heartbeat_seconds,
+                    backoff_initial_seconds,
+                    backoff_max_seconds,
+                    shutdown_grace_seconds,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            EventCommands::ServiceRun {
+                service_kind,
+                project_root,
+                status,
+                limit,
+                max_cycles,
+                interval_seconds,
+                idle_exit,
+                stop_file,
+                host,
+                port,
+                path,
+                origin,
+                action,
+                schema,
+                route,
+                max_requests,
+                max_body_bytes,
+                hmac_secret_env,
+                signature_header,
+                lease_owner,
+                lease_seconds,
+                heartbeat_seconds,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let normalized_kind = service_kind.trim();
+                let report = if normalized_kind == "worker" {
+                    run_event_worker_service(
+                        &store,
+                        &project_root,
+                        status.as_deref(),
+                        limit,
+                        max_cycles,
+                        interval_seconds,
+                        idle_exit,
+                        stop_file.as_deref(),
+                        &lease_owner,
+                        lease_seconds,
+                        heartbeat_seconds,
+                    )?
+                } else if matches!(
+                    normalized_kind,
+                    "webhook_ingress" | "webhook-ingress" | "webhook"
+                ) {
+                    run_event_webhook_ingress_service(
+                        &store,
+                        &project_root,
+                        &host,
+                        port,
+                        &path,
+                        origin.as_deref(),
+                        action.as_deref(),
+                        schema.as_deref(),
+                        route,
+                        max_requests,
+                        max_body_bytes,
+                        hmac_secret_env.as_deref(),
+                        &signature_header,
+                        stop_file.as_deref(),
+                        &lease_owner,
+                        lease_seconds,
+                        heartbeat_seconds,
+                    )?
+                } else {
+                    anyhow::bail!(
+                        "unsupported event service kind for service-run: {normalized_kind}"
+                    );
+                };
+                print_response(output, &report)?;
+                Ok(
+                    if report.status == "event_service_run_completed_with_failures" {
+                        1
+                    } else {
+                        0
+                    },
+                )
+            }
+            EventCommands::ServiceSupervise {
+                service_kind,
+                project_root,
+                status,
+                limit,
+                max_cycles,
+                interval_seconds,
+                idle_exit,
+                stop_file,
+                host,
+                port,
+                path,
+                origin,
+                action,
+                schema,
+                route,
+                max_requests,
+                max_body_bytes,
+                hmac_secret_env,
+                signature_header,
+                lease_owner,
+                lease_seconds,
+                heartbeat_seconds,
+                max_runs,
+                backoff_initial_seconds,
+                backoff_max_seconds,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = run_event_service_supervisor(
+                    &store,
+                    &project_root,
+                    &service_kind,
+                    status.as_deref(),
+                    limit,
+                    max_cycles,
+                    interval_seconds,
+                    idle_exit,
+                    &host,
+                    port,
+                    &path,
+                    origin.as_deref(),
+                    action.as_deref(),
+                    schema.as_deref(),
+                    route,
+                    max_requests,
+                    max_body_bytes,
+                    hmac_secret_env.as_deref(),
+                    &signature_header,
+                    stop_file.as_deref(),
+                    &lease_owner,
+                    lease_seconds,
+                    heartbeat_seconds,
+                    max_runs,
+                    backoff_initial_seconds,
+                    backoff_max_seconds,
+                )?;
+                print_response(output, &report)?;
+                Ok(
+                    if report.status == "event_service_supervisor_failed"
+                        || report.status == "event_service_supervisor_completed_with_failures"
+                    {
+                        1
+                    } else {
+                        0
+                    },
+                )
+            }
+            EventCommands::RuntimeReconcile {
+                project_root,
+                status,
+                limit,
+                service_limit,
+                execute,
+                max_cycles,
+                interval_seconds,
+                idle_exit,
+                recover_stale_services,
+                stop_file,
+                lease_owner,
+                lease_seconds,
+                heartbeat_seconds,
+                max_runs,
+                backoff_initial_seconds,
+                backoff_max_seconds,
+                scan_schedules,
+                schedule_executor,
+                schedule_max_workers,
+                schedule_ttl_seconds,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = run_event_runtime_reconcile(
+                    &store,
+                    &project_root,
+                    status.as_deref(),
+                    limit,
+                    service_limit,
+                    execute,
+                    max_cycles,
+                    interval_seconds,
+                    idle_exit,
+                    recover_stale_services,
+                    stop_file.as_deref(),
+                    &lease_owner,
+                    lease_seconds,
+                    heartbeat_seconds,
+                    max_runs,
+                    backoff_initial_seconds,
+                    backoff_max_seconds,
+                    scan_schedules,
+                    &schedule_executor,
+                    schedule_max_workers,
+                    schedule_ttl_seconds,
+                )?;
+                print_response(output, &report)?;
+                Ok(
+                    if report.status == "event_runtime_reconcile_executed_with_failures" {
+                        1
+                    } else {
+                        0
+                    },
+                )
+            }
+            EventCommands::RuntimeDaemon {
+                project_root,
+                status,
+                limit,
+                service_limit,
+                execute,
+                max_cycles,
+                interval_seconds,
+                idle_exit,
+                continuous,
+                cycle_retention,
+                recover_stale_services,
+                stop_file,
+                lease_owner,
+                lease_seconds,
+                heartbeat_seconds,
+                max_runs,
+                backoff_initial_seconds,
+                backoff_max_seconds,
+                scan_schedules,
+                schedule_executor,
+                schedule_max_workers,
+                schedule_ttl_seconds,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = run_event_runtime_daemon(
+                    &store,
+                    &project_root,
+                    status.as_deref(),
+                    limit,
+                    service_limit,
+                    execute,
+                    max_cycles,
+                    interval_seconds,
+                    idle_exit,
+                    continuous,
+                    cycle_retention,
+                    recover_stale_services,
+                    stop_file.as_deref(),
+                    &lease_owner,
+                    lease_seconds,
+                    heartbeat_seconds,
+                    max_runs,
+                    backoff_initial_seconds,
+                    backoff_max_seconds,
+                    scan_schedules,
+                    &schedule_executor,
+                    schedule_max_workers,
+                    schedule_ttl_seconds,
+                )?;
+                print_response(output, &report)?;
+                Ok(
+                    if report.status == "event_runtime_daemon_completed_with_failures" {
+                        1
+                    } else {
+                        0
+                    },
+                )
+            }
+            EventCommands::Services {
+                service_kind,
+                status,
+                limit,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report =
+                    list_event_services(&store, service_kind.as_deref(), status.as_deref(), limit)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            EventCommands::ServicesRecover {
+                project_root,
+                service_kind,
+                limit,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = recover_stale_event_services(
+                    &store,
+                    &project_root,
+                    service_kind.as_deref(),
+                    limit,
+                    &origin,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            EventCommands::WebhookIngress {
+                host,
+                port,
+                path,
+                origin,
+                action,
+                transport,
+                schema,
+                project_root,
+                route,
+                max_requests,
+                max_body_bytes,
+                hmac_secret_env,
+                signature_header,
+                stop_file,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = run_event_webhook_ingress_server(
+                    &store,
+                    &host,
+                    port,
+                    &path,
+                    &origin,
+                    &action,
+                    &transport,
+                    schema.as_deref(),
+                    &project_root,
+                    route,
+                    max_requests,
+                    max_body_bytes,
+                    hmac_secret_env.as_deref(),
+                    &signature_header,
+                    stop_file.as_deref(),
+                )?;
+                print_response(output, &report)?;
+                Ok(if report.failed_count > 0 { 1 } else { 0 })
+            }
+            EventCommands::Adapters {
+                addon,
+                transport,
+                direction,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let report = list_addon_event_adapters(
+                    &catalog,
+                    addon.as_deref(),
+                    transport.as_deref(),
+                    direction.as_deref(),
+                );
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            EventCommands::Route {
+                event_id,
+                project_root,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = route_inbound_event(&store, &event_id, &project_root)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            EventCommands::Emit {
+                addon,
+                adapter_id,
+                event_type,
+                action,
+                origin,
+                payload,
+                dry_run,
+                project_root,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let operating_context = load_project_operating_context(&project_root)?;
+                let payload: Value = serde_json::from_str(&payload)?;
+                let report = emit_event_egress(
+                    &store,
+                    &catalog,
+                    EventEgressEmitInput {
+                        adapter_id,
+                        addon_id: addon,
+                        event_type,
+                        action,
+                        origin,
+                        payload,
+                        dry_run,
+                    },
+                    &operating_context,
+                )?;
+                let success = report
+                    .delivery
+                    .as_ref()
+                    .map(|delivery| delivery.success)
+                    .unwrap_or(true);
+                print_response(output, &report)?;
+                Ok(if success { 0 } else { 1 })
+            }
+        },
+        Commands::Identity { command } => match command {
+            IdentityCommands::Context {
+                project_root,
+                output,
+            } => {
+                let report = inspect_project_operating_context(&project_root)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            IdentityCommands::Sync {
+                project_root,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = sync_project_operating_context(&store, &project_root)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            IdentityCommands::Registry { scope, id, output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_identity_registry(&store, scope.as_deref(), id.as_deref())?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            IdentityCommands::Memberships {
+                subject_scope,
+                subject_id,
+                organization_id,
+                brand_id,
+                product_id,
+                status,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_identity_memberships(
+                    &store,
+                    subject_scope.as_deref(),
+                    subject_id.as_deref(),
+                    organization_id.as_deref(),
+                    brand_id.as_deref(),
+                    product_id.as_deref(),
+                    status.as_deref(),
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            IdentityCommands::MembershipUpdate {
+                subject_scope,
+                subject_id,
+                organization_id,
+                brand_id,
+                product_id,
+                role,
+                status,
+                grant_permissions,
+                revoke_grants,
+                deny_permissions,
+                remove_denies,
+                expires_at,
+                clear_expires_at,
+                not_before,
+                clear_not_before,
+                source,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = update_identity_membership(
+                    &store,
+                    IdentityMembershipUpdateInput {
+                        subject_scope,
+                        subject_id,
+                        organization_id,
+                        brand_id,
+                        product_id,
+                        role,
+                        status,
+                        grant_permissions,
+                        revoke_grants,
+                        deny_permissions,
+                        remove_denies,
+                        expires_at,
+                        clear_expires_at,
+                        not_before,
+                        clear_not_before,
+                        source,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            IdentityCommands::Link {
+                left_scope,
+                left_id,
+                right_scope,
+                right_id,
+                link_type,
+                source,
+                reason,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = link_identity(
+                    &store,
+                    IdentityLinkInput {
+                        left_scope,
+                        left_id,
+                        right_scope,
+                        right_id,
+                        link_type,
+                        source,
+                        reason,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            IdentityCommands::Unlink {
+                left_scope,
+                left_id,
+                right_scope,
+                right_id,
+                link_type,
+                source,
+                reason,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = unlink_identity(
+                    &store,
+                    IdentityLinkInput {
+                        left_scope,
+                        left_id,
+                        right_scope,
+                        right_id,
+                        link_type,
+                        source,
+                        reason,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            IdentityCommands::Links {
+                scope,
+                id,
+                status,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_identity_links(
+                    &store,
+                    scope.as_deref(),
+                    id.as_deref(),
+                    status.as_deref(),
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            IdentityCommands::Resolve { scope, id, output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = resolve_identity(&store, &scope, &id)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            IdentityCommands::TenantIndex {
+                resource_type,
+                organization_id,
+                brand_id,
+                product_id,
+                workflow_id,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_tenant_index(
+                    &store,
+                    resource_type.as_deref(),
+                    organization_id.as_deref(),
+                    brand_id.as_deref(),
+                    product_id.as_deref(),
+                    workflow_id.as_deref(),
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            IdentityCommands::TenantAudit { output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = audit_tenant_index(&store)?;
+                print_response(output, &report)?;
+                Ok(if report.status == "tenant_index_complete" {
+                    0
+                } else {
+                    1
+                })
+            }
+            IdentityCommands::TenantPolicy {
+                workflow_id,
+                mode,
+                action,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report =
+                    evaluate_tenant_policy_for_action(&store, &workflow_id, &mode, &action)?;
+                let should_fail = report.mode == "enforce" && !report.allowed;
+                print_response(output, &report)?;
+                Ok(if should_fail { 1 } else { 0 })
+            }
+        },
+        Commands::Addons { command } => match command {
+            AddonCommands::Installed { output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_installed_addons(&store)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::Capabilities {
+                addon,
+                capability,
+                lifecycle,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_addon_capability_index(
+                    &store,
+                    addon.as_deref(),
+                    capability.as_deref(),
+                    lifecycle.as_deref(),
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::Observability {
+                addon,
+                lifecycle,
+                addon_dirs,
+                dispatch_limit,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let report = addon_observability_report(
+                    &store,
+                    &catalog,
+                    addon.as_deref(),
+                    lifecycle.as_deref(),
+                    dispatch_limit,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::Permissions {
+                addon,
+                permission,
+                status,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_addon_permission_authorizations(
+                    &store,
+                    addon.as_deref(),
+                    permission.as_deref(),
+                    status.as_deref(),
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::AuthorizePermission {
+                addon,
+                permission,
+                risk,
+                approved_by,
+                source,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = authorize_addon_permission(
+                    &store,
+                    &addon,
+                    &permission,
+                    &risk,
+                    &approved_by,
+                    &source,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::RevokePermission {
+                addon,
+                permission,
+                approved_by,
+                source,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report =
+                    revoke_addon_permission(&store, &addon, &permission, &approved_by, &source)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::Catalog { addon_dirs, output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                print_response(output, &catalog)?;
+                Ok(0)
+            }
+            AddonCommands::Contracts {
+                addon,
+                contract_type,
+                capability,
+                lifecycle,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let report = list_addon_runtime_contracts(
+                    &catalog,
+                    addon.as_deref(),
+                    contract_type.as_deref(),
+                    capability.as_deref(),
+                    lifecycle.as_deref(),
+                );
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::Planners {
+                addon,
+                capability,
+                workflow_extension,
+                lifecycle,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let report = list_addon_planner_registry(
+                    &catalog,
+                    addon.as_deref(),
+                    capability.as_deref(),
+                    workflow_extension.as_deref(),
+                    lifecycle.as_deref(),
+                );
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::ContractPolicy {
+                addon,
+                contract,
+                contract_type,
+                capability,
+                lifecycle,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let report = evaluate_addon_runtime_contract_policy(
+                    &catalog,
+                    addon.as_deref(),
+                    contract.as_deref(),
+                    contract_type.as_deref(),
+                    capability.as_deref(),
+                    lifecycle.as_deref(),
+                );
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::Views {
+                addon,
+                surface,
+                lifecycle,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let report = list_addon_views(
+                    &catalog,
+                    addon.as_deref(),
+                    surface.as_deref(),
+                    lifecycle.as_deref(),
+                );
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::DispatchContract {
+                addon,
+                contract,
+                input,
+                source,
+                dry_run,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let input_value: serde_json::Value = serde_json::from_str(&input)?;
+                let report = enqueue_addon_runtime_contract_dispatch(
+                    &store,
+                    &catalog,
+                    addon.as_deref(),
+                    &contract,
+                    input_value,
+                    &source,
+                    dry_run,
+                )?;
+                let should_fail = report.blocked_count > 0;
+                print_response(output, &report)?;
+                Ok(if should_fail { 1 } else { 0 })
+            }
+            AddonCommands::DispatchPlanner {
+                addon,
+                contract,
+                goal,
+                constraints,
+                workflow_id,
+                task_id,
+                context,
+                source,
+                dry_run,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let context_value: serde_json::Value = serde_json::from_str(&context)?;
+                let report = enqueue_addon_planner_dispatch(
+                    &store,
+                    &catalog,
+                    addon.as_deref(),
+                    &contract,
+                    &goal,
+                    &constraints,
+                    workflow_id.as_deref(),
+                    task_id.as_deref(),
+                    context_value,
+                    &source,
+                    dry_run,
+                )?;
+                let should_fail = report.blocked_count > 0;
+                print_response(output, &report)?;
+                Ok(if should_fail { 1 } else { 0 })
+            }
+            AddonCommands::ExecutePlanner {
+                addon,
+                contract,
+                worker,
+                goal,
+                constraints,
+                workflow_id,
+                task_id,
+                context,
+                lease_seconds,
+                source,
+                dry_run,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let context_value: serde_json::Value = serde_json::from_str(&context)?;
+                let report = execute_addon_planning_strategy(
+                    &store,
+                    &catalog,
+                    addon.as_deref(),
+                    &contract,
+                    &goal,
+                    &constraints,
+                    workflow_id.as_deref(),
+                    task_id.as_deref(),
+                    context_value,
+                    &worker,
+                    lease_seconds,
+                    &source,
+                    dry_run,
+                )?;
+                let should_fail = matches!(
+                    report.status.as_str(),
+                    "planning_strategy_dispatch_blocked"
+                        | "planning_strategy_execution_failed"
+                        | "planning_strategy_result_invalid"
+                );
+                print_response(output, &report)?;
+                Ok(if should_fail { 1 } else { 0 })
+            }
+            AddonCommands::Dispatches {
+                addon,
+                contract,
+                status,
+                limit,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_addon_runtime_contract_dispatches(
+                    &store,
+                    addon.as_deref(),
+                    contract.as_deref(),
+                    status.as_deref(),
+                    limit,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::RunDispatch {
+                dispatch,
+                worker,
+                dry_run,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let report = run_addon_runtime_contract_dispatch(
+                    &store, &catalog, &dispatch, &worker, dry_run,
+                )?;
+                let should_fail = report.blocked_count > 0;
+                print_response(output, &report)?;
+                Ok(if should_fail { 1 } else { 0 })
+            }
+            AddonCommands::ExecuteDispatch {
+                dispatch,
+                worker,
+                lease_seconds,
+                dry_run,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let report = execute_addon_runtime_contract_dispatch(
+                    &store,
+                    &catalog,
+                    &dispatch,
+                    &worker,
+                    lease_seconds,
+                    dry_run,
+                )?;
+                let should_fail = matches!(
+                    report.status.as_str(),
+                    "runtime_contract_dispatch_not_claimed"
+                        | "runtime_contract_dispatch_worker_rejected"
+                        | "runtime_contract_dispatch_completion_rejected"
+                        | "runtime_contract_dispatch_blocked"
+                );
+                print_response(output, &report)?;
+                Ok(if should_fail { 1 } else { 0 })
+            }
+            AddonCommands::ClaimDispatch {
+                dispatch,
+                worker,
+                lease_seconds,
+                dry_run,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let report = claim_addon_runtime_contract_dispatch(
+                    &store,
+                    &catalog,
+                    &dispatch,
+                    &worker,
+                    lease_seconds,
+                    dry_run,
+                )?;
+                let should_fail = !matches!(
+                    report.status.as_str(),
+                    "runtime_contract_dispatch_claimed" | "runtime_contract_dispatch_dry_run"
+                );
+                print_response(output, &report)?;
+                Ok(if should_fail { 1 } else { 0 })
+            }
+            AddonCommands::CompleteDispatch {
+                dispatch,
+                worker,
+                status,
+                result,
+                signature,
+                attestation,
+                dry_run,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let result_value: serde_json::Value = serde_json::from_str(&result)?;
+                let attestation_value: serde_json::Value = serde_json::from_str(&attestation)?;
+                let report = complete_addon_runtime_contract_dispatch(
+                    &store,
+                    &catalog,
+                    &dispatch,
+                    &worker,
+                    &status,
+                    result_value,
+                    signature.as_deref(),
+                    attestation_value,
+                    dry_run,
+                )?;
+                let should_fail = matches!(
+                    report.status.as_str(),
+                    "runtime_contract_dispatch_not_claimed"
+                        | "runtime_contract_dispatch_completion_rejected"
+                        | "runtime_contract_dispatch_blocked"
+                );
+                print_response(output, &report)?;
+                Ok(if should_fail { 1 } else { 0 })
+            }
+            AddonCommands::RegisterWorker {
+                worker,
+                runtime,
+                status,
+                trust_level,
+                source,
+                data,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let data_value: serde_json::Value = serde_json::from_str(&data)?;
+                let report = register_addon_runtime_worker(
+                    &store,
+                    &worker,
+                    &runtime,
+                    &status,
+                    &trust_level,
+                    &source,
+                    data_value,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::Workers {
+                runtime,
+                status,
+                trust_level,
+                limit,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_addon_runtime_workers(
+                    &store,
+                    runtime.as_deref(),
+                    status.as_deref(),
+                    trust_level.as_deref(),
+                    limit,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::Resolve {
+                goal,
+                addon_dirs,
+                registry_sources,
+                registry_cache_dir,
+                allow_remote_registry,
+                registry_max_bytes,
+                registry_max_packages,
+                registry_lock_path,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let report = if registry_sources.is_empty() {
+                    resolve_goal_capabilities_with_store(&store, &goal, &catalog)?
+                } else {
+                    resolve_goal_capabilities_with_registry_sync(
+                        &store,
+                        &goal,
+                        &catalog,
+                        &registry_sources,
+                        registry_cache_dir.as_deref(),
+                        allow_remote_registry,
+                        registry_max_bytes,
+                        registry_max_packages,
+                        registry_lock_path.as_deref(),
+                    )?
+                };
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::Validate { addon_dirs, output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let report = validate_addon_catalog(&catalog);
+                print_response(output, &report)?;
+                Ok(if report.status == "valid" { 0 } else { 1 })
+            }
+            AddonCommands::Install {
+                manifest,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let report = install_addon(&store, &manifest, &dirs)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::Package {
+                manifest,
+                addon_dirs,
+                repository,
+                channel,
+                signature,
+                public_key,
+                package_path,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let report = package_addon(
+                    &store,
+                    &manifest,
+                    &dirs,
+                    repository.as_deref(),
+                    &channel,
+                    signature.as_deref(),
+                    public_key.as_deref(),
+                    package_path.as_deref(),
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::TrustKey {
+                repository,
+                channel,
+                public_key,
+                trust_level,
+                approved_by,
+                source,
+                data,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let data_value: serde_json::Value = serde_json::from_str(&data)?;
+                let report = trust_addon_package_key(
+                    &store,
+                    &repository,
+                    &channel,
+                    &public_key,
+                    &trust_level,
+                    &approved_by,
+                    &source,
+                    data_value,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::TrustStore {
+                repository,
+                channel,
+                public_key,
+                status,
+                limit,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_addon_trust_store(
+                    &store,
+                    repository.as_deref(),
+                    channel.as_deref(),
+                    public_key.as_deref(),
+                    status.as_deref(),
+                    limit,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::PublishPackage {
+                package_path,
+                source,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = publish_addon_package(&store, &package_path, &source)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::FetchPackage {
+                source,
+                cache_dir,
+                expected_sha256,
+                lock_path,
+                allow_remote,
+                max_bytes,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = fetch_addon_package(
+                    &store,
+                    &source,
+                    cache_dir.as_deref(),
+                    expected_sha256.as_deref(),
+                    allow_remote,
+                    max_bytes,
+                    lock_path.as_deref(),
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::SyncRegistry {
+                source,
+                cache_dir,
+                lock_path,
+                allow_remote,
+                max_bytes,
+                max_packages,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = sync_addon_package_registry(
+                    &store,
+                    &source,
+                    cache_dir.as_deref(),
+                    allow_remote,
+                    max_bytes,
+                    max_packages,
+                    lock_path.as_deref(),
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::PackageLock {
+                repository,
+                channel,
+                addon,
+                status,
+                write,
+                limit,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = create_addon_package_lock(
+                    &store,
+                    repository.as_deref(),
+                    channel.as_deref(),
+                    addon.as_deref(),
+                    status.as_deref(),
+                    write.as_deref(),
+                    limit,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::Marketplace {
+                repository,
+                channel,
+                addon,
+                status,
+                limit,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = list_addon_marketplace(
+                    &store,
+                    repository.as_deref(),
+                    channel.as_deref(),
+                    addon.as_deref(),
+                    status.as_deref(),
+                    limit,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::InstallPackage {
+                package_path,
+                addon_dirs,
+                lock_path,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let report =
+                    install_addon_package(&store, &package_path, &dirs, lock_path.as_deref())?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::MigrationWorkflow {
+                from_manifest,
+                to_manifest,
+                action,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = create_addon_migration_workflow(
+                    &store,
+                    &from_manifest,
+                    &to_manifest,
+                    &action,
+                    &origin,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::Upgrade {
+                manifest,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let report = upgrade_addon(&store, &manifest, &dirs)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::Downgrade {
+                manifest,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let report = downgrade_addon(&store, &manifest, &dirs)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::Enable {
+                id,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let report = enable_addon(&store, &id, &dirs)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::Disable {
+                id,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let report = disable_addon(&store, &id, &dirs)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            AddonCommands::Uninstall {
+                id,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let report = uninstall_addon(&store, &id, &dirs)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+        },
+        Commands::Harness { command } => match command {
+            HarnessCommands::TokenHeadroom {
+                content,
+                content_kind,
+                budget_tokens,
+                source,
+                reversible,
+                output,
+            } => {
+                let report = analyze_token_headroom(
+                    &content,
+                    content_kind.as_deref(),
+                    budget_tokens,
+                    &source,
+                    reversible,
+                );
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            HarnessCommands::WrapPlan {
+                executor,
+                command,
+                forge_first,
+                workflow_id,
+                run_id,
+                context_budget,
+                token_headroom,
+                output,
+            } => {
+                let report = build_cli_wrapper_plan(
+                    &executor,
+                    &command,
+                    forge_first,
+                    workflow_id.as_deref(),
+                    run_id.as_deref(),
+                    context_budget,
+                    token_headroom,
+                );
+                print_response(output, &report)?;
+                Ok(0)
+            }
+        },
+        Commands::Cost { command } => match command {
+            CostCommands::Ledger {
+                workflow,
+                organization,
+                brand,
+                product,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_cost_ledger(
+                    &store,
+                    workflow.as_deref(),
+                    organization.as_deref(),
+                    brand.as_deref(),
+                    product.as_deref(),
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+        },
         Commands::Skill { command } => match command {
             SkillCommands::Install {
                 home,
@@ -2776,12 +5678,16 @@ fn run() -> Result<i32> {
             }
             MemoryCommands::Search {
                 query,
+                workflow_id,
                 scopes,
                 audience,
                 visibility,
+                memory_level,
                 run_id,
+                organization_id,
                 limit,
                 global_root,
+                organization_root,
                 project_root,
                 processing_root,
                 output,
@@ -2791,14 +5697,143 @@ fn run() -> Result<i32> {
                     &store,
                     MemorySearchOptions {
                         query,
+                        workflow_id,
                         scopes,
                         audience,
                         visibility,
+                        memory_level: Some(memory_level),
                         run_id,
+                        organization_id,
                         limit,
                         global_root,
+                        organization_root,
                         project_root,
                         processing_root,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MemoryCommands::Promote {
+                workflow_id,
+                from_scope,
+                to_scope,
+                source_path,
+                source_start_line,
+                source_end_line,
+                summary,
+                approved_by,
+                reason,
+                visibility,
+                shareability,
+                organization_id,
+                global_root,
+                organization_root,
+                project_root,
+                dry_run,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = promote_memory(
+                    &store,
+                    MemoryPromotionOptions {
+                        workflow_id,
+                        from_scope,
+                        to_scope,
+                        source_path,
+                        source_start_line,
+                        source_end_line,
+                        summary,
+                        approved_by,
+                        reason,
+                        visibility,
+                        shareability,
+                        organization_id,
+                        global_root,
+                        organization_root,
+                        project_root,
+                        dry_run,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MemoryCommands::Promotions {
+                workflow_id,
+                from_scope,
+                to_scope,
+                approved_by,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report =
+                    list_memory_promotions(&store, from_scope, to_scope, approved_by, workflow_id)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MemoryCommands::Retention {
+                workflow_id,
+                scopes,
+                run_id,
+                organization_id,
+                global_root,
+                organization_root,
+                project_root,
+                processing_root,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = memory_retention_report(
+                    &store,
+                    MemoryRetentionOptions {
+                        workflow_id,
+                        scopes,
+                        run_id,
+                        organization_id,
+                        global_root,
+                        organization_root,
+                        project_root,
+                        processing_root,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MemoryCommands::Cleanup {
+                workflow_id,
+                scopes,
+                run_id,
+                organization_id,
+                global_root,
+                organization_root,
+                project_root,
+                processing_root,
+                mode,
+                archive_root,
+                approved_by,
+                reason,
+                dry_run,
+                confirm,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = memory_cleanup_report(
+                    &store,
+                    MemoryCleanupOptions {
+                        workflow_id,
+                        scopes,
+                        run_id,
+                        organization_id,
+                        global_root,
+                        organization_root,
+                        project_root,
+                        processing_root,
+                        mode,
+                        archive_root,
+                        approved_by,
+                        reason,
+                        dry_run,
+                        confirm,
                     },
                 )?;
                 print_response(output, &report)?;
@@ -2940,14 +5975,20 @@ fn run() -> Result<i32> {
             }
         },
         Commands::Ops { command } => match command {
-            OpsCommands::Snapshot { output } => {
+            OpsCommands::Snapshot { addon_dirs, output } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = build_ops_snapshot(&store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let report = build_ops_snapshot_with_addon_dirs(&store, &dirs)?;
                 print_response(output, &report)?;
                 Ok(0)
             }
-            OpsCommands::Serve { host, port } => {
-                serve_ops_console(cli.store, &host, port)?;
+            OpsCommands::Serve {
+                host,
+                port,
+                addon_dirs,
+            } => {
+                let dirs = addon_dirs_or_default(addon_dirs);
+                serve_ops_console_with_addon_dirs(cli.store, &host, port, &dirs)?;
                 Ok(0)
             }
         },
@@ -3246,6 +6287,14 @@ fn print_response<T: Serialize>(format: OutputFormat, value: &T) -> Result<()> {
         OutputFormat::Human => println!("{}", serde_json::to_string_pretty(value)?),
     }
     Ok(())
+}
+
+fn addon_dirs_or_default(addon_dirs: Vec<PathBuf>) -> Vec<PathBuf> {
+    if addon_dirs.is_empty() {
+        default_addon_dirs()
+    } else {
+        addon_dirs
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

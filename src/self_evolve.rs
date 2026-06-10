@@ -3570,12 +3570,14 @@ mod tests {
             initial_goal: None,
             status: "running".to_string(),
             created_at: Utc::now(),
+            runtime: crate::graph::WorkflowRuntimeSpec::default(),
             intent: crate::intent::IntentSpec {
                 goal: BASE_SELF_EVOLUTION_GOAL.to_string(),
                 constraints: vec![],
                 deliverables: vec![],
                 risks: vec![],
                 unknowns: vec![],
+                ..crate::intent::IntentSpec::default()
             },
             tasks: vec![],
             artifacts: vec![],
@@ -3592,12 +3594,14 @@ mod tests {
             initial_goal: None,
             status: "pending".to_string(),
             created_at: Utc::now(),
+            runtime: crate::graph::WorkflowRuntimeSpec::default(),
             intent: crate::intent::IntentSpec {
                 goal: "Build a web app".to_string(),
                 constraints: vec![],
                 deliverables: vec![],
                 risks: vec![],
                 unknowns: vec![],
+                ..crate::intent::IntentSpec::default()
             },
             tasks: vec![],
             artifacts: vec![],

@@ -1,4 +1,5 @@
 use crate::adapter::{validate_executor_response_file, ExecutorResponseValidationReport};
+use crate::addon::{default_addon_dirs, load_addon_catalog_from_store};
 use crate::artifact::{list_workflow_artifacts, write_json_artifact};
 use crate::checkpoint::{load_workflow_checkpoints, TaskCheckpoint};
 use crate::context::{
@@ -9,7 +10,10 @@ use crate::graph::{
     create_workflow, task, AtomicTask, ExecutorKind, TaskStatus, ValidationRule, Workflow,
     WorkflowRevision,
 };
-use crate::intent::parse_intent;
+use crate::identity::{
+    ensure_operating_context_policy, ensure_workflow_policy, load_project_operating_context,
+};
+use crate::intent::{parse_intent, parse_intent_with_catalog_and_context};
 use crate::outcome::{
     assess_workflow_outcome, is_final_completion_audit_artifact,
     workflow_has_explicit_final_criteria, workflow_requires_final_outcome_audit,
@@ -668,7 +672,12 @@ pub fn start_async_request(
     goal: &str,
     origin: &str,
 ) -> Result<RequestStartReport> {
-    let mut workflow = create_workflow(parse_intent(goal));
+    let project_root = std::env::current_dir()?;
+    let addon_catalog = load_addon_catalog_from_store(store, &default_addon_dirs())?;
+    let operating_context = load_project_operating_context(&project_root)?;
+    ensure_operating_context_policy(store, &operating_context, "request start")?;
+    let intent = parse_intent_with_catalog_and_context(goal, &addon_catalog, operating_context);
+    let mut workflow = create_workflow(intent);
     let reuse_candidates = find_reuse_candidates(store, &workflow)?;
     let attached_subflows =
         attach_reuse_candidates_as_child_subflows(&mut workflow, &reuse_candidates);
@@ -795,7 +804,7 @@ pub fn update_run_status(
     status: &str,
     origin: &str,
 ) -> Result<RunRecord> {
-    let mut run = load_run_record(store, run_id)?;
+    let mut run = load_run_record_for_action(store, run_id, "run status update")?;
     let previous_status = run.status.clone();
     run.status = status.to_string();
     run.updated_at = Utc::now();
@@ -866,7 +875,7 @@ pub fn heartbeat_request(
     pid: Option<u32>,
     origin: &str,
 ) -> Result<RequestHeartbeatReport> {
-    let mut run = load_run_record(store, run_id)?;
+    let mut run = load_run_record_for_action(store, run_id, "request heartbeat")?;
     let previous_status = run.status.clone();
     let heartbeat_at = Utc::now();
     let ttl_seconds = ttl_seconds.max(1);
@@ -919,7 +928,7 @@ pub fn drive_request(
     ttl_seconds: u64,
     origin: &str,
 ) -> Result<RequestDriveReport> {
-    let run = load_run_record(store, run_id)?;
+    let run = load_run_record_for_action(store, run_id, "request drive")?;
     let workflow = store.load_workflow(&run.workflow_id)?;
     let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
     let latest_checkpoint = latest_actionable_checkpoint(&workflow, &checkpoints);
@@ -1640,7 +1649,7 @@ pub fn create_final_delivery_package(
     run_id: &str,
     origin: &str,
 ) -> Result<RequestFinalDeliveryPackageReport> {
-    let run = load_run_record(store, run_id)?;
+    let run = load_run_record_for_action(store, run_id, "final delivery package")?;
     let workflow = store.load_workflow(&run.workflow_id)?;
     let generated_at = Utc::now();
     let timestamp = generated_at.format("%Y%m%dT%H%M%SZ");
@@ -1733,6 +1742,7 @@ pub fn ensure_final_audit(
     executor: &str,
     origin: &str,
 ) -> Result<RequestFinalAuditReport> {
+    ensure_workflow_policy(store, workflow_id, "ensure final audit")?;
     let workflow = store.load_workflow(workflow_id)?;
     let updated_at = Utc::now();
     let Some(block_reason) = final_completion_audit_block_reason(store, &workflow)? else {
@@ -2368,7 +2378,7 @@ pub fn switch_request_executor(
     run_id: &str,
     input: RequestExecutorSwitchInput,
 ) -> Result<RequestExecutorSwitchReport> {
-    let mut run = load_run_record(store, run_id)?;
+    let mut run = load_run_record_for_action(store, run_id, "request switch executor")?;
     let previous_status = run.status.clone();
     let previous_executor = run.active_executor.clone();
     let previous_pid = run.executor_pid;
@@ -2627,8 +2637,14 @@ pub fn load_run_record(store: &ForgeStore, run_id: &str) -> Result<RunRecord> {
     Ok(serde_json::from_value(store.load_run(run_id)?)?)
 }
 
-pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestStatusReport> {
+fn load_run_record_for_action(store: &ForgeStore, run_id: &str, action: &str) -> Result<RunRecord> {
     let run = load_run_record(store, run_id)?;
+    ensure_workflow_policy(store, &run.workflow_id, action)?;
+    Ok(run)
+}
+
+pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestStatusReport> {
+    let run = load_run_record_for_action(store, run_id, "request status")?;
     let workflow = store.load_workflow(&run.workflow_id)?;
     let task_summary = summarize_tasks(&workflow);
     let outcome_status = request_outcome_status(store, &workflow)?;
@@ -3151,7 +3167,7 @@ pub fn cancel_request(
     run_id: &str,
     origin: &str,
 ) -> Result<RequestCancelReport> {
-    let mut run = load_run_record(store, run_id)?;
+    let mut run = load_run_record_for_action(store, run_id, "request cancel")?;
     let previous_status = run.status.clone();
     run.status = "cancelled".to_string();
     let cancelled_at = Utc::now();
@@ -3182,7 +3198,7 @@ pub fn resume_async_request(
     run_id: &str,
     origin: &str,
 ) -> Result<RequestResumeReport> {
-    let mut run = load_run_record(store, run_id)?;
+    let mut run = load_run_record_for_action(store, run_id, "request resume")?;
     let resumed_at = Utc::now();
     run.status = "resumed".to_string();
     run.updated_at = resumed_at;
@@ -3212,7 +3228,7 @@ pub fn recover_stale_request(
     run_id: &str,
     origin: &str,
 ) -> Result<RequestStaleRecoveryReport> {
-    let mut run = load_run_record(store, run_id)?;
+    let mut run = load_run_record_for_action(store, run_id, "request recover stale")?;
     let before_activity = build_run_activity(&run);
     if run.status != "running" || before_activity.heartbeat_status != "stale" {
         anyhow::bail!(

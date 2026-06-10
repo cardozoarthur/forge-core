@@ -22,6 +22,94 @@ fn forge() -> Command {
     Command::cargo_bin("forge").expect("forge binary should build")
 }
 
+#[test]
+fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environment() {
+    let content = (0..80)
+        .map(|index| format!("line {index}: error: failed to process request {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let output = forge()
+        .args([
+            "harness",
+            "token-headroom",
+            "--content",
+            &content,
+            "--kind",
+            "log",
+            "--budget-tokens",
+            "120",
+            "--source",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.harness.token_headroom.v1");
+    assert_eq!(json["content_kind"], "log");
+    assert_eq!(json["strategy"], "signal_log_compressor");
+    assert!(json["estimated_saved_tokens"].as_u64().unwrap() > 0);
+    assert!(json["retrieval_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("forge://harness/headroom/"));
+
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let mcp_input = serde_json::json!({
+        "executor": "claude-code",
+        "command": ["claude", "--model", "sonnet"],
+        "forge_first": true,
+        "workflow_id": "wf_demo",
+        "run_id": "run_demo",
+        "context_budget": 2048,
+        "token_headroom": true
+    });
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.wrap_plan",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp_json["schema_version"], "forge.mcp.call.v1");
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.harness.cli_wrapper_plan.v1"
+    );
+    assert_eq!(mcp_json["result"]["executor"], "claude");
+    assert_eq!(mcp_json["result"]["forge_first"], true);
+    assert!(mcp_json["result"]["launch_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("--forge-first".to_string())));
+    let env = mcp_json["result"]["env"].as_array().unwrap();
+    assert!(env
+        .iter()
+        .any(|item| item["name"] == "ENABLE_TOOL_SEARCH" && item["value"] == "true"));
+    assert!(env
+        .iter()
+        .any(|item| item["name"] == "FORGE_WORKFLOW_ID" && item["value"] == "wf_demo"));
+    assert!(env
+        .iter()
+        .any(|item| item["name"] == "FORGE_TOKEN_HEADROOM" && item["value"] == "enabled"));
+}
+
 #[cfg(unix)]
 fn write_fake_executor(bin_dir: &Path, name: &str, body: &str) {
     let executor_path = bin_dir.join(name);
@@ -2182,6 +2270,13 @@ fn plan_from_human_goal_creates_persistent_atomic_graph() {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["status"], "planned");
     assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
+    assert_eq!(
+        json["runtime"]["schema_version"],
+        "forge.workflow_runtime.v1"
+    );
+    assert_eq!(json["runtime"]["lifecycle_kind"], "ephemeral_workflow");
+    assert_eq!(json["runtime"]["ephemeral"], true);
+    assert_eq!(json["runtime"]["persistent"], false);
     assert!(json["tasks"].as_array().unwrap().len() >= 7);
     let requirements_task = find_task(json["tasks"].as_array().unwrap(), "Extract requirements");
     assert_eq!(requirements_task["executor"], "command");
@@ -2215,7 +2310,7 @@ fn plan_from_human_goal_creates_persistent_atomic_graph() {
         ])
         .assert()
         .success()
-        .stdout(predicates::str::contains("\"pending\""));
+        .stdout(predicates::str::contains("\"runtime\""));
 }
 
 #[test]
@@ -2240,6 +2335,16 @@ fn plan_supports_autonomous_mixed_workflow_with_cron_non_ai_step_and_email_cost_
         .clone();
 
     let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["runtime"]["schema_version"],
+        "forge.workflow_runtime.v1"
+    );
+    assert_eq!(json["runtime"]["lifecycle_kind"], "persistent_workflow");
+    assert_eq!(json["runtime"]["persistent"], true);
+    assert_eq!(
+        json["runtime"]["scale_to_zero_policy"],
+        "idle_waiting_for_events"
+    );
     let tasks = json["tasks"].as_array().unwrap();
 
     assert!(tasks.iter().any(|task| task["executor"] == "ai"));
@@ -9530,9 +9635,12 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
     for tool_name in [
         "forge.workflow.list",
         "forge.workflow.inspect",
+        "forge.events.timeline",
         "forge.improve.candidates",
+        "forge.cost.ledger",
         "forge.memory.policy",
         "forge.memory.search",
+        "forge.memory.cleanup",
         "forge.run.start",
         "forge.run.resume",
         "forge.run.status",
@@ -9611,6 +9719,77 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
         memory_search["input_schema"]["properties"]["query"]["type"],
         "string"
     );
+    assert_eq!(
+        memory_search["input_schema"]["properties"]["workflow_id"]["type"],
+        "string"
+    );
+    assert_eq!(
+        memory_search["input_schema"]["properties"]["memory_level"]["type"],
+        "string"
+    );
+    assert_eq!(
+        memory_search["input_schema"]["properties"]["organization_root"]["type"],
+        "string"
+    );
+    assert_eq!(
+        memory_search["input_schema"]["properties"]["organization_id"]["type"],
+        "string"
+    );
+
+    let memory_promote = find_mcp_tool(&json, "forge.memory.promote");
+    assert_eq!(memory_promote["output_schema"], "forge.memory_promotion.v1");
+    assert_eq!(memory_promote["mutates_workflow"], true);
+    assert_eq!(
+        memory_promote["input_schema"]["properties"]["approved_by"]["type"],
+        "string"
+    );
+    assert_eq!(
+        memory_promote["input_schema"]["properties"]["workflow_id"]["type"],
+        "string"
+    );
+    assert!(memory_promote["description"]
+        .as_str()
+        .unwrap()
+        .contains("Raw source content is not copied"));
+    let memory_promotions = find_mcp_tool(&json, "forge.memory.promotions");
+    assert_eq!(
+        memory_promotions["output_schema"],
+        "forge.memory_promotion_index.v1"
+    );
+    assert_eq!(memory_promotions["async_safe"], true);
+    assert_eq!(
+        memory_promotions["input_schema"]["properties"]["to_scope"]["type"],
+        "string"
+    );
+    assert_eq!(
+        memory_promotions["input_schema"]["properties"]["workflow_id"]["type"],
+        "string"
+    );
+    let memory_retention = find_mcp_tool(&json, "forge.memory.retention");
+    assert_eq!(
+        memory_retention["output_schema"],
+        "forge.memory_retention.v1"
+    );
+    assert_eq!(memory_retention["async_safe"], true);
+    assert_eq!(
+        memory_retention["input_schema"]["properties"]["processing_root"]["type"],
+        "string"
+    );
+    assert_eq!(
+        memory_retention["input_schema"]["properties"]["workflow_id"]["type"],
+        "string"
+    );
+    let memory_cleanup = find_mcp_tool(&json, "forge.memory.cleanup");
+    assert_eq!(memory_cleanup["output_schema"], "forge.memory_cleanup.v1");
+    assert_eq!(memory_cleanup["mutates_workflow"], true);
+    assert_eq!(
+        memory_cleanup["input_schema"]["properties"]["confirm"]["type"],
+        "boolean"
+    );
+    assert!(memory_cleanup["description"]
+        .as_str()
+        .unwrap()
+        .contains("requires approval"));
 
     let task_handoff = find_mcp_tool(&json, "forge.task.handoff");
     assert_eq!(task_handoff["async_safe"], true);
@@ -9627,12 +9806,28 @@ fn memory_search_separates_customer_private_and_manager_shared_suggestions() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
     let global_root = temp.path().join("global-memory");
+    let organization_root = temp.path().join("organization-memory");
     let project_root = temp.path().join("project-memory");
     let processing_root = temp.path().join("processing-memory");
     fs::create_dir_all(&global_root).unwrap();
+    fs::create_dir_all(&organization_root).unwrap();
     fs::create_dir_all(&project_root).unwrap();
     fs::create_dir_all(&processing_root).unwrap();
 
+    fs::write(
+        organization_root.join("org-operating-decisions.md"),
+        r#"---
+visibility: internal
+shareability: organization_shared
+retention: persistent
+---
+
+# Decisão organizacional
+
+A organização definiu que toda integração operacional deve preservar contexto de tenant antes de compartilhar memória entre projetos.
+"#,
+    )
+    .unwrap();
     fs::write(
         project_root.join("customer-suggestions.md"),
         r#"---
@@ -9691,6 +9886,27 @@ Integrações públicas devem ter mensagem clara de entrega.
         .clone();
     let policy_json: Value = serde_json::from_slice(&policy).unwrap();
     assert_eq!(policy_json["schema_version"], "forge.memory_policy.v1");
+    assert!(policy_json["memory_levels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|level| level["level"] == "MEMORY_STANDARD"
+            && level["allowed_scopes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|scope| scope == "organization")));
+    assert!(policy_json["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|scope| scope["scope"] == "organization"
+            && scope["default_shareability"] == "organization_shared"));
+    assert!(policy_json["shareability_levels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|level| level["shareability"] == "organization_shared"));
     assert!(policy_json["shareability_levels"]
         .as_array()
         .unwrap()
@@ -9789,10 +10005,129 @@ Integrações públicas devem ter mensagem clara de entrega.
     assert_eq!(public_json["result_count"], 0);
     assert_eq!(public_json["governance"]["denied_result_count"], 2);
 
+    let organization_search = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "search",
+            "--query",
+            "tenant compartilhar memória projetos",
+            "--scope",
+            "organization",
+            "--audience",
+            "internal",
+            "--memory-level",
+            "standard",
+            "--organization",
+            "digital-directive",
+            "--organization-root",
+            organization_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let organization_json: Value = serde_json::from_slice(&organization_search).unwrap();
+    assert_eq!(organization_json["memory_level"], "MEMORY_STANDARD");
+    assert_eq!(
+        organization_json["effective_scopes"],
+        serde_json::json!(["organization"])
+    );
+    assert_eq!(organization_json["result_count"], 1);
+    assert_eq!(organization_json["results"][0]["scope"], "organization");
+    assert_eq!(
+        organization_json["results"][0]["shareability"],
+        "organization_shared"
+    );
+
+    let session_search = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "search",
+            "--query",
+            "orçamento integração operacional",
+            "--scope",
+            "global",
+            "--scope",
+            "project",
+            "--scope",
+            "processing",
+            "--audience",
+            "private",
+            "--memory-level",
+            "session",
+            "--global-root",
+            global_root.to_str().unwrap(),
+            "--organization-root",
+            organization_root.to_str().unwrap(),
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--processing-root",
+            processing_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let session_json: Value = serde_json::from_slice(&session_search).unwrap();
+    assert_eq!(session_json["memory_level"], "MEMORY_SESSION");
+    assert_eq!(
+        session_json["requested_scopes"],
+        serde_json::json!(["global", "project", "processing"])
+    );
+    assert_eq!(
+        session_json["effective_scopes"],
+        serde_json::json!(["processing"])
+    );
+    assert_eq!(session_json["result_count"], 1);
+    assert_eq!(session_json["results"][0]["scope"], "processing");
+    assert_eq!(session_json["results"][0]["shareability"], "non_shareable");
+
+    let none_search = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "search",
+            "--query",
+            "integração operacional",
+            "--scope",
+            "project",
+            "--audience",
+            "private",
+            "--memory-level",
+            "none",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let none_json: Value = serde_json::from_slice(&none_search).unwrap();
+    assert_eq!(none_json["memory_level"], "MEMORY_NONE");
+    assert_eq!(none_json["effective_scopes"], serde_json::json!([]));
+    assert_eq!(none_json["searched_roots"].as_array().unwrap().len(), 0);
+    assert_eq!(none_json["result_count"], 0);
+
     let mcp_input = serde_json::json!({
         "query": "integração operacional gestor",
         "scopes": ["project", "processing"],
         "audience": "manager",
+        "memory_level": "short_term",
+        "organization_id": "digital-directive",
         "project_root": project_root,
         "processing_root": processing_root,
         "limit": 5
@@ -9816,11 +10151,926 @@ Integrações públicas devem ter mensagem clara de entrega.
         .clone();
     let mcp_json: Value = serde_json::from_slice(&mcp_search).unwrap();
     assert_eq!(mcp_json["tool_name"], "forge.memory.search");
+    assert_eq!(mcp_json["result"]["memory_level"], "MEMORY_SHORT_TERM");
     assert_eq!(mcp_json["result"]["result_count"], 1);
     assert_eq!(
         mcp_json["result"]["results"][0]["shareability"],
         "manager_shared"
     );
+}
+
+#[test]
+fn memory_promote_records_curated_summary_with_approval_and_lineage() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let processing_root = temp.path().join("processing-memory");
+    let organization_root = temp.path().join("organization-memory");
+    let project_root = temp.path().join("project-memory");
+    fs::create_dir_all(&processing_root).unwrap();
+    fs::create_dir_all(&organization_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    let raw_source = processing_root.join("raw-lead-thread.md");
+    fs::write(
+        &raw_source,
+        r#"---
+visibility: private
+shareability: non_shareable
+retention: temporary
+---
+
+# Thread privada
+
+Cliente informou CPF 123 e sugeriu que o produto mostre uma explicação simples para gestores antes de automações recorrentes.
+"#,
+    )
+    .unwrap();
+
+    let promote_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "promote",
+            "--from-scope",
+            "processing",
+            "--to-scope",
+            "organization",
+            "--source-path",
+            raw_source.to_str().unwrap(),
+            "--source-start-line",
+            "8",
+            "--source-end-line",
+            "8",
+            "--summary",
+            "Produto deve mostrar uma explicação simples para gestores antes de automações recorrentes.",
+            "--approved-by",
+            "arthur",
+            "--reason",
+            "Sinal de produto curado sem dados pessoais.",
+            "--visibility",
+            "internal",
+            "--organization",
+            "digital-directive",
+            "--organization-root",
+            organization_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let promote_json: Value = serde_json::from_slice(&promote_output).unwrap();
+    assert_eq!(promote_json["schema_version"], "forge.memory_promotion.v1");
+    assert_eq!(promote_json["status"], "memory_promotion_recorded");
+    assert!(promote_json["promotion_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("mem_"));
+    assert_eq!(promote_json["from_scope"], "processing");
+    assert_eq!(promote_json["to_scope"], "organization");
+    assert_eq!(promote_json["target_written"], true);
+    assert_eq!(promote_json["shareability"], "organization_shared");
+    assert_eq!(promote_json["governance"]["raw_source_copied"], false);
+    assert_eq!(promote_json["governance"]["approval_recorded"], true);
+    let target_path = promote_json["target_path"].as_str().unwrap();
+    assert!(target_path.starts_with(organization_root.to_str().unwrap()));
+    let promoted_content = fs::read_to_string(target_path).unwrap();
+    assert!(promoted_content.contains("schema_version: forge.promoted_memory.v1"));
+    assert!(promoted_content.contains("approved_by: \"arthur\""));
+    assert!(promoted_content.contains("source_scope: processing"));
+    assert!(promoted_content.contains("target_scope: organization"));
+    assert!(promoted_content.contains("explicação simples para gestores"));
+    assert!(!promoted_content.contains("CPF 123"));
+
+    let promoted_search = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "search",
+            "--query",
+            "explicação gestores automações",
+            "--scope",
+            "organization",
+            "--audience",
+            "internal",
+            "--organization-root",
+            organization_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let promoted_search_json: Value = serde_json::from_slice(&promoted_search).unwrap();
+    assert_eq!(promoted_search_json["result_count"], 1);
+    assert_eq!(
+        promoted_search_json["results"][0]["shareability"],
+        "organization_shared"
+    );
+
+    let promotion_index = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "promotions",
+            "--to-scope",
+            "organization",
+            "--approved-by",
+            "arthur",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let promotion_index_json: Value = serde_json::from_slice(&promotion_index).unwrap();
+    assert_eq!(
+        promotion_index_json["schema_version"],
+        "forge.memory_promotion_index.v1"
+    );
+    assert_eq!(promotion_index_json["promotion_count"], 1);
+    assert_eq!(
+        promotion_index_json["promotions"][0]["promotion_id"],
+        promote_json["promotion_id"]
+    );
+    assert_eq!(
+        promotion_index_json["promotions"][0]["report"]["target_path"],
+        promote_json["target_path"]
+    );
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "promote",
+            "--from-scope",
+            "processing",
+            "--to-scope",
+            "global",
+            "--source-path",
+            raw_source.to_str().unwrap(),
+            "--summary",
+            "Resumo curado para destino global.",
+            "--approved-by",
+            "arthur",
+            "--reason",
+            "Teste de bloqueio.",
+            "--shareability",
+            "project_shared",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure();
+
+    let mcp_input = serde_json::json!({
+        "from_scope": "processing",
+        "to_scope": "project",
+        "source_path": raw_source,
+        "summary": "Resumo de produto para projeto sem copiar dados privados.",
+        "approved_by": "arthur",
+        "reason": "Dry-run de promoção local.",
+        "visibility": "internal",
+        "shareability": "project_shared",
+        "project_root": project_root,
+        "dry_run": true
+    })
+    .to_string();
+    let mcp_promote = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.memory.promote",
+        ])
+        .arg("--input")
+        .arg(mcp_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_promote).unwrap();
+    assert_eq!(mcp_json["tool_name"], "forge.memory.promote");
+    assert_eq!(mcp_json["result"]["status"], "memory_promotion_planned");
+    assert_eq!(mcp_json["result"]["target_written"], false);
+    assert!(!Path::new(mcp_json["result"]["target_path"].as_str().unwrap()).exists());
+
+    let mcp_index_input = serde_json::json!({
+        "from_scope": "processing",
+        "to_scope": "organization"
+    })
+    .to_string();
+    let mcp_index = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.memory.promotions",
+        ])
+        .arg("--input")
+        .arg(mcp_index_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_index_json: Value = serde_json::from_slice(&mcp_index).unwrap();
+    assert_eq!(mcp_index_json["tool_name"], "forge.memory.promotions");
+    assert_eq!(mcp_index_json["result"]["promotion_count"], 1);
+}
+
+#[test]
+fn memory_retention_reports_processing_cleanup_without_deleting_files() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let processing_root = temp.path().join("processing-memory");
+    let project_root = temp.path().join("project-memory");
+    fs::create_dir_all(&processing_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    let temporary_memory = processing_root.join("temporary-thread.md");
+    fs::write(
+        &temporary_memory,
+        r#"---
+visibility: private
+shareability: non_shareable
+retention: temporary
+---
+
+# Scratch
+
+Temporary run notes.
+"#,
+    )
+    .unwrap();
+    let promotable_memory = processing_root.join("promotable-suggestion.md");
+    fs::write(
+        &promotable_memory,
+        r#"---
+visibility: private
+shareability: manager_shared
+retention: promote_curated_summary
+---
+
+# Suggestion
+
+Customer idea should be curated before cleanup.
+"#,
+    )
+    .unwrap();
+    let persistent_memory = project_root.join("project-decision.md");
+    fs::write(
+        &persistent_memory,
+        r#"---
+visibility: internal
+shareability: project_shared
+retention: persistent
+---
+
+# Decision
+
+Project keeps this decision.
+"#,
+    )
+    .unwrap();
+
+    let retention_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "retention",
+            "--scope",
+            "processing",
+            "--scope",
+            "project",
+            "--processing-root",
+            processing_root.to_str().unwrap(),
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let retention_json: Value = serde_json::from_slice(&retention_output).unwrap();
+    assert_eq!(
+        retention_json["schema_version"],
+        "forge.memory_retention.v1"
+    );
+    assert_eq!(retention_json["status"], "memory_retention_evaluated");
+    assert_eq!(retention_json["item_count"], 3);
+    assert_eq!(retention_json["delete_candidate_count"], 1);
+    assert_eq!(retention_json["promote_or_delete_count"], 1);
+    assert_eq!(retention_json["keep_count"], 1);
+    assert_eq!(
+        retention_json["governance"]["destructive_actions_performed"],
+        false
+    );
+    assert!(temporary_memory.exists());
+    assert!(promotable_memory.exists());
+    assert!(persistent_memory.exists());
+    assert!(retention_json["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["action"] == "delete_after_final_packaging"));
+    assert!(retention_json["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| {
+            item["action"] == "classify_then_promote_or_delete"
+                && item["path"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("promotable-suggestion.md")
+        }));
+
+    let mcp_input = serde_json::json!({
+        "scopes": ["processing"],
+        "processing_root": processing_root
+    })
+    .to_string();
+    let mcp_retention = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.memory.retention",
+        ])
+        .arg("--input")
+        .arg(mcp_input)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_retention).unwrap();
+    assert_eq!(mcp_json["tool_name"], "forge.memory.retention");
+    assert_eq!(mcp_json["result"]["item_count"], 2);
+    assert_eq!(mcp_json["result"]["delete_candidate_count"], 1);
+
+    let archive_root = temp.path().join("memory-archive");
+    let cleanup_dry_run = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "cleanup",
+            "--scope",
+            "processing",
+            "--processing-root",
+            processing_root.to_str().unwrap(),
+            "--archive-root",
+            archive_root.to_str().unwrap(),
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cleanup_dry_run_json: Value = serde_json::from_slice(&cleanup_dry_run).unwrap();
+    assert_eq!(
+        cleanup_dry_run_json["schema_version"],
+        "forge.memory_cleanup.v1"
+    );
+    assert_eq!(cleanup_dry_run_json["status"], "memory_cleanup_planned");
+    assert_eq!(
+        cleanup_dry_run_json["governance"]["destructive_actions_performed"],
+        false
+    );
+    assert!(temporary_memory.exists());
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "cleanup",
+            "--scope",
+            "processing",
+            "--processing-root",
+            processing_root.to_str().unwrap(),
+            "--archive-root",
+            archive_root.to_str().unwrap(),
+            "--confirm",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure();
+
+    let cleanup_archive = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "cleanup",
+            "--scope",
+            "processing",
+            "--processing-root",
+            processing_root.to_str().unwrap(),
+            "--archive-root",
+            archive_root.to_str().unwrap(),
+            "--approved-by",
+            "arthur",
+            "--reason",
+            "Final packaging archived temporary processing memory.",
+            "--confirm",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cleanup_archive_json: Value = serde_json::from_slice(&cleanup_archive).unwrap();
+    assert_eq!(cleanup_archive_json["status"], "memory_cleanup_executed");
+    assert_eq!(cleanup_archive_json["archived_count"], 1);
+    assert_eq!(
+        cleanup_archive_json["governance"]["approval_recorded"],
+        true
+    );
+    assert!(!temporary_memory.exists());
+    assert!(promotable_memory.exists());
+    let archived_target = cleanup_archive_json["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["cleanup_action"] == "archived")
+        .and_then(|item| item["target_path"].as_str())
+        .unwrap();
+    assert!(Path::new(archived_target).exists());
+}
+
+#[test]
+fn workflow_bound_memory_operations_derive_tenant_and_reject_disallowed_scopes() {
+    let temp = tempdir().unwrap();
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: memory-org
+  label: Memory Org
+brand:
+  scope: brand
+  id: memory-brand
+  label: Memory Brand
+product:
+  scope: product
+  id: memory-product
+  label: Memory Product
+user:
+  scope: user
+  id: memory-user
+  label: Memory User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+memory_scope: organization_project_session
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let planned = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Operar memória com isolamento por workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+
+    let organization_root = temp.path().join("organization-memory");
+    let project_root = temp.path().join("project-memory");
+    let processing_root = temp.path().join("processing-memory");
+    let global_root = temp.path().join("global-memory");
+    fs::create_dir_all(&organization_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    fs::create_dir_all(&processing_root).unwrap();
+    fs::create_dir_all(&global_root).unwrap();
+    fs::write(
+        organization_root.join("tenant-decision.md"),
+        r#"---
+visibility: internal
+shareability: organization_shared
+retention: persistent
+---
+
+# Decisão
+
+Tenant memory records must be searched through workflow policy.
+"#,
+    )
+    .unwrap();
+    let raw_source = processing_root.join("scratch.md");
+    fs::write(
+        &raw_source,
+        r#"---
+visibility: private
+shareability: non_shareable
+retention: temporary
+---
+
+# Scratch
+
+Resumo curado para a organização sem dados privados.
+"#,
+    )
+    .unwrap();
+
+    let search_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "search",
+            "--workflow",
+            workflow_id,
+            "--query",
+            "workflow policy tenant",
+            "--scope",
+            "organization",
+            "--audience",
+            "internal",
+            "--organization-root",
+            organization_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let search_json: Value = serde_json::from_slice(&search_output).unwrap();
+    assert_eq!(search_json["result_count"], 1);
+    assert_eq!(
+        search_json["governance"]["workflow_binding"]["workflow_id"],
+        workflow_id
+    );
+    assert_eq!(
+        search_json["governance"]["workflow_binding"]["organization_id"],
+        "memory-org"
+    );
+    assert_eq!(
+        search_json["governance"]["workflow_binding"]["allowed_scopes"],
+        serde_json::json!(["organization", "project", "processing"])
+    );
+
+    let default_scope_search = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "search",
+            "--workflow",
+            workflow_id,
+            "--query",
+            "workflow policy",
+            "--organization-root",
+            organization_root.to_str().unwrap(),
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--processing-root",
+            processing_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let default_scope_json: Value = serde_json::from_slice(&default_scope_search).unwrap();
+    assert_eq!(
+        default_scope_json["requested_scopes"],
+        serde_json::json!(["organization", "project", "processing"])
+    );
+    assert!(!default_scope_json["searched_roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|root| root["scope"] == "global"));
+
+    let wrong_org_stderr = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "search",
+            "--workflow",
+            workflow_id,
+            "--query",
+            "workflow policy",
+            "--scope",
+            "organization",
+            "--organization",
+            "other-org",
+            "--organization-root",
+            organization_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    assert!(String::from_utf8(wrong_org_stderr)
+        .unwrap()
+        .contains("does not match workflow"));
+
+    let global_stderr = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "search",
+            "--workflow",
+            workflow_id,
+            "--query",
+            "workflow policy",
+            "--scope",
+            "global",
+            "--global-root",
+            global_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    assert!(String::from_utf8(global_stderr)
+        .unwrap()
+        .contains("outside allowed workflow memory scopes"));
+
+    let promote_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "promote",
+            "--workflow",
+            workflow_id,
+            "--from-scope",
+            "processing",
+            "--to-scope",
+            "organization",
+            "--source-path",
+            raw_source.to_str().unwrap(),
+            "--summary",
+            "Resumo curado para a organização sem dados privados.",
+            "--approved-by",
+            "arthur",
+            "--reason",
+            "Promoção governada por workflow.",
+            "--visibility",
+            "internal",
+            "--organization-root",
+            organization_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let promote_json: Value = serde_json::from_slice(&promote_output).unwrap();
+    assert_eq!(promote_json["to_scope"], "organization");
+    assert_eq!(
+        promote_json["governance"]["workflow_binding"]["organization_id"],
+        "memory-org"
+    );
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "promote",
+            "--workflow",
+            workflow_id,
+            "--from-scope",
+            "processing",
+            "--to-scope",
+            "global",
+            "--source-path",
+            raw_source.to_str().unwrap(),
+            "--summary",
+            "Resumo global bloqueado.",
+            "--approved-by",
+            "arthur",
+            "--reason",
+            "Teste de escopo global.",
+            "--shareability",
+            "global_shared",
+            "--global-root",
+            global_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "promote",
+            "--from-scope",
+            "processing",
+            "--to-scope",
+            "organization",
+            "--source-path",
+            raw_source.to_str().unwrap(),
+            "--summary",
+            "Resumo legado sem workflow para comprovar filtro físico.",
+            "--approved-by",
+            "arthur",
+            "--reason",
+            "Registro legado sem binding de workflow.",
+            "--visibility",
+            "internal",
+            "--organization",
+            "memory-org",
+            "--organization-root",
+            organization_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let promotions_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "promotions",
+            "--workflow",
+            workflow_id,
+            "--to-scope",
+            "organization",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let promotions_json: Value = serde_json::from_slice(&promotions_output).unwrap();
+    assert_eq!(promotions_json["filters"]["workflow_id"], workflow_id);
+    assert_eq!(promotions_json["filters"]["organization_id"], "memory-org");
+    assert_eq!(promotions_json["filters"]["brand_id"], "memory-brand");
+    assert_eq!(promotions_json["filters"]["product_id"], "memory-product");
+    assert_eq!(promotions_json["promotion_count"], 1);
+    assert_eq!(promotions_json["promotions"][0]["workflow_id"], workflow_id);
+    assert_eq!(
+        promotions_json["promotions"][0]["organization_id"],
+        "memory-org"
+    );
+    assert_eq!(promotions_json["promotions"][0]["brand_id"], "memory-brand");
+    assert_eq!(
+        promotions_json["promotions"][0]["product_id"],
+        "memory-product"
+    );
+
+    let all_promotions_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "promotions",
+            "--to-scope",
+            "organization",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let all_promotions_json: Value = serde_json::from_slice(&all_promotions_output).unwrap();
+    assert_eq!(all_promotions_json["promotion_count"], 2);
+
+    let retention_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "retention",
+            "--workflow",
+            workflow_id,
+            "--organization-root",
+            organization_root.to_str().unwrap(),
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--processing-root",
+            processing_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let retention_json: Value = serde_json::from_slice(&retention_output).unwrap();
+    assert_eq!(
+        retention_json["requested_scopes"],
+        serde_json::json!(["organization", "project", "processing"])
+    );
+    assert_eq!(
+        retention_json["governance"]["workflow_binding"]["workflow_id"],
+        workflow_id
+    );
+
+    let mcp_global_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "query": "workflow policy",
+        "scopes": ["global"],
+        "global_root": global_root
+    })
+    .to_string();
+    let mcp_global_stderr = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.memory.search",
+        ])
+        .arg("--input")
+        .arg(mcp_global_input)
+        .args(["--output", "json"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    assert!(String::from_utf8(mcp_global_stderr)
+        .unwrap()
+        .contains("outside allowed workflow memory scopes"));
 }
 
 #[test]
@@ -11202,6 +12452,119 @@ fn workflow_goals_can_be_mutated_during_runtime_with_origin_trace() {
     );
     assert_eq!(status_json["revisions"].as_array().unwrap().len(), 1);
     assert_eq!(status_json["revisions"][0]["origin"], "codex");
+}
+
+#[test]
+fn workflow_goal_update_reparses_intent_deliverables_and_outcome_gate() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Generate internal workflow support artifacts",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+
+    let before = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let before_json: Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(before_json["outcome_status"]["status"], "support_only");
+
+    let update_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "update-goal",
+            "--workflow",
+            workflow_id,
+            "--goal",
+            "Implementar o Forge Core e entregar relatório final em Markdown, enviando o relatório no Telegram",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let update_json: Value = serde_json::from_slice(&update_output).unwrap();
+    assert_eq!(update_json["status"], "workflow_goal_updated");
+    assert!(
+        update_json["new_deliverable_count"].as_u64().unwrap()
+            > update_json["previous_deliverable_count"].as_u64().unwrap()
+    );
+    let added = update_json["added_deliverables"].as_array().unwrap();
+    assert!(added.contains(&Value::String("Telegram notification evidence".to_string())));
+    assert!(added.contains(&Value::String("final Markdown report".to_string())));
+    assert!(added.contains(&Value::String(
+        "verified user-facing final outcome".to_string()
+    )));
+
+    let after = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let after_json: Value = serde_json::from_slice(&after).unwrap();
+    assert_eq!(
+        after_json["outcome_status"]["status"],
+        "needs_user_delivery_evidence"
+    );
+    assert!(
+        after_json["outcome_status"]["user_facing_deliverable_count"]
+            .as_u64()
+            .unwrap()
+            >= 3
+    );
+    assert!(after_json["outcome_status"]["deliverables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|deliverable| deliverable["name"] == "final Markdown report"
+            && deliverable["kind"] == "user_facing"));
 }
 
 #[test]
@@ -13143,6 +14506,21 @@ fn list_surfaces_workflow_registry_with_lifecycle_and_initial_request() {
     assert_eq!(listed_json["summary"]["total"], 2);
     assert_eq!(listed_json["summary"]["running"], 0);
     assert_eq!(listed_json["summary"]["non_running"], 2);
+    assert_eq!(
+        listed_json["summary"]["runtime"]["schema_version"],
+        "forge.registry_workflow_runtime.v1"
+    );
+    assert_eq!(listed_json["summary"]["runtime"]["workflows"], 2);
+    assert_eq!(listed_json["summary"]["runtime"]["persistent_workflows"], 1);
+    assert_eq!(listed_json["summary"]["runtime"]["ephemeral_workflows"], 1);
+    assert_eq!(
+        listed_json["summary"]["runtime"]["scale_to_zero_after_completion"],
+        1
+    );
+    assert_eq!(
+        listed_json["summary"]["runtime"]["idle_waiting_for_events"],
+        1
+    );
 
     let planned_row = find_workflow(&listed_json, planned_workflow_id);
     assert_eq!(
@@ -13156,6 +14534,22 @@ fn list_surfaces_workflow_registry_with_lifecycle_and_initial_request() {
     assert_eq!(planned_row["lifecycle_state"], "scaled_to_zero");
     assert_eq!(planned_row["running"], false);
     assert!(planned_row["run_ids"].as_array().unwrap().is_empty());
+    assert_eq!(
+        planned_row["runtime"]["schema_version"],
+        "forge.registry_workflow_runtime.v1"
+    );
+    assert_eq!(
+        planned_row["runtime"]["lifecycle_kind"],
+        "ephemeral_workflow"
+    );
+    assert_eq!(
+        planned_row["runtime"]["operational_state"],
+        "scaled_to_zero"
+    );
+    assert_eq!(
+        planned_row["runtime"]["operator_action"],
+        "archive_or_reuse"
+    );
 
     let async_row = find_workflow(&listed_json, async_workflow_id);
     assert_eq!(
@@ -13170,6 +14564,18 @@ fn list_surfaces_workflow_registry_with_lifecycle_and_initial_request() {
     assert_eq!(async_row["running"], false);
     assert_eq!(async_row["run_ids"], serde_json::json!([run_id]));
     assert_eq!(async_row["workflow_revision"], 1);
+    assert_eq!(
+        async_row["runtime"]["lifecycle_kind"],
+        "persistent_workflow"
+    );
+    assert_eq!(
+        async_row["runtime"]["operational_state"],
+        "idle_waiting_for_events"
+    );
+    assert_eq!(
+        async_row["runtime"]["operator_action"],
+        "keep_event_listener_ready"
+    );
     assert_eq!(
         async_row["task_summary"]["total"],
         async_row["task_summary"]["pending"]
@@ -16027,6 +17433,22 @@ fn task_handoff_packet_carries_per_node_brain_routing_for_ai_agents() {
         "forge_memory_router"
     );
     assert_eq!(
+        packet["memory_policy"]["schema_version"],
+        "forge.context.memory_policy.v1"
+    );
+    assert_eq!(
+        packet["memory_policy"]["memory_source"],
+        "forge_memory_router"
+    );
+    assert_eq!(packet["memory_policy"]["memory_level"], "standard");
+    assert!(packet["memory_policy"]["allowed_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|scope| scope == "organization"));
+    assert_eq!(packet["memory_policy"]["requires_explicit_search"], true);
+    assert_eq!(packet["memory_policy"]["inline_memory_allowed"], false);
+    assert_eq!(
         packet["node_brain_routing"]["skills_source"],
         "forge_skill_router"
     );
@@ -16756,6 +18178,152 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     assert_eq!(promoted_event.data["cost"]["tokens_out"], 220);
     assert_eq!(promoted_event.data["artifact_count"], 1);
     assert_eq!(promoted_event.data["trace_ref"], "traces/task-001.jsonl");
+
+    let ledger_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "ledger",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ledger: Value = serde_json::from_slice(&ledger_output).unwrap();
+    assert_eq!(ledger["schema_version"], "forge.cost_ledger.v1");
+    assert_eq!(ledger["status"], "cost_ledger_loaded");
+    assert_eq!(ledger["summary"]["workflow_count"], 1);
+    assert_eq!(ledger["summary"]["observed_event_cost_total_usd"], 0.12);
+    assert_eq!(ledger["summary"]["observed_tokens_in_total"], 1200);
+    assert_eq!(ledger["summary"]["observed_tokens_out_total"], 220);
+    assert_eq!(ledger["tenants"][0]["organization_id"], "default-org");
+    assert_eq!(
+        ledger["workflows"][0]["nodes"][0]["observed_event_cost_usd"],
+        0.12
+    );
+
+    let mcp_input = format!(r#"{{"workflow_id":"{workflow_id}","organization_id":"default-org"}}"#);
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.cost.ledger",
+            "--input",
+            &mcp_input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["summary"]["observed_event_cost_total_usd"],
+        0.12
+    );
+
+    let timeline_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "timeline",
+            "--workflow",
+            workflow_id,
+            "--organization",
+            "default-org",
+            "--limit",
+            "5",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let timeline: Value = serde_json::from_slice(&timeline_output).unwrap();
+    assert_eq!(timeline["schema_version"], "forge.event_timeline.v1");
+    assert_eq!(
+        timeline["page"]["schema_version"],
+        "forge.event_timeline.page.v1"
+    );
+    assert!(timeline["page"]["next_cursor"].as_i64().unwrap() >= 1);
+    assert!(timeline["event_count"].as_u64().unwrap() >= 1);
+    assert!(timeline["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["kind"] == "executor_response_promoted"
+            && event["tenant_context"]["organization"]["id"] == "default-org"));
+    let first_sequence = timeline["events"][0]["store_sequence"].as_i64().unwrap();
+    let first_sequence_arg = first_sequence.to_string();
+    let timeline_page_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "timeline",
+            "--workflow",
+            workflow_id,
+            "--organization",
+            "default-org",
+            "--after-sequence",
+            &first_sequence_arg,
+            "--limit",
+            "1",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let timeline_page: Value = serde_json::from_slice(&timeline_page_output).unwrap();
+    assert_eq!(timeline_page["page"]["after_sequence"], first_sequence);
+    assert!(timeline_page["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|event| event["store_sequence"].as_i64().unwrap() > first_sequence));
+
+    let timeline_mcp_input = format!(
+        r#"{{"workflow_id":"{workflow_id}","organization_id":"default-org","limit":5,"after_sequence":0}}"#
+    );
+    let timeline_mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.events.timeline",
+            "--input",
+            &timeline_mcp_input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let timeline_mcp_json: Value = serde_json::from_slice(&timeline_mcp_output).unwrap();
+    assert_eq!(
+        timeline_mcp_json["result"]["schema_version"],
+        "forge.event_timeline.v1"
+    );
+    assert_eq!(timeline_mcp_json["result"]["page"]["after_sequence"], 0);
 }
 
 #[test]
@@ -19638,6 +21206,64 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
         snapshot_json["registry"]["summary"]["outcome"]["schema_version"],
         "forge.outcome_registry_summary.v1"
     );
+    assert_eq!(
+        snapshot_json["addon_views"]["schema_version"],
+        "forge.addon_views.v1"
+    );
+    assert_eq!(
+        snapshot_json["addon_observability"]["schema_version"],
+        "forge.addon_observability.v1"
+    );
+    assert!(
+        snapshot_json["addon_observability"]["addon_count"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(snapshot_json["addon_observability"]["addons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["addon_id"] == "forge.addon.visual_workspace"
+            && entry["view_count"].as_u64().unwrap() >= 1
+            && entry["permission_gate"]["schema_version"] == "forge.addon_permission_gate.v1"));
+    assert!(snapshot_json["addon_views"]["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["addon_id"] == "forge.addon.visual_workspace"
+            && entry["view"]["id"] == "visual.workspace"
+            && entry["view"]["surface"] == "ops_console"
+            && entry["view"]["type"] == "dashboard"
+            && entry["view"]["layout"]["zone"] == "main"
+            && entry["view"]["data_bindings"][0]["id"] == "visual_artifacts"
+            && entry["view"]["actions"][0]["id"] == "visual.create_artifact"));
+    assert_eq!(
+        snapshot_json["registry"]["summary"]["runtime"]["schema_version"],
+        "forge.registry_workflow_runtime.v1"
+    );
+    assert_eq!(
+        snapshot_json["registry"]["summary"]["runtime"]["ephemeral_workflows"],
+        1
+    );
+    let registry_row = snapshot_json["registry"]["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workflow| workflow["workflow_id"] == workflow_id)
+        .unwrap();
+    assert_eq!(
+        registry_row["runtime"]["schema_version"],
+        "forge.registry_workflow_runtime.v1"
+    );
+    assert_eq!(
+        registry_row["runtime"]["lifecycle_kind"],
+        "ephemeral_workflow"
+    );
+    assert_eq!(
+        registry_row["runtime"]["operator_action"],
+        "run_or_promote_if_recurring"
+    );
     let visual_workflow = snapshot_json["visual_workflows"]
         .as_array()
         .unwrap()
@@ -19686,6 +21312,16 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
     assert!(html.contains(workflow_id));
     assert!(html.contains("Lane modificadora"));
     assert!(html.contains("Visualização operacional"));
+    assert!(html.contains("Views de Addons"));
+    assert!(html.contains("Observabilidade de Addons"));
+    assert!(html.contains("Dispatch queued/blocked/worker"));
+    assert!(html.contains("visual.workspace"));
+    assert!(html.contains("Data bindings"));
+    assert!(html.contains("visual_artifacts"));
+    assert!(html.contains("visual.create_artifact"));
+    assert!(html.contains("Ação runtime"));
+    assert!(html.contains("ephemeral_workflow"));
+    assert!(html.contains("run_or_promote_if_recurring"));
     assert!(html.contains("whiteboards: 1"));
     assert!(html.contains("Criar artefato visual"));
     assert!(html.contains("Registrar colaboração"));
@@ -23563,6 +25199,202 @@ fn schedule_scan_due_executes_due_workflows_with_lease_and_scales_idle_workflows
 }
 
 #[test]
+fn schedule_runtime_executes_one_shot_wait_until_nodes_without_cron() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Execute intake now, wait until 2000-01-01T00:00:00Z, run a deterministic non-AI cost calculation without AI, and email the workflow cost to ops@example.com",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap().to_string();
+    let wait_task = planned_json["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["executor"] == "wait")
+        .unwrap();
+    let wait_task_id = wait_task["id"].as_str().unwrap().to_string();
+    assert_eq!(wait_task["schedule"]["kind"], "wait_until");
+    assert_eq!(wait_task["schedule"]["cron"], "");
+    assert_eq!(wait_task["schedule"]["next_run_at"], "2000-01-01T00:00:00Z");
+
+    let worker_status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "worker-status",
+            "--executor",
+            "forge-wait-worker",
+            "--max-workers",
+            "1",
+            "--ttl-seconds",
+            "60",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let worker_json: Value = serde_json::from_slice(&worker_status).unwrap();
+    assert_eq!(worker_json["status"], "ready_due_work");
+    assert_eq!(worker_json["summary"]["due_workflows"], 1);
+    assert_eq!(worker_json["summary"]["wait_until_nodes"], 1);
+    assert_eq!(
+        worker_json["worker_pool"]["assignment_plan"]["assigned"][0]["schedule_task_id"],
+        wait_task_id
+    );
+
+    let scanned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "scan-due",
+            "--executor",
+            "forge-wait-worker",
+            "--ttl-seconds",
+            "60",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let scanned_json: Value = serde_json::from_slice(&scanned).unwrap();
+    assert_eq!(scanned_json["status"], "schedule_scan_completed");
+    assert_eq!(scanned_json["summary"]["due_workflows"], 1);
+    assert_eq!(scanned_json["summary"]["executed_workflows"], 1);
+    let result = scanned_json["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["workflow_id"] == workflow_id)
+        .unwrap();
+    assert_eq!(result["schedule_task_id"], wait_task_id);
+    assert_eq!(result["lease_status"], "lease_acquired");
+    assert_eq!(result["run_due"]["status"], "due_workflow_executed");
+    assert_eq!(result["run_due"]["due_executed"], true);
+    assert_eq!(result["run_due"]["schedule_summary"]["wait_until_nodes"], 1);
+    assert_eq!(result["run_due"]["schedule_summary"]["due_nodes"], 0);
+    assert!(result["run_due"]["schedule_summary"]["next_run_at"].is_null());
+
+    let inspected = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            &workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected_json: Value = serde_json::from_slice(&inspected).unwrap();
+    assert_eq!(inspected_json["schedule_summary"]["wait_until_nodes"], 1);
+    assert_eq!(inspected_json["schedule_summary"]["due_nodes"], 0);
+    let inspected_wait = inspected_json["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == wait_task_id)
+        .unwrap();
+    assert_eq!(inspected_wait["status"], "completed");
+    assert!(inspected_wait["schedule"]["next_run_at"].is_null());
+
+    let daemon_planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Execute daemon intake now, wait until 2000-01-01T00:00:00Z, and run deterministic follow-up without AI",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let daemon_planned_json: Value = serde_json::from_slice(&daemon_planned).unwrap();
+    let daemon_wait_workflow_id = daemon_planned_json["workflow_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let daemon_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "runtime-daemon",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--execute",
+            "--scan-schedules",
+            "--schedule-executor",
+            "forge-wait-runtime",
+            "--schedule-max-workers",
+            "1",
+            "--schedule-ttl-seconds",
+            "60",
+            "--max-cycles",
+            "1",
+            "--interval-seconds",
+            "0",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let daemon_json: Value = serde_json::from_slice(&daemon_output).unwrap();
+    assert_eq!(daemon_json["status"], "event_runtime_daemon_completed");
+    assert_eq!(daemon_json["schedule_execution_count"], 1);
+    assert_eq!(
+        daemon_json["cycles"][0]["report"]["schedule"]["scan_due"]["summary"]["executed_workflows"],
+        1
+    );
+    let daemon_wait_result = daemon_json["cycles"][0]["report"]["schedule"]["scan_due"]["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["workflow_id"] == daemon_wait_workflow_id)
+        .unwrap();
+    assert_eq!(
+        daemon_wait_result["run_due"]["status"],
+        "due_workflow_executed"
+    );
+    assert_eq!(
+        daemon_wait_result["run_due"]["schedule_summary"]["wait_until_nodes"],
+        1
+    );
+}
+
+#[test]
 fn schedule_run_due_executes_after_simulate_advances_next_run() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -24714,6 +26546,11 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     assert!(text.contains("Shell entrypoints"));
     assert!(text.contains("Runtime/node status"));
     assert!(text.contains("Scheduler worker status"));
+    assert!(text.contains("Workflow focus"));
+    assert!(text.contains("Schedule panel"));
+    assert!(text.contains("Event timeline"));
+    assert!(text.contains("Cost panel"));
+    assert!(text.contains("Context/memory panel"));
     assert!(text.contains("Repository context"));
     assert!(text.contains("Estimated costs"));
     assert!(text.contains("Attention actions"));
@@ -25342,6 +27179,24 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("/brains")));
+    assert!(home_json["result"]["dashboard"]["workflow_focus"].is_array());
+    assert!(
+        home_json["result"]["dashboard"]["schedule_panel"]["status"].is_string(),
+        "interactive home should expose scheduler panel state for agent dashboards"
+    );
+    assert!(
+        home_json["result"]["dashboard"]["event_panel"]["status"].is_string(),
+        "interactive home should expose global event timeline state for agent dashboards"
+    );
+    assert!(
+        home_json["result"]["dashboard"]["cost_panel"]["status"].is_string(),
+        "interactive home should expose cost ledger state for agent dashboards"
+    );
+    assert!(
+        home_json["result"]["dashboard"]["context_memory_panel"]["memory_policy_status"]
+            .is_string(),
+        "interactive home should expose context and memory policy state for agent dashboards"
+    );
 
     let brain_router = forge()
         .arg("--store")

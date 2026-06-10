@@ -3,6 +3,7 @@ use crate::graph::{
     ArtifactLineageRecord, ArtifactRecord, AtomicTask, LoopSpec, NativeSubflowSpec,
     ScheduleRunRecord, ScheduleSpec, TaskStatus, Workflow, WorkflowRevision,
 };
+use crate::identity::ensure_workflow_policy;
 use crate::intent::parse_intent;
 use crate::lease::{acquire_task_lease, release_task_lease};
 use crate::registry::{attach_reuse_candidates_as_child_subflows, find_reuse_candidates};
@@ -31,6 +32,10 @@ pub struct ScheduleSummary {
     pub schema_version: String,
     pub scheduled_nodes: usize,
     pub cron_nodes: usize,
+    #[serde(default)]
+    pub wait_until_nodes: usize,
+    #[serde(default)]
+    pub delay_nodes: usize,
     pub due_nodes: usize,
     pub missed_run_nodes: usize,
     pub scale_to_zero_when_idle_nodes: usize,
@@ -219,6 +224,12 @@ pub struct ScheduleWorkerStatusSummary {
     pub scale_to_zero_workflows: usize,
     pub paused_or_stopped_loop_workflows: usize,
     pub scheduled_nodes: usize,
+    #[serde(default)]
+    pub cron_nodes: usize,
+    #[serde(default)]
+    pub wait_until_nodes: usize,
+    #[serde(default)]
+    pub delay_nodes: usize,
     pub due_nodes: usize,
 }
 
@@ -317,6 +328,10 @@ pub fn summarize_schedules(tasks: &[AtomicTask]) -> ScheduleSummary {
         summary.scheduled_nodes += 1;
         if schedule.kind == "cron" {
             summary.cron_nodes += 1;
+        } else if schedule.kind == "wait_until" {
+            summary.wait_until_nodes += 1;
+        } else if schedule.kind == "delay" {
+            summary.delay_nodes += 1;
         }
         if schedule
             .next_run_at
@@ -435,6 +450,7 @@ pub fn update_workflow_schedule(
     task_id: &str,
     options: ScheduleUpdateOptions<'_>,
 ) -> Result<ScheduleUpdateReport> {
+    ensure_workflow_policy(store, workflow_id, "schedule update")?;
     let mut workflow = store.load_workflow(workflow_id)?;
     let parsed_next_run_at = options
         .next_run_at
@@ -591,7 +607,8 @@ fn record_schedule_run_history_with_status(
         let missed_run_policy = schedule.missed_run_policy.clone();
         let reconciliation_action = missed_run_action(&missed_run_policy, missed, status);
         let run_id = format!("run_{}", Uuid::new_v4().to_string().replace('-', ""));
-        let next_run_at_after = finished_at + Duration::days(1);
+        let one_shot_wait = is_one_shot_wait_kind(&schedule.kind);
+        let next_run_at_after = (!one_shot_wait).then_some(finished_at + Duration::days(1));
         schedule.run_history.push(ScheduleRunRecord {
             run_id: run_id.clone(),
             scheduled_at,
@@ -602,7 +619,10 @@ fn record_schedule_run_history_with_status(
             missed_run_policy: missed_run_policy.clone(),
             reconciliation_action: reconciliation_action.clone(),
         });
-        schedule.next_run_at = Some(next_run_at_after);
+        schedule.next_run_at = next_run_at_after;
+        if one_shot_wait {
+            task.status = TaskStatus::Completed;
+        }
         emissions.push(ScheduleRunEmission {
             schedule_task_id: task.id.clone(),
             run_id,
@@ -710,6 +730,8 @@ pub fn aggregate_summary(tasks_by_workflow: &[&[AtomicTask]]) -> AggregateSummar
         let s = summarize_schedules(tasks);
         total_schedule.scheduled_nodes += s.scheduled_nodes;
         total_schedule.cron_nodes += s.cron_nodes;
+        total_schedule.wait_until_nodes += s.wait_until_nodes;
+        total_schedule.delay_nodes += s.delay_nodes;
         total_schedule.due_nodes += s.due_nodes;
         total_schedule.missed_run_nodes += s.missed_run_nodes;
         total_schedule.scale_to_zero_when_idle_nodes += s.scale_to_zero_when_idle_nodes;
@@ -778,6 +800,7 @@ pub fn update_loop_state(
     new_state: &str,
     origin: &str,
 ) -> Result<LoopStateUpdateReport> {
+    ensure_workflow_policy(store, workflow_id, "loop state update")?;
     let valid_states = ["active", "paused", "stopped"];
     if !valid_states.contains(&new_state) {
         anyhow::bail!("invalid loop state: {new_state}. Valid states: active, paused, stopped");
@@ -832,6 +855,7 @@ pub fn run_due_workflow(
     store: &ForgeStore,
     workflow_id: &str,
 ) -> Result<Option<ScheduleRunDueReport>> {
+    ensure_workflow_policy(store, workflow_id, "run due workflow")?;
     let mut workflow = store.load_workflow(workflow_id)?;
     let now = Utc::now();
     let has_due = workflow.tasks.iter().any(|task| {
@@ -863,7 +887,7 @@ pub fn run_due_workflow(
         }
 
         return Ok(Some(ScheduleRunDueReport {
-            status: "no_due_cron_nodes".to_string(),
+            status: no_due_schedule_status(&schedule_summary),
             workflow_id: workflow_id.to_string(),
             goal: workflow.goal.clone(),
             due_executed: false,
@@ -1082,7 +1106,7 @@ pub fn scan_due_workflows(
             lease_released: false,
             current_lease_id: None,
             run_due,
-            reason: "no due cron nodes; recorded idle schedule state".to_string(),
+            reason: no_due_schedule_reason(&schedule_summary),
         });
     }
 
@@ -1187,7 +1211,7 @@ pub fn scan_due_workflows_parallel(
         .count();
     let skipped = final_results
         .iter()
-        .filter(|r| r.status == "missed_runs_skipped" || r.status == "no_due_cron_nodes")
+        .filter(|r| r.status == "missed_runs_skipped" || r.status.starts_with("no_due_"))
         .count();
     summary.executed_workflows = executed;
     summary.scale_to_zero_workflows = scale_to_zero;
@@ -1241,9 +1265,7 @@ fn scan_idle_workflow_reconciliation(
         lease_released: false,
         current_lease_id: None,
         run_due,
-        reason:
-            "no due cron nodes; reconciled idle schedule state before bounded concurrent dispatch"
-                .to_string(),
+        reason: no_due_schedule_reason(&schedule_summary),
     })
 }
 
@@ -1269,7 +1291,7 @@ fn scan_due_workflow_dispatch(
             lease_released: false,
             current_lease_id: None,
             run_due: None,
-            reason: "no due cron nodes; recorded idle schedule state".to_string(),
+            reason: no_due_schedule_reason(&schedule_summary),
         });
     };
 
@@ -1357,6 +1379,9 @@ pub fn build_schedule_worker_status(
 
         summary.scanned_workflows += 1;
         summary.scheduled_nodes += schedule_summary.scheduled_nodes;
+        summary.cron_nodes += schedule_summary.cron_nodes;
+        summary.wait_until_nodes += schedule_summary.wait_until_nodes;
+        summary.delay_nodes += schedule_summary.delay_nodes;
         summary.due_nodes += schedule_summary.due_nodes;
         let scale_to_zero_eligible = can_scale_to_zero_when_idle(&schedule_summary);
         if scale_to_zero_eligible {
@@ -1531,6 +1556,33 @@ fn can_scale_to_zero_when_idle(summary: &ScheduleSummary) -> bool {
         && summary.scale_to_zero_when_idle_nodes == summary.scheduled_nodes
 }
 
+fn is_one_shot_wait_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "wait_until" | "delay" | "sleep_until" | "one_shot_wait"
+    )
+}
+
+fn no_due_schedule_status(summary: &ScheduleSummary) -> String {
+    if summary.cron_nodes > 0 {
+        "no_due_cron_nodes".to_string()
+    } else if summary.wait_until_nodes > 0 || summary.delay_nodes > 0 {
+        "no_due_wait_nodes".to_string()
+    } else {
+        "no_due_scheduled_nodes".to_string()
+    }
+}
+
+fn no_due_schedule_reason(summary: &ScheduleSummary) -> String {
+    if summary.cron_nodes > 0 {
+        "no due cron nodes; recorded idle schedule state".to_string()
+    } else if summary.wait_until_nodes > 0 || summary.delay_nodes > 0 {
+        "no due wait nodes; recorded idle wait state".to_string()
+    } else {
+        "no due scheduled nodes; recorded idle schedule state".to_string()
+    }
+}
+
 fn first_blocking_loop_state(workflow: &Workflow) -> Option<(String, String)> {
     workflow.tasks.iter().find_map(|task| {
         task.loop_control.as_ref().and_then(|loop_control| {
@@ -1635,12 +1687,11 @@ fn scale_to_zero_decision(
 
 fn skip_due_missed_runs(workflow: &mut Workflow) -> Vec<MissedRunReconciliationReport> {
     let mut reconciliation = Vec::new();
-    for schedule in workflow
-        .tasks
-        .iter_mut()
-        .filter_map(|task| task.schedule.as_mut().map(|schedule| (&task.id, schedule)))
-    {
-        let (task_id, schedule) = schedule;
+    for task in workflow.tasks.iter_mut() {
+        let task_id = task.id.clone();
+        let Some(schedule) = task.schedule.as_mut() else {
+            continue;
+        };
         let Some(next_run_at) = schedule.next_run_at else {
             continue;
         };
@@ -1653,7 +1704,8 @@ fn skip_due_missed_runs(workflow: &mut Workflow) -> Vec<MissedRunReconciliationR
         }
 
         let run_id = format!("run_{}", Uuid::new_v4().to_string().replace('-', ""));
-        let next_run_at_after = now + Duration::days(1);
+        let one_shot_wait = is_one_shot_wait_kind(&schedule.kind);
+        let next_run_at_after = (!one_shot_wait).then_some(now + Duration::days(1));
         schedule.run_history.push(ScheduleRunRecord {
             run_id: run_id.clone(),
             scheduled_at: next_run_at,
@@ -1664,16 +1716,19 @@ fn skip_due_missed_runs(workflow: &mut Workflow) -> Vec<MissedRunReconciliationR
             missed_run_policy: schedule.missed_run_policy.clone(),
             reconciliation_action: "skipped_missed".to_string(),
         });
-        schedule.next_run_at = Some(next_run_at_after);
+        schedule.next_run_at = next_run_at_after;
+        if one_shot_wait {
+            task.status = TaskStatus::Completed;
+        }
         reconciliation.push(MissedRunReconciliationReport {
             schema_version: MISSED_RUN_RECONCILIATION_SCHEMA_VERSION.to_string(),
-            task_id: task_id.clone(),
+            task_id,
             policy: schedule.missed_run_policy.clone(),
             action: "skipped_missed".to_string(),
             scheduled_at: format_utc_rfc3339(next_run_at),
             observed_at: format_utc_rfc3339(now),
             next_run_at_before: format_utc_rfc3339(next_run_at),
-            next_run_at_after: Some(format_utc_rfc3339(next_run_at_after)),
+            next_run_at_after: next_run_at_after.map(format_utc_rfc3339),
             run_id,
             run_status: "skipped_missed".to_string(),
             missed: true,

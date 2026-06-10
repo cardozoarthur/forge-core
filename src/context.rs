@@ -4,6 +4,7 @@ use crate::graph::{
     ArtifactRecord, AtomicTask, ChildSubflowRef, ExecutionPolicySpec, ExecutorKind,
     PersonaRoutingSpec, TaskStatus, Workflow,
 };
+use crate::intent::OperatingContextSpec;
 use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -31,6 +32,7 @@ const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
     "forge.context_routing_quality_summary.v1";
 const CONTEXT_HANDOFF_SUMMARY_SCHEMA_VERSION: &str = "forge.context_handoff_summary.v1";
 const CONTINUATION_PLAN_SCHEMA_VERSION: &str = "forge.context.continuation_plan.v1";
+const CONTEXT_MEMORY_POLICY_SCHEMA_VERSION: &str = "forge.context.memory_policy.v1";
 const ROUTING_POLICY: &str =
     "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_shard_selection_audit_v30";
 const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
@@ -43,6 +45,7 @@ const NOTIFICATION_CONTEXT_BUDGET: usize = 900;
 const ALL_CONTEXT_SECTIONS: &[&str] = &[
     "local_objective",
     "workflow_goal",
+    "operating_context",
     "artifacts",
     "persona_routing",
     "execution_policy",
@@ -68,6 +71,7 @@ const NO_AI_CONTEXT_SECTIONS: &[&str] = &[
 const NOTIFICATION_CONTEXT_SECTIONS: &[&str] = &[
     "local_objective",
     "workflow_goal",
+    "operating_context",
     "artifacts",
     "persona_routing",
     "execution_policy",
@@ -80,6 +84,7 @@ const NOTIFICATION_CONTEXT_SECTIONS: &[&str] = &[
 const REASONING_REQUIRED_CONTEXT_SECTIONS: &[&str] = &[
     "local_objective",
     "workflow_goal",
+    "operating_context",
     "execution_policy",
     "context_requirements",
     "validation_rules",
@@ -108,6 +113,7 @@ const ARTIFACT_MANIFEST_REQUIRED_CONTEXT_SECTIONS: &[&str] = &[
 ];
 const NOTIFICATION_REQUIRED_CONTEXT_SECTIONS: &[&str] = &[
     "local_objective",
+    "operating_context",
     "persona_routing",
     "execution_policy",
     "context_requirements",
@@ -116,6 +122,7 @@ const NOTIFICATION_REQUIRED_CONTEXT_SECTIONS: &[&str] = &[
 const FINAL_COMPLETION_AUDIT_REQUIRED_CONTEXT_SECTIONS: &[&str] = &[
     "local_objective",
     "workflow_goal",
+    "operating_context",
     "artifacts",
     "execution_policy",
     "context_requirements",
@@ -132,6 +139,8 @@ pub struct ContextPackage {
     pub workflow_revision: u64,
     pub artifact_count: usize,
     pub lineage: ContextLineage,
+    pub operating_context: OperatingContextSpec,
+    pub memory_policy: ContextMemoryPolicy,
     pub persona: Option<PersonaRoutingSpec>,
     pub persona_profile: Option<ContextPersonaProfile>,
     pub persona_contract: Option<ContextPersonaContract>,
@@ -174,6 +183,38 @@ pub struct ContextPackage {
     pub profile_omitted_sections: Vec<String>,
     pub shards: Vec<ContextShard>,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextMemoryPolicy {
+    pub schema_version: String,
+    pub source: String,
+    pub memory_source: String,
+    pub memory_scope: String,
+    pub memory_level: String,
+    pub allowed_scopes: Vec<String>,
+    pub default_audience: String,
+    pub default_shareability: String,
+    pub visibility: String,
+    pub data_classification: String,
+    pub sharing_policy: String,
+    pub tenant_policy_mode: String,
+    pub tenant_boundary: ContextMemoryTenantBoundary,
+    pub requires_explicit_search: bool,
+    pub inline_memory_allowed: bool,
+    pub default_search_command: Vec<String>,
+    pub mcp_tool: String,
+    pub promotion_policy: String,
+    pub processing_retention: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextMemoryTenantBoundary {
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    pub user_id: String,
+    pub channel_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -413,6 +454,7 @@ pub struct ContextLineage {
     pub task_goal_sha256: String,
     pub artifact_manifest_sha256: String,
     pub artifact_count: usize,
+    pub operating_context_sha256: String,
     pub persona_mode_sha256: String,
     pub persona_profile_sha256: String,
     pub persona_scope: String,
@@ -429,6 +471,11 @@ pub struct ContextPersonaProfile {
     pub instruction_source: String,
     pub voice: String,
     pub tone: String,
+    pub brand_voice: String,
+    pub brand_tone: String,
+    pub brand_values: Vec<String>,
+    pub design_token_source: String,
+    pub operating_policy: String,
     pub validation_gate: String,
     pub routing_rationale: String,
     pub source_model_summaries: Vec<ContextPersonaSourceModelSummary>,
@@ -453,6 +500,11 @@ pub struct ContextPersonaContract {
     pub instruction_source: String,
     pub voice: String,
     pub tone: String,
+    pub brand_voice: String,
+    pub brand_tone: String,
+    pub brand_values: Vec<String>,
+    pub design_token_source: String,
+    pub operating_policy: String,
     pub validation_gate: String,
     pub routing_rationale: String,
     pub source_models: Vec<String>,
@@ -718,6 +770,7 @@ struct ContextLineageSeed {
     task_goal_sha256: String,
     artifact_manifest_sha256: String,
     artifact_count: usize,
+    operating_context_sha256: String,
     persona_mode_sha256: String,
     persona_profile_sha256: String,
     persona_scope: String,
@@ -747,6 +800,11 @@ struct ContextPersonaProfileSeed {
     validation_gate: String,
     routing_rationale: String,
     source_model_summaries: Vec<ContextPersonaSourceModelSummary>,
+    brand_voice: String,
+    brand_tone: String,
+    brand_values: Vec<String>,
+    design_token_source: String,
+    operating_policy: String,
     auditable: bool,
 }
 
@@ -1068,8 +1126,13 @@ pub fn build_context_package_with_checkpoint(
         .iter()
         .map(|revision| revision.origin.clone())
         .collect::<Vec<_>>();
+    let operating_context = workflow.intent.operating_context.clone();
+    let memory_policy = build_context_memory_policy(workflow, task, &operating_context);
     let persona = task.persona.clone();
-    let persona_profile = persona.as_ref().map(build_persona_profile).transpose()?;
+    let persona_profile = persona
+        .as_ref()
+        .map(|persona| build_persona_profile(persona, &operating_context))
+        .transpose()?;
     let persona_profile_sha256 = persona_profile
         .as_ref()
         .map(|profile| profile.profile_sha256.clone())
@@ -1121,6 +1184,12 @@ pub fn build_context_package_with_checkpoint(
                 workflow_revision,
                 workflow.artifacts.len()
             ),
+        },
+        ContextShardCandidate {
+            section: "operating_context",
+            source: "operating_context",
+            priority: priority_for_profile(&profile, "operating_context", 94),
+            content: render_operating_context_context(&workflow.intent.operating_context),
         },
         ContextShardCandidate {
             section: "artifacts",
@@ -1180,7 +1249,7 @@ pub fn build_context_package_with_checkpoint(
         ContextShardCandidate {
             section: "dependencies",
             source: "graph",
-            priority: priority_for_profile(&profile, "dependencies", 70),
+            priority: priority_for_profile(&profile, "dependencies", 92),
             content: render_dependencies_context(&dependency_refs, &dependency_summary),
         },
         ContextShardCandidate {
@@ -1491,6 +1560,8 @@ pub fn build_context_package_with_checkpoint(
         workflow_revision,
         artifact_count: workflow.artifacts.len(),
         lineage,
+        operating_context,
+        memory_policy,
         persona,
         persona_profile,
         persona_contract,
@@ -2171,6 +2242,10 @@ fn prompt_packet_instruction_sources(persona: Option<&PersonaRoutingSpec>) -> Ve
     let mut sources = BTreeSet::from([
         "forge_context_router".to_string(),
         "forge_executor_policy".to_string(),
+        "forge_operating_context".to_string(),
+        "forge_brand_identity".to_string(),
+        "forge_design_system".to_string(),
+        "forge_operating_policy".to_string(),
     ]);
 
     if let Some(persona) = persona {
@@ -3100,6 +3175,9 @@ fn build_lineage(input: ContextLineageInput<'_>) -> Result<ContextLineage> {
         task_goal_sha256: hex_sha256(input.task_goal.as_bytes()),
         artifact_manifest_sha256: hex_sha256(input.artifact_manifest.as_bytes()),
         artifact_count: input.workflow.artifacts.len(),
+        operating_context_sha256: hex_sha256(
+            serde_json::to_string(&input.workflow.intent.operating_context)?.as_bytes(),
+        ),
         persona_mode_sha256: hex_sha256(persona_mode.as_bytes()),
         persona_profile_sha256: input.persona_profile_sha256.to_string(),
         persona_scope,
@@ -3112,6 +3190,7 @@ fn build_lineage(input: ContextLineageInput<'_>) -> Result<ContextLineage> {
         task_goal_sha256: seed.task_goal_sha256,
         artifact_manifest_sha256: seed.artifact_manifest_sha256,
         artifact_count: seed.artifact_count,
+        operating_context_sha256: seed.operating_context_sha256,
         persona_mode_sha256: seed.persona_mode_sha256,
         persona_profile_sha256: seed.persona_profile_sha256,
         persona_scope: seed.persona_scope,
@@ -3120,7 +3199,10 @@ fn build_lineage(input: ContextLineageInput<'_>) -> Result<ContextLineage> {
     })
 }
 
-fn build_persona_profile(persona: &PersonaRoutingSpec) -> Result<ContextPersonaProfile> {
+fn build_persona_profile(
+    persona: &PersonaRoutingSpec,
+    operating_context: &OperatingContextSpec,
+) -> Result<ContextPersonaProfile> {
     let source_model_summaries = persona
         .source_models
         .iter()
@@ -3128,6 +3210,7 @@ fn build_persona_profile(persona: &PersonaRoutingSpec) -> Result<ContextPersonaP
         .collect::<Vec<_>>();
     let profile_id = persona_profile_id(&persona.mode);
     let routing_rationale = persona_routing_rationale(persona);
+    let operating_policy = operating_policy_summary(operating_context);
     let seed = ContextPersonaProfileSeed {
         schema_version: PERSONA_PROFILE_SCHEMA_VERSION,
         profile_id: profile_id.clone(),
@@ -3136,6 +3219,11 @@ fn build_persona_profile(persona: &PersonaRoutingSpec) -> Result<ContextPersonaP
         instruction_source: persona.instruction_source.clone(),
         voice: persona.voice.clone(),
         tone: persona.tone.clone(),
+        brand_voice: operating_context.brand_identity.voice.clone(),
+        brand_tone: operating_context.brand_identity.tone.clone(),
+        brand_values: operating_context.brand_identity.values.clone(),
+        design_token_source: operating_context.design_system.token_source.clone(),
+        operating_policy: operating_policy.clone(),
         validation_gate: persona.validation_gate.clone(),
         routing_rationale: routing_rationale.clone(),
         source_model_summaries: source_model_summaries.clone(),
@@ -3151,6 +3239,11 @@ fn build_persona_profile(persona: &PersonaRoutingSpec) -> Result<ContextPersonaP
         instruction_source: persona.instruction_source.clone(),
         voice: persona.voice.clone(),
         tone: persona.tone.clone(),
+        brand_voice: operating_context.brand_identity.voice.clone(),
+        brand_tone: operating_context.brand_identity.tone.clone(),
+        brand_values: operating_context.brand_identity.values.clone(),
+        design_token_source: operating_context.design_system.token_source.clone(),
+        operating_policy,
         validation_gate: persona.validation_gate.clone(),
         routing_rationale,
         source_model_summaries,
@@ -3212,6 +3305,11 @@ fn build_persona_contract(
         instruction_source: persona.instruction_source.clone(),
         voice: persona.voice.clone(),
         tone: persona.tone.clone(),
+        brand_voice: profile.brand_voice.clone(),
+        brand_tone: profile.brand_tone.clone(),
+        brand_values: profile.brand_values.clone(),
+        design_token_source: profile.design_token_source.clone(),
+        operating_policy: profile.operating_policy.clone(),
         validation_gate: persona.validation_gate.clone(),
         routing_rationale: profile.routing_rationale.clone(),
         source_models: persona.source_models.clone(),
@@ -3225,19 +3323,240 @@ fn build_persona_contract(
 
 fn render_persona_context(persona: &PersonaRoutingSpec, profile: &ContextPersonaProfile) -> String {
     format!(
-        "Persona mode: {}\nPersona profile: {}\nPersona scope: {}\nInstruction source: {}\nVoice: {}\nTone: {}\nValidation gate: {}\nRouting rationale: {}\nSource models: {}\nPersona profile sha256: {}\nAuditable: {}\n",
+        "Persona mode: {}\nPersona profile: {}\nPersona scope: {}\nInstruction source: {}\nVoice: {}\nTone: {}\nBrand voice: {}\nBrand tone: {}\nBrand values: {}\nDesign token source: {}\nOperating policy: {}\nValidation gate: {}\nRouting rationale: {}\nSource models: {}\nPersona profile sha256: {}\nAuditable: {}\n",
         persona.mode,
         profile.profile_id,
         persona.scope,
         persona.instruction_source,
         persona.voice,
         persona.tone,
+        profile.brand_voice,
+        profile.brand_tone,
+        join_or_none(&profile.brand_values),
+        profile.design_token_source,
+        profile.operating_policy,
         persona.validation_gate,
         profile.routing_rationale,
         persona.source_models.join(", "),
         profile.profile_sha256,
         persona.auditable
     )
+}
+
+fn render_operating_context_context(context: &OperatingContextSpec) -> String {
+    format!(
+        "Operating context: o={} b={} p={} u={} c={} t={}\nBrand voice: {}; tone={}\nPolicy: data={} visibility={} approval={}\n",
+        context.organization.id,
+        context.brand.id,
+        context.product.id,
+        context.user.id,
+        context.channel.id,
+        context.tenant_policy_mode,
+        context.brand_identity.voice,
+        context.brand_identity.tone,
+        context.operating_policy.data_classification,
+        context.operating_policy.memory_visibility,
+        context.operating_policy.approval_policy,
+    )
+}
+
+fn build_context_memory_policy(
+    workflow: &Workflow,
+    task: &AtomicTask,
+    context: &OperatingContextSpec,
+) -> ContextMemoryPolicy {
+    let memory_level = memory_level_for_operating_scope(&context.memory_scope);
+    let allowed_scopes = allowed_memory_scopes_for_context(&context.memory_scope, &memory_level);
+    let default_audience = default_memory_audience(context);
+    let default_shareability = default_memory_shareability(&allowed_scopes);
+    let mut default_search_command = vec![
+        "forge".to_string(),
+        "memory".to_string(),
+        "search".to_string(),
+        "--query".to_string(),
+        "<query>".to_string(),
+        "--workflow".to_string(),
+        workflow.id.clone(),
+        "--memory-level".to_string(),
+        memory_level.clone(),
+    ];
+    for scope in &allowed_scopes {
+        default_search_command.push("--scope".to_string());
+        default_search_command.push(scope.clone());
+    }
+    if allowed_scopes.iter().any(|scope| scope == "organization") {
+        default_search_command.push("--organization".to_string());
+        default_search_command.push(context.organization.id.clone());
+    }
+    default_search_command.push("--audience".to_string());
+    default_search_command.push(default_audience.clone());
+    default_search_command.push("--output".to_string());
+    default_search_command.push("json".to_string());
+
+    ContextMemoryPolicy {
+        schema_version: CONTEXT_MEMORY_POLICY_SCHEMA_VERSION.to_string(),
+        source: format!(
+            "workflow:{} task:{} operating_context",
+            workflow.id, task.id
+        ),
+        memory_source: "forge_memory_router".to_string(),
+        memory_scope: context.memory_scope.clone(),
+        memory_level,
+        allowed_scopes,
+        default_audience,
+        default_shareability,
+        visibility: context.operating_policy.memory_visibility.clone(),
+        data_classification: context.operating_policy.data_classification.clone(),
+        sharing_policy: context.operating_policy.sharing_policy.clone(),
+        tenant_policy_mode: context.tenant_policy_mode.clone(),
+        tenant_boundary: ContextMemoryTenantBoundary {
+            organization_id: context.organization.id.clone(),
+            brand_id: context.brand.id.clone(),
+            product_id: context.product.id.clone(),
+            user_id: context.user.id.clone(),
+            channel_id: context.channel.id.clone(),
+        },
+        requires_explicit_search: true,
+        inline_memory_allowed: false,
+        default_search_command,
+        mcp_tool: "forge.memory.search".to_string(),
+        promotion_policy:
+            "processing memory must be explicitly classified before promotion to project, organization or global memory"
+                .to_string(),
+        processing_retention:
+            "processing memory is run-lived scratch and can be deleted after final packaging unless promoted with evidence"
+                .to_string(),
+    }
+}
+
+fn memory_level_for_operating_scope(memory_scope: &str) -> String {
+    let normalized = memory_scope.trim().to_ascii_lowercase().replace('-', "_");
+    if normalized.contains("none") || normalized.contains("disabled") {
+        "none".to_string()
+    } else if normalized.contains("admin") {
+        "admin".to_string()
+    } else if normalized.contains("full") {
+        "full".to_string()
+    } else if (normalized.contains("session")
+        || normalized.contains("processing")
+        || normalized.contains("run")
+        || normalized.contains("thread"))
+        && !normalized.contains("project")
+        && !normalized.contains("organization")
+        && !normalized.contains("tenant")
+        && !normalized.contains("global")
+    {
+        "session".to_string()
+    } else if normalized.contains("project")
+        && !normalized.contains("organization")
+        && !normalized.contains("tenant")
+        && !normalized.contains("global")
+    {
+        "short_term".to_string()
+    } else {
+        "standard".to_string()
+    }
+}
+
+fn allowed_memory_scopes_for_context(memory_scope: &str, memory_level: &str) -> Vec<String> {
+    let normalized = memory_scope.trim().to_ascii_lowercase().replace('-', "_");
+    let mut scopes = Vec::new();
+    if normalized.contains("none") || normalized.contains("disabled") || memory_level == "none" {
+        return scopes;
+    }
+    if normalized.contains("global") {
+        push_memory_scope(&mut scopes, "global");
+    }
+    if normalized.contains("organization") || normalized.contains("tenant") || normalized == "org" {
+        push_memory_scope(&mut scopes, "organization");
+    }
+    if normalized.contains("project") {
+        push_memory_scope(&mut scopes, "project");
+    }
+    if normalized.contains("session")
+        || normalized.contains("processing")
+        || normalized.contains("run")
+        || normalized.contains("thread")
+    {
+        push_memory_scope(&mut scopes, "processing");
+    }
+    if scopes.is_empty() {
+        scopes.extend([
+            "organization".to_string(),
+            "project".to_string(),
+            "processing".to_string(),
+        ]);
+    }
+
+    let allowed_by_level = match memory_level {
+        "session" => vec!["processing"],
+        "short_term" => vec!["project", "processing"],
+        _ => vec!["global", "organization", "project", "processing"],
+    };
+    scopes
+        .into_iter()
+        .filter(|scope| allowed_by_level.contains(&scope.as_str()))
+        .collect()
+}
+
+fn push_memory_scope(scopes: &mut Vec<String>, scope: &str) {
+    if !scopes.iter().any(|existing| existing == scope) {
+        scopes.push(scope.to_string());
+    }
+}
+
+fn default_memory_audience(context: &OperatingContextSpec) -> String {
+    let classification = context
+        .operating_policy
+        .data_classification
+        .trim()
+        .to_ascii_lowercase();
+    let visibility = context
+        .operating_policy
+        .memory_visibility
+        .trim()
+        .to_ascii_lowercase();
+    if classification.contains("private")
+        || classification.contains("confidential")
+        || classification.contains("restricted")
+        || visibility.contains("private")
+    {
+        "private".to_string()
+    } else if visibility.contains("public") {
+        "public".to_string()
+    } else {
+        "internal".to_string()
+    }
+}
+
+fn default_memory_shareability(scopes: &[String]) -> String {
+    if scopes.iter().any(|scope| scope == "organization") {
+        "organization_shared".to_string()
+    } else if scopes.iter().any(|scope| scope == "project") {
+        "project_shared".to_string()
+    } else if scopes.iter().any(|scope| scope == "global") {
+        "global_shared".to_string()
+    } else {
+        "non_shareable".to_string()
+    }
+}
+
+fn operating_policy_summary(context: &OperatingContextSpec) -> String {
+    format!(
+        "data_classification={}; memory_visibility={}; sharing_policy={}; approval_policy={}",
+        context.operating_policy.data_classification,
+        context.operating_policy.memory_visibility,
+        context.operating_policy.sharing_policy,
+        context.operating_policy.approval_policy
+    )
+}
+
+fn join_or_none(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values.join(", ")
+    }
 }
 
 fn render_execution_policy_context(policy: &ExecutionPolicySpec) -> String {
@@ -3435,6 +3754,29 @@ fn compress_shard(candidate: &ContextShardCandidate, summary: &str) -> String {
             .find(|line| line.starts_with("- "))
             .unwrap_or("No artifact path selected");
         return format!("[compressed artifacts]\n{header}\n{first_artifact}\n");
+    }
+
+    if candidate.section == "dependencies" {
+        let first_dependency = candidate
+            .content
+            .lines()
+            .find(|line| line.starts_with("- "))
+            .unwrap_or("No dependency detail selected");
+        return format!("[compressed dependencies]\n{summary}\n{first_dependency}\n");
+    }
+
+    if candidate.section == "persona_routing" {
+        let mode = candidate
+            .content
+            .lines()
+            .find(|line| line.starts_with("Persona mode:"))
+            .unwrap_or(summary);
+        let profile = candidate
+            .content
+            .lines()
+            .find(|line| line.starts_with("Persona profile:"))
+            .unwrap_or("Persona profile: unknown");
+        return format!("[compressed persona_routing]\n{mode}\n{profile}\n");
     }
 
     format!("[compressed {}]\n{}\n", candidate.section, summary)
