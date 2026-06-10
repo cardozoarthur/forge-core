@@ -1,5 +1,7 @@
 use crate::artifact::write_json_artifact;
-use crate::event::{build_event_improvement_policy, EventImprovementRecommendation};
+use crate::event::{
+    build_event_improvement_policy, build_event_observability, EventImprovementRecommendation,
+};
 use crate::graph::{
     AsyncPolicy, AtomicTask, ExecutionPolicySpec, ExecutorKind, TaskStatus, ValidationRule,
     Workflow, WorkflowRevision,
@@ -1604,25 +1606,17 @@ pub fn apply_event_improvement_policy(
     let mut proposed_changes = Vec::new();
     let mut rollback_changes = Vec::new();
 
-    if let Some(node_ref) = recommendation.node_ref.as_deref() {
-        if let Some(task) = workflow.tasks.iter_mut().find(|task| task.id == node_ref) {
+    let target_task_ids = event_policy_target_task_ids(store, &workflow, &recommendation)?;
+    for target_task_id in target_task_ids {
+        if let Some(task) = workflow
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == target_task_id)
+        {
             let previous_task = task.clone();
             let mut proposed_task = task.clone();
             let changed_fields =
                 apply_event_policy_recommendation_to_task(&mut proposed_task, &recommendation);
-            if changed_fields.is_empty()
-                && recommendation.recommended_policy == "prefer_deterministic_node"
-            {
-                return Ok(event_policy_noop_report(
-                    workflow,
-                    origin,
-                    apply,
-                    approved_by,
-                    recommendation,
-                    "event_policy_application_already_applied",
-                    "event_policy_application_noop",
-                ));
-            }
             if !changed_fields.is_empty() {
                 proposed_task.version = previous_task.version + 1;
                 proposed_changes.push(event_policy_proposed_change(
@@ -1640,6 +1634,17 @@ pub fn apply_event_improvement_policy(
     }
 
     if proposed_changes.is_empty() {
+        if recommendation.recommended_policy == "prefer_deterministic_node" {
+            return Ok(event_policy_noop_report(
+                workflow,
+                origin,
+                apply,
+                approved_by,
+                recommendation,
+                "event_policy_application_already_applied",
+                "event_policy_application_noop",
+            ));
+        }
         let validation = validate_workflow(&workflow);
         let revision = workflow
             .revisions
@@ -2128,6 +2133,64 @@ fn select_event_policy_recommendation(
                     .is_none_or(|policy| recommendation.recommended_policy == policy)
         })
         .cloned()
+}
+
+fn event_policy_target_task_ids(
+    store: &ForgeStore,
+    workflow: &Workflow,
+    recommendation: &EventImprovementRecommendation,
+) -> Result<Vec<String>> {
+    let known_task_ids = workflow
+        .tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut targets = BTreeSet::new();
+    match recommendation.scope.as_str() {
+        "node" => {
+            if let Some(node_ref) = recommendation.node_ref.as_deref() {
+                if known_task_ids.contains(node_ref) {
+                    targets.insert(node_ref.to_string());
+                }
+            }
+        }
+        "addon" => {
+            if let Some(addon_id) = recommendation.addon_id.as_deref() {
+                for event in store.load_global_events()? {
+                    if event.workflow_id.as_deref() != Some(workflow.id.as_str()) {
+                        continue;
+                    }
+                    let observability = build_event_observability(&event.kind, &event.data);
+                    if observability.addon_id.as_deref() != Some(addon_id) {
+                        continue;
+                    }
+                    if let Some(node_ref) = observability.node_ref.as_deref() {
+                        if known_task_ids.contains(node_ref) {
+                            targets.insert(node_ref.to_string());
+                        }
+                    }
+                }
+            }
+            if targets.is_empty() {
+                if let Some(node_ref) = recommendation.node_ref.as_deref() {
+                    if known_task_ids.contains(node_ref) {
+                        targets.insert(node_ref.to_string());
+                    }
+                }
+            }
+        }
+        "workflow" => {
+            targets.extend(workflow.tasks.iter().map(|task| task.id.clone()));
+        }
+        _ => {
+            if let Some(node_ref) = recommendation.node_ref.as_deref() {
+                if known_task_ids.contains(node_ref) {
+                    targets.insert(node_ref.to_string());
+                }
+            }
+        }
+    }
+    Ok(targets.into_iter().collect())
 }
 
 fn select_event_policy_application_event<'a>(
@@ -3129,11 +3192,7 @@ pub fn generate_improvement(
     ];
     if event_improvement_policy.recommendation_count > 0 {
         for recommendation in &event_improvement_policy.recommendations {
-            let target = recommendation
-                .node_ref
-                .as_deref()
-                .or(recommendation.addon_id.as_deref())
-                .unwrap_or("_workflow");
+            let target = event_policy_recommendation_target_label(recommendation);
             candidate_changes.push(format!(
                 "evaluate event policy `{}` for {} `{}` with controlled benchmark evidence before changing runtime behavior",
                 recommendation.recommended_policy, recommendation.scope, target
@@ -3276,11 +3335,7 @@ fn render_event_policy_changelog_section(
         .recommendations
         .iter()
         .map(|recommendation| {
-            let target = recommendation
-                .node_ref
-                .as_deref()
-                .or(recommendation.addon_id.as_deref())
-                .unwrap_or("_workflow");
+            let target = event_policy_recommendation_target_label(recommendation);
             format!(
                 "- `{}` for {} `{}`: {}",
                 recommendation.recommended_policy,
@@ -3297,4 +3352,19 @@ fn render_event_policy_changelog_section(
         event_improvement_policy.recommendation_count,
         recommendations
     )
+}
+
+fn event_policy_recommendation_target_label(
+    recommendation: &EventImprovementRecommendation,
+) -> &str {
+    match recommendation.scope.as_str() {
+        "node" => recommendation.node_ref.as_deref().unwrap_or("_node"),
+        "addon" => recommendation.addon_id.as_deref().unwrap_or("_addon"),
+        "workflow" => "_workflow",
+        _ => recommendation
+            .node_ref
+            .as_deref()
+            .or(recommendation.addon_id.as_deref())
+            .unwrap_or("_workflow"),
+    }
 }

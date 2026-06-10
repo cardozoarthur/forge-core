@@ -8195,6 +8195,324 @@ fn improve_apply_event_policy_covers_retry_context_and_wait_policies() {
 }
 
 #[test]
+fn improve_apply_event_policy_applies_addon_scope_to_all_observed_nodes() {
+    use forge_core::graph::{self, ExecutorKind};
+    use forge_core::intent;
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(intent::parse_intent(
+        "Apply addon scoped event policy to every observed node",
+    ));
+    workflow.tasks = vec![
+        graph::task(
+            "task-import",
+            "Import partner invoices",
+            &[],
+            &["invoice source"],
+            vec![],
+            "imported invoice data",
+            (ExecutorKind::Ai, 1.5),
+        ),
+        graph::task(
+            "task-reconcile",
+            "Reconcile partner invoices",
+            &["task-import"],
+            &["invoice source"],
+            vec![],
+            "reconciled invoice data",
+            (ExecutorKind::Ai, 1.5),
+        ),
+    ];
+    store.save_workflow(&workflow).unwrap();
+    {
+        let connection = Connection::open(&store_path).unwrap();
+        for (index, node_id) in ["task-import", "task-reconcile", "task-import"]
+            .iter()
+            .enumerate()
+        {
+            let source_id = format!("event-policy-addon-scope-{index}");
+            let created_at = format!("2026-06-10T15:{:02}:00Z", index * 5);
+            let data = serde_json::json!({
+                "node_id": node_id,
+                "addon_id": "forge.addon.billing",
+                "duration_ms": 100,
+                "retry_count": 0,
+                "wait_seconds": 1,
+                "context": {
+                    "effective_budget": 1000,
+                    "routing_summary": {
+                        "selected_bytes": 960 + index,
+                        "remaining_budget": 40 - index
+                    },
+                    "memory_policy": {
+                        "memory_level": "standard",
+                        "memory_scope": "organization"
+                    }
+                }
+            });
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO global_events (
+                        source, source_id, workflow_id, kind, origin, status,
+                        organization_id, brand_id, product_id, user_id, channel_id,
+                        tenant_context_json, data_json, created_at
+                    )
+                    VALUES (
+                        'event_policy_addon_scope_seed', ?1, ?2, 'ai_executor_completed', 'codex', 'recorded',
+                        'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
+                        '{}', ?3, ?4
+                    )
+                    "#,
+                    rusqlite::params![source_id, workflow.id, data.to_string(), created_at],
+                )
+                .unwrap();
+        }
+    }
+
+    let recommendation_id = format!(
+        "event_policy:context_pressure_hotspot:{}:addon:forge.addon.billing",
+        workflow.id
+    );
+    let plan_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "apply-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--recommendation",
+            &recommendation_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    assert_eq!(plan["status"], "event_policy_application_planned");
+    assert_eq!(plan["recommendation"]["scope"], "addon");
+    assert_eq!(plan["recommendation"]["addon_id"], "forge.addon.billing");
+    assert_eq!(plan["proposed_change_count"], 2);
+    let proposed_tasks = plan["proposed_changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|change| change["task_id"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(proposed_tasks.contains(&"task-import".to_string()));
+    assert!(proposed_tasks.contains(&"task-reconcile".to_string()));
+    assert_eq!(plan["rollback_plan"]["rollback_change_count"], 2);
+
+    let applied_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "apply-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--recommendation",
+            &recommendation_id,
+            "--apply",
+            "--approved-by",
+            "codex-test",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let applied: Value = serde_json::from_slice(&applied_output).unwrap();
+    assert_eq!(applied["status"], "event_policy_application_applied");
+    assert_eq!(applied["proposed_change_count"], 2);
+    assert_eq!(applied["revision"], 1);
+
+    let updated = ForgeStore::open(&store_path)
+        .unwrap()
+        .load_workflow(&workflow.id)
+        .unwrap();
+    assert_eq!(updated.revisions.len(), 1);
+    for task in updated.tasks {
+        assert_eq!(
+            task.execution_policy.reuse_hint,
+            "event_policy_context_cache"
+        );
+        assert!(task
+            .context_requirements
+            .iter()
+            .any(|requirement| requirement.starts_with("event_policy_context_routing:")));
+    }
+}
+
+#[test]
+fn improve_apply_event_policy_applies_workflow_scope_to_all_workflow_nodes() {
+    use forge_core::graph::{self, ExecutorKind};
+    use forge_core::intent;
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(intent::parse_intent(
+        "Apply workflow scoped event policy to every workflow node",
+    ));
+    workflow.tasks = vec![
+        graph::task(
+            "task-discover",
+            "Discover operational events",
+            &[],
+            &["event stream"],
+            vec![],
+            "discovered operational events",
+            (ExecutorKind::Ai, 1.5),
+        ),
+        graph::task(
+            "task-plan",
+            "Plan operational repair",
+            &["task-discover"],
+            &["event stream"],
+            vec![],
+            "repair plan",
+            (ExecutorKind::Ai, 1.5),
+        ),
+        graph::task(
+            "task-verify",
+            "Verify operational repair",
+            &["task-plan"],
+            &["event stream"],
+            vec![],
+            "verified repair",
+            (ExecutorKind::Ai, 1.5),
+        ),
+    ];
+    store.save_workflow(&workflow).unwrap();
+    {
+        let connection = Connection::open(&store_path).unwrap();
+        for index in 0..3 {
+            let source_id = format!("event-policy-workflow-scope-{index}");
+            let created_at = format!("2026-06-10T16:{:02}:00Z", index * 5);
+            let data = serde_json::json!({
+                "node_id": "task-discover",
+                "addon_id": "forge.addon.operations",
+                "duration_ms": 100,
+                "retry_count": 0,
+                "wait_seconds": 1,
+                "context": {
+                    "effective_budget": 1000,
+                    "routing_summary": {
+                        "selected_bytes": 970 + index,
+                        "remaining_budget": 30 - index
+                    },
+                    "memory_policy": {
+                        "memory_level": "standard",
+                        "memory_scope": "organization"
+                    }
+                }
+            });
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO global_events (
+                        source, source_id, workflow_id, kind, origin, status,
+                        organization_id, brand_id, product_id, user_id, channel_id,
+                        tenant_context_json, data_json, created_at
+                    )
+                    VALUES (
+                        'event_policy_workflow_scope_seed', ?1, ?2, 'ai_executor_completed', 'codex', 'recorded',
+                        'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
+                        '{}', ?3, ?4
+                    )
+                    "#,
+                    rusqlite::params![source_id, workflow.id, data.to_string(), created_at],
+                )
+                .unwrap();
+        }
+    }
+
+    let recommendation_id = format!(
+        "event_policy:context_pressure_hotspot:{}:workflow:_workflow",
+        workflow.id
+    );
+    let plan_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "apply-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--recommendation",
+            &recommendation_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    assert_eq!(plan["status"], "event_policy_application_planned");
+    assert_eq!(plan["recommendation"]["scope"], "workflow");
+    assert_eq!(plan["recommendation"]["workflow_id"], workflow.id);
+    assert_eq!(plan["proposed_change_count"], 3);
+    assert_eq!(plan["rollback_plan"]["rollback_change_count"], 3);
+
+    let applied_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "apply-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--recommendation",
+            &recommendation_id,
+            "--apply",
+            "--approved-by",
+            "codex-test",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let applied: Value = serde_json::from_slice(&applied_output).unwrap();
+    assert_eq!(applied["status"], "event_policy_application_applied");
+    assert_eq!(applied["proposed_change_count"], 3);
+    assert_eq!(applied["revision"], 1);
+
+    let updated = ForgeStore::open(&store_path)
+        .unwrap()
+        .load_workflow(&workflow.id)
+        .unwrap();
+    assert_eq!(updated.revisions.len(), 1);
+    for task in updated.tasks {
+        assert_eq!(
+            task.execution_policy.reuse_hint,
+            "event_policy_context_cache"
+        );
+        assert!(task
+            .context_requirements
+            .iter()
+            .any(|requirement| requirement.starts_with("event_policy_context_routing:")));
+    }
+}
+
+#[test]
 fn improve_benchmark_event_policy_validates_equivalence_before_promotion() {
     use forge_core::graph::{self, ExecutorKind, TaskStatus};
     use forge_core::intent;

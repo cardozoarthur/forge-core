@@ -31,7 +31,7 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 8. Use `forge memory policy --output json` and `forge memory search --workflow <workflow-id> --query "<query>" --memory-level none|session|short_term|standard|full|admin --scope global|organization|project|processing --organization <organization-id> --audience public|internal|manager|private --output json` before loading broad historical context. Forge memory is file-first, level-scoped, workflow/tenant-bound when a workflow is supplied, and visibility-gated; search returns snippets and line ranges, not whole files.
 9. Run `forge validate --workflow <id> --output json` before promotion. If `rework_tasks` is not empty, return those tasks to work.
 10. Run `forge improve candidates --output json` or `forge.improve.candidates` before choosing a workflow to mutate; use its run/event/outcome/parallelization/cost evidence to decide whether to recover a stale run, parallelize ready handoffs, replace avoidable AI work with command nodes, or generate a controlled experiment.
-11. Run `forge improve --workflow <id> --target-version <version> --output json` only to generate a controlled experiment and changelog. Use `forge improve apply-event-policy --workflow <id> --policy <policy> --apply --approved-by <operator> --output json` only for approved event-policy revisions, then `forge improve benchmark-event-policy --workflow <id> --policy <policy> --output json` to validate rollback, equivalence and workflow validation evidence, and only then `forge improve promote-event-policy --workflow <id> --policy <policy> --approved-by <operator> --output json` to record governed acceptance. Do not auto-promote without benchmark, validation and explicit approval evidence.
+11. Run `forge improve --workflow <id> --target-version <version> --output json` only to generate a controlled experiment and changelog. Use `forge improve apply-event-policy --workflow <id> --policy <policy> --apply --approved-by <operator> --output json` or `--recommendation <recommendation-id>` only for approved event-policy revisions; recommendations may target node, Addon or workflow scope. Then run `forge improve benchmark-event-policy --workflow <id> --policy <policy> --output json` to validate rollback, equivalence and workflow validation evidence, and only then `forge improve promote-event-policy --workflow <id> --policy <policy> --approved-by <operator> --output json` to record governed acceptance. Do not auto-promote without benchmark, validation and explicit approval evidence.
 12. Run `forge milestone status --version 0.5 --output json` and `forge milestone manifest --version 0.5 --output json` before claiming Forge 0.5 creative-runtime readiness; planned or groundwork capabilities block promotion.
 
 ## MCP Agent Surface
@@ -113,7 +113,9 @@ forge request recover-stale --run <run-id> --origin codex --output json
 forge ops snapshot --output json
 forge ops serve --host 127.0.0.1 --port 8765
 forge improve candidates --output json
+forge events improvement-policy --workflow <workflow-id> --output json
 forge improve apply-event-policy --workflow <workflow-id> --policy prefer_deterministic_node --apply --approved-by <operator> --output json
+forge improve apply-event-policy --workflow <workflow-id> --recommendation <recommendation-id> --apply --approved-by <operator> --output json
 forge improve benchmark-event-policy --workflow <workflow-id> --policy prefer_deterministic_node --output json
 forge improve promote-event-policy --workflow <workflow-id> --policy prefer_deterministic_node --approved-by <operator> --output json
 forge mcp tools --output json

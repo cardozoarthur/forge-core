@@ -2009,6 +2009,9 @@ fn build_event_improvement_recommendations(
     recommendations.extend(build_scoped_event_improvement_recommendations(
         records, thresholds, "addon",
     ));
+    recommendations.extend(build_scoped_event_improvement_recommendations(
+        records, thresholds, "workflow",
+    ));
     recommendations
 }
 
@@ -2032,6 +2035,7 @@ fn build_scoped_event_improvement_recommendations(
                 };
                 format!("{}|{}", record.workflow_id, addon_id)
             }
+            "workflow" => record.workflow_id.clone(),
             _ => continue,
         };
         let bucket = buckets.entry(key).or_default();
@@ -2150,11 +2154,7 @@ fn event_improvement_recommendation(
     recommended_action: &str,
 ) -> EventImprovementRecommendation {
     let priority = event_improvement_priority(bucket, thresholds, kind);
-    let target = bucket
-        .node_ref
-        .as_deref()
-        .or(bucket.addon_id.as_deref())
-        .unwrap_or("_workflow");
+    let target = event_improvement_bucket_target(bucket);
     EventImprovementRecommendation {
         id: format!(
             "event_policy:{}:{}:{}:{}",
@@ -2225,11 +2225,7 @@ fn event_improvement_reason(
     thresholds: &EventImprovementPolicyThresholds,
     kind: &str,
 ) -> String {
-    let target = bucket
-        .node_ref
-        .as_deref()
-        .or(bucket.addon_id.as_deref())
-        .unwrap_or("_workflow");
+    let target = event_improvement_bucket_target(bucket);
     match kind {
         "deterministic_node_candidate" => format!(
             "{target} teve {} eventos, {} ms acumulados e {} sinais de executor/IA; limite mínimo: {} eventos e {} ms.",
@@ -2256,6 +2252,19 @@ fn event_improvement_reason(
     }
 }
 
+fn event_improvement_bucket_target(bucket: &EventImprovementPolicyBucket) -> &str {
+    match bucket.scope.as_str() {
+        "node" => bucket.node_ref.as_deref().unwrap_or("_node"),
+        "addon" => bucket.addon_id.as_deref().unwrap_or("_addon"),
+        "workflow" => "_workflow",
+        _ => bucket
+            .node_ref
+            .as_deref()
+            .or(bucket.addon_id.as_deref())
+            .unwrap_or("_workflow"),
+    }
+}
+
 fn event_improvement_suggested_commands(
     bucket: &EventImprovementPolicyBucket,
     recommended_policy: &str,
@@ -2269,32 +2278,37 @@ fn event_improvement_suggested_commands(
         "--output".to_string(),
         "json".to_string(),
     ]];
-    if let Some(node_ref) = bucket.node_ref.as_deref() {
-        commands[0].push("--node".to_string());
-        commands[0].push(node_ref.to_string());
-    }
-    if let Some(addon_id) = bucket.addon_id.as_deref() {
-        commands[0].push("--addon".to_string());
-        commands[0].push(addon_id.to_string());
-    }
-    if recommended_policy == "prefer_deterministic_node" {
+    if bucket.scope == "node" {
         if let Some(node_ref) = bucket.node_ref.as_deref() {
-            commands.push(vec![
-                "forge".to_string(),
-                "workflow".to_string(),
-                "update-node-brain".to_string(),
-                "--workflow".to_string(),
-                bucket.workflow_id.clone(),
-                "--task".to_string(),
-                node_ref.to_string(),
-                "--default-brain".to_string(),
-                "command".to_string(),
-                "--origin".to_string(),
-                "event_improvement_policy".to_string(),
-                "--output".to_string(),
-                "json".to_string(),
-            ]);
+            commands[0].push("--node".to_string());
+            commands[0].push(node_ref.to_string());
         }
+    }
+    if matches!(bucket.scope.as_str(), "node" | "addon") {
+        if let Some(addon_id) = bucket.addon_id.as_deref() {
+            commands[0].push("--addon".to_string());
+            commands[0].push(addon_id.to_string());
+        }
+    }
+    if recommended_policy == "prefer_deterministic_node" && bucket.scope == "node" {
+        let Some(node_ref) = bucket.node_ref.as_deref() else {
+            return commands;
+        };
+        commands.push(vec![
+            "forge".to_string(),
+            "workflow".to_string(),
+            "update-node-brain".to_string(),
+            "--workflow".to_string(),
+            bucket.workflow_id.clone(),
+            "--task".to_string(),
+            node_ref.to_string(),
+            "--default-brain".to_string(),
+            "command".to_string(),
+            "--origin".to_string(),
+            "event_improvement_policy".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]);
     }
     commands
 }
