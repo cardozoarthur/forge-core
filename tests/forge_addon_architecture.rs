@@ -2793,6 +2793,158 @@ fn event_observability_index_backfills_existing_global_events_on_migration() {
 }
 
 #[test]
+fn event_observability_history_rolls_up_time_buckets_for_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    {
+        let _store_handle = ForgeStore::open(&store).unwrap();
+    }
+    {
+        let connection = Connection::open(&store).unwrap();
+        connection
+            .execute_batch(
+                r#"
+                INSERT INTO global_events (
+                    source, source_id, workflow_id, kind, origin, status,
+                    organization_id, brand_id, product_id, user_id, channel_id,
+                    tenant_context_json, data_json, created_at
+                )
+                VALUES
+                (
+                    'history_seed', 'hist-001', 'wf_history',
+                    'task_observability_sampled', 'history_test', 'recorded',
+                    'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
+                    '{}',
+                    '{"node_id":"node-stock","addon_id":"forge.addon.inventory","duration_ms":120,"retry_count":0,"wait_seconds":5,"context":{"effective_budget":1000,"routing_summary":{"selected_bytes":500,"remaining_budget":500},"memory_policy":{"memory_level":"standard","memory_scope":"project"}}}',
+                    '2026-06-09T10:15:00Z'
+                ),
+                (
+                    'history_seed', 'hist-002', 'wf_history',
+                    'task_observability_sampled', 'history_test', 'recorded',
+                    'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
+                    '{}',
+                    '{"node_id":"node-stock","addon_id":"forge.addon.inventory","duration_ms":180,"retry_count":1,"wait_seconds":7,"context":{"effective_budget":1000,"routing_summary":{"selected_bytes":850,"remaining_budget":150},"memory_policy":{"memory_level":"standard","memory_scope":"project"}}}',
+                    '2026-06-10T11:20:00Z'
+                ),
+                (
+                    'history_seed', 'hist-003', 'wf_history',
+                    'task_observability_sampled', 'history_test', 'recorded',
+                    'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
+                    '{}',
+                    '{"node_id":"node-payment","addon_id":"forge.addon.payment","duration_ms":75,"retry_count":2,"wait_seconds":3,"context":{"effective_budget":800,"routing_summary":{"selected_bytes":760,"remaining_budget":40},"memory_policy":{"memory_level":"short_term","memory_scope":"organization"}}}',
+                    '2026-06-10T12:25:00Z'
+                );
+                "#,
+            )
+            .unwrap();
+    }
+    let _store_handle = ForgeStore::open(&store).unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "observability-history",
+            "--organization",
+            "org-demo",
+            "--bucket",
+            "day",
+            "--group-by",
+            "addon",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.event_observability_history.v1"
+    );
+    assert_eq!(json["status"], "event_observability_history_loaded");
+    assert_eq!(json["index_source"], "sqlite_materialized");
+    assert_eq!(json["filters"]["bucket"], "day");
+    assert_eq!(json["filters"]["group_by"], "addon");
+    assert_eq!(json["summary"]["total_event_count"], 3);
+    assert_eq!(json["summary"]["total_duration_ms"], 375);
+    assert_eq!(json["summary"]["total_wait_seconds"], 15);
+    assert_eq!(json["summary"]["max_context_pressure_bps"], 9500);
+    assert_eq!(json["bucket_count"], 3);
+
+    let buckets = json["buckets"].as_array().unwrap();
+    let inventory_first_day = buckets
+        .iter()
+        .find(|bucket| {
+            bucket["group_id"] == "forge.addon.inventory"
+                && bucket["bucket_start"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("2026-06-09T00:00:00")
+        })
+        .unwrap();
+    assert_eq!(inventory_first_day["summary"]["total_event_count"], 1);
+    assert_eq!(
+        inventory_first_day["summary"]["total_selected_context_bytes"],
+        500
+    );
+
+    let payment_second_day = buckets
+        .iter()
+        .find(|bucket| {
+            bucket["group_id"] == "forge.addon.payment"
+                && bucket["bucket_start"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("2026-06-10T00:00:00")
+        })
+        .unwrap();
+    assert_eq!(payment_second_day["summary"]["total_retry_count"], 2);
+    assert_eq!(
+        payment_second_day["summary"]["max_context_pressure_bps"],
+        9500
+    );
+
+    let mcp_input = serde_json::json!({
+        "workflow_id": "wf_history",
+        "addon_id": "forge.addon.inventory",
+        "bucket": "day",
+        "group_by": "addon"
+    });
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.events.observability_history",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.event_observability_history.v1"
+    );
+    assert_eq!(mcp_json["result"]["bucket_count"], 2);
+    assert_eq!(mcp_json["result"]["summary"]["total_event_count"], 2);
+    assert_eq!(
+        mcp_json["result"]["summary"]["total_selected_context_bytes"],
+        1350
+    );
+}
+
+#[test]
 fn tenant_index_tracks_async_run_resources() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

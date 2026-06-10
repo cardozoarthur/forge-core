@@ -32,7 +32,9 @@ use crate::workflow::{
     update_workflow_goal, ArtifactAttachReport,
 };
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{
+    DateTime, Datelike, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Timelike, Utc,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -51,6 +53,7 @@ pub const EVENT_STREAM_SCHEMA_VERSION: &str = "forge.event_stream.v1";
 pub const EVENT_ENVELOPE_SCHEMA_VERSION: &str = "forge.event_envelope.v1";
 pub const EVENT_TIMELINE_SCHEMA_VERSION: &str = "forge.event_timeline.v1";
 pub const EVENT_OBSERVABILITY_INDEX_SCHEMA_VERSION: &str = "forge.event_observability_index.v1";
+pub const EVENT_OBSERVABILITY_HISTORY_SCHEMA_VERSION: &str = "forge.event_observability_history.v1";
 pub const EVENT_INBOX_SCHEMA_VERSION: &str = "forge.event_inbox.v1";
 pub const EVENT_INGEST_SCHEMA_VERSION: &str = "forge.event_ingest.v1";
 pub const EVENT_ROUTE_SCHEMA_VERSION: &str = "forge.event_route.v1";
@@ -141,6 +144,17 @@ pub struct EventObservabilityIndexReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct EventObservabilityHistoryReport {
+    pub schema_version: String,
+    pub status: String,
+    pub index_source: String,
+    pub filters: EventObservabilityHistoryFilters,
+    pub summary: EventObservabilitySummary,
+    pub bucket_count: usize,
+    pub buckets: Vec<EventObservabilityHistoryBucket>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct EventObservabilityIndexFilters {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow_id: Option<String>,
@@ -158,6 +172,40 @@ pub struct EventObservabilityIndexFilters {
     pub limit: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after_sequence: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventObservabilityHistoryFilters {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brand_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_id: Option<String>,
+    pub bucket: String,
+    pub group_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_sequence: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventObservabilityHistoryBucket {
+    pub bucket: String,
+    pub bucket_start: String,
+    pub bucket_end: String,
+    pub group_by: String,
+    pub group_id: String,
+    pub summary: EventObservabilitySummary,
+    pub first_event_sequence: i64,
+    pub last_event_sequence: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1111,6 +1159,114 @@ pub fn build_event_observability_index(
     limit: Option<usize>,
     after_sequence: Option<i64>,
 ) -> Result<EventObservabilityIndexReport> {
+    let (mut records, index_source) = load_event_observability_records(
+        store,
+        workflow_id,
+        organization_id,
+        brand_id,
+        product_id,
+        node_ref,
+        addon_id,
+    )?;
+    records.sort_by_key(|event| event.store_sequence);
+    let summary = summarize_event_observability(&records);
+    let tenants = summarize_event_observability_tenants(&records);
+    let workflows = summarize_event_observability_workflows(&records);
+    let nodes = summarize_event_observability_nodes(&records);
+    let addons = summarize_event_observability_addons(&records);
+    let (events, page) = select_observability_page(records, limit, after_sequence);
+    Ok(EventObservabilityIndexReport {
+        schema_version: EVENT_OBSERVABILITY_INDEX_SCHEMA_VERSION.to_string(),
+        status: "event_observability_index_loaded".to_string(),
+        index_source,
+        filters: EventObservabilityIndexFilters {
+            workflow_id: normalize_text(workflow_id),
+            organization_id: normalize_text(organization_id),
+            brand_id: normalize_text(brand_id),
+            product_id: normalize_text(product_id),
+            node_ref: normalize_text(node_ref),
+            addon_id: normalize_text(addon_id),
+            limit,
+            after_sequence,
+        },
+        page,
+        summary,
+        tenants,
+        workflows,
+        nodes,
+        addons,
+        event_count: events.len(),
+        events,
+    })
+}
+
+pub fn build_event_observability_history(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    node_ref: Option<&str>,
+    addon_id: Option<&str>,
+    bucket: Option<&str>,
+    group_by: Option<&str>,
+    limit: Option<usize>,
+    after_sequence: Option<i64>,
+) -> Result<EventObservabilityHistoryReport> {
+    let bucket = normalize_history_bucket(bucket)?;
+    let group_by = normalize_history_group_by(group_by)?;
+    let (mut records, index_source) = load_event_observability_records(
+        store,
+        workflow_id,
+        organization_id,
+        brand_id,
+        product_id,
+        node_ref,
+        addon_id,
+    )?;
+    records.sort_by_key(|event| event.store_sequence);
+    if let Some(after_sequence) = after_sequence {
+        records.retain(|event| event.store_sequence > after_sequence);
+    }
+    let summary = summarize_event_observability(&records);
+    let buckets = build_event_observability_history_buckets(
+        &records,
+        bucket.as_str(),
+        group_by.as_str(),
+        limit,
+    )?;
+
+    Ok(EventObservabilityHistoryReport {
+        schema_version: EVENT_OBSERVABILITY_HISTORY_SCHEMA_VERSION.to_string(),
+        status: "event_observability_history_loaded".to_string(),
+        index_source,
+        filters: EventObservabilityHistoryFilters {
+            workflow_id: normalize_text(workflow_id),
+            organization_id: normalize_text(organization_id),
+            brand_id: normalize_text(brand_id),
+            product_id: normalize_text(product_id),
+            node_ref: normalize_text(node_ref),
+            addon_id: normalize_text(addon_id),
+            bucket,
+            group_by,
+            limit: limit.filter(|limit| *limit > 0),
+            after_sequence,
+        },
+        summary,
+        bucket_count: buckets.len(),
+        buckets,
+    })
+}
+
+fn load_event_observability_records(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    node_ref: Option<&str>,
+    addon_id: Option<&str>,
+) -> Result<(Vec<EventObservabilityRecord>, String)> {
     let mut records = store
         .load_event_observability_index(
             workflow_id,
@@ -1148,36 +1304,7 @@ pub fn build_event_observability_index(
     } else {
         "sqlite_materialized".to_string()
     };
-    records.sort_by_key(|event| event.store_sequence);
-    let summary = summarize_event_observability(&records);
-    let tenants = summarize_event_observability_tenants(&records);
-    let workflows = summarize_event_observability_workflows(&records);
-    let nodes = summarize_event_observability_nodes(&records);
-    let addons = summarize_event_observability_addons(&records);
-    let (events, page) = select_observability_page(records, limit, after_sequence);
-    Ok(EventObservabilityIndexReport {
-        schema_version: EVENT_OBSERVABILITY_INDEX_SCHEMA_VERSION.to_string(),
-        status: "event_observability_index_loaded".to_string(),
-        index_source,
-        filters: EventObservabilityIndexFilters {
-            workflow_id: normalize_text(workflow_id),
-            organization_id: normalize_text(organization_id),
-            brand_id: normalize_text(brand_id),
-            product_id: normalize_text(product_id),
-            node_ref: normalize_text(node_ref),
-            addon_id: normalize_text(addon_id),
-            limit,
-            after_sequence,
-        },
-        page,
-        summary,
-        tenants,
-        workflows,
-        nodes,
-        addons,
-        event_count: events.len(),
-        events,
-    })
+    Ok((records, index_source))
 }
 
 fn event_observability_record(event: WorkflowEventEnvelope) -> EventObservabilityRecord {
@@ -1554,6 +1681,153 @@ fn accumulate_observability_bucket(
 
 fn max_i64_option(target: &mut Option<i64>, value: i64) {
     *target = Some(target.map_or(value, |current| current.max(value)));
+}
+
+fn build_event_observability_history_buckets(
+    records: &[EventObservabilityRecord],
+    bucket: &str,
+    group_by: &str,
+    limit: Option<usize>,
+) -> Result<Vec<EventObservabilityHistoryBucket>> {
+    let mut buckets: BTreeMap<String, EventObservabilityHistoryAccumulator> = BTreeMap::new();
+    for record in records {
+        let occurred_at = parse_observability_time(&record.occurred_at)?;
+        let (bucket_start, bucket_end) = observability_bucket_bounds(occurred_at, bucket)?;
+        let group_id = event_observability_history_group_id(record, group_by);
+        let key = format!("{bucket_start}|{group_by}|{group_id}");
+        let accumulator =
+            buckets
+                .entry(key)
+                .or_insert_with(|| EventObservabilityHistoryAccumulator {
+                    bucket: bucket.to_string(),
+                    bucket_start: bucket_start.clone(),
+                    bucket_end: bucket_end.clone(),
+                    group_by: group_by.to_string(),
+                    group_id: group_id.clone(),
+                    records: Vec::new(),
+                });
+        accumulator.records.push(record.clone());
+    }
+
+    let mut history = buckets
+        .into_values()
+        .map(|mut bucket| {
+            bucket.records.sort_by_key(|record| record.store_sequence);
+            let first_event_sequence = bucket
+                .records
+                .first()
+                .map(|record| record.store_sequence)
+                .unwrap_or_default();
+            let last_event_sequence = bucket
+                .records
+                .last()
+                .map(|record| record.store_sequence)
+                .unwrap_or_default();
+            EventObservabilityHistoryBucket {
+                bucket: bucket.bucket,
+                bucket_start: bucket.bucket_start,
+                bucket_end: bucket.bucket_end,
+                group_by: bucket.group_by,
+                group_id: bucket.group_id,
+                summary: summarize_event_observability(&bucket.records),
+                first_event_sequence,
+                last_event_sequence,
+            }
+        })
+        .collect::<Vec<_>>();
+    history.sort_by(|left, right| {
+        left.bucket_start
+            .cmp(&right.bucket_start)
+            .then_with(|| left.group_by.cmp(&right.group_by))
+            .then_with(|| left.group_id.cmp(&right.group_id))
+    });
+    if let Some(limit) = limit.filter(|limit| *limit > 0) {
+        let start = history.len().saturating_sub(limit);
+        history = history.into_iter().skip(start).collect();
+    }
+    Ok(history)
+}
+
+struct EventObservabilityHistoryAccumulator {
+    bucket: String,
+    bucket_start: String,
+    bucket_end: String,
+    group_by: String,
+    group_id: String,
+    records: Vec<EventObservabilityRecord>,
+}
+
+fn normalize_history_bucket(bucket: Option<&str>) -> Result<String> {
+    let bucket = normalize_text(bucket).unwrap_or_else(|| "day".to_string());
+    match bucket.as_str() {
+        "hour" | "day" => Ok(bucket),
+        _ => bail!("observability history bucket must be `hour` or `day`"),
+    }
+}
+
+fn normalize_history_group_by(group_by: Option<&str>) -> Result<String> {
+    let group_by = normalize_text(group_by).unwrap_or_else(|| "none".to_string());
+    match group_by.as_str() {
+        "none" | "tenant" | "workflow" | "node" | "addon" => Ok(group_by),
+        _ => bail!(
+            "observability history group_by must be one of `none`, `tenant`, `workflow`, `node` or `addon`"
+        ),
+    }
+}
+
+fn parse_observability_time(value: &str) -> Result<DateTime<Utc>> {
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
+        return Ok(parsed.with_timezone(&Utc));
+    }
+    let naive = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+        .with_context(|| format!("event timestamp `{value}` must be RFC3339 or SQLite UTC"))?;
+    Ok(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
+}
+
+fn observability_bucket_bounds(
+    occurred_at: DateTime<Utc>,
+    bucket: &str,
+) -> Result<(String, String)> {
+    let date = NaiveDate::from_ymd_opt(occurred_at.year(), occurred_at.month(), occurred_at.day())
+        .with_context(|| "failed to derive event bucket date")?;
+    let start_naive = match bucket {
+        "hour" => date
+            .and_hms_opt(occurred_at.hour(), 0, 0)
+            .with_context(|| "failed to derive hourly event bucket")?,
+        "day" => date
+            .and_hms_opt(0, 0, 0)
+            .with_context(|| "failed to derive daily event bucket")?,
+        _ => bail!("observability history bucket must be `hour` or `day`"),
+    };
+    let start = DateTime::<Utc>::from_naive_utc_and_offset(start_naive, Utc);
+    let end = match bucket {
+        "hour" => start + ChronoDuration::hours(1),
+        "day" => start + ChronoDuration::days(1),
+        _ => bail!("observability history bucket must be `hour` or `day`"),
+    };
+    Ok((start.to_rfc3339(), end.to_rfc3339()))
+}
+
+fn event_observability_history_group_id(
+    record: &EventObservabilityRecord,
+    group_by: &str,
+) -> String {
+    match group_by {
+        "tenant" => format!(
+            "{}|{}|{}",
+            record.organization_id, record.brand_id, record.product_id
+        ),
+        "workflow" => record.workflow_id.clone(),
+        "node" => record
+            .node_ref
+            .clone()
+            .unwrap_or_else(|| "_unassigned_node".to_string()),
+        "addon" => record
+            .addon_id
+            .clone()
+            .unwrap_or_else(|| "_no_addon".to_string()),
+        _ => "_all".to_string(),
+    }
 }
 
 pub fn ingest_inbound_event(
