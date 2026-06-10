@@ -60,6 +60,124 @@ fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environme
 
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    let persisted_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "token-headroom",
+            "--content",
+            &content,
+            "--kind",
+            "log",
+            "--budget-tokens",
+            "120",
+            "--source",
+            "persisted-test",
+            "--persist",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let persisted: Value = serde_json::from_slice(&persisted_output).unwrap();
+    assert_eq!(persisted["persisted"], true);
+    assert_eq!(persisted["retrieval_available"], true);
+    assert_eq!(persisted["store_status"], "stored_local_sqlite");
+    let retrieval_ref = persisted["retrieval_ref"].as_str().unwrap();
+    let retrieval_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "retrieve-headroom",
+            "--ref",
+            retrieval_ref,
+            "--include-content",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let retrieval: Value = serde_json::from_slice(&retrieval_output).unwrap();
+    assert_eq!(
+        retrieval["schema_version"],
+        "forge.harness.headroom_retrieval.v1"
+    );
+    assert_eq!(retrieval["status"], "headroom_blob_retrieved");
+    assert_eq!(retrieval["found"], true);
+    assert_eq!(retrieval["source"], "persisted-test");
+    assert_eq!(retrieval["original_content"], content);
+    assert_eq!(
+        retrieval["compressed_sha256"],
+        persisted["compressed_sha256"]
+    );
+
+    let mcp_headroom_input = serde_json::json!({
+        "content": "alpha\nbeta\nwarning: check this\nomega",
+        "kind": "log",
+        "budget_tokens": 12,
+        "source": "mcp-persisted-test",
+        "persist": true
+    });
+    let mcp_headroom_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.token_headroom",
+            "--input",
+            &mcp_headroom_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_headroom: Value = serde_json::from_slice(&mcp_headroom_output).unwrap();
+    assert_eq!(mcp_headroom["result"]["persisted"], true);
+    let mcp_retrieval_input = serde_json::json!({
+        "retrieval_ref": mcp_headroom["result"]["retrieval_ref"],
+        "include_content": true
+    });
+    let mcp_retrieval_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.retrieve_headroom",
+            "--input",
+            &mcp_retrieval_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_retrieval: Value = serde_json::from_slice(&mcp_retrieval_output).unwrap();
+    assert_eq!(
+        mcp_retrieval["result"]["schema_version"],
+        "forge.harness.headroom_retrieval.v1"
+    );
+    assert_eq!(mcp_retrieval["result"]["found"], true);
+    assert_eq!(mcp_retrieval["result"]["source"], "mcp-persisted-test");
+    assert_eq!(
+        mcp_retrieval["result"]["original_content"],
+        "alpha\nbeta\nwarning: check this\nomega"
+    );
+
     let mcp_input = serde_json::json!({
         "executor": "claude-code",
         "command": ["claude", "--model", "sonnet"],

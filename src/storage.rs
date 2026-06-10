@@ -123,6 +123,48 @@ pub struct StoredCostLedgerIndexRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct HeadroomBlobWrite {
+    pub source: String,
+    pub content_kind: String,
+    pub strategy: String,
+    pub reversible: bool,
+    pub original_sha256: String,
+    pub original_bytes: i64,
+    pub compressed_sha256: String,
+    pub compressed_bytes: i64,
+    pub estimated_original_tokens: i64,
+    pub estimated_compressed_tokens: i64,
+    pub estimated_saved_tokens: i64,
+    pub budget_tokens: i64,
+    pub budget_status: String,
+    pub routing: serde_json::Value,
+    pub original_content: String,
+    pub compressed_content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredHeadroomBlobRecord {
+    pub source: String,
+    pub content_kind: String,
+    pub strategy: String,
+    pub reversible: bool,
+    pub original_sha256: String,
+    pub original_bytes: i64,
+    pub compressed_sha256: String,
+    pub compressed_bytes: i64,
+    pub estimated_original_tokens: i64,
+    pub estimated_compressed_tokens: i64,
+    pub estimated_saved_tokens: i64,
+    pub budget_tokens: i64,
+    pub budget_status: String,
+    pub routing: serde_json::Value,
+    pub original_content: String,
+    pub compressed_content: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct InboundEventRecord {
     pub id: String,
     pub origin: String,
@@ -563,6 +605,30 @@ impl ForgeStore {
                 ON cost_ledger_index (organization_id, brand_id, product_id, source_kind);
             CREATE INDEX IF NOT EXISTS idx_cost_ledger_addon
                 ON cost_ledger_index (addon_id, source_kind);
+            CREATE TABLE IF NOT EXISTS harness_headroom_blobs (
+                original_sha256 TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                content_kind TEXT NOT NULL,
+                strategy TEXT NOT NULL,
+                reversible INTEGER NOT NULL,
+                original_bytes INTEGER NOT NULL,
+                compressed_sha256 TEXT NOT NULL,
+                compressed_bytes INTEGER NOT NULL,
+                estimated_original_tokens INTEGER NOT NULL,
+                estimated_compressed_tokens INTEGER NOT NULL,
+                estimated_saved_tokens INTEGER NOT NULL,
+                budget_tokens INTEGER NOT NULL,
+                budget_status TEXT NOT NULL,
+                routing_json TEXT NOT NULL,
+                original_content TEXT NOT NULL,
+                compressed_content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_harness_headroom_source
+                ON harness_headroom_blobs (source, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_harness_headroom_kind
+                ON harness_headroom_blobs (content_kind, updated_at);
             CREATE TABLE IF NOT EXISTS event_inbox (
                 id TEXT PRIMARY KEY,
                 origin TEXT NOT NULL,
@@ -1668,6 +1734,100 @@ impl ForgeStore {
             records.push(row?);
         }
         Ok(records)
+    }
+
+    pub fn save_headroom_blob(
+        &self,
+        record: &HeadroomBlobWrite,
+    ) -> Result<StoredHeadroomBlobRecord> {
+        self.connection.execute(
+            r#"
+            INSERT INTO harness_headroom_blobs (
+                original_sha256,
+                source,
+                content_kind,
+                strategy,
+                reversible,
+                original_bytes,
+                compressed_sha256,
+                compressed_bytes,
+                estimated_original_tokens,
+                estimated_compressed_tokens,
+                estimated_saved_tokens,
+                budget_tokens,
+                budget_status,
+                routing_json,
+                original_content,
+                compressed_content,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, CURRENT_TIMESTAMP)
+            ON CONFLICT(original_sha256) DO UPDATE SET
+                source=excluded.source,
+                content_kind=excluded.content_kind,
+                strategy=excluded.strategy,
+                reversible=excluded.reversible,
+                original_bytes=excluded.original_bytes,
+                compressed_sha256=excluded.compressed_sha256,
+                compressed_bytes=excluded.compressed_bytes,
+                estimated_original_tokens=excluded.estimated_original_tokens,
+                estimated_compressed_tokens=excluded.estimated_compressed_tokens,
+                estimated_saved_tokens=excluded.estimated_saved_tokens,
+                budget_tokens=excluded.budget_tokens,
+                budget_status=excluded.budget_status,
+                routing_json=excluded.routing_json,
+                original_content=excluded.original_content,
+                compressed_content=excluded.compressed_content,
+                updated_at=CURRENT_TIMESTAMP
+            "#,
+            params![
+                record.original_sha256,
+                record.source,
+                record.content_kind,
+                record.strategy,
+                record.reversible,
+                record.original_bytes,
+                record.compressed_sha256,
+                record.compressed_bytes,
+                record.estimated_original_tokens,
+                record.estimated_compressed_tokens,
+                record.estimated_saved_tokens,
+                record.budget_tokens,
+                record.budget_status,
+                serde_json::to_string(&record.routing)?,
+                record.original_content,
+                record.compressed_content,
+            ],
+        )?;
+        self.load_headroom_blob_by_sha(&record.original_sha256)?
+            .with_context(|| "persisted headroom blob was not readable after save")
+    }
+
+    pub fn load_headroom_blob_by_sha(
+        &self,
+        original_sha256: &str,
+    ) -> Result<Option<StoredHeadroomBlobRecord>> {
+        let sha = original_sha256.trim();
+        if sha.is_empty() {
+            return Ok(None);
+        }
+        self.connection
+            .query_row(
+                r#"
+                SELECT source, content_kind, strategy, reversible, original_sha256,
+                       original_bytes, compressed_sha256, compressed_bytes,
+                       estimated_original_tokens, estimated_compressed_tokens,
+                       estimated_saved_tokens, budget_tokens, budget_status,
+                       routing_json, original_content, compressed_content,
+                       created_at, updated_at
+                FROM harness_headroom_blobs
+                WHERE original_sha256 = ?1
+                "#,
+                params![sha],
+                stored_headroom_blob_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     fn backfill_event_observability_index(&self) -> Result<()> {
@@ -4155,6 +4315,36 @@ fn stored_cost_ledger_index_from_row(
         })?,
         created_at: row.get(17)?,
         updated_at: row.get(18)?,
+    })
+}
+
+fn stored_headroom_blob_from_row(row: &Row<'_>) -> rusqlite::Result<StoredHeadroomBlobRecord> {
+    let routing_json = row.get::<_, String>(13)?;
+    Ok(StoredHeadroomBlobRecord {
+        source: row.get(0)?,
+        content_kind: row.get(1)?,
+        strategy: row.get(2)?,
+        reversible: row.get(3)?,
+        original_sha256: row.get(4)?,
+        original_bytes: row.get(5)?,
+        compressed_sha256: row.get(6)?,
+        compressed_bytes: row.get(7)?,
+        estimated_original_tokens: row.get(8)?,
+        estimated_compressed_tokens: row.get(9)?,
+        estimated_saved_tokens: row.get(10)?,
+        budget_tokens: row.get(11)?,
+        budget_status: row.get(12)?,
+        routing: serde_json::from_str(&routing_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                13,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        original_content: row.get(14)?,
+        compressed_content: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
     })
 }
 

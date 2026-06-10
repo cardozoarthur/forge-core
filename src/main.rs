@@ -55,7 +55,10 @@ use forge_core::executor::{
 };
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff;
-use forge_core::harness::{analyze_token_headroom, build_cli_wrapper_plan};
+use forge_core::harness::{
+    analyze_token_headroom, build_cli_wrapper_plan, persist_token_headroom_report,
+    retrieve_headroom_blob,
+};
 use forge_core::identity::{
     audit_tenant_index, ensure_operating_context_policy, ensure_workflow_policy,
     evaluate_tenant_policy_for_action, inspect_project_operating_context, link_identity,
@@ -430,6 +433,16 @@ enum HarnessCommands {
         source: String,
         #[arg(long, default_value_t = true)]
         reversible: bool,
+        #[arg(long, default_value_t = false)]
+        persist: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    RetrieveHeadroom {
+        #[arg(long = "ref")]
+        retrieval_ref: String,
+        #[arg(long = "include-content", default_value_t = false)]
+        include_content: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -4768,6 +4781,7 @@ fn run() -> Result<i32> {
                 budget_tokens,
                 source,
                 reversible,
+                persist,
                 output,
             } => {
                 let report = analyze_token_headroom(
@@ -4777,6 +4791,22 @@ fn run() -> Result<i32> {
                     &source,
                     reversible,
                 );
+                let report = if persist {
+                    let store = ForgeStore::open(cli.store)?;
+                    persist_token_headroom_report(&store, report, &content)?
+                } else {
+                    report
+                };
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            HarnessCommands::RetrieveHeadroom {
+                retrieval_ref,
+                include_content,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = retrieve_headroom_blob(&store, &retrieval_ref, include_content)?;
                 print_response(output, &report)?;
                 Ok(0)
             }

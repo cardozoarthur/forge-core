@@ -38,7 +38,10 @@ use crate::event::{
 };
 use crate::executor::load_executors;
 use crate::handoff::build_task_handoff;
-use crate::harness::{analyze_token_headroom, build_cli_wrapper_plan};
+use crate::harness::{
+    analyze_token_headroom, build_cli_wrapper_plan, persist_token_headroom_report,
+    retrieve_headroom_blob,
+};
 use crate::identity::{
     audit_tenant_index, ensure_workflow_policy, evaluate_tenant_policy_for_action,
     inspect_project_operating_context, link_identity, list_identity_links,
@@ -345,6 +348,14 @@ struct HarnessTokenHeadroomInput {
     budget_tokens: Option<usize>,
     source: Option<String>,
     reversible: Option<bool>,
+    persist: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HarnessRetrieveHeadroomInput {
+    #[serde(alias = "ref")]
+    retrieval_ref: String,
+    include_content: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4223,9 +4234,22 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("budget_tokens", "integer", "optional target token budget"),
                     ("source", "string", "caller/source label"),
                     ("reversible", "boolean", "whether to include retrieval metadata"),
+                    ("persist", "boolean", "whether to store reversible content locally"),
                 ], &["content"]),
                 "forge.harness.token_headroom.v1",
                 &["forge", "harness", "token-headroom", "--content", "<payload>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
+                "forge.harness.retrieve_headroom",
+                "Retrieve Headroom Blob",
+                "Retrieve metadata or content for a persisted Forge headroom blob by retrieval ref.",
+                object_schema(&[
+                    ("retrieval_ref", "string", "forge://harness/headroom/<sha256> or raw sha256"),
+                    ("include_content", "boolean", "include original and compressed content"),
+                ], &["retrieval_ref"]),
+                "forge.harness.headroom_retrieval.v1",
+                &["forge", "harness", "retrieve-headroom", "--ref", "<retrieval-ref>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -6345,13 +6369,27 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         "forge.harness.token_headroom" => {
             let input: HarnessTokenHeadroomInput = parse_input(input)?;
             let content_kind = input.content_kind.or(input.kind);
-            serde_json::to_value(analyze_token_headroom(
+            let report = analyze_token_headroom(
                 &input.content,
                 content_kind.as_deref(),
                 input.budget_tokens.unwrap_or(0),
                 input.source.as_deref().unwrap_or("mcp"),
                 input.reversible.unwrap_or(true),
-            ))?
+            );
+            let report = if input.persist.unwrap_or(false) {
+                persist_token_headroom_report(store, report, &input.content)?
+            } else {
+                report
+            };
+            serde_json::to_value(report)?
+        }
+        "forge.harness.retrieve_headroom" => {
+            let input: HarnessRetrieveHeadroomInput = parse_input(input)?;
+            serde_json::to_value(retrieve_headroom_blob(
+                store,
+                &input.retrieval_ref,
+                input.include_content.unwrap_or(false),
+            )?)?
         }
         "forge.harness.wrap_plan" => {
             let input: HarnessWrapPlanInput = parse_input(input)?;

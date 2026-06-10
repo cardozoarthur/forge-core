@@ -1,9 +1,12 @@
 use crate::artifact::hex_sha256;
+use crate::storage::{ForgeStore, HeadroomBlobWrite, StoredHeadroomBlobRecord};
+use anyhow::{bail, Result};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 pub const TOKEN_HEADROOM_SCHEMA_VERSION: &str = "forge.harness.token_headroom.v1";
 pub const CLI_WRAPPER_PLAN_SCHEMA_VERSION: &str = "forge.harness.cli_wrapper_plan.v1";
+pub const HEADROOM_RETRIEVAL_SCHEMA_VERSION: &str = "forge.harness.headroom_retrieval.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenHeadroomReport {
@@ -24,6 +27,9 @@ pub struct TokenHeadroomReport {
     pub budget_tokens: usize,
     pub budget_status: String,
     pub retrieval_ref: String,
+    pub persisted: bool,
+    pub retrieval_available: bool,
+    pub store_status: String,
     pub routing: Vec<String>,
     pub compressed_content: String,
 }
@@ -49,6 +55,50 @@ pub struct CliWrapperEnvVar {
     pub name: String,
     pub value: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HeadroomRetrievalReport {
+    pub schema_version: String,
+    pub status: String,
+    pub retrieval_ref: String,
+    pub original_sha256: String,
+    pub found: bool,
+    pub include_content: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reversible: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compressed_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compressed_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_original_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_compressed_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_saved_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routing: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compressed_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
 }
 
 pub fn analyze_token_headroom(
@@ -101,9 +151,83 @@ pub fn analyze_token_headroom(
         budget_tokens,
         budget_status: budget_status.to_string(),
         retrieval_ref: format!("forge://harness/headroom/{original_sha256}"),
+        persisted: false,
+        retrieval_available: false,
+        store_status: "not_persisted".to_string(),
         routing,
         compressed_content,
     }
+}
+
+pub fn persist_token_headroom_report(
+    store: &ForgeStore,
+    mut report: TokenHeadroomReport,
+    original_content: &str,
+) -> Result<TokenHeadroomReport> {
+    let write = HeadroomBlobWrite {
+        source: report.source.clone(),
+        content_kind: report.content_kind.clone(),
+        strategy: report.strategy.clone(),
+        reversible: report.reversible,
+        original_sha256: report.original_sha256.clone(),
+        original_bytes: usize_to_i64(report.original_bytes),
+        compressed_sha256: report.compressed_sha256.clone(),
+        compressed_bytes: usize_to_i64(report.compressed_bytes),
+        estimated_original_tokens: usize_to_i64(report.estimated_original_tokens),
+        estimated_compressed_tokens: usize_to_i64(report.estimated_compressed_tokens),
+        estimated_saved_tokens: usize_to_i64(report.estimated_saved_tokens),
+        budget_tokens: usize_to_i64(report.budget_tokens),
+        budget_status: report.budget_status.clone(),
+        routing: json!(report.routing),
+        original_content: original_content.to_string(),
+        compressed_content: report.compressed_content.clone(),
+    };
+    store.save_headroom_blob(&write)?;
+    report.persisted = true;
+    report.retrieval_available = true;
+    report.store_status = "stored_local_sqlite".to_string();
+    Ok(report)
+}
+
+pub fn retrieve_headroom_blob(
+    store: &ForgeStore,
+    retrieval_ref: &str,
+    include_content: bool,
+) -> Result<HeadroomRetrievalReport> {
+    let original_sha256 = parse_headroom_ref(retrieval_ref)?;
+    let retrieval_ref = format!("forge://harness/headroom/{original_sha256}");
+    let Some(record) = store.load_headroom_blob_by_sha(&original_sha256)? else {
+        return Ok(HeadroomRetrievalReport {
+            schema_version: HEADROOM_RETRIEVAL_SCHEMA_VERSION.to_string(),
+            status: "headroom_blob_missing".to_string(),
+            retrieval_ref,
+            original_sha256,
+            found: false,
+            include_content,
+            source: None,
+            content_kind: None,
+            strategy: None,
+            reversible: None,
+            original_bytes: None,
+            compressed_sha256: None,
+            compressed_bytes: None,
+            estimated_original_tokens: None,
+            estimated_compressed_tokens: None,
+            estimated_saved_tokens: None,
+            budget_tokens: None,
+            budget_status: None,
+            routing: None,
+            original_content: None,
+            compressed_content: None,
+            created_at: None,
+            updated_at: None,
+        });
+    };
+    Ok(headroom_retrieval_report(
+        record,
+        retrieval_ref,
+        include_content,
+    ))
 }
 
 pub fn build_cli_wrapper_plan(
@@ -194,13 +318,65 @@ pub fn build_cli_wrapper_plan(
             "resolve real CLI before PATH shim precedence".to_string(),
             "prepend Forge shim directory only for the child process".to_string(),
             "record argv, cwd, workflow/run lineage and token-headroom metrics".to_string(),
+            "persist reversible headroom blobs in the Forge store when compression is applied".to_string(),
             "fall back to observe_only when Forge context is unavailable".to_string(),
         ],
         notes: vec![
-            "Headroom-inspired ideas absorbed: local-first compression, CLI wrapper env shaping, tool-search preservation and shim-based harness tests".to_string(),
+            "Headroom-inspired ideas absorbed: local-first compression, reversible retrieval refs, CLI wrapper env shaping, tool-search preservation and shim-based harness tests".to_string(),
             "This plan is non-destructive; actual exec remains a separate guarded harness action".to_string(),
         ],
     }
+}
+
+fn headroom_retrieval_report(
+    record: StoredHeadroomBlobRecord,
+    retrieval_ref: String,
+    include_content: bool,
+) -> HeadroomRetrievalReport {
+    HeadroomRetrievalReport {
+        schema_version: HEADROOM_RETRIEVAL_SCHEMA_VERSION.to_string(),
+        status: "headroom_blob_retrieved".to_string(),
+        retrieval_ref,
+        original_sha256: record.original_sha256,
+        found: true,
+        include_content,
+        source: Some(record.source),
+        content_kind: Some(record.content_kind),
+        strategy: Some(record.strategy),
+        reversible: Some(record.reversible),
+        original_bytes: Some(record.original_bytes),
+        compressed_sha256: Some(record.compressed_sha256),
+        compressed_bytes: Some(record.compressed_bytes),
+        estimated_original_tokens: Some(record.estimated_original_tokens),
+        estimated_compressed_tokens: Some(record.estimated_compressed_tokens),
+        estimated_saved_tokens: Some(record.estimated_saved_tokens),
+        budget_tokens: Some(record.budget_tokens),
+        budget_status: Some(record.budget_status),
+        routing: Some(record.routing),
+        original_content: include_content.then_some(record.original_content),
+        compressed_content: include_content.then_some(record.compressed_content),
+        created_at: Some(record.created_at),
+        updated_at: Some(record.updated_at),
+    }
+}
+
+fn parse_headroom_ref(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("headroom retrieval ref cannot be empty");
+    }
+    let sha = value
+        .strip_prefix("forge://harness/headroom/")
+        .unwrap_or(value)
+        .trim();
+    if sha.is_empty() {
+        bail!("headroom retrieval ref does not include a hash");
+    }
+    Ok(sha.to_string())
+}
+
+fn usize_to_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn detect_content_kind(content: &str, hint: Option<&str>) -> String {
