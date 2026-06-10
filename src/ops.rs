@@ -39,6 +39,7 @@ const OPS_SNAPSHOT_SCHEMA_VERSION: &str = "forge.ops.snapshot.v1";
 const OPS_ACTION_SCHEMA_VERSION: &str = "forge.ops.action.v1";
 const OPS_MODIFIER_LANE_SCHEMA_VERSION: &str = "forge.ops.modifier_lane.v1";
 const OPS_MODIFIER_PROPOSAL_SCHEMA_VERSION: &str = "forge.ops.modifier_proposal.v1";
+const OPS_ADDON_VIEW_RENDERERS_SCHEMA_VERSION: &str = "forge.ops.addon_view_renderers.v1";
 const OPS_MODIFIER_PROPOSAL_CREATED_EVENT: &str = "ops_modifier_proposal_created";
 const OPS_MODIFIER_PROPOSAL_APPLIED_EVENT: &str = "ops_modifier_proposal_applied";
 const MAX_HTTP_REQUEST_BYTES: usize = 1024 * 1024;
@@ -54,6 +55,7 @@ pub struct OpsSnapshot {
     pub modifier_lane: OpsModifierLane,
     pub addon_observability: AddonObservabilityReport,
     pub addon_views: AddonViewReport,
+    pub addon_view_renderers: OpsAddonViewRendererReport,
     pub visual_workflows: Vec<OpsWorkflowVisual>,
     pub actions: Vec<OpsActionSpec>,
 }
@@ -207,6 +209,66 @@ pub struct OpsModifierApplyReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct OpsAddonViewRendererReport {
+    pub schema_version: String,
+    pub status: String,
+    pub renderer_count: usize,
+    pub safe_renderer_count: usize,
+    pub family_count: usize,
+    pub families: Vec<String>,
+    pub renderers: Vec<OpsAddonViewRenderer>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsAddonViewRenderer {
+    pub addon_id: String,
+    pub addon_name: String,
+    pub addon_lifecycle: String,
+    pub view_id: String,
+    pub title: String,
+    pub surface: String,
+    pub renderer_family: String,
+    pub renderer_component: String,
+    pub safe_renderer: bool,
+    pub layout_region: String,
+    pub layout_density: String,
+    pub layout_width: String,
+    pub permission_status: String,
+    pub required_permissions: Vec<String>,
+    pub required_capabilities: Vec<String>,
+    pub data_sources: Vec<OpsAddonViewDataSource>,
+    pub actions: Vec<OpsAddonViewActionRender>,
+    pub tui_affordance: String,
+    pub html_anchor: String,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsAddonViewDataSource {
+    pub binding_id: String,
+    pub source: String,
+    pub scope: String,
+    pub query: String,
+    pub refresh_seconds: u64,
+    pub required_capability: String,
+    pub live_refresh: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsAddonViewActionRender {
+    pub action_id: String,
+    pub label: String,
+    pub action_type: String,
+    pub method: String,
+    pub target: String,
+    pub permission: String,
+    pub requires_confirmation: bool,
+    pub payload_fields: Vec<String>,
+    pub risk: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct OpsServeReport {
     pub status: String,
     pub schema_version: String,
@@ -250,6 +312,7 @@ pub fn build_ops_snapshot_with_addon_dirs(
     let addon_catalog = load_addon_catalog_from_store(store, addon_dirs)?;
     let addon_observability = addon_observability_report(store, &addon_catalog, None, None, 1000)?;
     let addon_views = list_addon_views(&addon_catalog, None, Some("ops_console"), Some("enabled"));
+    let addon_view_renderers = build_addon_view_renderer_report(&addon_views);
     let visual_workflows = build_visual_workflows(store)?;
     Ok(OpsSnapshot {
         status: "ok".to_string(),
@@ -272,9 +335,145 @@ pub fn build_ops_snapshot_with_addon_dirs(
         modifier_lane,
         addon_observability,
         addon_views,
+        addon_view_renderers,
         visual_workflows,
         actions: ops_actions(),
     })
+}
+
+pub fn build_addon_view_renderer_report(
+    addon_views: &AddonViewReport,
+) -> OpsAddonViewRendererReport {
+    let mut renderers = addon_views
+        .views
+        .iter()
+        .map(|entry| {
+            let renderer_family =
+                classify_addon_view_renderer_family(&entry.view.view_type, &entry.view.component);
+            let renderer_component = renderer_component_for_family(&renderer_family);
+            let layout_region = defaulted(&entry.view.layout.zone, "main");
+            let layout_density = defaulted(&entry.view.layout.density, "standard");
+            let layout_width = defaulted(&entry.view.layout.width, "auto");
+            let data_sources = entry
+                .view
+                .data_bindings
+                .iter()
+                .map(|binding| OpsAddonViewDataSource {
+                    binding_id: binding.id.clone(),
+                    source: defaulted(&binding.source, "forge.snapshot"),
+                    scope: defaulted(&binding.scope, "workflow"),
+                    query: binding.query.clone(),
+                    refresh_seconds: binding.refresh_seconds,
+                    required_capability: binding.required_capability.clone(),
+                    live_refresh: binding.refresh_seconds > 0,
+                })
+                .collect::<Vec<_>>();
+            let required_capabilities = unique_sorted(
+                data_sources
+                    .iter()
+                    .filter_map(|binding| non_empty(&binding.required_capability))
+                    .collect(),
+            );
+            let mut required_permissions = entry.permission_gate.required_permissions.clone();
+            required_permissions.extend(entry.view.permissions.iter().cloned());
+            required_permissions.extend(
+                entry
+                    .view
+                    .actions
+                    .iter()
+                    .filter_map(|action| non_empty(&action.permission)),
+            );
+            let required_permissions = unique_sorted(required_permissions);
+            let unsafe_props = props_contain_unsafe_keys(&entry.view.props);
+            let safe_renderer = !unsafe_props;
+            let actions = entry
+                .view
+                .actions
+                .iter()
+                .map(|action| {
+                    let risk = classify_addon_view_action_risk(
+                        &action.action_type,
+                        &action.method,
+                        &action.target,
+                        action.requires_confirmation,
+                    );
+                    OpsAddonViewActionRender {
+                        action_id: action.id.clone(),
+                        label: action.label.clone(),
+                        action_type: action.action_type.clone(),
+                        method: defaulted(&action.method, "UI"),
+                        target: action.target.clone(),
+                        permission: action.permission.clone(),
+                        requires_confirmation: action.requires_confirmation,
+                        payload_fields: action.payload_schema.clone(),
+                        risk,
+                        enabled: entry.permission_gate.allowed && safe_renderer,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut notes = Vec::new();
+            if unsafe_props {
+                notes.push("view_props_contain_unsafe_keys_renderer_disabled".to_string());
+            }
+            if !entry.permission_gate.allowed {
+                notes.push(format!("permission_gate_{}", entry.permission_gate.status));
+            }
+            if data_sources.is_empty() {
+                notes.push("no_data_bindings_declared".to_string());
+            }
+            OpsAddonViewRenderer {
+                addon_id: entry.addon_id.clone(),
+                addon_name: entry.addon_name.clone(),
+                addon_lifecycle: entry.addon_lifecycle.clone(),
+                view_id: entry.view.id.clone(),
+                title: entry.view.title.clone(),
+                surface: entry.view.surface.clone(),
+                renderer_family,
+                renderer_component,
+                safe_renderer,
+                layout_region,
+                layout_density,
+                layout_width,
+                permission_status: entry.permission_gate.status.clone(),
+                required_permissions,
+                required_capabilities,
+                data_sources,
+                actions,
+                tui_affordance: format!(
+                    "forge addons views --addon {} --surface {} --output json",
+                    entry.addon_id,
+                    defaulted(&entry.view.surface, "ops_console")
+                ),
+                html_anchor: format!("addon-view-{}", slug_for_anchor(&entry.view.id)),
+                notes,
+            }
+        })
+        .collect::<Vec<_>>();
+    renderers.sort_by(|left, right| {
+        left.layout_region
+            .cmp(&right.layout_region)
+            .then(left.renderer_family.cmp(&right.renderer_family))
+            .then(left.view_id.cmp(&right.view_id))
+    });
+    let families = unique_sorted(
+        renderers
+            .iter()
+            .map(|renderer| renderer.renderer_family.clone())
+            .collect(),
+    );
+    let safe_renderer_count = renderers
+        .iter()
+        .filter(|renderer| renderer.safe_renderer)
+        .count();
+    OpsAddonViewRendererReport {
+        schema_version: OPS_ADDON_VIEW_RENDERERS_SCHEMA_VERSION.to_string(),
+        status: "addon_view_renderers_ready".to_string(),
+        renderer_count: renderers.len(),
+        safe_renderer_count,
+        family_count: families.len(),
+        families,
+        renderers,
+    }
 }
 
 fn build_visual_workflows(store: &ForgeStore) -> Result<Vec<OpsWorkflowVisual>> {
@@ -424,6 +623,148 @@ fn task_status(status: &TaskStatus) -> String {
         TaskStatus::Failed => "failed",
     }
     .to_string()
+}
+
+fn classify_addon_view_renderer_family(view_type: &str, component: &str) -> String {
+    let normalized = format!("{view_type} {component}")
+        .to_ascii_lowercase()
+        .replace(['-', '.'], "_");
+    if normalized.contains("dashboard")
+        || normalized.contains("panel")
+        || normalized.contains("widget")
+    {
+        "dashboard_renderer".to_string()
+    } else if normalized.contains("chart")
+        || normalized.contains("graph")
+        || normalized.contains("metric")
+        || normalized.contains("visualization")
+    {
+        "visualization_renderer".to_string()
+    } else if normalized.contains("editor")
+        || normalized.contains("form")
+        || normalized.contains("input")
+        || normalized.contains("builder")
+    {
+        "editor_renderer".to_string()
+    } else if normalized.contains("table")
+        || normalized.contains("list")
+        || normalized.contains("grid")
+        || normalized.contains("kanban")
+    {
+        "data_list_renderer".to_string()
+    } else if normalized.contains("timeline")
+        || normalized.contains("log")
+        || normalized.contains("event")
+    {
+        "timeline_renderer".to_string()
+    } else if normalized.contains("board")
+        || normalized.contains("canvas")
+        || normalized.contains("whiteboard")
+        || normalized.contains("wireframe")
+        || normalized.contains("flow")
+    {
+        "canvas_renderer".to_string()
+    } else if normalized.contains("document")
+        || normalized.contains("markdown")
+        || normalized.contains("report")
+    {
+        "document_renderer".to_string()
+    } else {
+        "generic_card_renderer".to_string()
+    }
+}
+
+fn renderer_component_for_family(family: &str) -> String {
+    match family {
+        "visualization_renderer" => "forge.safe.visualization",
+        "editor_renderer" => "forge.safe.editor",
+        "data_list_renderer" => "forge.safe.data_list",
+        "timeline_renderer" => "forge.safe.timeline",
+        "canvas_renderer" => "forge.safe.canvas",
+        "document_renderer" => "forge.safe.document",
+        "dashboard_renderer" => "forge.safe.dashboard",
+        _ => "forge.safe.card",
+    }
+    .to_string()
+}
+
+fn classify_addon_view_action_risk(
+    action_type: &str,
+    method: &str,
+    target: &str,
+    requires_confirmation: bool,
+) -> String {
+    let action_type = action_type.to_ascii_lowercase();
+    let method = method.to_ascii_uppercase();
+    let target = target.to_ascii_lowercase();
+    if requires_confirmation
+        || method == "DELETE"
+        || target.contains("dispatch")
+        || target.contains("complete")
+        || target.contains("apply")
+        || target.contains("patch")
+    {
+        "high".to_string()
+    } else if matches!(method.as_str(), "POST" | "PUT" | "PATCH" | "MCP")
+        || action_type.contains("command")
+        || action_type.contains("mutation")
+    {
+        "medium".to_string()
+    } else {
+        "low".to_string()
+    }
+}
+
+fn props_contain_unsafe_keys(props: &BTreeMap<String, Value>) -> bool {
+    props.keys().any(|key| {
+        let key = key.to_ascii_lowercase();
+        key.contains("script")
+            || key.contains("iframe")
+            || key.contains("unsafe")
+            || key.contains("inner_html")
+            || key.contains("dangerously")
+            || key.contains("eval")
+    })
+}
+
+fn defaulted(value: &str, fallback: &str) -> String {
+    if value.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn unique_sorted(mut values: Vec<String>) -> Vec<String> {
+    values.retain(|value| !value.trim().is_empty());
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn slug_for_anchor(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 pub fn load_modifier_lane(store: &ForgeStore) -> Result<OpsModifierLane> {
@@ -1338,6 +1679,78 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
             "<tr><td colspan=\"7\">Nenhuma view ativa de Addon para o console ops.</td></tr>",
         );
     }
+    let mut addon_renderer_cards = String::new();
+    for renderer in &snapshot.addon_view_renderers.renderers {
+        let mut data_sources = String::new();
+        for source in &renderer.data_sources {
+            let refresh = if source.live_refresh {
+                format!("{}s", source.refresh_seconds)
+            } else {
+                "manual".to_string()
+            };
+            data_sources.push_str(&format!(
+                "<li><code>{}</code> via <code>{}</code> <span>{}</span> <small>{}</small></li>",
+                escape_html(&source.binding_id),
+                escape_html(&source.source),
+                escape_html(&source.scope),
+                escape_html(&refresh),
+            ));
+        }
+        if data_sources.is_empty() {
+            data_sources.push_str("<li>Nenhuma fonte declarada.</li>");
+        }
+        let mut rendered_actions = String::new();
+        for action in &renderer.actions {
+            rendered_actions.push_str(&format!(
+                "<li><code>{}</code> {} <span class=\"badge\">risco {}</span> <small>{} {}</small></li>",
+                escape_html(&action.action_id),
+                escape_html(&action.label),
+                escape_html(&action.risk),
+                escape_html(&action.method),
+                escape_html(&action.target),
+            ));
+        }
+        if rendered_actions.is_empty() {
+            rendered_actions.push_str("<li>Nenhuma ação renderizável.</li>");
+        }
+        let permission_text = if renderer.required_permissions.is_empty() {
+            "sem permissões declaradas".to_string()
+        } else {
+            renderer.required_permissions.join(", ")
+        };
+        let capability_text = if renderer.required_capabilities.is_empty() {
+            "sem capability específica".to_string()
+        } else {
+            renderer.required_capabilities.join(", ")
+        };
+        let notes = if renderer.notes.is_empty() {
+            "renderer seguro por contrato declarativo".to_string()
+        } else {
+            renderer.notes.join("; ")
+        };
+        addon_renderer_cards.push_str(&format!(
+            "<section id=\"{}\" class=\"addon-view-card\"><div class=\"addon-view-head\"><div><h3>{}</h3><code>{}</code></div><span>{}</span></div><div class=\"design-strip\"><span>família: {}</span><span>componente seguro: {}</span><span>região: {}</span><span>densidade: {}</span><span>largura: {}</span><span>safe: {}</span></div><p>{}</p><div class=\"visual-panels\"><div><h4>Fontes seguras</h4><ul class=\"compact-list\">{}</ul></div><div><h4>Ações renderizáveis</h4><ul class=\"compact-list\">{}</ul></div></div><div class=\"design-strip\"><span>Permissões: {}</span><span>Capabilities: {}</span><span>TUI: {}</span></div></section>",
+            escape_html(&renderer.html_anchor),
+            escape_html(&renderer.title),
+            escape_html(&renderer.view_id),
+            escape_html(&renderer.permission_status),
+            escape_html(&renderer.renderer_family),
+            escape_html(&renderer.renderer_component),
+            escape_html(&renderer.layout_region),
+            escape_html(&renderer.layout_density),
+            escape_html(&renderer.layout_width),
+            renderer.safe_renderer,
+            escape_html(&notes),
+            data_sources,
+            rendered_actions,
+            escape_html(&permission_text),
+            escape_html(&capability_text),
+            escape_html(&renderer.tui_affordance),
+        ));
+    }
+    if addon_renderer_cards.is_empty() {
+        addon_renderer_cards.push_str("<p>Nenhum renderer seguro de Addon disponível.</p>");
+    }
     let mut addon_observability_rows = String::new();
     for entry in &snapshot.addon_observability.addons {
         let consumed = if entry.event_flow.consumed_event_types.is_empty() {
@@ -1466,6 +1879,9 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
   <h2>Views de Addons</h2>
   <p class="section-note">Composição dinâmica de UI/TUI/Ops declarada por Addons ativos para esta superfície.</p>
   {}
+  <h2>Renderers seguros de Addons</h2>
+  <p class="section-note">Projeção sem execução de código externo: família de renderer, fontes de dados, permissões, risco das ações e affordance equivalente para TUI.</p>
+  {}
   <table>
     <thead><tr><th>Addon</th><th>Nome</th><th>View</th><th>Título</th><th>Surface</th><th>Tipo</th><th>Zona</th></tr></thead>
     <tbody>{}</tbody>
@@ -1558,6 +1974,7 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
         rows,
         visual_sections,
         addon_view_cards,
+        addon_renderer_cards,
         addon_view_rows,
         addon_observability_rows,
         proposal_rows

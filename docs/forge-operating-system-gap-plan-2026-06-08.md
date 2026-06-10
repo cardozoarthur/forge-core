@@ -265,6 +265,7 @@ Este corte iniciou a migração para Core + Addons:
 - `forge addons validate` agora bloqueia manifesto que referencia permissão não declarada em `runtime_contracts`, `event_adapters` ou `views`.
 - Catálogo store-aware agora projeta Addons habilitados como `unauthorized` quando falta aprovação humana, inclusive para manifestos carregados por arquivo em `--addon-dir`.
 - `forge interactive home` e MCP `forge.interactive.home` agora expõem painéis estruturados para foco de workflows, schedule worker, timeline global de eventos, cost ledger e contexto/memória, além do resumo textual da TUI; isso dá ao operador humano e a agentes externos a mesma visão de custos, waits/schedules e memória sem abrir cada workflow manualmente.
+- `forge ops snapshot` agora emite `forge.ops.addon_view_renderers.v1`, classificando views de Addons em famílias seguras de renderer, normalizando fontes de dados, permissões, capabilities, risco de ações, anchors HTML e affordance TUI; `forge interactive home` também resume os renderers disponíveis.
 - `forge workflow update-goal` agora reparsa `forge.intent.v2` usando o operating context existente e o catálogo atual de Addons, persistindo deliverables/capabilities atualizados e retornando added/removed deliverables. O workflow ativo do Forge OS foi reprocessado para deixar de ser `support_only` e exigir relatório Markdown, evidência Telegram e auditoria final.
 - Testes adicionados em `tests/forge_addon_architecture.rs`.
 
@@ -330,12 +331,12 @@ Status: `forge.workflow_runtime.v1` formaliza `ephemeral_workflow` e `persistent
 
 ### P6 — TUI E Ops Console De Classe Mundial
 
-Status: ops console local, visual workspace, descoberta de views por Addon e observabilidade consolidada de Addons iniciados; `forge.addon_views.v1` lista contribuições de UI/TUI/ops-console por Addon/surface/lifecycle com contrato de tipo, componente, layout, bindings, ações e props, `forge.addon_observability.v1` resume lifecycle, permission gates, eventos e dispatch usage, e `forge ops snapshot|serve --addon-dir ...` já consome views `ops_console` habilitadas como cards de composição operacional e renderiza uma tabela de "Observabilidade de Addons". O `forge interactive home` também expõe `workflow_focus`, `schedule_panel`, `event_panel`, `cost_panel` e `context_memory_panel` por CLI/MCP, cobrindo o primeiro corte dos painéis TUI operacionais.
+Status: ops console local, visual workspace, descoberta de views por Addon e observabilidade consolidada de Addons iniciados; `forge.addon_views.v1` lista contribuições de UI/TUI/ops-console por Addon/surface/lifecycle com contrato de tipo, componente, layout, bindings, ações e props, `forge.ops.addon_view_renderers.v1` classifica essas views em famílias seguras (`dashboard_renderer`, `visualization_renderer`, `editor_renderer`, `data_list_renderer`, `timeline_renderer`, `canvas_renderer`, `document_renderer`), normaliza fontes de dados/permissões/capabilities/risco de ações e bloqueia props inseguras sem executar componente externo, `forge.addon_observability.v1` resume lifecycle, permission gates, eventos e dispatch usage, e `forge ops snapshot|serve --addon-dir ...` já consome views `ops_console` habilitadas como cards de composição operacional/renderers seguros e renderiza uma tabela de "Observabilidade de Addons". O `forge interactive home` também expõe `workflow_focus`, `schedule_panel`, `event_panel`, `cost_panel`, `context_memory_panel` e `addon_renderer_panel` por CLI/MCP, cobrindo o primeiro corte dos painéis TUI operacionais.
 
 - Expandir os painéis atuais da TUI para DAG detalhado, handoffs, checkpoints, approvals e artifacts com navegação interativa.
 - Task board humano+IA.
-- UI composition por Addons ainda precisa ter renderers específicos seguros para famílias de widgets, editores e visualizações, além dos cards declarativos atuais.
-- Levar a mesma composição para a TUI e expandir whiteboard, tokens, components e artifact editors como views dinâmicas.
+- UI composition por Addons já possui primeira projeção segura por famílias; ainda precisa de renderizadores interativos reais para cada família, com estado, filtros, charts, formulários e editores de artefato sem executar código arbitrário do Addon.
+- Levar a composição para uma TUI interativa real e expandir whiteboard, tokens, components e artifact editors como views dinâmicas editáveis.
 
 ### P7 — Memory, Identity E Governance
 

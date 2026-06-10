@@ -21211,6 +21211,10 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
         "forge.addon_views.v1"
     );
     assert_eq!(
+        snapshot_json["addon_view_renderers"]["schema_version"],
+        "forge.ops.addon_view_renderers.v1"
+    );
+    assert_eq!(
         snapshot_json["addon_observability"]["schema_version"],
         "forge.addon_observability.v1"
     );
@@ -21238,6 +21242,26 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
             && entry["view"]["layout"]["zone"] == "main"
             && entry["view"]["data_bindings"][0]["id"] == "visual_artifacts"
             && entry["view"]["actions"][0]["id"] == "visual.create_artifact"));
+    let visual_renderer = snapshot_json["addon_view_renderers"]["renderers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["view_id"] == "visual.workspace")
+        .unwrap();
+    assert_eq!(visual_renderer["renderer_family"], "dashboard_renderer");
+    assert_eq!(
+        visual_renderer["renderer_component"],
+        "forge.safe.dashboard"
+    );
+    assert_eq!(visual_renderer["safe_renderer"], true);
+    assert_eq!(visual_renderer["layout_region"], "main");
+    assert_eq!(
+        visual_renderer["data_sources"][0]["binding_id"],
+        "visual_artifacts"
+    );
+    assert_eq!(visual_renderer["data_sources"][0]["live_refresh"], true);
+    assert_eq!(visual_renderer["actions"][0]["risk"], "medium");
+    assert_eq!(visual_renderer["actions"][0]["enabled"], true);
     assert_eq!(
         snapshot_json["registry"]["summary"]["runtime"]["schema_version"],
         "forge.registry_workflow_runtime.v1"
@@ -21313,12 +21337,16 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
     assert!(html.contains("Lane modificadora"));
     assert!(html.contains("Visualização operacional"));
     assert!(html.contains("Views de Addons"));
+    assert!(html.contains("Renderers seguros de Addons"));
     assert!(html.contains("Observabilidade de Addons"));
     assert!(html.contains("Dispatch queued/blocked/worker"));
     assert!(html.contains("visual.workspace"));
     assert!(html.contains("Data bindings"));
     assert!(html.contains("visual_artifacts"));
     assert!(html.contains("visual.create_artifact"));
+    assert!(html.contains("dashboard_renderer"));
+    assert!(html.contains("forge.safe.dashboard"));
+    assert!(html.contains("risco medium"));
     assert!(html.contains("Ação runtime"));
     assert!(html.contains("ephemeral_workflow"));
     assert!(html.contains("run_or_promote_if_recurring"));
@@ -26551,6 +26579,8 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     assert!(text.contains("Event timeline"));
     assert!(text.contains("Cost panel"));
     assert!(text.contains("Context/memory panel"));
+    assert!(text.contains("Addon UI renderers"));
+    assert!(text.contains("dashboard_renderer"));
     assert!(text.contains("Repository context"));
     assert!(text.contains("Estimated costs"));
     assert!(text.contains("Attention actions"));

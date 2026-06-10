@@ -1,7 +1,9 @@
+use crate::addon::{default_addon_dirs, list_addon_views, load_addon_catalog_from_store};
 use crate::cost::build_cost_ledger;
 use crate::event::build_global_event_timeline;
 use crate::executor::load_executors;
 use crate::memory::memory_policy_report;
+use crate::ops::build_addon_view_renderer_report;
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
@@ -60,6 +62,7 @@ pub struct InteractiveDashboard {
     pub event_panel: InteractiveEventPanel,
     pub cost_panel: InteractiveCostPanel,
     pub context_memory_panel: InteractiveContextMemoryPanel,
+    pub addon_renderer_panel: InteractiveAddonRendererPanel,
     pub attention_actions: Vec<String>,
     pub useful_next_commands: Vec<String>,
     pub quick_actions: Vec<String>,
@@ -120,6 +123,15 @@ pub struct InteractiveContextMemoryPanel {
     pub memory_policy_status: String,
     pub memory_level_count: usize,
     pub temporary_memory_rule: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveAddonRendererPanel {
+    pub status: String,
+    pub renderer_count: usize,
+    pub safe_renderer_count: usize,
+    pub family_count: usize,
+    pub families: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -424,6 +436,27 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
         memory_level_count: memory_policy.memory_levels.len(),
         temporary_memory_rule,
     };
+    let addon_renderer_panel = load_addon_catalog_from_store(store, &default_addon_dirs())
+        .ok()
+        .map(|catalog| {
+            let addon_views =
+                list_addon_views(&catalog, None, Some("ops_console"), Some("enabled"));
+            let renderers = build_addon_view_renderer_report(&addon_views);
+            InteractiveAddonRendererPanel {
+                status: renderers.status,
+                renderer_count: renderers.renderer_count,
+                safe_renderer_count: renderers.safe_renderer_count,
+                family_count: renderers.family_count,
+                families: renderers.families,
+            }
+        })
+        .unwrap_or_else(|| InteractiveAddonRendererPanel {
+            status: "addon_renderers_unavailable".to_string(),
+            renderer_count: 0,
+            safe_renderer_count: 0,
+            family_count: 0,
+            families: Vec::new(),
+        });
 
     Ok(InteractiveHomeReport {
         status: "interactive_home_ready".to_string(),
@@ -459,6 +492,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             event_panel,
             cost_panel,
             context_memory_panel,
+            addon_renderer_panel,
             attention_actions,
             useful_next_commands: vec![
                 "forge list".to_string(),
@@ -672,6 +706,11 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     } else {
         d.event_panel.latest_events.join(" | ")
     };
+    let addon_renderer_families = if d.addon_renderer_panel.families.is_empty() {
+        "none".to_string()
+    } else {
+        d.addon_renderer_panel.families.join(", ")
+    };
     let run_ids_line = if d.active_run_ids.is_empty() {
         String::new()
     } else {
@@ -700,6 +739,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Event timeline: {event_status}; visible {event_visible}/{event_total}; latest {latest_events}\n\
          Cost panel: {cost_status}; workflows {cost_workflows}, nodes {cost_nodes}, estimated ${cost_estimated:.4}, observed ${cost_observed:.4}\n\
          Context/memory panel: ready {context_ready}, blocked {context_blocked}, budget pressure {context_budget_pressure}, memory {memory_policy_status}\n\
+         Addon UI renderers: {addon_renderer_status}; safe {addon_safe_renderers}/{addon_renderers}, families {addon_renderer_family_count} ({addon_renderer_families})\n\
          Repository context: {repository_context}\n\
          Estimated costs: {estimated_costs}\n\
          Attention actions: {attention_actions}\n\
@@ -747,6 +787,11 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         context_blocked = d.context_memory_panel.blocked_tasks,
         context_budget_pressure = d.context_memory_panel.context_budget_pressure,
         memory_policy_status = d.context_memory_panel.memory_policy_status,
+        addon_renderer_status = d.addon_renderer_panel.status,
+        addon_safe_renderers = d.addon_renderer_panel.safe_renderer_count,
+        addon_renderers = d.addon_renderer_panel.renderer_count,
+        addon_renderer_family_count = d.addon_renderer_panel.family_count,
+        addon_renderer_families = addon_renderer_families,
         repository_context = d.repository_context,
         estimated_costs = d.estimated_costs,
         attention_actions = attention_actions,
