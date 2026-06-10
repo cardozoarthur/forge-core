@@ -68,7 +68,7 @@ use forge_core::identity::{
     unlink_identity, update_identity_membership, IdentityLinkInput, IdentityMembershipUpdateInput,
 };
 use forge_core::improve::{
-    generate_improvement, normalize_avoidable_ai_costs,
+    apply_event_improvement_policy, generate_improvement, normalize_avoidable_ai_costs,
     normalize_avoidable_ai_costs_for_candidates, rank_improvement_candidates_with_filter,
     ImprovementCandidateFilter,
 };
@@ -2668,6 +2668,22 @@ enum ImproveCommands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
+    ApplyEventPolicy {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long = "recommendation")]
+        recommendation_id: Option<String>,
+        #[arg(long = "policy")]
+        recommended_policy: Option<String>,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long = "approved-by")]
+        approved_by: Option<String>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -3186,6 +3202,27 @@ fn run() -> Result<i32> {
                             "`forge improve normalize-cost` requires --workflow <id> or --all"
                         );
                     }
+                    Ok(0)
+                }
+                Some(ImproveCommands::ApplyEventPolicy {
+                    workflow,
+                    recommendation_id,
+                    recommended_policy,
+                    apply,
+                    approved_by,
+                    origin,
+                    output,
+                }) => {
+                    let report = apply_event_improvement_policy(
+                        &store,
+                        &workflow,
+                        recommendation_id.as_deref(),
+                        recommended_policy.as_deref(),
+                        apply,
+                        approved_by.as_deref(),
+                        &origin,
+                    )?;
+                    print_response(output, &report)?;
                     Ok(0)
                 }
                 None => {

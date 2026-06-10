@@ -52,7 +52,10 @@ use crate::identity::{
     load_project_operating_context, resolve_identity, sync_project_operating_context,
     unlink_identity, update_identity_membership, IdentityLinkInput, IdentityMembershipUpdateInput,
 };
-use crate::improve::{rank_improvement_candidates_with_filter, ImprovementCandidateFilter};
+use crate::improve::{
+    apply_event_improvement_policy, rank_improvement_candidates_with_filter,
+    ImprovementCandidateFilter,
+};
 use crate::inspection::inspect_workflow_with_focus;
 use crate::interaction::{
     answer_human_interaction, create_choice_interaction, create_form_interaction,
@@ -172,6 +175,19 @@ struct ImprovementCandidatesInput {
     limit: Option<usize>,
     workflow_ids: Option<Vec<String>>,
     goal_contains: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImproveApplyEventPolicyInput {
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    recommendation: Option<String>,
+    recommendation_id: Option<String>,
+    policy: Option<String>,
+    recommended_policy: Option<String>,
+    apply: Option<bool>,
+    approved_by: Option<String>,
+    origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2157,6 +2173,33 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.orchestrator_improvement_candidates.v1",
                 &["forge", "improve", "candidates", "--output", "json"],
                 ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.improve.apply_event_policy",
+                "Apply Event Improvement Policy",
+                "Plan or apply a selected event-improvement recommendation through a governed workflow revision with rollback details, equivalence gate and no autopromotion.",
+                object_schema(
+                    &[
+                        ("workflow_id", "string", "workflow id"),
+                        ("recommendation_id", "string", "optional exact recommendation id"),
+                        ("recommended_policy", "string", "optional policy such as prefer_deterministic_node"),
+                        ("apply", "boolean", "default false; true requests a revision"),
+                        ("approved_by", "string", "required for apply=true"),
+                        ("origin", "string", "origin label for audit events"),
+                    ],
+                    &["workflow_id"],
+                ),
+                "forge.improve.event_policy_application.v1",
+                &[
+                    "forge",
+                    "improve",
+                    "apply-event-policy",
+                    "--workflow",
+                    "<workflow-id>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(false, true),
             ),
             tool(
                 "forge.interactive.home",
@@ -5268,6 +5311,27 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     workflow_ids: input.workflow_ids.unwrap_or_default(),
                     goal_contains: input.goal_contains.unwrap_or_default(),
                 },
+            )?)?
+        }
+        "forge.improve.apply_event_policy" => {
+            let input: ImproveApplyEventPolicyInput = parse_input(input)?;
+            let workflow_id = input
+                .workflow_id
+                .or(input.workflow)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("forge.improve.apply_event_policy requires workflow_id")
+                })?;
+            let recommendation_id = input.recommendation_id.or(input.recommendation);
+            let recommended_policy = input.recommended_policy.or(input.policy);
+            serde_json::to_value(apply_event_improvement_policy(
+                store,
+                &workflow_id,
+                recommendation_id.as_deref(),
+                recommended_policy.as_deref(),
+                input.apply.unwrap_or(false),
+                input.approved_by.as_deref(),
+                input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
         "forge.interactive.home" => serde_json::to_value(build_interactive_home(store)?)?,

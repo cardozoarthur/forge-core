@@ -12,7 +12,7 @@ use crate::request::{
 use crate::scheduler::{plan_parallel_execution, ParallelSchedulePlan};
 use crate::storage::{ForgeStore, StoreEvent};
 use crate::validation::validate_workflow;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::json;
@@ -242,6 +242,72 @@ pub struct AvoidableAiCostBatchNormalizationReport {
     pub total_propagated_version_task_count: usize,
     pub total_avoided_estimated_cost_usd: f64,
     pub reports: Vec<AvoidableAiCostNormalizationReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventPolicyApplicationReport {
+    pub status: String,
+    pub schema_version: String,
+    pub workflow_id: String,
+    pub origin: String,
+    pub dry_run: bool,
+    pub apply_requested: bool,
+    pub applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approved_by: Option<String>,
+    pub recommendation: EventImprovementRecommendation,
+    pub proposed_change_count: usize,
+    pub proposed_changes: Vec<EventPolicyProposedChange>,
+    pub rollback_plan: EventPolicyRollbackPlan,
+    pub equivalence_gate: EventPolicyEquivalenceGate,
+    pub validation_status: String,
+    pub promotable: bool,
+    pub promotion_gate: String,
+    pub revision: u64,
+    pub event_kind: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventPolicyProposedChange {
+    pub task_id: String,
+    pub title: String,
+    pub policy: String,
+    pub previous_executor: String,
+    pub new_executor: String,
+    pub previous_execution_policy_mode: String,
+    pub new_execution_policy_mode: String,
+    pub previous_estimated_cost_usd: f64,
+    pub new_estimated_cost_usd: f64,
+    pub previous_version: u64,
+    pub new_version: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventPolicyRollbackPlan {
+    pub status: String,
+    pub requires_human_approval: bool,
+    pub rollback_change_count: usize,
+    pub changes: Vec<EventPolicyRollbackChange>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventPolicyRollbackChange {
+    pub task_id: String,
+    pub restore_executor: String,
+    pub restore_execution_policy_mode: String,
+    pub restore_estimated_cost_usd: f64,
+    pub restore_version: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventPolicyEquivalenceGate {
+    pub status: String,
+    pub required: bool,
+    pub benchmark_required: bool,
+    pub validation_required: bool,
+    pub promotion_allowed: bool,
+    pub checks: Vec<String>,
 }
 
 pub fn rank_improvement_candidates(
@@ -1402,6 +1468,351 @@ pub fn normalize_avoidable_ai_costs_for_candidates(
         total_avoided_estimated_cost_usd,
         reports,
     })
+}
+
+pub fn apply_event_improvement_policy(
+    store: &ForgeStore,
+    workflow_id: &str,
+    recommendation_id: Option<&str>,
+    recommended_policy: Option<&str>,
+    apply: bool,
+    approved_by: Option<&str>,
+    origin: &str,
+) -> Result<EventPolicyApplicationReport> {
+    let approved_by = approved_by.map(str::trim).filter(|value| !value.is_empty());
+    let mut workflow = store.load_workflow(workflow_id)?;
+    let policy_report = build_event_improvement_policy(
+        store,
+        Some(workflow_id),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(20),
+        None,
+    )?;
+    let Some(recommendation) = select_event_policy_recommendation(
+        &policy_report.recommendations,
+        recommendation_id,
+        recommended_policy,
+    ) else {
+        bail!("no matching event improvement policy recommendation found for workflow `{workflow_id}`");
+    };
+    let mut proposed_changes = Vec::new();
+    let mut rollback_changes = Vec::new();
+
+    if recommendation.recommended_policy == "prefer_deterministic_node" {
+        if let Some(node_ref) = recommendation.node_ref.as_deref() {
+            if let Some(task) = workflow.tasks.iter_mut().find(|task| task.id == node_ref) {
+                if task.executor == ExecutorKind::Command
+                    && task.execution_policy.deterministic
+                    && !task.execution_policy.ai_allowed
+                {
+                    return Ok(event_policy_noop_report(
+                        workflow,
+                        origin,
+                        apply,
+                        approved_by,
+                        recommendation,
+                        "event_policy_application_already_applied",
+                        "event_policy_application_noop",
+                    ));
+                }
+                let previous_executor = executor_name(&task.executor);
+                let previous_execution_policy_mode = task.execution_policy.mode.clone();
+                let previous_estimated_cost_usd = task.cost.estimated_cost_usd;
+                let previous_version = task.version;
+                let new_estimated_cost_usd = normalized_command_cost(task);
+                let new_version = previous_version + 1;
+                proposed_changes.push(EventPolicyProposedChange {
+                    task_id: task.id.clone(),
+                    title: task.title.clone(),
+                    policy: recommendation.recommended_policy.clone(),
+                    previous_executor: previous_executor.clone(),
+                    new_executor: "command".to_string(),
+                    previous_execution_policy_mode: previous_execution_policy_mode.clone(),
+                    new_execution_policy_mode: "deterministic_executor".to_string(),
+                    previous_estimated_cost_usd,
+                    new_estimated_cost_usd,
+                    previous_version,
+                    new_version,
+                    reason: recommendation.reason.clone(),
+                });
+                rollback_changes.push(EventPolicyRollbackChange {
+                    task_id: task.id.clone(),
+                    restore_executor: previous_executor,
+                    restore_execution_policy_mode: previous_execution_policy_mode,
+                    restore_estimated_cost_usd: previous_estimated_cost_usd,
+                    restore_version: previous_version,
+                });
+                if apply && approved_by.is_some() {
+                    task.executor = ExecutorKind::Command;
+                    task.execution_policy = deterministic_execution_policy(
+                        "applied event improvement policy: repeated observed execution can be benchmarked as deterministic work",
+                    );
+                    task.cost.estimated_cost_usd = new_estimated_cost_usd;
+                    task.version = new_version;
+                }
+            }
+        }
+    }
+
+    if proposed_changes.is_empty() {
+        let validation = validate_workflow(&workflow);
+        let revision = workflow
+            .revisions
+            .last()
+            .map(|item| item.revision)
+            .unwrap_or(0);
+        return Ok(EventPolicyApplicationReport {
+            status: "event_policy_application_plan_only".to_string(),
+            schema_version: "forge.improve.event_policy_application.v1".to_string(),
+            workflow_id: workflow.id,
+            origin: origin.to_string(),
+            dry_run: !apply,
+            apply_requested: apply,
+            applied: false,
+            approved_by: approved_by.map(str::to_string),
+            recommendation,
+            proposed_change_count: 0,
+            proposed_changes,
+            rollback_plan: event_policy_rollback_plan(rollback_changes),
+            equivalence_gate: event_policy_equivalence_gate(),
+            validation_status: validation.status,
+            promotable: validation.promotable,
+            promotion_gate: "benchmark_and_validation_required".to_string(),
+            revision,
+            event_kind: "event_policy_application_plan_only".to_string(),
+        });
+    }
+
+    let propagated_version_task_ids = if apply && approved_by.is_some() {
+        propagate_dependency_version_boundary(&mut workflow.tasks)
+    } else {
+        Vec::new()
+    };
+    let validation = validate_workflow(&workflow);
+    if apply && approved_by.is_none() {
+        let revision = workflow
+            .revisions
+            .last()
+            .map(|item| item.revision)
+            .unwrap_or(0);
+        return Ok(EventPolicyApplicationReport {
+            status: "event_policy_application_blocked_missing_approval".to_string(),
+            schema_version: "forge.improve.event_policy_application.v1".to_string(),
+            workflow_id: workflow.id,
+            origin: origin.to_string(),
+            dry_run: false,
+            apply_requested: true,
+            applied: false,
+            approved_by: None,
+            recommendation,
+            proposed_change_count: proposed_changes.len(),
+            proposed_changes,
+            rollback_plan: event_policy_rollback_plan(rollback_changes),
+            equivalence_gate: event_policy_equivalence_gate(),
+            validation_status: validation.status,
+            promotable: validation.promotable,
+            promotion_gate: "approval_benchmark_and_validation_required".to_string(),
+            revision,
+            event_kind: "event_policy_application_blocked".to_string(),
+        });
+    }
+
+    if !apply {
+        let revision = workflow
+            .revisions
+            .last()
+            .map(|item| item.revision)
+            .unwrap_or(0);
+        return Ok(EventPolicyApplicationReport {
+            status: "event_policy_application_planned".to_string(),
+            schema_version: "forge.improve.event_policy_application.v1".to_string(),
+            workflow_id: workflow.id,
+            origin: origin.to_string(),
+            dry_run: true,
+            apply_requested: false,
+            applied: false,
+            approved_by: approved_by.map(str::to_string),
+            recommendation,
+            proposed_change_count: proposed_changes.len(),
+            proposed_changes,
+            rollback_plan: event_policy_rollback_plan(rollback_changes),
+            equivalence_gate: event_policy_equivalence_gate(),
+            validation_status: validation.status,
+            promotable: validation.promotable,
+            promotion_gate: "benchmark_and_validation_required".to_string(),
+            revision,
+            event_kind: "event_policy_application_planned".to_string(),
+        });
+    }
+
+    let revision = workflow
+        .revisions
+        .last()
+        .map(|item| item.revision + 1)
+        .unwrap_or(1);
+    workflow.revisions.push(WorkflowRevision {
+        revision,
+        origin: origin.to_string(),
+        change_type: "event_improvement_policy_applied".to_string(),
+        summary: format!(
+            "applied event improvement policy `{}` to {} task(s)",
+            recommendation.recommended_policy,
+            proposed_changes.len()
+        ),
+        created_at: Utc::now(),
+    });
+    store.save_workflow(&workflow)?;
+    store.record_event(
+        &workflow.id,
+        "event_improvement_policy_applied",
+        &json!({
+            "schema_version": "forge.improve.event_policy_application.v1",
+            "revision": revision,
+            "origin": origin,
+            "approved_by": approved_by,
+            "recommendation_id": recommendation.id,
+            "recommended_policy": recommendation.recommended_policy,
+            "proposed_change_count": proposed_changes.len(),
+            "proposed_changes": proposed_changes.clone(),
+            "rollback_plan": event_policy_rollback_plan(rollback_changes.clone()),
+            "equivalence_gate": event_policy_equivalence_gate(),
+            "validation_status": validation.status.clone(),
+            "promotable": validation.promotable,
+            "propagated_version_task_ids": propagated_version_task_ids,
+        }),
+    )?;
+
+    Ok(EventPolicyApplicationReport {
+        status: "event_policy_application_applied".to_string(),
+        schema_version: "forge.improve.event_policy_application.v1".to_string(),
+        workflow_id: workflow.id,
+        origin: origin.to_string(),
+        dry_run: false,
+        apply_requested: true,
+        applied: true,
+        approved_by: approved_by.map(str::to_string),
+        recommendation,
+        proposed_change_count: proposed_changes.len(),
+        proposed_changes,
+        rollback_plan: event_policy_rollback_plan(rollback_changes),
+        equivalence_gate: event_policy_equivalence_gate(),
+        validation_status: validation.status,
+        promotable: validation.promotable,
+        promotion_gate: "benchmark_and_validation_required".to_string(),
+        revision,
+        event_kind: "event_improvement_policy_applied".to_string(),
+    })
+}
+
+fn select_event_policy_recommendation(
+    recommendations: &[EventImprovementRecommendation],
+    recommendation_id: Option<&str>,
+    recommended_policy: Option<&str>,
+) -> Option<EventImprovementRecommendation> {
+    let recommendation_id = recommendation_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let recommended_policy = recommended_policy
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if recommendation_id.is_none() && recommended_policy.is_none() {
+        return recommendations.first().cloned();
+    }
+    recommendations
+        .iter()
+        .find(|recommendation| {
+            recommendation_id.is_none_or(|id| recommendation.id == id)
+                && recommended_policy
+                    .is_none_or(|policy| recommendation.recommended_policy == policy)
+        })
+        .cloned()
+}
+
+fn event_policy_rollback_plan(changes: Vec<EventPolicyRollbackChange>) -> EventPolicyRollbackPlan {
+    EventPolicyRollbackPlan {
+        status: if changes.is_empty() {
+            "no_rollback_changes".to_string()
+        } else {
+            "rollback_ready_for_human_approval".to_string()
+        },
+        requires_human_approval: true,
+        rollback_change_count: changes.len(),
+        changes,
+    }
+}
+
+fn event_policy_equivalence_gate() -> EventPolicyEquivalenceGate {
+    EventPolicyEquivalenceGate {
+        status: "pending_benchmark".to_string(),
+        required: true,
+        benchmark_required: true,
+        validation_required: true,
+        promotion_allowed: false,
+        checks: vec![
+            "run the previous and proposed node behavior against the same input set".to_string(),
+            "compare output hashes, validation artifacts and user-facing acceptance criteria"
+                .to_string(),
+            "promote only after validation passes and benchmark evidence is attached".to_string(),
+            "keep rollback ready until the next validated workflow version is accepted".to_string(),
+        ],
+    }
+}
+
+fn event_policy_noop_report(
+    workflow: Workflow,
+    origin: &str,
+    apply: bool,
+    approved_by: Option<&str>,
+    recommendation: EventImprovementRecommendation,
+    status: &str,
+    event_kind: &str,
+) -> EventPolicyApplicationReport {
+    let validation = validate_workflow(&workflow);
+    let revision = workflow
+        .revisions
+        .last()
+        .map(|item| item.revision)
+        .unwrap_or(0);
+    EventPolicyApplicationReport {
+        status: status.to_string(),
+        schema_version: "forge.improve.event_policy_application.v1".to_string(),
+        workflow_id: workflow.id,
+        origin: origin.to_string(),
+        dry_run: !apply,
+        apply_requested: apply,
+        applied: false,
+        approved_by: approved_by.map(str::to_string),
+        recommendation,
+        proposed_change_count: 0,
+        proposed_changes: Vec::new(),
+        rollback_plan: event_policy_rollback_plan(Vec::new()),
+        equivalence_gate: event_policy_equivalence_gate(),
+        validation_status: validation.status,
+        promotable: validation.promotable,
+        promotion_gate: "benchmark_and_validation_required".to_string(),
+        revision,
+        event_kind: event_kind.to_string(),
+    }
+}
+
+fn executor_name(executor: &ExecutorKind) -> String {
+    match executor {
+        ExecutorKind::Ai => "ai",
+        ExecutorKind::Command => "command",
+        ExecutorKind::Wait => "wait",
+        ExecutorKind::Notification => "notification",
+        ExecutorKind::Mixed => "mixed",
+    }
+    .to_string()
 }
 
 fn observed_ai_cost_from_event(event: &crate::storage::StoreEvent) -> Option<f64> {

@@ -7741,6 +7741,246 @@ fn improve_creates_controlled_experiment_and_never_promotes_without_validation()
 }
 
 #[test]
+fn improve_apply_event_policy_requires_approval_and_records_rollback_gate() {
+    use forge_core::graph::{self, ExecutorKind};
+    use forge_core::intent;
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(intent::parse_intent(
+        "Convert repeated render node through governed event policy",
+    ));
+    workflow.tasks = vec![graph::task(
+        "task-policy",
+        "Render repeated operational report",
+        &[],
+        &[],
+        vec![],
+        "deterministic report output",
+        (ExecutorKind::Ai, 2.0),
+    )];
+    store.save_workflow(&workflow).unwrap();
+    {
+        let connection = Connection::open(&store_path).unwrap();
+        for index in 0..3 {
+            let source_id = format!("event-policy-apply-{index}");
+            let created_at = format!("2026-06-10T11:{:02}:00Z", index * 5);
+            let data = serde_json::json!({
+                "node_id": "task-policy",
+                "addon_id": "forge.addon.reporting",
+                "duration_ms": 650,
+                "retry_count": 0,
+                "wait_seconds": 5,
+                "context": {
+                    "effective_budget": 1000,
+                    "routing_summary": {
+                        "selected_bytes": 920 + index,
+                        "remaining_budget": 80 - index
+                    },
+                    "memory_policy": {
+                        "memory_level": "standard",
+                        "memory_scope": "project"
+                    }
+                }
+            });
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO global_events (
+                        source, source_id, workflow_id, kind, origin, status,
+                        organization_id, brand_id, product_id, user_id, channel_id,
+                        tenant_context_json, data_json, created_at
+                    )
+                    VALUES (
+                        'event_policy_apply_seed', ?1, ?2, 'ai_executor_completed', 'codex', 'recorded',
+                        'org-demo', 'brand-demo', 'product-demo', 'user-demo', 'web',
+                        '{}', ?3, ?4
+                    )
+                    "#,
+                    rusqlite::params![source_id, workflow.id, data.to_string(), created_at],
+                )
+                .unwrap();
+        }
+    }
+
+    let plan_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "apply-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--policy",
+            "prefer_deterministic_node",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    assert_eq!(
+        plan["schema_version"],
+        "forge.improve.event_policy_application.v1"
+    );
+    assert_eq!(plan["status"], "event_policy_application_planned");
+    assert_eq!(plan["applied"], false);
+    assert_eq!(plan["proposed_change_count"], 1);
+    assert_eq!(
+        plan["proposed_changes"][0]["new_execution_policy_mode"],
+        "deterministic_executor"
+    );
+    assert_eq!(
+        plan["rollback_plan"]["status"],
+        "rollback_ready_for_human_approval"
+    );
+    assert_eq!(plan["equivalence_gate"]["promotion_allowed"], false);
+
+    let mcp_input = serde_json::json!({
+        "workflow_id": workflow.id,
+        "recommended_policy": "prefer_deterministic_node"
+    });
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.improve.apply_event_policy",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.improve.event_policy_application.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["status"],
+        "event_policy_application_planned"
+    );
+
+    let blocked_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "apply-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--policy",
+            "prefer_deterministic_node",
+            "--apply",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let blocked: Value = serde_json::from_slice(&blocked_output).unwrap();
+    assert_eq!(
+        blocked["status"],
+        "event_policy_application_blocked_missing_approval"
+    );
+    assert_eq!(blocked["applied"], false);
+
+    forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "apply-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--policy",
+            "unknown_policy",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "no matching event improvement policy recommendation found",
+        ));
+
+    let applied_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "apply-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--policy",
+            "prefer_deterministic_node",
+            "--apply",
+            "--approved-by",
+            "codex-test",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let applied: Value = serde_json::from_slice(&applied_output).unwrap();
+    assert_eq!(applied["status"], "event_policy_application_applied");
+    assert_eq!(applied["applied"], true);
+    assert_eq!(applied["approved_by"], "codex-test");
+    assert_eq!(applied["revision"], 1);
+    let updated = ForgeStore::open(&store_path)
+        .unwrap()
+        .load_workflow(&workflow.id)
+        .unwrap();
+    assert_eq!(updated.revisions.len(), 1);
+    assert_eq!(updated.tasks[0].executor, ExecutorKind::Command);
+    assert_eq!(updated.tasks[0].execution_policy.ai_allowed, false);
+    assert_eq!(updated.tasks[0].execution_policy.deterministic, true);
+
+    let noop_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "improve",
+            "apply-event-policy",
+            "--workflow",
+            &workflow.id,
+            "--policy",
+            "prefer_deterministic_node",
+            "--apply",
+            "--approved-by",
+            "codex-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let noop: Value = serde_json::from_slice(&noop_output).unwrap();
+    assert_eq!(noop["status"], "event_policy_application_already_applied");
+    assert_eq!(noop["proposed_change_count"], 0);
+    assert_eq!(noop["revision"], 1);
+}
+
+#[test]
 fn improve_candidates_rank_live_workflows_with_logs_and_parallel_opportunities() {
     use chrono::{Duration, Utc};
     use forge_core::graph::{self, ExecutorKind};
