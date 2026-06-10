@@ -32,7 +32,8 @@ use forge_core::cluster::{
 };
 use forge_core::context::build_context_package_with_checkpoint;
 use forge_core::cost::{
-    build_cost_ledger, build_cost_ledger_history, materialize_cost_ledger_index,
+    build_cost_ledger, build_cost_ledger_history, maintain_cost_ledger,
+    materialize_cost_ledger_index,
 };
 use forge_core::credential_vault::{
     run_describe as run_credential_vault_describe, run_exec as run_credential_vault_exec,
@@ -393,6 +394,30 @@ enum CostCommands {
         group_by: String,
         #[arg(long)]
         limit: Option<usize>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Maintain {
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long)]
+        organization: Option<String>,
+        #[arg(long)]
+        brand: Option<String>,
+        #[arg(long)]
+        product: Option<String>,
+        #[arg(long = "source-kind")]
+        source_kind: Option<String>,
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long, default_value = "day")]
+        bucket: String,
+        #[arg(long = "group-by", default_value = "none")]
+        group_by: String,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long = "retention-days")]
+        retention_days: Option<i64>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -4952,6 +4977,36 @@ fn run() -> Result<i32> {
                     Some(&bucket),
                     Some(&group_by),
                     limit,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            CostCommands::Maintain {
+                workflow,
+                organization,
+                brand,
+                product,
+                source_kind,
+                addon,
+                bucket,
+                group_by,
+                limit,
+                retention_days,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = maintain_cost_ledger(
+                    &store,
+                    workflow.as_deref(),
+                    organization.as_deref(),
+                    brand.as_deref(),
+                    product.as_deref(),
+                    source_kind.as_deref(),
+                    addon.as_deref(),
+                    Some(&bucket),
+                    Some(&group_by),
+                    limit,
+                    retention_days,
                 )?;
                 print_response(output, &report)?;
                 Ok(0)

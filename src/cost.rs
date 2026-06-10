@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 pub const COST_LEDGER_SCHEMA_VERSION: &str = "forge.cost_ledger.v1";
 pub const COST_LEDGER_INDEX_SCHEMA_VERSION: &str = "forge.cost_ledger_index.v1";
 pub const COST_LEDGER_HISTORY_SCHEMA_VERSION: &str = "forge.cost_ledger_history.v1";
+pub const COST_LEDGER_MAINTENANCE_SCHEMA_VERSION: &str = "forge.cost_ledger_maintenance.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CostLedgerReport {
@@ -231,6 +232,50 @@ pub struct CostLedgerHistoryBucket {
     pub last_row_key: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CostLedgerMaintenanceReport {
+    pub schema_version: String,
+    pub status: String,
+    pub filters: CostLedgerMaintenanceFilters,
+    pub retention: CostLedgerRetentionPlan,
+    pub materialized_row_count: usize,
+    pub indexed_row_count: usize,
+    pub history_bucket_count: usize,
+    pub summary: CostLedgerIndexSummary,
+    pub materialization: CostLedgerIndexReport,
+    pub history: CostLedgerHistoryReport,
+    pub maintenance_policy: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CostLedgerMaintenanceFilters {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brand_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_id: Option<String>,
+    pub bucket: String,
+    pub group_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CostLedgerRetentionPlan {
+    pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_days: Option<i64>,
+    pub action: String,
+    pub reason: String,
+}
+
 #[derive(Default)]
 struct SummaryBucket {
     workflow_ids: Vec<String>,
@@ -372,6 +417,87 @@ pub fn build_cost_ledger_history(
         summary,
         bucket_count: buckets.len(),
         buckets,
+    })
+}
+
+pub fn maintain_cost_ledger(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    source_kind: Option<&str>,
+    addon_id: Option<&str>,
+    bucket: Option<&str>,
+    group_by: Option<&str>,
+    limit: Option<usize>,
+    retention_days: Option<i64>,
+) -> Result<CostLedgerMaintenanceReport> {
+    let bucket = normalize_cost_history_bucket(bucket)?;
+    let group_by = normalize_cost_history_group_by(group_by)?;
+    let materialization = materialize_cost_ledger_index(
+        store,
+        workflow_id,
+        organization_id,
+        brand_id,
+        product_id,
+        source_kind,
+        addon_id,
+        limit,
+    )?;
+    let history = build_cost_ledger_history(
+        store,
+        workflow_id,
+        organization_id,
+        brand_id,
+        product_id,
+        source_kind,
+        addon_id,
+        Some(&bucket),
+        Some(&group_by),
+        limit,
+    )?;
+    let retention = retention_days
+        .filter(|days| *days > 0)
+        .map(|days| CostLedgerRetentionPlan {
+            mode: "plan_only".to_string(),
+            retention_days: Some(days),
+            action: "retention_not_applied".to_string(),
+            reason: "physical cost retention requires a separate approval gate before deleting ledger rows".to_string(),
+        })
+        .unwrap_or_else(|| CostLedgerRetentionPlan {
+            mode: "not_configured".to_string(),
+            retention_days: None,
+            action: "no_retention_requested".to_string(),
+            reason: "maintenance materialized current cost rows and rollups without pruning history".to_string(),
+        });
+    Ok(CostLedgerMaintenanceReport {
+        schema_version: COST_LEDGER_MAINTENANCE_SCHEMA_VERSION.to_string(),
+        status: "cost_ledger_maintenance_completed".to_string(),
+        filters: CostLedgerMaintenanceFilters {
+            workflow_id: normalize_filter(workflow_id),
+            organization_id: normalize_filter(organization_id),
+            brand_id: normalize_filter(brand_id),
+            product_id: normalize_filter(product_id),
+            source_kind: normalize_filter(source_kind),
+            addon_id: normalize_filter(addon_id),
+            bucket,
+            group_by,
+            limit: limit.filter(|limit| *limit > 0),
+        },
+        retention,
+        materialized_row_count: materialization.materialized_row_count,
+        indexed_row_count: materialization.summary.total_row_count,
+        history_bucket_count: history.bucket_count,
+        summary: history.summary.clone(),
+        materialization,
+        history,
+        maintenance_policy: vec![
+            "materialize planned and observed cost rows before reading history".to_string(),
+            "derive hour/day rollups from the normalized SQLite index".to_string(),
+            "keep the command idempotent so event runtime or schedule workers can run it periodically".to_string(),
+            "treat retention as plan-only until an approval-gated delete/archive surface exists".to_string(),
+        ],
     })
 }
 

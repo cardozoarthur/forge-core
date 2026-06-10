@@ -18665,6 +18665,81 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
         0.12
     );
 
+    let maintenance_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "maintain",
+            "--workflow",
+            workflow_id,
+            "--bucket",
+            "day",
+            "--group-by",
+            "source_kind",
+            "--retention-days",
+            "31",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let maintenance: Value = serde_json::from_slice(&maintenance_output).unwrap();
+    assert_eq!(
+        maintenance["schema_version"],
+        "forge.cost_ledger_maintenance.v1"
+    );
+    assert_eq!(maintenance["status"], "cost_ledger_maintenance_completed");
+    assert_eq!(maintenance["materialized_row_count"], expected_total_rows);
+    assert_eq!(maintenance["history_bucket_count"], 2);
+    assert_eq!(maintenance["retention"]["mode"], "plan_only");
+    assert_eq!(maintenance["retention"]["retention_days"], 31);
+    assert_eq!(
+        maintenance["materialization"]["schema_version"],
+        "forge.cost_ledger_index.v1"
+    );
+    assert_eq!(
+        maintenance["history"]["schema_version"],
+        "forge.cost_ledger_history.v1"
+    );
+    assert!(maintenance["maintenance_policy"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|policy| policy.as_str().unwrap().contains("periodically")));
+
+    let mcp_maintenance_input =
+        format!(r#"{{"workflow_id":"{workflow_id}","group_by":"workflow","retention_days":31}}"#);
+    let mcp_maintenance_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.cost.maintain",
+            "--input",
+            &mcp_maintenance_input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_maintenance: Value = serde_json::from_slice(&mcp_maintenance_output).unwrap();
+    assert_eq!(
+        mcp_maintenance["result"]["schema_version"],
+        "forge.cost_ledger_maintenance.v1"
+    );
+    assert_eq!(
+        mcp_maintenance["result"]["summary"]["observed_event_cost_total_usd"],
+        0.12
+    );
+
     let timeline_output = forge()
         .args([
             "--store",
