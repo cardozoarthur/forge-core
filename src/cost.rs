@@ -12,6 +12,7 @@ pub const COST_LEDGER_SCHEMA_VERSION: &str = "forge.cost_ledger.v1";
 pub const COST_LEDGER_INDEX_SCHEMA_VERSION: &str = "forge.cost_ledger_index.v1";
 pub const COST_LEDGER_HISTORY_SCHEMA_VERSION: &str = "forge.cost_ledger_history.v1";
 pub const COST_LEDGER_MAINTENANCE_SCHEMA_VERSION: &str = "forge.cost_ledger_maintenance.v1";
+pub const COST_LEDGER_DAEMON_SCHEMA_VERSION: &str = "forge.cost_ledger_daemon.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CostLedgerReport {
@@ -276,6 +277,35 @@ pub struct CostLedgerRetentionPlan {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CostLedgerDaemonReport {
+    pub schema_version: String,
+    pub status: String,
+    pub origin: String,
+    pub filters: CostLedgerMaintenanceFilters,
+    pub max_cycles: usize,
+    pub interval_seconds: u64,
+    pub idle_exit: bool,
+    pub cycle_count: usize,
+    pub total_materialized_row_count: usize,
+    pub total_indexed_row_count: usize,
+    pub total_history_bucket_count: usize,
+    pub stop_reason: String,
+    pub summary: CostLedgerIndexSummary,
+    pub cycles: Vec<CostLedgerDaemonCycle>,
+    pub daemon_policy: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CostLedgerDaemonCycle {
+    pub cycle: usize,
+    pub status: String,
+    pub origin: String,
+    pub global_event_id: i64,
+    pub slept_after_seconds: u64,
+    pub maintenance: CostLedgerMaintenanceReport,
+}
+
 #[derive(Default)]
 struct SummaryBucket {
     workflow_ids: Vec<String>,
@@ -497,6 +527,139 @@ pub fn maintain_cost_ledger(
             "derive hour/day rollups from the normalized SQLite index".to_string(),
             "keep the command idempotent so event runtime or schedule workers can run it periodically".to_string(),
             "treat retention as plan-only until an approval-gated delete/archive surface exists".to_string(),
+        ],
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_cost_ledger_daemon(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    source_kind: Option<&str>,
+    addon_id: Option<&str>,
+    bucket: Option<&str>,
+    group_by: Option<&str>,
+    limit: Option<usize>,
+    retention_days: Option<i64>,
+    max_cycles: usize,
+    interval_seconds: u64,
+    idle_exit: bool,
+    origin: &str,
+) -> Result<CostLedgerDaemonReport> {
+    let max_cycles = max_cycles.max(1);
+    let bucket = normalize_cost_history_bucket(bucket)?;
+    let group_by = normalize_cost_history_group_by(group_by)?;
+    let tenant_context =
+        cost_daemon_tenant_context(store, workflow_id, organization_id, brand_id, product_id)?;
+    let mut cycles = Vec::new();
+    let mut total_materialized_row_count = 0;
+    let mut total_indexed_row_count = 0;
+    let mut total_history_bucket_count = 0;
+    let mut summary = CostLedgerIndexSummary::default();
+    let mut stop_reason = "max_cycles_reached".to_string();
+
+    for cycle in 1..=max_cycles {
+        let maintenance = maintain_cost_ledger(
+            store,
+            workflow_id,
+            organization_id,
+            brand_id,
+            product_id,
+            source_kind,
+            addon_id,
+            Some(&bucket),
+            Some(&group_by),
+            limit,
+            retention_days,
+        )?;
+        total_materialized_row_count += maintenance.materialized_row_count;
+        total_indexed_row_count += maintenance.indexed_row_count;
+        total_history_bucket_count += maintenance.history_bucket_count;
+        summary = maintenance.summary.clone();
+        let data = json!({
+            "schema_version": COST_LEDGER_DAEMON_SCHEMA_VERSION,
+            "cycle": cycle,
+            "origin": origin,
+            "status": "cost_ledger_daemon_cycle_completed",
+            "workflow_id": normalize_filter(workflow_id),
+            "filters": &maintenance.filters,
+            "retention": &maintenance.retention,
+            "materialized_row_count": maintenance.materialized_row_count,
+            "indexed_row_count": maintenance.indexed_row_count,
+            "history_bucket_count": maintenance.history_bucket_count,
+            "summary": &maintenance.summary,
+        });
+        let source_id = format!(
+            "cost-ledger-daemon-{cycle}-{}",
+            Utc::now().timestamp_millis()
+        );
+        let global_event_id = store.record_global_event(
+            "cost_ledger_daemon",
+            &source_id,
+            workflow_id,
+            "cost_ledger_daemon_cycle",
+            origin,
+            "recorded",
+            &data,
+            &tenant_context,
+        )?;
+        let should_stop_for_idle = idle_exit && maintenance.indexed_row_count == 0;
+        let slept_after_seconds = if cycle < max_cycles && !should_stop_for_idle {
+            if interval_seconds > 0 {
+                std::thread::sleep(std::time::Duration::from_secs(interval_seconds));
+            }
+            interval_seconds
+        } else {
+            0
+        };
+        cycles.push(CostLedgerDaemonCycle {
+            cycle,
+            status: "cost_ledger_daemon_cycle_completed".to_string(),
+            origin: origin.to_string(),
+            global_event_id,
+            slept_after_seconds,
+            maintenance,
+        });
+        if should_stop_for_idle {
+            stop_reason = "idle_exit_no_cost_rows".to_string();
+            break;
+        }
+    }
+
+    Ok(CostLedgerDaemonReport {
+        schema_version: COST_LEDGER_DAEMON_SCHEMA_VERSION.to_string(),
+        status: "cost_ledger_daemon_completed".to_string(),
+        origin: origin.to_string(),
+        filters: CostLedgerMaintenanceFilters {
+            workflow_id: normalize_filter(workflow_id),
+            organization_id: normalize_filter(organization_id),
+            brand_id: normalize_filter(brand_id),
+            product_id: normalize_filter(product_id),
+            source_kind: normalize_filter(source_kind),
+            addon_id: normalize_filter(addon_id),
+            bucket,
+            group_by,
+            limit: limit.filter(|limit| *limit > 0),
+        },
+        max_cycles,
+        interval_seconds,
+        idle_exit,
+        cycle_count: cycles.len(),
+        total_materialized_row_count,
+        total_indexed_row_count,
+        total_history_bucket_count,
+        stop_reason,
+        summary,
+        cycles,
+        daemon_policy: vec![
+            "run cost ledger maintenance as a bounded dedicated loop".to_string(),
+            "record every cycle in the global event timeline for Cost OS observability".to_string(),
+            "keep physical retention delegated to the approval-gated maintenance policy"
+                .to_string(),
+            "use external runtime supervisors for unbounded service lifetime".to_string(),
         ],
     })
 }
@@ -1062,6 +1225,36 @@ fn filter_eq(filter: Option<&str>, value: &str) -> bool {
         .filter(|filter| !filter.is_empty())
         .map(|filter| filter == value)
         .unwrap_or(true)
+}
+
+fn cost_daemon_tenant_context(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+) -> Result<serde_json::Value> {
+    if let Some(workflow_id) = workflow_id.and_then(|value| normalize_filter(Some(value))) {
+        let workflow = store.load_workflow(&workflow_id)?;
+        return serde_json::to_value(&workflow.intent.operating_context)
+            .context("failed to serialize workflow operating context for cost daemon");
+    }
+    Ok(json!({
+        "schema_version": "forge.operating_context.v1",
+        "organization": cost_daemon_identity(organization_id, "default-org"),
+        "brand": cost_daemon_identity(brand_id, "default-brand"),
+        "product": cost_daemon_identity(product_id, "default-product"),
+        "user": cost_daemon_identity(None, "forge-cost-daemon"),
+        "channel": cost_daemon_identity(None, "system"),
+        "memory_scope": "project",
+        "personality_scope": "default",
+        "tenant_policy_mode": "audit"
+    }))
+}
+
+fn cost_daemon_identity(value: Option<&str>, fallback: &str) -> serde_json::Value {
+    let id = normalize_filter(value).unwrap_or_else(|| fallback.to_string());
+    json!({ "id": id })
 }
 
 fn normalize_filter(value: Option<&str>) -> Option<String> {

@@ -11075,6 +11075,7 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
         "forge.events.timeline",
         "forge.improve.candidates",
         "forge.improve.promote_event_policy",
+        "forge.cost.daemon",
         "forge.cost.ledger",
         "forge.memory.policy",
         "forge.memory.search",
@@ -19915,6 +19916,89 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
         mcp_maintenance["result"]["summary"]["observed_event_cost_total_usd"],
         0.12
     );
+
+    let daemon_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "daemon",
+            "--workflow",
+            workflow_id,
+            "--bucket",
+            "day",
+            "--group-by",
+            "workflow",
+            "--retention-days",
+            "31",
+            "--max-cycles",
+            "2",
+            "--interval-seconds",
+            "0",
+            "--origin",
+            "codex-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let daemon: Value = serde_json::from_slice(&daemon_output).unwrap();
+    assert_eq!(daemon["schema_version"], "forge.cost_ledger_daemon.v1");
+    assert_eq!(daemon["status"], "cost_ledger_daemon_completed");
+    assert_eq!(daemon["cycle_count"], 2);
+    assert_eq!(daemon["stop_reason"], "max_cycles_reached");
+    assert_eq!(daemon["summary"]["observed_event_cost_total_usd"], 0.12);
+    assert_eq!(daemon["cycles"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        daemon["cycles"][0]["maintenance"]["schema_version"],
+        "forge.cost_ledger_maintenance.v1"
+    );
+    assert!(daemon["cycles"][0]["global_event_id"].as_i64().unwrap() > 0);
+
+    let mcp_daemon_input = format!(
+        r#"{{"workflow_id":"{workflow_id}","group_by":"workflow","retention_days":31,"max_cycles":1,"interval_seconds":0,"origin":"mcp-test"}}"#
+    );
+    let mcp_daemon_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.cost.daemon",
+            "--input",
+            &mcp_daemon_input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_daemon: Value = serde_json::from_slice(&mcp_daemon_output).unwrap();
+    assert_eq!(
+        mcp_daemon["result"]["schema_version"],
+        "forge.cost_ledger_daemon.v1"
+    );
+    assert_eq!(mcp_daemon["result"]["cycle_count"], 1);
+    assert_eq!(mcp_daemon["result"]["cycles"][0]["origin"], "mcp-test");
+
+    let daemon_events = ForgeStore::open(&store)
+        .unwrap()
+        .load_global_events()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "cost_ledger_daemon_cycle")
+        .collect::<Vec<_>>();
+    assert!(daemon_events.len() >= 3);
+    assert!(daemon_events.iter().any(|event| {
+        event.data["schema_version"] == "forge.cost_ledger_daemon.v1"
+            && event.data["cycle"] == 1
+            && event.data["status"] == "cost_ledger_daemon_cycle_completed"
+    }));
 
     let timeline_output = forge()
         .args([

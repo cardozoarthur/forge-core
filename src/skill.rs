@@ -118,10 +118,13 @@ forge improve apply-event-policy --workflow <workflow-id> --policy prefer_determ
 forge improve apply-event-policy --workflow <workflow-id> --recommendation <recommendation-id> --apply --approved-by <operator> --output json
 forge improve benchmark-event-policy --workflow <workflow-id> --policy prefer_deterministic_node --output json
 forge improve promote-event-policy --workflow <workflow-id> --policy prefer_deterministic_node --approved-by <operator> --output json
+forge cost maintain --workflow <workflow-id> --bucket day --group-by source_kind --retention-days 31 --output json
+forge cost daemon --workflow <workflow-id> --bucket day --group-by workflow --max-cycles 2 --interval-seconds 300 --retention-days 31 --output json
 forge mcp tools --output json
 forge mcp call forge.improve.candidates --input '{"limit":10}' --output json
 forge mcp call forge.improve.benchmark_event_policy --input '{"workflow_id":"<workflow-id>","recommended_policy":"prefer_deterministic_node"}' --output json
 forge mcp call forge.improve.promote_event_policy --input '{"workflow_id":"<workflow-id>","recommended_policy":"prefer_deterministic_node","approved_by":"<operator>"}' --output json
+forge mcp call forge.cost.daemon --input '{"workflow_id":"<workflow-id>","max_cycles":1,"interval_seconds":0}' --output json
 forge mcp call forge.interactive.home --output json
 forge brains --output json
 forge mcp call forge.brain_router --output json
