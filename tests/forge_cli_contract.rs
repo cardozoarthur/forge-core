@@ -13811,6 +13811,7 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
     assert!(skill.contains("forge validate"));
     assert!(skill.contains("forge mcp tools"));
     assert!(skill.contains("forge ops renderer-event"));
+    assert!(skill.contains("forge.ops.snapshot"));
     assert!(skill.contains("forge.ops.addon_renderer_event"));
     assert!(skill.contains("forge mcp call forge.run.start"));
     assert!(skill.contains("forge.workflow.attach_artifact"));
@@ -13854,6 +13855,7 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
         "forge.workflow.list",
         "forge.workflow.inspect",
         "forge.events.timeline",
+        "forge.ops.snapshot",
         "forge.ops.addon_renderer_event",
         "forge.improve.candidates",
         "forge.improve.promote_event_policy",
@@ -14023,6 +14025,19 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
         .as_str()
         .unwrap()
         .contains("requires approval"));
+
+    let ops_snapshot = find_mcp_tool(&json, "forge.ops.snapshot");
+    assert_eq!(ops_snapshot["output_schema"], "forge.ops.snapshot.v1");
+    assert_eq!(ops_snapshot["async_safe"], true);
+    assert_eq!(ops_snapshot["mutates_workflow"], false);
+    assert_eq!(
+        ops_snapshot["input_schema"]["properties"]["project_root"]["type"],
+        "string"
+    );
+    assert_eq!(
+        ops_snapshot["input_schema"]["properties"]["addon_dirs"]["type"],
+        "array"
+    );
 
     let task_handoff = find_mcp_tool(&json, "forge.task.handoff");
     assert_eq!(task_handoff["async_safe"], true);
@@ -29492,6 +29507,38 @@ views:
                 .unwrap()
                 .contains(&serde_json::json!("--project-root"))
             && workflow["memory_policy_source"] == "project_governance"));
+    let mcp_ops_snapshot_input = serde_json::json!({
+        "project_root": project_root.to_str().unwrap(),
+        "addon_dirs": [addon_dir.to_str().unwrap()],
+    });
+    let mcp_ops_snapshot = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.ops.snapshot",
+            "--input",
+            &mcp_ops_snapshot_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_ops_snapshot_json: Value = serde_json::from_slice(&mcp_ops_snapshot).unwrap();
+    assert_eq!(mcp_ops_snapshot_json["status"], "ok");
+    assert_eq!(
+        mcp_ops_snapshot_json["result"]["schema_version"],
+        "forge.ops.snapshot.v1"
+    );
+    assert_eq!(
+        mcp_ops_snapshot_json["result"]["memory_context_governance"]["project_governance"]
+            ["status"],
+        "configured"
+    );
     assert!(
         snapshot_json["addon_observability"]["addon_count"]
             .as_u64()

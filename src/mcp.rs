@@ -100,7 +100,10 @@ use crate::multimodal::{
     build_multimodal_status_with_feature_flag, evaluate_multimodal_guard,
     resolve_multimodal_feature_flag, MultimodalBenchmarkResultOptions,
 };
-use crate::ops::{record_addon_renderer_client_event, OpsAddonRendererClientEventInput};
+use crate::ops::{
+    build_ops_snapshot_with_addon_dirs_and_project, record_addon_renderer_client_event,
+    OpsAddonRendererClientEventInput,
+};
 use crate::patch::{
     build_patch_apply, build_patch_diff, build_patch_plan, build_patch_restore, build_patch_revert,
     build_patch_review, PatchDiffOptions,
@@ -792,6 +795,12 @@ struct WorkflowInspectInput {
 struct WorkflowEventsInput {
     workflow_id: String,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpsSnapshotInput {
+    project_root: Option<String>,
+    addon_dirs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1827,6 +1836,25 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ),
                 "forge.event_timeline.v1",
                 &["forge", "events", "timeline", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.ops.snapshot",
+                "Read Ops Snapshot",
+                "Read the operational assisted-operations snapshot, including workflows, improvement candidates, Addon views and optional project memory/context governance.",
+                object_schema(
+                    &[
+                        (
+                            "project_root",
+                            "string",
+                            "optional project root containing .forge/memory-governance.json",
+                        ),
+                        ("addon_dirs", "array", "optional Addon manifest directories"),
+                    ],
+                    &[],
+                ),
+                "forge.ops.snapshot.v1",
+                &["forge", "ops", "snapshot", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -5647,6 +5675,16 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.limit,
                 input.after_sequence,
                 &operating_context,
+            )?)?
+        }
+        "forge.ops.snapshot" => {
+            let input: OpsSnapshotInput = parse_input(input)?;
+            let addon_dirs = addon_dirs_from_input(input.addon_dirs);
+            let project_root = input.project_root.as_deref().map(PathBuf::from);
+            serde_json::to_value(build_ops_snapshot_with_addon_dirs_and_project(
+                store,
+                &addon_dirs,
+                project_root.as_deref(),
             )?)?
         }
         "forge.ops.addon_renderer_event" => {
