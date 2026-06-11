@@ -33,6 +33,7 @@ use std::process::Command;
 const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
 const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_board.v1";
 const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
+const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
 const SLASH_COMMANDS_SCHEMA_VERSION: &str = "forge.interactive.slash_commands.v1";
 const INTERACTIVE_ROUTE_SCHEMA_VERSION: &str = "forge.interactive.route.v1";
 
@@ -74,6 +75,7 @@ pub struct InteractiveDashboard {
     pub estimated_costs: String,
     pub scheduler_worker_status: String,
     pub workflow_focus: Vec<InteractiveWorkflowCard>,
+    pub navigation_panel: InteractiveNavigationPanel,
     pub dag_panel: InteractiveWorkflowDagPanel,
     pub task_board_panel: InteractiveTaskBoardPanel,
     pub schedule_panel: InteractiveSchedulePanel,
@@ -97,6 +99,25 @@ pub struct InteractiveWorkflowCard {
     pub quality_action: String,
     pub tasks: String,
     pub schedule: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveNavigationPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub default_display_mode: String,
+    pub display_modes: Vec<String>,
+    pub active_theme: String,
+    pub themes: Vec<String>,
+    pub keybindings: Vec<InteractiveKeyBinding>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveKeyBinding {
+    pub key: String,
+    pub action: String,
+    pub target: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -657,6 +678,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 .to_string(),
             scheduler_worker_status,
             workflow_focus,
+            navigation_panel: build_navigation_panel(),
             dag_panel,
             task_board_panel,
             schedule_panel,
@@ -897,6 +919,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
             .collect::<Vec<_>>()
             .join(" | ")
     };
+    let navigation_keys = render_navigation_keybindings(&d.navigation_panel);
     let task_board_lanes = render_task_board_lane_summary(&d.task_board_panel);
     let dag_workflows = render_workflow_dag_summary(&d.dag_panel);
     let digital_twin_workflows = if d.digital_twin_panel.workflows.is_empty() {
@@ -955,6 +978,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Runtime/node status: {runtime_node_status}\n\
          Scheduler worker status: {scheduler_worker_status}\n\
          Workflow focus: {workflow_focus}\n\
+         Navigation panel: {navigation_status}; default {navigation_default_mode}, theme {navigation_theme}, modes {navigation_modes}, keys {navigation_keys}\n\
          Operational digital twin: {digital_twin_status}; workflows {digital_twin_workflows_count}, happening {digital_twin_happening}, done {digital_twin_done}, remaining {digital_twin_remaining}, validated {digital_twin_validated}, rejected {digital_twin_rejected}, approvals {digital_twin_approvals}; {digital_twin_workflows}\n\
          DAG panel: {dag_status}; workflows {dag_workflows_count}, nodes {dag_nodes}, edges {dag_edges}, running {dag_running}, blocked {dag_blocked}, waits {dag_waits}, human waits {dag_human_waits}; {dag_workflows}\n\
          Task board: {task_board_status}; workflows {task_board_workflows}, tasks {task_board_tasks}, ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, checkpoints {task_board_checkpoints}, artifacts {task_board_artifacts}; lanes {task_board_lanes}\n\
@@ -996,6 +1020,11 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         runtime_node_status = d.runtime_node_status,
         scheduler_worker_status = d.scheduler_worker_status,
         workflow_focus = workflow_focus,
+        navigation_status = d.navigation_panel.status,
+        navigation_default_mode = d.navigation_panel.default_display_mode,
+        navigation_theme = d.navigation_panel.active_theme,
+        navigation_modes = d.navigation_panel.display_modes.join(", "),
+        navigation_keys = navigation_keys,
         digital_twin_status = d.digital_twin_panel.schema_version,
         digital_twin_workflows_count = d.digital_twin_panel.workflow_count,
         digital_twin_happening = d.digital_twin_panel.global_counts.happening_now_count,
@@ -1070,6 +1099,75 @@ pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> Strin
         artifacts = panel.artifact_count,
         lanes = render_task_board_lane_summary(panel),
     )
+}
+
+fn build_navigation_panel() -> InteractiveNavigationPanel {
+    InteractiveNavigationPanel {
+        schema_version: INTERACTIVE_NAVIGATION_SCHEMA_VERSION.to_string(),
+        status: "navigation_ready".to_string(),
+        default_display_mode: "detailed".to_string(),
+        display_modes: vec![
+            "compact".to_string(),
+            "detailed".to_string(),
+            "focus".to_string(),
+        ],
+        active_theme: "forge_dark".to_string(),
+        themes: vec![
+            "forge_dark".to_string(),
+            "forge_light".to_string(),
+            "high_contrast".to_string(),
+        ],
+        keybindings: vec![
+            navigation_key("j", "focus_next", "panel", "Move focus to the next panel"),
+            navigation_key(
+                "k",
+                "focus_previous",
+                "panel",
+                "Move focus to the previous panel",
+            ),
+            navigation_key("enter", "open_focused", "panel", "Open the focused item"),
+            navigation_key(
+                "/",
+                "command_palette",
+                "global",
+                "Open slash command routing",
+            ),
+            navigation_key("t", "cycle_theme", "global", "Cycle available themes"),
+            navigation_key(
+                "m",
+                "cycle_display_mode",
+                "global",
+                "Cycle compact, detailed and focus display modes",
+            ),
+        ],
+    }
+}
+
+fn navigation_key(
+    key: &str,
+    action: &str,
+    target: &str,
+    description: &str,
+) -> InteractiveKeyBinding {
+    InteractiveKeyBinding {
+        key: key.to_string(),
+        action: action.to_string(),
+        target: target.to_string(),
+        description: description.to_string(),
+    }
+}
+
+fn render_navigation_keybindings(panel: &InteractiveNavigationPanel) -> String {
+    if panel.keybindings.is_empty() {
+        return "none".to_string();
+    }
+
+    panel
+        .keybindings
+        .iter()
+        .map(|binding| format!("{}={}", binding.key, binding.action))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn render_task_board_lane_summary(panel: &InteractiveTaskBoardPanel) -> String {

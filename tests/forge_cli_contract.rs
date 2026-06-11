@@ -35567,6 +35567,28 @@ fn interactive_home_exposes_task_board_handoffs_checkpoints_and_artifacts() {
         task_board["schema_version"],
         "forge.interactive.task_board.v1"
     );
+    let navigation = &home["dashboard"]["navigation_panel"];
+    assert_eq!(
+        navigation["schema_version"],
+        "forge.interactive.navigation.v1"
+    );
+    assert!(navigation["display_modes"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("compact")));
+    assert!(navigation["display_modes"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("detailed")));
+    assert!(navigation["themes"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("forge_dark")));
+    assert!(navigation["keybindings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|binding| binding["key"] == "j" && binding["action"] == "focus_next"));
     assert_eq!(task_board["status"], "task_board_ready");
     assert!(task_board["workflow_count"].as_u64().unwrap() >= 1);
     assert!(task_board["task_count"].as_u64().unwrap() >= 1);
@@ -35672,6 +35694,7 @@ fn interactive_home_exposes_task_board_handoffs_checkpoints_and_artifacts() {
     assert!(text.contains("Operational digital twin"));
     assert!(text.contains("pending_human_or_modifier_approval"));
     assert!(text.contains("DAG panel"));
+    assert!(text.contains("Navigation panel"));
     assert!(text.contains("Task board"));
     assert!(text.contains("human waits 1"));
     assert!(text.contains("checkpoints 1"));
