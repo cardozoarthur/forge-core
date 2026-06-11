@@ -208,6 +208,76 @@ pub struct ShellSessionReceipt {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct BrainSessionsReport {
+    pub schema_version: String,
+    pub status: String,
+    pub controller: String,
+    pub selected_provider_id: Option<String>,
+    pub provider_count: usize,
+    pub session_count: usize,
+    pub ready_session_count: usize,
+    pub planned_event_count: usize,
+    pub providers: Vec<BrainProviderSessionSummary>,
+    pub sessions: Vec<BrainSessionState>,
+    pub recent_events: Vec<BrainSessionEventSummary>,
+    pub safety_gates: Vec<String>,
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainProviderSessionSummary {
+    pub provider_id: String,
+    pub display_name: String,
+    pub provider_kind: String,
+    pub status: String,
+    pub selected: bool,
+    pub installed: bool,
+    pub configured: bool,
+    pub allowed: bool,
+    pub non_interactive_ready: bool,
+    pub forge_first_ready: bool,
+    pub session_count: usize,
+    pub ready_session_count: usize,
+    pub recorded_plan_count: usize,
+    pub session_ids: Vec<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainSessionState {
+    pub session_id: String,
+    pub provider_id: String,
+    pub provider_kind: String,
+    pub readiness: String,
+    pub entry_command: Vec<String>,
+    pub attachable: bool,
+    pub launch_mode: String,
+    pub forge_first_ready: bool,
+    pub state_boundary: String,
+    pub recorded_plan_count: usize,
+    pub last_planned_at: Option<String>,
+    pub last_origin: Option<String>,
+    pub last_workflow_id: Option<String>,
+    pub last_task_id: Option<String>,
+    pub last_run_id: Option<String>,
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainSessionEventSummary {
+    pub global_event_id: i64,
+    pub kind: String,
+    pub origin: String,
+    pub status: String,
+    pub workflow_id: Option<String>,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub executor_filter: Option<String>,
+    pub session_ids: Vec<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ExecutorQuotaPolicyReport {
     pub schema_version: String,
     pub selection_principle: String,
@@ -1216,6 +1286,201 @@ pub fn record_shell_session_plan(
         executor_filter: launch_plan.executor_filter.clone(),
         launch_plan,
     })
+}
+
+pub fn build_brain_sessions_report(
+    store: &ForgeStore,
+    router: &BrainRouterReport,
+) -> Result<BrainSessionsReport> {
+    let mut events = store
+        .load_global_events()?
+        .into_iter()
+        .filter(|event| event.source == "forge_shell" && event.kind == "shell_launch_planned")
+        .map(brain_session_event_summary)
+        .collect::<Vec<_>>();
+    events.sort_by(|left, right| right.global_event_id.cmp(&left.global_event_id));
+
+    let sessions = router
+        .shell_sessions
+        .iter()
+        .map(|session| {
+            let brain = router
+                .brains
+                .iter()
+                .find(|candidate| candidate.id == session.brain_id);
+            brain_session_state(session, brain, &events)
+        })
+        .collect::<Vec<_>>();
+    let providers = brain_provider_session_summaries(router, &sessions);
+    let ready_session_count = sessions
+        .iter()
+        .filter(|session| session.readiness == "ready")
+        .count();
+    let status = if sessions.is_empty() {
+        "empty"
+    } else {
+        "loaded"
+    };
+
+    Ok(BrainSessionsReport {
+        schema_version: "forge.brain_sessions.v1".to_string(),
+        status: status.to_string(),
+        controller: router.controller.clone(),
+        selected_provider_id: router.selected_brain.clone(),
+        provider_count: providers.len(),
+        session_count: sessions.len(),
+        ready_session_count,
+        planned_event_count: events.len(),
+        providers,
+        sessions,
+        recent_events: events.into_iter().take(20).collect(),
+        safety_gates: router.safety_gates.clone(),
+        next_actions: vec![
+            "Use forge shells --record-session before handing a shell to a human or external brain."
+                .to_string(),
+            "Use forge request switch-executor to hot-swap an active run provider without losing workflow lineage."
+                .to_string(),
+            "Use forge workflow update-node-brain to change provider routing for one AI or mixed node while the workflow remains active."
+                .to_string(),
+        ],
+    })
+}
+
+fn brain_session_event_summary(
+    event: crate::storage::StoredGlobalEventRecord,
+) -> BrainSessionEventSummary {
+    let launch_plan = &event.data["launch_plan"];
+    let session_ids = launch_plan["launch_plans"]
+        .as_array()
+        .map(|plans| {
+            plans
+                .iter()
+                .filter_map(|plan| plan["session_id"].as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    BrainSessionEventSummary {
+        global_event_id: event.id,
+        kind: event.kind,
+        origin: event.origin,
+        status: event.status,
+        workflow_id: event.workflow_id,
+        task_id: event.data["task_id"].as_str().map(str::to_string),
+        run_id: event.data["run_id"].as_str().map(str::to_string),
+        executor_filter: event.data["executor_filter"].as_str().map(str::to_string),
+        session_ids,
+        created_at: event.created_at,
+    }
+}
+
+fn brain_session_state(
+    session: &BrainShellSessionSpec,
+    brain: Option<&BrainCandidate>,
+    events: &[BrainSessionEventSummary],
+) -> BrainSessionState {
+    let matching_events = events
+        .iter()
+        .filter(|event| event.session_ids.iter().any(|id| id == &session.id))
+        .collect::<Vec<_>>();
+    let last_event = matching_events.first().copied();
+    BrainSessionState {
+        session_id: session.id.clone(),
+        provider_id: session.brain_id.clone(),
+        provider_kind: brain
+            .map(|candidate| candidate.execution_mode.clone())
+            .unwrap_or_else(|| "forge_control_plane".to_string()),
+        readiness: shell_session_readiness(session, brain).to_string(),
+        entry_command: session.entry_command.clone(),
+        attachable: session.attachable,
+        launch_mode: session.launch_mode.clone(),
+        forge_first_ready: session.forge_first_ready,
+        state_boundary: session.state_boundary.clone(),
+        recorded_plan_count: matching_events.len(),
+        last_planned_at: last_event.map(|event| event.created_at.clone()),
+        last_origin: last_event.map(|event| event.origin.clone()),
+        last_workflow_id: last_event.and_then(|event| event.workflow_id.clone()),
+        last_task_id: last_event.and_then(|event| event.task_id.clone()),
+        last_run_id: last_event.and_then(|event| event.run_id.clone()),
+        next_actions: shell_next_actions(session),
+    }
+}
+
+fn brain_provider_session_summaries(
+    router: &BrainRouterReport,
+    sessions: &[BrainSessionState],
+) -> Vec<BrainProviderSessionSummary> {
+    let mut providers = Vec::new();
+    providers.push(forge_provider_session_summary(router, sessions));
+    providers.extend(router.brains.iter().map(|brain| {
+        let provider_sessions = sessions
+            .iter()
+            .filter(|session| session.provider_id == brain.id)
+            .collect::<Vec<_>>();
+        BrainProviderSessionSummary {
+            provider_id: brain.id.clone(),
+            display_name: brain.display_name.clone(),
+            provider_kind: brain.execution_mode.clone(),
+            status: brain.status.clone(),
+            selected: router.selected_brain.as_deref() == Some(brain.id.as_str()),
+            installed: brain.installed,
+            configured: brain.configured,
+            allowed: brain.allowed,
+            non_interactive_ready: brain.non_interactive_ready,
+            forge_first_ready: brain.forge_first_ready,
+            session_count: provider_sessions.len(),
+            ready_session_count: provider_sessions
+                .iter()
+                .filter(|session| session.readiness == "ready")
+                .count(),
+            recorded_plan_count: provider_sessions
+                .iter()
+                .map(|session| session.recorded_plan_count)
+                .sum(),
+            session_ids: provider_sessions
+                .iter()
+                .map(|session| session.session_id.clone())
+                .collect(),
+            reason: brain.reason.clone(),
+        }
+    }));
+    providers
+}
+
+fn forge_provider_session_summary(
+    router: &BrainRouterReport,
+    sessions: &[BrainSessionState],
+) -> BrainProviderSessionSummary {
+    let provider_sessions = sessions
+        .iter()
+        .filter(|session| session.provider_id == "forge")
+        .collect::<Vec<_>>();
+    BrainProviderSessionSummary {
+        provider_id: "forge".to_string(),
+        display_name: "Forge Control Plane".to_string(),
+        provider_kind: "forge_control_plane".to_string(),
+        status: "ready".to_string(),
+        selected: router.selected_brain.as_deref() == Some("forge"),
+        installed: true,
+        configured: true,
+        allowed: true,
+        non_interactive_ready: true,
+        forge_first_ready: true,
+        session_count: provider_sessions.len(),
+        ready_session_count: provider_sessions
+            .iter()
+            .filter(|session| session.readiness == "ready")
+            .count(),
+        recorded_plan_count: provider_sessions
+            .iter()
+            .map(|session| session.recorded_plan_count)
+            .sum(),
+        session_ids: provider_sessions
+            .iter()
+            .map(|session| session.session_id.clone())
+            .collect(),
+        reason: "Forge owns orchestration, workflow state, context, memory, skills, MCP routing and shell lifecycle.".to_string(),
+    }
 }
 
 fn shell_session_tenant_context(

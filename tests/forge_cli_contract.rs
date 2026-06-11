@@ -15323,6 +15323,183 @@ fn shells_launch_plan_selects_forge_first_entrypoint_without_running_brain() {
     assert_eq!(mcp_receipt_json["result"]["origin"], "mcp-contract-test");
 }
 
+#[cfg(unix)]
+#[test]
+fn brain_sessions_report_aggregates_providers_shell_specs_and_planned_events() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let home = temp.path().join("home");
+    let real_bin = temp.path().join("real-bin");
+    let shim_dir = home.join(".forge/bin");
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(home.join(".codex/config.toml"), "model = \"test\"\n").unwrap();
+    write_fake_cli(&real_bin, "codex");
+    fs::create_dir_all(&shim_dir).unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "install-shims",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--real-cmd",
+            real_bin.join("codex").to_str().unwrap(),
+            "--forge-first",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    let path = format!(
+        "{}:{}:{}",
+        shim_dir.display(),
+        real_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "executors",
+            "--home",
+            home.to_str().unwrap(),
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--allow",
+            "codex",
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "shells",
+            "--executor",
+            "codex",
+            "--workflow",
+            "wf_session_management",
+            "--task",
+            "task-session",
+            "--run",
+            "run-session",
+            "--record-session",
+            "--origin",
+            "contract-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sessions",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.brain_sessions.v1");
+    assert_eq!(json["controller"], "forge");
+    assert_eq!(json["status"], "loaded");
+    assert!(json["provider_count"].as_u64().unwrap() >= 1);
+    assert!(json["session_count"].as_u64().unwrap() >= 1);
+    let codex_provider = json["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["provider_id"] == "codex")
+        .expect("codex provider should be summarized");
+    assert_eq!(codex_provider["provider_kind"], "external_cli_brain");
+    assert_eq!(codex_provider["forge_first_ready"], true);
+    assert!(codex_provider["session_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("codex-shell")));
+
+    let codex_session = json["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["session_id"] == "codex-shell")
+        .expect("codex-shell should be manageable");
+    assert_eq!(codex_session["provider_id"], "codex");
+    assert_eq!(codex_session["readiness"], "ready");
+    assert_eq!(codex_session["launch_mode"], "forge_first_harness");
+    assert_eq!(codex_session["recorded_plan_count"], 1);
+    assert_eq!(codex_session["last_origin"], "contract-test");
+    assert_eq!(codex_session["last_workflow_id"], "wf_session_management");
+    assert_eq!(codex_session["last_task_id"], "task-session");
+    assert_eq!(codex_session["last_run_id"], "run-session");
+    assert!(json["recent_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["kind"] == "shell_launch_planned"
+            && event["origin"] == "contract-test"
+            && event["session_ids"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("codex-shell"))));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.sessions");
+    assert_eq!(tool["output_schema"], "forge.brain_sessions.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .env("PATH", &path)
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.sessions"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.brain_sessions.v1"
+    );
+    assert!(mcp_json["result"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |session| session["session_id"] == "codex-shell" && session["recorded_plan_count"] == 1
+        ));
+}
+
 #[test]
 fn brain_router_keeps_memory_skills_mcp_and_shells_under_forge_control() {
     let temp = tempdir().unwrap();

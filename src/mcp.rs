@@ -43,7 +43,8 @@ use crate::event::{
     EventEgressEmitInput, InboundEventIngestInput,
 };
 use crate::executor::{
-    build_shell_launch_plan, load_executors, record_shell_session_plan, ShellLaunchPlanOptions,
+    build_brain_sessions_report, build_shell_launch_plan, load_executors,
+    record_shell_session_plan, ShellLaunchPlanOptions,
 };
 use crate::handoff::build_task_handoff;
 use crate::harness::{
@@ -2643,6 +2644,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.brain_router.v1",
                 &["forge", "brains", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.sessions",
+                "Inspect Brain Sessions",
+                "Return Forge-owned provider/session management state for execution brains, shell specs and recorded shell launch events without starting child processes.",
+                object_schema(&[], &[]),
+                "forge.brain_sessions.v1",
+                &["forge", "sessions", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -6108,6 +6118,10 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(build_interactive_task_board(store)?)?
         }
         "forge.brain_router" => serde_json::to_value(load_executors(store)?.brain_router)?,
+        "forge.sessions" => {
+            let report = load_executors(store)?;
+            serde_json::to_value(build_brain_sessions_report(store, &report.brain_router)?)?
+        }
         "forge.shell.launch_plan" => {
             let input: ShellLaunchPlanInput = parse_input(input)?;
             let executor = input.executor.or(input.brain);

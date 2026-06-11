@@ -576,6 +576,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 "/milestone".to_string(),
                 "/sync".to_string(),
                 "/brains".to_string(),
+                "/sessions".to_string(),
                 "/shells".to_string(),
                 "/harness".to_string(),
                 "/validate".to_string(),
@@ -1546,6 +1547,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Brains",
             "List Forge-controlled execution brains and routing boundaries.",
             &["forge", "brains"],
+            false,
+            "low",
+        ),
+        slash(
+            "/sessions",
+            "Sessions",
+            "Inspect Forge-controlled provider and shell session management state.",
+            &["forge", "sessions", "--output", "json"],
             false,
             "low",
         ),
@@ -2738,6 +2747,38 @@ mod tests {
                 "forge".to_string(),
                 "harness".to_string(),
                 "mode".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn interactive_home_surfaces_sessions_quick_action() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let report = build_interactive_home(&store).unwrap();
+        assert!(report
+            .dashboard
+            .quick_actions
+            .contains(&"/sessions".to_string()));
+    }
+
+    #[test]
+    fn slash_sessions_is_recognized_as_read_only_provider_state() {
+        let report = route_slash_command("/sessions");
+        assert_eq!(report.input_kind, "slash_command");
+        assert_eq!(report.routing_decision, "slash_command");
+        let route = report.slash_command.unwrap();
+        assert_eq!(route.name, "/sessions");
+        assert!(route.recognized);
+        assert!(!route.mutates_workflow);
+        assert_eq!(route.risk_level, "low");
+        assert_eq!(
+            route.equivalent_command,
+            vec![
+                "forge".to_string(),
+                "sessions".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ]
