@@ -545,6 +545,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 "/workflows".to_string(),
                 "/runs".to_string(),
                 "/artifacts".to_string(),
+                "/task-board".to_string(),
                 "/milestone".to_string(),
                 "/sync".to_string(),
                 "/brains".to_string(),
@@ -568,6 +569,14 @@ pub fn slash_command_catalog() -> SlashCommandCatalogReport {
         schema_version: SLASH_COMMANDS_SCHEMA_VERSION.to_string(),
         commands: slash_commands(),
     }
+}
+
+pub fn build_interactive_task_board(store: &ForgeStore) -> Result<InteractiveTaskBoardPanel> {
+    let workflows = list_workflows_with_filters(
+        store,
+        WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
+    )?;
+    build_task_board_panel(store, &workflows.workflows)
 }
 
 pub fn route_interactive_input(
@@ -740,28 +749,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
             .collect::<Vec<_>>()
             .join(" | ")
     };
-    let task_board_lanes = if d.task_board_panel.lanes.is_empty() {
-        "none".to_string()
-    } else {
-        d.task_board_panel
-            .lanes
-            .iter()
-            .map(|lane| {
-                format!(
-                    "{} [{}] tasks {}/{}, ready handoffs {}, human waits {}, checkpoints {}, artifacts {}",
-                    lane.workflow_id,
-                    lane.lifecycle_state,
-                    lane.completed_tasks,
-                    lane.total_tasks,
-                    lane.ready_handoffs,
-                    lane.pending_human_interactions,
-                    lane.checkpoint_resume_candidates,
-                    lane.artifact_count
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" | ")
-    };
+    let task_board_lanes = render_task_board_lane_summary(&d.task_board_panel);
     let latest_events = if d.event_panel.latest_events.is_empty() {
         "none".to_string()
     } else {
@@ -868,6 +856,44 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         quick_actions = quick_actions,
         next_commands = next_commands,
     )
+}
+
+pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> String {
+    format!(
+        "Task board: {status}; workflows {workflow_count}, tasks {task_count}, ready handoffs {ready_handoffs}, human waits {human_waits}, checkpoints {checkpoints}, artifacts {artifacts}\nLanes: {lanes}\n",
+        status = panel.status,
+        workflow_count = panel.workflow_count,
+        task_count = panel.task_count,
+        ready_handoffs = panel.ready_handoffs,
+        human_waits = panel.pending_human_interactions,
+        checkpoints = panel.checkpoint_resume_candidates,
+        artifacts = panel.artifact_count,
+        lanes = render_task_board_lane_summary(panel),
+    )
+}
+
+fn render_task_board_lane_summary(panel: &InteractiveTaskBoardPanel) -> String {
+    if panel.lanes.is_empty() {
+        return "none".to_string();
+    }
+    panel
+        .lanes
+        .iter()
+        .map(|lane| {
+            format!(
+                "{} [{}] tasks {}/{}, ready handoffs {}, human waits {}, checkpoints {}, artifacts {}",
+                lane.workflow_id,
+                lane.lifecycle_state,
+                lane.completed_tasks,
+                lane.total_tasks,
+                lane.ready_handoffs,
+                lane.pending_human_interactions,
+                lane.checkpoint_resume_candidates,
+                lane.artifact_count
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 fn build_task_board_panel(
@@ -1271,6 +1297,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Artifacts",
             "List workflow artifacts.",
             &["forge", "artifacts", "--workflow", "<workflow-id>"],
+            false,
+            "low",
+        ),
+        slash(
+            "/task-board",
+            "Task Board",
+            "Show operational workflow lanes with handoffs, checkpoints, human waits and artifacts.",
+            &["forge", "interactive", "task-board"],
             false,
             "low",
         ),

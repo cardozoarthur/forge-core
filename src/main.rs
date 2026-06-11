@@ -83,7 +83,8 @@ use forge_core::interaction::{
     CreateChoiceInteractionRequest,
 };
 use forge_core::interactive::{
-    build_interactive_home, render_interactive_home, route_interactive_input, run_interactive_repl,
+    build_interactive_home, build_interactive_task_board, render_interactive_home,
+    render_interactive_task_board, route_interactive_input, run_interactive_repl,
     slash_command_catalog,
 };
 use forge_core::ir::{CreativeArtifact, TokenCollection};
@@ -2841,6 +2842,10 @@ enum ImproveCommands {
 #[derive(Debug, Subcommand)]
 enum InteractiveCommands {
     Home {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    TaskBoard {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -6621,6 +6626,15 @@ fn run() -> Result<i32> {
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => println!("{}", render_interactive_home(&report)),
+                }
+                Ok(0)
+            }
+            InteractiveCommands::TaskBoard { output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_interactive_task_board(&store)?;
+                match output {
+                    OutputFormat::Json => print_response(output, &report)?,
+                    OutputFormat::Human => println!("{}", render_interactive_task_board(&report)),
                 }
                 Ok(0)
             }

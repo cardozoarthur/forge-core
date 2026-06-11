@@ -31056,6 +31056,138 @@ fn interactive_home_exposes_task_board_handoffs_checkpoints_and_artifacts() {
 }
 
 #[test]
+fn interactive_task_board_command_and_mcp_surface_are_dedicated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Operate a dedicated task board with human waiting state",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let task = find_task(
+        planned_json["tasks"].as_array().unwrap(),
+        "Extract requirements",
+    );
+    let task_id = task["id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interaction",
+            "create-choice",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--kind",
+            "approve_reject_refine_combine",
+            "--prompt",
+            "Choose whether the dedicated task board can proceed",
+            "--choice",
+            "approve=Approve",
+            "--choice",
+            "refine=Refine",
+            "--timeout-seconds",
+            "3600",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let board_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "task-board",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let board: Value = serde_json::from_slice(&board_output).unwrap();
+    assert_eq!(board["schema_version"], "forge.interactive.task_board.v1");
+    assert_eq!(board["status"], "task_board_ready");
+    assert_eq!(board["workflow_count"], 1);
+    assert_eq!(board["pending_human_interactions"], 1);
+    assert!(board["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|lane| lane["workflow_id"] == workflow_id
+            && lane["next_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("forge interaction list"))));
+
+    let board_text = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "task-board",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(board_text).unwrap();
+    assert!(text.contains("Task board"));
+    assert!(text.contains(workflow_id));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.task_board");
+    assert_eq!(tool["output_schema"], "forge.interactive.task_board.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.task_board"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.task_board.v1"
+    );
+    assert_eq!(mcp_json["result"]["pending_human_interactions"], 1);
+}
+
+#[test]
 fn no_args_non_tty_stays_script_safe_and_does_not_open_dashboard() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -31139,6 +31271,7 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         "/runs",
         "/workflows",
         "/artifacts",
+        "/task-board",
         "/costs",
         "/config",
         "/sync",
@@ -31656,6 +31789,10 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.home"),
         "the packaged Forge skill should expose interactive home state through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.task_board"),
+        "the packaged Forge skill should expose the dedicated interactive task board through MCP"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.route"),

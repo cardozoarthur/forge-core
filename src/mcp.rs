@@ -65,7 +65,10 @@ use crate::interaction::{
     answer_human_interaction, create_choice_interaction, create_form_interaction,
     expire_human_interaction, list_human_interactions, CreateChoiceInteractionRequest,
 };
-use crate::interactive::{build_interactive_home, route_interactive_input, slash_command_catalog};
+use crate::interactive::{
+    build_interactive_home, build_interactive_task_board, route_interactive_input,
+    slash_command_catalog,
+};
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
     list_memory_promotions, memory_cleanup_report, memory_policy_report, memory_retention_report,
@@ -2536,6 +2539,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.home.v1",
                 &["forge", "interactive", "home", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.task_board",
+                "Inspect Interactive Task Board",
+                "Return the Forge interactive task-board lanes with ready handoffs, checkpoint resume candidates, pending human waits, artifacts and next actions without launching a TTY.",
+                object_schema(&[], &[]),
+                "forge.interactive.task_board.v1",
+                &["forge", "interactive", "task-board", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -5871,6 +5883,9 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             )?)?
         }
         "forge.interactive.home" => serde_json::to_value(build_interactive_home(store)?)?,
+        "forge.interactive.task_board" => {
+            serde_json::to_value(build_interactive_task_board(store)?)?
+        }
         "forge.brain_router" => serde_json::to_value(load_executors(store)?.brain_router)?,
         "forge.addons.installed" => serde_json::to_value(list_installed_addons(store)?)?,
         "forge.addons.capabilities" => {
