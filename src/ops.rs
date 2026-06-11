@@ -2230,6 +2230,54 @@ fn render_addon_interaction_state_html(state: &OpsAddonViewInteractionState) -> 
     )
 }
 
+fn render_addon_renderer_event_controls(
+    renderer: &OpsAddonViewRenderer,
+    workflow_options: &str,
+) -> String {
+    if !renderer.safe_renderer {
+        return "<p><small>Renderer bloqueado para eventos de cliente.</small></p>".to_string();
+    }
+    if workflow_options.is_empty() {
+        return "<p><small>Nenhum workflow disponível para registrar eventos.</small></p>"
+            .to_string();
+    }
+    let event_options = renderer
+        .interaction_state
+        .allowed_client_events
+        .iter()
+        .map(|event| {
+            format!(
+                "<option value=\"{}\">{}</option>",
+                escape_html(event),
+                escape_html(event)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let sample_payload = default_renderer_event_payload(&renderer.renderer_family);
+    format!(
+        r#"<form method="post" action="/api/addon-renderer/event"><input type="hidden" name="view_id" value="{}"><label>Registrar evento de renderer</label><select name="workflow_id">{}</select><select name="event_kind">{}</select><input name="actor" value="ops-web"><textarea name="payload">{}</textarea><button type="submit">Registrar evento de renderer</button></form>"#,
+        escape_html(&renderer.view_id),
+        workflow_options,
+        event_options,
+        escape_html(&sample_payload),
+    )
+}
+
+fn default_renderer_event_payload(renderer_family: &str) -> String {
+    match renderer_family {
+        "dashboard_renderer" | "visualization_renderer" => {
+            r#"{"point":"series.current"}"#.to_string()
+        }
+        "editor_renderer" => r#"{"draft":{"field":"value"}}"#.to_string(),
+        "data_list_renderer" => r#"{"selection":{"row_key":"row-1"}}"#.to_string(),
+        "timeline_renderer" => r#"{"cursor":"latest"}"#.to_string(),
+        "canvas_renderer" => r#"{"selection":{"artifact_id":"artifact-1"}}"#.to_string(),
+        "document_renderer" => r#"{"selection":{"section":"summary"}}"#.to_string(),
+        _ => "{}".to_string(),
+    }
+}
+
 pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
     let mut rows = String::new();
     for workflow in &snapshot.registry.workflows {
@@ -2413,6 +2461,24 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
             "<tr><td colspan=\"7\">Nenhuma view ativa de Addon para o console ops.</td></tr>",
         );
     }
+    let renderer_workflow_options = snapshot
+        .registry
+        .workflows
+        .iter()
+        .map(|workflow| {
+            let label = format!(
+                "{} · {}",
+                workflow.workflow_id,
+                truncate(&workflow.current_goal, 80)
+            );
+            format!(
+                "<option value=\"{}\">{}</option>",
+                escape_html(&workflow.workflow_id),
+                escape_html(&label)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
     let mut addon_renderer_cards = String::new();
     for renderer in &snapshot.addon_view_renderers.renderers {
         let mut data_sources = String::new();
@@ -2463,8 +2529,10 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
             renderer.notes.join("; ")
         };
         let interaction = render_addon_interaction_state_html(&renderer.interaction_state);
+        let event_controls =
+            render_addon_renderer_event_controls(renderer, &renderer_workflow_options);
         addon_renderer_cards.push_str(&format!(
-            "<section id=\"{}\" class=\"addon-view-card\"><div class=\"addon-view-head\"><div><h3>{}</h3><code>{}</code></div><span>{}</span></div><div class=\"design-strip\"><span>família: {}</span><span>componente seguro: {}</span><span>região: {}</span><span>densidade: {}</span><span>largura: {}</span><span>safe: {}</span></div><p>{}</p><div class=\"visual-panels\"><div><h4>Fontes seguras</h4><ul class=\"compact-list\">{}</ul></div><div><h4>Ações renderizáveis</h4><ul class=\"compact-list\">{}</ul></div></div>{}<div class=\"design-strip\"><span>Permissões: {}</span><span>Capabilities: {}</span><span>TUI: {}</span></div></section>",
+            "<section id=\"{}\" class=\"addon-view-card\"><div class=\"addon-view-head\"><div><h3>{}</h3><code>{}</code></div><span>{}</span></div><div class=\"design-strip\"><span>família: {}</span><span>componente seguro: {}</span><span>região: {}</span><span>densidade: {}</span><span>largura: {}</span><span>safe: {}</span></div><p>{}</p><div class=\"visual-panels\"><div><h4>Fontes seguras</h4><ul class=\"compact-list\">{}</ul></div><div><h4>Ações renderizáveis</h4><ul class=\"compact-list\">{}</ul></div></div>{}<div class=\"visual-actions\">{}</div><div class=\"design-strip\"><span>Permissões: {}</span><span>Capabilities: {}</span><span>TUI: {}</span></div></section>",
             escape_html(&renderer.html_anchor),
             escape_html(&renderer.title),
             escape_html(&renderer.view_id),
@@ -2479,6 +2547,7 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
             data_sources,
             rendered_actions,
             interaction,
+            event_controls,
             escape_html(&permission_text),
             escape_html(&capability_text),
             escape_html(&renderer.tui_affordance),

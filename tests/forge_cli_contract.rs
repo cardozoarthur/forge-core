@@ -23776,6 +23776,9 @@ views:
     assert!(custom_html.contains("Editor seguro"));
     assert!(custom_html.contains("renderer.metrics_chart"));
     assert!(custom_html.contains("renderer.settings_form"));
+    assert!(custom_html.contains("/api/addon-renderer/event"));
+    assert!(custom_html.contains("Registrar evento de renderer"));
+    assert!(custom_html.contains("series.current"));
     let renderer_event_request = format!(
         "POST /api/addon-renderer/event HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nworkflow_id={workflow_id}&view_id=renderer.metrics_chart&event_kind=hover_changed&actor=human%3Aarthur&payload=%7B%22point%22%3A%22cost_series%22%7D"
     );
