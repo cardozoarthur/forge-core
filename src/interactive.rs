@@ -52,6 +52,8 @@ const INTERACTIVE_SESSIONS_SCHEMA_VERSION: &str = "forge.interactive.sessions.v1
 const INTERACTIVE_COMMAND_PALETTE_SCHEMA_VERSION: &str = "forge.interactive.command_palette.v1";
 const INTERACTIVE_AUTOCOMPLETE_SCHEMA_VERSION: &str = "forge.interactive.autocomplete.v1";
 const INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION: &str = "forge.interactive.patch_workbench.v1";
+const INTERACTIVE_ADDON_ACTION_CONTRACT_SCHEMA_VERSION: &str =
+    "forge.interactive.addon_action_contract.v1";
 const INTERACTIVE_PATCH_ADDON_CONTRACT_SCHEMA_VERSION: &str =
     "forge.interactive.patch_addon_contract.v1";
 const INTERACTIVE_PATCH_EDIT_INTAKE_SCHEMA_VERSION: &str = "forge.interactive.patch_edit_intake.v1";
@@ -260,7 +262,7 @@ pub struct InteractiveCommandPaletteEntry {
     pub description: String,
     pub source_panel: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub addon_contract: Option<InteractivePatchAddonContract>,
+    pub addon_contract: Option<InteractiveAddonActionContract>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub addon_view_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -294,7 +296,7 @@ pub struct InteractiveAutocompleteSuggestion {
     pub source: String,
     pub source_panel: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub addon_contract: Option<InteractivePatchAddonContract>,
+    pub addon_contract: Option<InteractiveAddonActionContract>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub addon_view_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -466,6 +468,23 @@ pub struct InteractivePatchAddonContract {
     pub runtime_contract_id: String,
     pub runtime: String,
     pub entrypoint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveAddonActionContract {
+    pub schema_version: String,
+    pub source_addon: String,
+    pub addon_name: String,
+    pub addon_version: String,
+    pub addon_lifecycle: String,
+    pub capability_id: String,
+    pub permission_id: String,
+    pub permission_gate_status: String,
+    pub view_id: String,
+    pub action_id: String,
+    pub action_type: String,
+    pub method: String,
+    pub target: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1860,7 +1879,7 @@ fn addon_view_command_palette_entry(
         title,
         description,
         source_panel,
-        addon_contract: addon_action_contract(view, action),
+        addon_contract: Some(addon_action_contract(view, action)),
         addon_view_id: Some(view.view.id.clone()),
         addon_view_action_id: Some(action.id.clone()),
         workflow_id: None,
@@ -1875,13 +1894,34 @@ fn addon_view_command_palette_entry(
 fn addon_action_contract(
     view: &AddonViewEntry,
     action: &AddonViewAction,
-) -> Option<InteractivePatchAddonContract> {
-    if view.addon_id == "forge.addon.software_development"
-        && action.permission == "source_code.patch"
-    {
-        Some(patch_addon_contract())
-    } else {
-        None
+) -> InteractiveAddonActionContract {
+    let capability_id = view
+        .view
+        .data_bindings
+        .iter()
+        .find_map(|binding| {
+            if binding.required_capability.is_empty() {
+                None
+            } else {
+                Some(binding.required_capability.clone())
+            }
+        })
+        .unwrap_or_default();
+
+    InteractiveAddonActionContract {
+        schema_version: INTERACTIVE_ADDON_ACTION_CONTRACT_SCHEMA_VERSION.to_string(),
+        source_addon: view.addon_id.clone(),
+        addon_name: view.addon_name.clone(),
+        addon_version: view.addon_version.clone(),
+        addon_lifecycle: view.addon_lifecycle.clone(),
+        capability_id,
+        permission_id: action.permission.clone(),
+        permission_gate_status: view.permission_gate.status.clone(),
+        view_id: view.view.id.clone(),
+        action_id: action.id.clone(),
+        action_type: action.action_type.clone(),
+        method: action.method.clone(),
+        target: action.target.clone(),
     }
 }
 

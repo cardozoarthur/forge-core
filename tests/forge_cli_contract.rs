@@ -37014,10 +37014,19 @@ fn interactive_command_palette_surfaces_contextual_actions_for_replacement_cli()
                     .unwrap()
                     .contains(&serde_json::json!("diff"))
                 && entry["addon_contract"]["schema_version"]
-                    == "forge.interactive.patch_addon_contract.v1"
+                    == "forge.interactive.addon_action_contract.v1"
                 && entry["addon_contract"]["source_addon"] == "forge.addon.software_development"
+                && entry["addon_contract"]["addon_name"] == "Software Development Addon"
+                && entry["addon_contract"]["addon_version"] == "0.1.0"
+                && entry["addon_contract"]["addon_lifecycle"] == "enabled"
                 && entry["addon_contract"]["capability_id"] == "source_code_patch_lifecycle"
                 && entry["addon_contract"]["permission_id"] == "source_code.patch"
+                && entry["addon_contract"]["permission_gate_status"] == "allowed"
+                && entry["addon_contract"]["view_id"] == "software.patch_workbench"
+                && entry["addon_contract"]["action_id"] == "patch.diff"
+                && entry["addon_contract"]["action_type"] == "command"
+                && entry["addon_contract"]["method"] == "CLI"
+                && entry["addon_contract"]["target"] == "forge patch diff"
                 && entry["addon_view_id"] == "software.patch_workbench"
                 && entry["addon_view_action_id"] == "patch.diff"
             })
@@ -37216,10 +37225,21 @@ fn interactive_autocomplete_suggests_slash_and_palette_actions_for_replacement_c
                 && suggestion["description"]
                     == "Open read-only multi-file diff navigation from the Addon workbench action."
                 && suggestion["source_panel"] == "patch_workbench_panel"
+                && suggestion["addon_contract"]["schema_version"]
+                    == "forge.interactive.addon_action_contract.v1"
                 && suggestion["addon_contract"]["source_addon"]
                     == "forge.addon.software_development"
+                && suggestion["addon_contract"]["addon_name"] == "Software Development Addon"
+                && suggestion["addon_contract"]["addon_version"] == "0.1.0"
+                && suggestion["addon_contract"]["addon_lifecycle"] == "enabled"
                 && suggestion["addon_contract"]["capability_id"] == "source_code_patch_lifecycle"
                 && suggestion["addon_contract"]["permission_id"] == "source_code.patch"
+                && suggestion["addon_contract"]["permission_gate_status"] == "allowed"
+                && suggestion["addon_contract"]["view_id"] == "software.patch_workbench"
+                && suggestion["addon_contract"]["action_id"] == "patch.diff"
+                && suggestion["addon_contract"]["action_type"] == "command"
+                && suggestion["addon_contract"]["method"] == "CLI"
+                && suggestion["addon_contract"]["target"] == "forge patch diff"
                 && suggestion["addon_view_id"] == "software.patch_workbench"
                 && suggestion["addon_view_action_id"] == "patch.diff"
                 && suggestion["requires_approval"] == false
