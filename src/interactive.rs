@@ -53,6 +53,7 @@ const INTERACTIVE_COMMAND_PALETTE_SCHEMA_VERSION: &str = "forge.interactive.comm
 const INTERACTIVE_COMMAND_PALETTE_ACTION_PLAN_SCHEMA_VERSION: &str =
     "forge.interactive.command_palette_action_plan.v1";
 const INTERACTIVE_ACTION_REGISTRY_SCHEMA_VERSION: &str = "forge.interactive.action_registry.v1";
+const INTERACTIVE_ACTION_INVOCATION_SCHEMA_VERSION: &str = "forge.interactive.action_invocation.v1";
 const INTERACTIVE_AUTOCOMPLETE_SCHEMA_VERSION: &str = "forge.interactive.autocomplete.v1";
 const INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION: &str = "forge.interactive.patch_workbench.v1";
 const INTERACTIVE_ADDON_ACTION_CONTRACT_SCHEMA_VERSION: &str =
@@ -329,6 +330,33 @@ pub struct InteractiveActionRegistryCommands {
     pub command_palette: Vec<String>,
     pub autocomplete: Vec<String>,
     pub inspect_addons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveActionInvocationReport {
+    pub schema_version: String,
+    pub status: String,
+    pub requested_action_id: String,
+    pub match_count: usize,
+    pub can_execute: bool,
+    pub diagnostic_only: bool,
+    pub not_executed: bool,
+    pub selected_command: Vec<String>,
+    pub selected_command_text: String,
+    pub blocked_reason: String,
+    pub recommended_action: String,
+    pub next_commands: Vec<Vec<String>>,
+    pub operation_plan: InteractiveCommandPaletteActionPlan,
+    pub action: Option<InteractiveCommandPaletteEntry>,
+    pub commands: InteractiveActionInvocationCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveActionInvocationCommands {
+    pub action_invocation: Vec<String>,
+    pub action_registry: Vec<String>,
+    pub command_palette: Vec<String>,
+    pub autocomplete: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -1770,6 +1798,128 @@ pub fn build_interactive_action_registry(
         &palette,
         query.unwrap_or_default(),
     ))
+}
+
+pub fn build_interactive_action_invocation(
+    store: &ForgeStore,
+    action_id: &str,
+) -> Result<InteractiveActionInvocationReport> {
+    let action_id = action_id.trim().to_string();
+    let registry = build_interactive_action_registry(store, None)?;
+    let matches = registry
+        .actions
+        .iter()
+        .filter(|action| action.action_id == action_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let action = matches.first().cloned();
+    let operation_plan = action
+        .as_ref()
+        .map(|action| action.operation_plan.clone())
+        .unwrap_or_else(|| {
+            command_palette_action_plan(
+                "not_found",
+                "inspect_action_registry",
+                true,
+                "action_not_found",
+                vec![vec![
+                    "interactive".to_string(),
+                    "action-registry".to_string(),
+                    "--query".to_string(),
+                    action_id.clone(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ]],
+            )
+        });
+    let can_execute = matches.len() == 1
+        && action.as_ref().is_some_and(|action| action.enabled)
+        && !operation_plan.diagnostic_only
+        && action
+            .as_ref()
+            .is_some_and(|action| !action.commands.is_empty());
+    let diagnostic_only = operation_plan.diagnostic_only || !can_execute;
+    let selected_command = if can_execute {
+        action
+            .as_ref()
+            .map(|action| action.commands.clone())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let blocked_reason = if matches.is_empty() {
+        "action_not_found".to_string()
+    } else if matches.len() > 1 {
+        "action_ambiguous".to_string()
+    } else {
+        action
+            .as_ref()
+            .map(|action| action.blocked_reason.clone())
+            .unwrap_or_else(|| "action_not_found".to_string())
+    };
+    let status = if matches.is_empty() {
+        "action_invocation_not_found"
+    } else if matches.len() > 1 {
+        "action_invocation_ambiguous"
+    } else if can_execute {
+        "action_invocation_ready"
+    } else {
+        "action_invocation_blocked"
+    };
+    let selected_command_text = selected_command.join(" ");
+    let next_commands = operation_plan.next_commands.clone();
+    let recommended_action = operation_plan.recommended_action.clone();
+
+    Ok(InteractiveActionInvocationReport {
+        schema_version: INTERACTIVE_ACTION_INVOCATION_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        requested_action_id: action_id.clone(),
+        match_count: matches.len(),
+        can_execute,
+        diagnostic_only,
+        not_executed: true,
+        selected_command,
+        selected_command_text,
+        blocked_reason,
+        recommended_action,
+        next_commands,
+        operation_plan,
+        action,
+        commands: InteractiveActionInvocationCommands {
+            action_invocation: vec![
+                "interactive".to_string(),
+                "action-invocation".to_string(),
+                "--action".to_string(),
+                action_id.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            action_registry: vec![
+                "interactive".to_string(),
+                "action-registry".to_string(),
+                "--query".to_string(),
+                action_id.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            command_palette: vec![
+                "interactive".to_string(),
+                "command-palette".to_string(),
+                "--query".to_string(),
+                action_id.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            autocomplete: vec![
+                "interactive".to_string(),
+                "autocomplete".to_string(),
+                "--input".to_string(),
+                action_id,
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        },
+    })
 }
 
 fn build_action_registry_from_palette(
@@ -5079,6 +5229,25 @@ pub fn render_interactive_action_registry(panel: &InteractiveActionRegistryPanel
         blocked_action_count = panel.blocked_action_count,
         diagnostic_action_count = panel.diagnostic_action_count,
         actions = render_action_registry_action_summary(panel),
+    )
+}
+
+pub fn render_interactive_action_invocation(report: &InteractiveActionInvocationReport) -> String {
+    let command = if report.selected_command_text.is_empty() {
+        "none".to_string()
+    } else {
+        report.selected_command_text.clone()
+    };
+    format!(
+        "Action invocation: {status}; action {action_id}; matches {match_count}; can_execute {can_execute}; diagnostic_only {diagnostic_only}; not executed\nSelected command: {command}\nRecommended action: {recommended_action}; blocked_reason {blocked_reason}\n",
+        status = report.status,
+        action_id = report.requested_action_id,
+        match_count = report.match_count,
+        can_execute = report.can_execute,
+        diagnostic_only = report.diagnostic_only,
+        command = command,
+        recommended_action = report.recommended_action,
+        blocked_reason = report.blocked_reason,
     )
 }
 

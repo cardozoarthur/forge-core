@@ -81,12 +81,12 @@ use crate::interaction::{
     expire_human_interaction, list_human_interactions, CreateChoiceInteractionRequest,
 };
 use crate::interactive::{
-    build_interactive_action_registry, build_interactive_autocomplete,
-    build_interactive_command_palette, build_interactive_harness, build_interactive_home,
-    build_interactive_patch_workbench, build_interactive_permissions, build_interactive_readiness,
-    build_interactive_sessions, build_interactive_structured_logs, build_interactive_task_board,
-    build_interactive_workflow_dag, route_interactive_input, slash_command_catalog,
-    InteractiveHarnessOptions, InteractiveSessionsOptions,
+    build_interactive_action_invocation, build_interactive_action_registry,
+    build_interactive_autocomplete, build_interactive_command_palette, build_interactive_harness,
+    build_interactive_home, build_interactive_patch_workbench, build_interactive_permissions,
+    build_interactive_readiness, build_interactive_sessions, build_interactive_structured_logs,
+    build_interactive_task_board, build_interactive_workflow_dag, route_interactive_input,
+    slash_command_catalog, InteractiveHarnessOptions, InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -517,6 +517,12 @@ struct InteractiveHarnessInput {
 #[derive(Debug, Deserialize, Default)]
 struct InteractiveCommandPaletteInput {
     query: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InteractiveActionInvocationInput {
+    action: Option<String>,
+    action_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -2888,6 +2894,18 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &[]),
                 "forge.interactive.action_registry.v1",
                 &["forge", "interactive", "action-registry", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.action_invocation",
+                "Plan Interactive Action Invocation",
+                "Resolve one action id from the interactive action registry into a ready command or diagnostic-only operation plan without executing it.",
+                object_schema(&[
+                    ("action_id", "string", "action id to resolve, such as patch.diff"),
+                    ("action", "string", "alias for action_id"),
+                ], &[]),
+                "forge.interactive.action_invocation.v1",
+                &["forge", "interactive", "action-invocation", "--action", "<action-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -6708,6 +6726,17 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 store,
                 input.query.as_deref(),
             )?)?
+        }
+        "forge.interactive.action_invocation" => {
+            let input: InteractiveActionInvocationInput = if input.is_null() {
+                InteractiveActionInvocationInput::default()
+            } else {
+                parse_input(input)?
+            };
+            let action_id = input.action_id.or(input.action).ok_or_else(|| {
+                anyhow::anyhow!("forge.interactive.action_invocation requires action_id")
+            })?;
+            serde_json::to_value(build_interactive_action_invocation(store, &action_id)?)?
         }
         "forge.interactive.autocomplete" => {
             let input: InteractiveAutocompleteInput = if input.is_null() {

@@ -36953,6 +36953,233 @@ fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
 }
 
 #[test]
+fn interactive_action_invocation_plans_ready_and_blocked_registry_actions() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let addon_dir = temp.path().join(".forge/addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        addon_dir.join("zzi.yaml"),
+        r#"
+id: forge.addon.zzi_ops
+name: Zzi Ops Addon
+version: 0.1.0
+description: Demonstrates action invocation planning for blocked Addon actions.
+lifecycle: enabled
+capabilities:
+  - id: zzi_ops
+    title: Zzi operations
+    description: Zzi operational controls.
+views:
+  - id: zzi.ops_panel
+    title: Zzi Ops Panel
+    surface: tui
+    type: dashboard
+    component: forge.zzi.ops_panel
+    route: /zzi/ops
+    layout:
+      zone: main
+      order: 42
+      width: full
+      height: auto
+      density: dense
+    data_bindings:
+      - id: zzi_state
+        source: forge.zzi.state
+        query: zzi.state
+        scope: workflow
+        required_capability: zzi_ops
+    actions:
+      - id: zzi.blocked
+        label: Blocked zzi action
+        description: Should resolve to a diagnostic-only invocation plan.
+        palette_group: zzi
+        source_panel: zzi_ops_panel
+        type: command
+        method: CLI
+        target: forge zzi blocked
+        permission: zzi.missing_permission
+        command_template:
+          - zzi
+          - blocked
+        keywords:
+          - zzi
+          - blocked
+"#,
+    )
+    .unwrap();
+
+    let ready_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-invocation",
+            "--action",
+            "patch.diff",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ready: Value = serde_json::from_slice(&ready_output).unwrap();
+    assert_eq!(
+        ready["schema_version"],
+        "forge.interactive.action_invocation.v1"
+    );
+    assert_eq!(ready["status"], "action_invocation_ready");
+    assert_eq!(ready["requested_action_id"], "patch.diff");
+    assert_eq!(ready["match_count"], 1);
+    assert_eq!(ready["can_execute"], true);
+    assert_eq!(ready["not_executed"], true);
+    assert_eq!(ready["diagnostic_only"], false);
+    assert_eq!(ready["selected_command"][0], "patch");
+    assert_eq!(ready["selected_command"][1], "diff");
+    assert_eq!(ready["operation_plan"]["status"], "ready");
+    assert_eq!(
+        ready["operation_plan"]["recommended_action"],
+        "execute_command"
+    );
+    assert_eq!(ready["action"]["action_id"], "patch.diff");
+
+    let blocked_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-invocation",
+            "--action",
+            "zzi.blocked",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let blocked: Value = serde_json::from_slice(&blocked_output).unwrap();
+    assert_eq!(blocked["status"], "action_invocation_blocked");
+    assert_eq!(blocked["requested_action_id"], "zzi.blocked");
+    assert_eq!(blocked["match_count"], 1);
+    assert_eq!(blocked["can_execute"], false);
+    assert_eq!(blocked["diagnostic_only"], true);
+    assert_eq!(blocked["selected_command"], serde_json::json!([]));
+    assert_eq!(
+        blocked["blocked_reason"],
+        "permission_gate_undeclared_permission"
+    );
+    assert_eq!(blocked["operation_plan"]["status"], "blocked");
+    assert_eq!(
+        blocked["operation_plan"]["recommended_action"],
+        "inspect_addon_permission_gate"
+    );
+    assert!(blocked["next_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!([
+            "addons",
+            "views",
+            "--addon",
+            "forge.addon.zzi_ops",
+            "--surface",
+            "tui",
+            "--output",
+            "json"
+        ])));
+    assert_eq!(blocked["action"]["enabled"], false);
+
+    let missing_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-invocation",
+            "--action",
+            "zzi.missing",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let missing: Value = serde_json::from_slice(&missing_output).unwrap();
+    assert_eq!(missing["status"], "action_invocation_not_found");
+    assert_eq!(missing["can_execute"], false);
+    assert_eq!(missing["diagnostic_only"], true);
+    assert_eq!(
+        missing["operation_plan"]["recommended_action"],
+        "inspect_action_registry"
+    );
+    assert_eq!(missing["action"], serde_json::Value::Null);
+
+    let text_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-invocation",
+            "--action",
+            "patch.diff",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Action invocation"));
+    assert!(text.contains("patch.diff"));
+    assert!(text.contains("not executed"));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.action_invocation");
+    assert_eq!(
+        tool["output_schema"],
+        "forge.interactive.action_invocation.v1"
+    );
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .current_dir(temp.path())
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.action_invocation"])
+        .arg("--input")
+        .arg(r#"{"action_id":"zzi.blocked"}"#)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.action_invocation.v1"
+    );
+    assert_eq!(mcp_json["result"]["status"], "action_invocation_blocked");
+    assert_eq!(mcp_json["result"]["can_execute"], false);
+}
+
+#[test]
 fn interactive_action_registry_projects_palette_actions_for_tui_and_agents() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
