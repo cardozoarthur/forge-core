@@ -63,6 +63,7 @@ use forge_core::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, inspect_cli_harness_shim_status,
     install_cli_harness_shim, persist_token_headroom_report, retrieve_headroom_blob,
     run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions,
+    CliWrapperPlanOptions,
 };
 use forge_core::identity::{
     audit_tenant_index, ensure_operating_context_policy, ensure_workflow_policy,
@@ -605,6 +606,8 @@ enum HarnessCommands {
         forge_first: bool,
         #[arg(long = "workflow")]
         workflow_id: Option<String>,
+        #[arg(long = "task")]
+        task_id: Option<String>,
         #[arg(long = "run")]
         run_id: Option<String>,
         #[arg(long = "context-budget", default_value_t = 1200)]
@@ -625,6 +628,8 @@ enum HarnessCommands {
         forge_first: bool,
         #[arg(long = "workflow")]
         workflow_id: Option<String>,
+        #[arg(long = "task")]
+        task_id: Option<String>,
         #[arg(long = "run")]
         run_id: Option<String>,
         #[arg(long = "context-budget", default_value_t = 1200)]
@@ -651,6 +656,8 @@ enum HarnessCommands {
         forge_first: bool,
         #[arg(long = "workflow")]
         workflow_id: Option<String>,
+        #[arg(long = "task")]
+        task_id: Option<String>,
         #[arg(long = "run")]
         run_id: Option<String>,
         #[arg(long = "context-budget", default_value_t = 1200)]
@@ -5164,20 +5171,22 @@ fn run() -> Result<i32> {
                 command,
                 forge_first,
                 workflow_id,
+                task_id,
                 run_id,
                 context_budget,
                 token_headroom,
                 output,
             } => {
-                let report = build_cli_wrapper_plan(
-                    &executor,
-                    &command,
+                let report = build_cli_wrapper_plan(CliWrapperPlanOptions {
+                    executor: &executor,
+                    command: &command,
                     forge_first,
-                    workflow_id.as_deref(),
-                    run_id.as_deref(),
+                    workflow_id: workflow_id.as_deref(),
+                    task_id: task_id.as_deref(),
+                    run_id: run_id.as_deref(),
                     context_budget,
                     token_headroom,
-                );
+                });
                 print_response(output, &report)?;
                 Ok(0)
             }
@@ -5187,6 +5196,7 @@ fn run() -> Result<i32> {
                 real_cmd,
                 forge_first,
                 workflow_id,
+                task_id,
                 run_id,
                 context_budget,
                 token_headroom,
@@ -5200,6 +5210,7 @@ fn run() -> Result<i32> {
                     store_path: Some(cli.store.as_path()),
                     forge_first,
                     workflow_id: workflow_id.as_deref(),
+                    task_id: task_id.as_deref(),
                     run_id: run_id.as_deref(),
                     context_budget,
                     token_headroom,
@@ -5224,6 +5235,7 @@ fn run() -> Result<i32> {
                 executor,
                 forge_first,
                 workflow_id,
+                task_id,
                 run_id,
                 context_budget,
                 token_headroom,
@@ -5240,6 +5252,7 @@ fn run() -> Result<i32> {
                     command: &command,
                     forge_first,
                     workflow_id: workflow_id.as_deref(),
+                    task_id: task_id.as_deref(),
                     run_id: run_id.as_deref(),
                     context_budget,
                     token_headroom,

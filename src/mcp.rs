@@ -50,6 +50,7 @@ use crate::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, inspect_cli_harness_shim_status,
     install_cli_harness_shim, persist_token_headroom_report, retrieve_headroom_blob,
     run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions,
+    CliWrapperPlanOptions,
 };
 use crate::identity::{
     audit_tenant_index, ensure_workflow_policy, evaluate_tenant_policy_for_action,
@@ -419,6 +420,8 @@ struct HarnessWrapPlanInput {
     forge_first: Option<bool>,
     workflow: Option<String>,
     workflow_id: Option<String>,
+    task: Option<String>,
+    task_id: Option<String>,
     run: Option<String>,
     run_id: Option<String>,
     context_budget: Option<usize>,
@@ -434,6 +437,8 @@ struct HarnessInstallShimsInput {
     forge_first: Option<bool>,
     workflow: Option<String>,
     workflow_id: Option<String>,
+    task: Option<String>,
+    task_id: Option<String>,
     run: Option<String>,
     run_id: Option<String>,
     context_budget: Option<usize>,
@@ -455,6 +460,8 @@ struct HarnessExecInput {
     forge_first: Option<bool>,
     workflow: Option<String>,
     workflow_id: Option<String>,
+    task: Option<String>,
+    task_id: Option<String>,
     run: Option<String>,
     run_id: Option<String>,
     context_budget: Option<usize>,
@@ -4787,6 +4794,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("command", "array", "command argv to launch under the harness"),
                     ("forge_first", "boolean", "prefer Forge context routing before native CLI defaults"),
                     ("workflow_id", "string", "optional workflow lineage"),
+                    ("task_id", "string", "optional task/node lineage"),
                     ("run_id", "string", "optional async run lineage"),
                     ("context_budget", "integer", "context byte budget"),
                     ("token_headroom", "boolean", "enable token-headroom env"),
@@ -4805,6 +4813,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("real_cmd", "string", "optional resolved native CLI command/path; omitted values are discovered from PATH outside shim_dir"),
                     ("forge_first", "boolean", "prefer Forge context routing before native CLI defaults"),
                     ("workflow_id", "string", "optional workflow lineage"),
+                    ("task_id", "string", "optional task/node lineage"),
                     ("run_id", "string", "optional async run lineage"),
                     ("context_budget", "integer", "context byte budget"),
                     ("token_headroom", "boolean", "enable token-headroom env"),
@@ -4835,6 +4844,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("command", "array", "command argv to launch under the harness"),
                     ("forge_first", "boolean", "prefer Forge context routing before native CLI defaults"),
                     ("workflow_id", "string", "optional workflow lineage"),
+                    ("task_id", "string", "optional task/node lineage"),
                     ("run_id", "string", "optional async run lineage"),
                     ("context_budget", "integer", "context byte budget"),
                     ("token_headroom", "boolean", "enable token-headroom env"),
@@ -7266,16 +7276,18 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let input: HarnessWrapPlanInput = parse_input(input)?;
             let command = input.command.or(input.cmd).unwrap_or_default();
             let workflow_id = input.workflow_id.or(input.workflow);
+            let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
-            serde_json::to_value(build_cli_wrapper_plan(
-                &input.executor,
-                &command,
-                input.forge_first.unwrap_or(true),
-                workflow_id.as_deref(),
-                run_id.as_deref(),
-                input.context_budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
-                input.token_headroom.unwrap_or(true),
-            ))?
+            serde_json::to_value(build_cli_wrapper_plan(CliWrapperPlanOptions {
+                executor: &input.executor,
+                command: &command,
+                forge_first: input.forge_first.unwrap_or(true),
+                workflow_id: workflow_id.as_deref(),
+                task_id: task_id.as_deref(),
+                run_id: run_id.as_deref(),
+                context_budget: input.context_budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
+                token_headroom: input.token_headroom.unwrap_or(true),
+            }))?
         }
         "forge.harness.install_shims" => {
             let input: HarnessInstallShimsInput = parse_input(input)?;
@@ -7284,6 +7296,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 .or(input.real_command)
                 .filter(|value| !value.trim().is_empty());
             let workflow_id = input.workflow_id.or(input.workflow);
+            let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
             serde_json::to_value(install_cli_harness_shim(CliShimInstallOptions {
                 shim_dir: std::path::Path::new(&input.shim_dir),
@@ -7292,6 +7305,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 store_path: Some(store.path()),
                 forge_first: input.forge_first.unwrap_or(true),
                 workflow_id: workflow_id.as_deref(),
+                task_id: task_id.as_deref(),
                 run_id: run_id.as_deref(),
                 context_budget: input.context_budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
                 token_headroom: input.token_headroom.unwrap_or(true),
@@ -7309,6 +7323,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let input: HarnessExecInput = parse_input(input)?;
             let command = input.command.or(input.cmd).unwrap_or_default();
             let workflow_id = input.workflow_id.or(input.workflow);
+            let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
             let cwd = input.cwd.as_deref().map(std::path::Path::new);
             serde_json::to_value(run_cli_harness_exec(CliHarnessExecOptions {
@@ -7317,6 +7332,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 command: &command,
                 forge_first: input.forge_first.unwrap_or(true),
                 workflow_id: workflow_id.as_deref(),
+                task_id: task_id.as_deref(),
                 run_id: run_id.as_deref(),
                 context_budget: input.context_budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
                 token_headroom: input.token_headroom.unwrap_or(true),

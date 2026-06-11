@@ -51,6 +51,9 @@ pub struct CliWrapperPlanReport {
     pub executor: String,
     pub command: Vec<String>,
     pub forge_first: bool,
+    pub workflow_id: Option<String>,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
     pub wrapper_strategy: String,
     pub context_budget: usize,
     pub token_headroom_enabled: bool,
@@ -58,6 +61,17 @@ pub struct CliWrapperPlanReport {
     pub launch_command: Vec<String>,
     pub harness_checks: Vec<String>,
     pub notes: Vec<String>,
+}
+
+pub struct CliWrapperPlanOptions<'a> {
+    pub executor: &'a str,
+    pub command: &'a [String],
+    pub forge_first: bool,
+    pub workflow_id: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+    pub run_id: Option<&'a str>,
+    pub context_budget: usize,
+    pub token_headroom: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -75,6 +89,9 @@ pub struct CliHarnessExecReceipt {
     pub command: Vec<String>,
     pub command_sha256: String,
     pub cwd: String,
+    pub workflow_id: Option<String>,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
     pub forge_first: bool,
     pub dry_run: bool,
     pub allow_exec: bool,
@@ -170,6 +187,7 @@ pub struct CliShimInstallOptions<'a> {
     pub store_path: Option<&'a Path>,
     pub forge_first: bool,
     pub workflow_id: Option<&'a str>,
+    pub task_id: Option<&'a str>,
     pub run_id: Option<&'a str>,
     pub context_budget: usize,
     pub token_headroom: bool,
@@ -189,6 +207,7 @@ pub struct CliHarnessExecOptions<'a> {
     pub command: &'a [String],
     pub forge_first: bool,
     pub workflow_id: Option<&'a str>,
+    pub task_id: Option<&'a str>,
     pub run_id: Option<&'a str>,
     pub context_budget: usize,
     pub token_headroom: bool,
@@ -370,15 +389,17 @@ pub fn retrieve_headroom_blob(
     ))
 }
 
-pub fn build_cli_wrapper_plan(
-    executor: &str,
-    command: &[String],
-    forge_first: bool,
-    workflow_id: Option<&str>,
-    run_id: Option<&str>,
-    context_budget: usize,
-    token_headroom: bool,
-) -> CliWrapperPlanReport {
+pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperPlanReport {
+    let CliWrapperPlanOptions {
+        executor,
+        command,
+        forge_first,
+        workflow_id,
+        task_id,
+        run_id,
+        context_budget,
+        token_headroom,
+    } = options;
     let executor = normalize_executor(executor);
     let command = if command.is_empty() {
         vec![executor.clone()]
@@ -415,6 +436,13 @@ pub fn build_cli_wrapper_plan(
             "binds CLI execution to a Forge workflow lineage",
         ));
     }
+    if let Some(task_id) = task_id.filter(|value| !value.trim().is_empty()) {
+        env.push(env_var(
+            "FORGE_TASK_ID",
+            task_id,
+            "binds CLI execution to a Forge task/node lineage",
+        ));
+    }
     if let Some(run_id) = run_id.filter(|value| !value.trim().is_empty()) {
         env.push(env_var(
             "FORGE_RUN_ID",
@@ -444,6 +472,10 @@ pub fn build_cli_wrapper_plan(
         launch_command.push("--workflow".to_string());
         launch_command.push(workflow_id.to_string());
     }
+    if let Some(task_id) = task_id.filter(|value| !value.trim().is_empty()) {
+        launch_command.push("--task".to_string());
+        launch_command.push(task_id.to_string());
+    }
     if let Some(run_id) = run_id.filter(|value| !value.trim().is_empty()) {
         launch_command.push("--run".to_string());
         launch_command.push(run_id.to_string());
@@ -459,6 +491,9 @@ pub fn build_cli_wrapper_plan(
         executor,
         command,
         forge_first,
+        workflow_id: normalize_optional_text(workflow_id),
+        task_id: normalize_optional_text(task_id),
+        run_id: normalize_optional_text(run_id),
         wrapper_strategy: "env_overlay_with_forge_context_and_token_headroom".to_string(),
         context_budget,
         token_headroom_enabled: token_headroom,
@@ -467,7 +502,7 @@ pub fn build_cli_wrapper_plan(
         harness_checks: vec![
             "resolve real CLI before PATH shim precedence".to_string(),
             "prepend Forge shim directory only for the child process".to_string(),
-            "record argv, cwd, workflow/run lineage, token-headroom metrics and timeline event evidence".to_string(),
+            "record argv, cwd, workflow/task/run lineage, token-headroom metrics and timeline event evidence".to_string(),
             "persist reversible headroom blobs in the Forge store when compression is applied".to_string(),
             "fall back to observe_only when Forge context is unavailable".to_string(),
         ],
@@ -488,6 +523,7 @@ pub fn install_cli_harness_shim(
         store_path,
         forge_first,
         workflow_id,
+        task_id,
         run_id,
         context_budget,
         token_headroom,
@@ -514,6 +550,7 @@ pub fn install_cli_harness_shim(
         store_path,
         forge_first,
         workflow_id,
+        task_id,
         run_id,
         context_budget,
         token_headroom,
@@ -734,6 +771,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         command,
         forge_first,
         workflow_id,
+        task_id,
         run_id,
         context_budget,
         token_headroom,
@@ -741,15 +779,16 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         allow_exec,
         cwd,
     } = options;
-    let wrapper_plan = build_cli_wrapper_plan(
+    let wrapper_plan = build_cli_wrapper_plan(CliWrapperPlanOptions {
         executor,
         command,
         forge_first,
         workflow_id,
+        task_id,
         run_id,
         context_budget,
         token_headroom,
-    );
+    });
     let command = wrapper_plan.command.clone();
     let cwd_path = cwd
         .map(Path::to_path_buf)
@@ -762,7 +801,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         "resolved executable is recorded before running the child process".to_string(),
         "Forge env overlay is applied only to the child process".to_string(),
         "stdout and stderr are summarized by bytes, sha256 and bounded excerpts".to_string(),
-        "workflow/run lineage, token-headroom settings and harness events stay explicit in the receipt".to_string(),
+        "workflow/task/run lineage, token-headroom settings and harness events stay explicit in the receipt".to_string(),
     ];
 
     if dry_run {
@@ -792,7 +831,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             stdout_headroom: None,
             stderr_headroom: None,
         });
-        record_harness_exec_event_if_possible(store, workflow_id, run_id, &mut receipt)?;
+        record_harness_exec_event_if_possible(store, workflow_id, task_id, run_id, &mut receipt)?;
         return Ok(receipt);
     }
     if !allow_exec {
@@ -822,7 +861,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             stdout_headroom: None,
             stderr_headroom: None,
         });
-        record_harness_exec_event_if_possible(store, workflow_id, run_id, &mut receipt)?;
+        record_harness_exec_event_if_possible(store, workflow_id, task_id, run_id, &mut receipt)?;
         return Ok(receipt);
     }
     let Some(executable) = resolved_executable.clone() else {
@@ -852,7 +891,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             stdout_headroom: None,
             stderr_headroom: None,
         });
-        record_harness_exec_event_if_possible(store, workflow_id, run_id, &mut receipt)?;
+        record_harness_exec_event_if_possible(store, workflow_id, task_id, run_id, &mut receipt)?;
         return Ok(receipt);
     };
 
@@ -915,13 +954,14 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         stdout_headroom,
         stderr_headroom,
     });
-    record_harness_exec_event_if_possible(store, workflow_id, run_id, &mut receipt)?;
+    record_harness_exec_event_if_possible(store, workflow_id, task_id, run_id, &mut receipt)?;
     Ok(receipt)
 }
 
 fn record_harness_exec_event_if_possible(
     store: Option<&ForgeStore>,
     workflow_id: Option<&str>,
+    task_id: Option<&str>,
     run_id: Option<&str>,
     receipt: &mut CliHarnessExecReceipt,
 ) -> Result<()> {
@@ -932,6 +972,10 @@ fn record_harness_exec_event_if_possible(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .is_none()
+        && task_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
         && run_id
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -942,6 +986,7 @@ fn record_harness_exec_event_if_possible(
     let data = json!({
         "schema_version": CLI_HARNESS_EXEC_EVENT_SCHEMA_VERSION,
         "status": harness_event_status(&receipt.status),
+        "task_id": task_id,
         "run_id": run_id,
         "executor": receipt.executor,
         "command_sha256": receipt.command_sha256,
@@ -986,6 +1031,13 @@ fn harness_event_status(status: &str) -> &'static str {
     }
 }
 
+fn normalize_optional_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 struct CliShimScriptOptions<'a> {
     forge_binary: &'a str,
     executor: &'a str,
@@ -993,6 +1045,7 @@ struct CliShimScriptOptions<'a> {
     store_path: Option<&'a Path>,
     forge_first: bool,
     workflow_id: Option<&'a str>,
+    task_id: Option<&'a str>,
     run_id: Option<&'a str>,
     context_budget: usize,
     token_headroom: bool,
@@ -1006,6 +1059,7 @@ fn build_cli_shim_script(options: CliShimScriptOptions<'_>) -> String {
         store_path,
         forge_first,
         workflow_id,
+        task_id,
         run_id,
         context_budget,
         token_headroom,
@@ -1027,6 +1081,10 @@ fn build_cli_shim_script(options: CliShimScriptOptions<'_>) -> String {
     if let Some(workflow_id) = workflow_id.filter(|value| !value.trim().is_empty()) {
         parts.push("--workflow".to_string());
         parts.push(shell_quote(workflow_id));
+    }
+    if let Some(task_id) = task_id.filter(|value| !value.trim().is_empty()) {
+        parts.push("--task".to_string());
+        parts.push(shell_quote(task_id));
     }
     if let Some(run_id) = run_id.filter(|value| !value.trim().is_empty()) {
         parts.push("--run".to_string());
@@ -1445,6 +1503,9 @@ struct CliExecReceiptInput {
 
 fn exec_receipt(input: CliExecReceiptInput) -> CliHarnessExecReceipt {
     let executor = input.wrapper_plan.executor.clone();
+    let workflow_id = input.wrapper_plan.workflow_id.clone();
+    let task_id = input.wrapper_plan.task_id.clone();
+    let run_id = input.wrapper_plan.run_id.clone();
     CliHarnessExecReceipt {
         schema_version: CLI_HARNESS_EXEC_SCHEMA_VERSION.to_string(),
         status: input.status,
@@ -1452,6 +1513,9 @@ fn exec_receipt(input: CliExecReceiptInput) -> CliHarnessExecReceipt {
         command: input.command,
         command_sha256: input.command_sha256,
         cwd: input.cwd,
+        workflow_id,
+        task_id,
+        run_id,
         forge_first: input.forge_first,
         dry_run: input.dry_run,
         allow_exec: input.allow_exec,

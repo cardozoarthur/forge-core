@@ -203,6 +203,7 @@ fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environme
         "command": ["claude", "--model", "sonnet"],
         "forge_first": true,
         "workflow_id": "wf_demo",
+        "task_id": "task_demo",
         "run_id": "run_demo",
         "context_budget": 2048,
         "token_headroom": true
@@ -245,7 +246,15 @@ fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environme
         .any(|item| item["name"] == "FORGE_WORKFLOW_ID" && item["value"] == "wf_demo"));
     assert!(env
         .iter()
+        .any(|item| item["name"] == "FORGE_TASK_ID" && item["value"] == "task_demo"));
+    assert!(env
+        .iter()
         .any(|item| item["name"] == "FORGE_TOKEN_HEADROOM" && item["value"] == "enabled"));
+    assert!(mcp_json["result"]["launch_command"]
+        .as_array()
+        .unwrap()
+        .windows(2)
+        .any(|pair| pair[0] == "--task" && pair[1] == "task_demo"));
 
     let exec_output = forge()
         .args([
@@ -258,6 +267,8 @@ fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environme
             "--forge-first",
             "--workflow",
             "wf_demo",
+            "--task",
+            "task_demo",
             "--run",
             "run_demo",
             "--context-budget",
@@ -275,6 +286,7 @@ fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environme
     assert_eq!(exec_json["schema_version"], "forge.harness.exec_receipt.v1");
     assert_eq!(exec_json["status"], "harness_exec_dry_run");
     assert_eq!(exec_json["executor"], "codex");
+    assert_eq!(exec_json["task_id"], "task_demo");
     assert_eq!(exec_json["dry_run"], true);
     assert_eq!(exec_json["allow_exec"], false);
     assert_eq!(exec_json["executed"], false);
@@ -287,12 +299,16 @@ fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environme
     assert!(exec_env
         .iter()
         .any(|item| item["name"] == "FORGE_RUN_ID" && item["value"] == "run_demo"));
+    assert!(exec_env
+        .iter()
+        .any(|item| item["name"] == "FORGE_TASK_ID" && item["value"] == "task_demo"));
 
     let mcp_exec_input = serde_json::json!({
         "executor": "opencode",
         "command": ["definitely-not-a-real-forge-test-cli", "--help"],
         "forge_first": true,
         "workflow_id": "wf_demo",
+        "task_id": "task_mcp_demo",
         "dry_run": true,
         "allow_exec": false
     });
@@ -320,6 +336,7 @@ fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environme
     );
     assert_eq!(mcp_exec["result"]["status"], "harness_exec_dry_run");
     assert_eq!(mcp_exec["result"]["executed"], false);
+    assert_eq!(mcp_exec["result"]["task_id"], "task_mcp_demo");
     assert_eq!(mcp_exec["result"]["event_recorded"], true);
     assert!(mcp_exec["result"]["global_event_id"].as_i64().unwrap() > 0);
 }
@@ -358,6 +375,8 @@ done
             "--forge-first",
             "--workflow",
             "wf_noisy",
+            "--task",
+            "task-noisy",
             "--run",
             "run_noisy",
             "--context-budget",
@@ -377,6 +396,7 @@ done
     let receipt: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(receipt["schema_version"], "forge.harness.exec_receipt.v1");
     assert_eq!(receipt["status"], "harness_exec_completed");
+    assert_eq!(receipt["task_id"], "task-noisy");
     assert_eq!(receipt["executed"], true);
     assert_eq!(receipt["event_recorded"], true);
     assert!(receipt["global_event_id"].as_i64().unwrap() > 0);
@@ -461,6 +481,7 @@ done
     assert_eq!(harness_event["data"]["status"], "completed");
     assert_eq!(harness_event["data"]["global_event"]["status"], "completed");
     assert_eq!(harness_event["correlation"]["run_id"], "run_noisy");
+    assert_eq!(harness_event["correlation"]["task_id"], "task-noisy");
     assert_eq!(
         harness_event["data"]["receipt"]["schema_version"],
         "forge.harness.exec_receipt.v1"
@@ -504,6 +525,8 @@ printf 'argc:%s env:%s args:%s\n' "$#" "$FORGE_HARNESS" "$*"
             "--forge-first",
             "--workflow",
             "wf_shim",
+            "--task",
+            "task-shim",
             "--run",
             "run_shim",
             "--context-budget",
@@ -540,6 +563,8 @@ printf 'argc:%s env:%s args:%s\n' "$#" "$FORGE_HARNESS" "$*"
     assert!(script.contains("--forge-first"));
     assert!(script.contains("--workflow"));
     assert!(script.contains("wf_shim"));
+    assert!(script.contains("--task"));
+    assert!(script.contains("task-shim"));
     assert!(script.contains("--run"));
     assert!(script.contains("run_shim"));
     assert!(script.contains("--context-budget"));
@@ -559,6 +584,7 @@ printf 'argc:%s env:%s args:%s\n' "$#" "$FORGE_HARNESS" "$*"
     let shim_receipt: Value = serde_json::from_slice(&shim_output.stdout).unwrap();
     assert_eq!(shim_receipt["status"], "harness_exec_completed");
     assert_eq!(shim_receipt["executed"], true);
+    assert_eq!(shim_receipt["task_id"], "task-shim");
     assert_eq!(shim_receipt["event_recorded"], true);
     assert!(shim_receipt["global_event_id"].as_i64().unwrap() > 0);
     assert_eq!(shim_receipt["command"][0], real_cmd.to_str().unwrap());
