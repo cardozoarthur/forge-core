@@ -262,6 +262,7 @@ fn diff_review_commands(paths: &[String]) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 const PATCH_REVIEW_SCHEMA_VERSION: &str = "forge.patch_review.v1";
+const PATCH_DIFF_SCHEMA_VERSION: &str = "forge.patch_diff.v1";
 const PATCH_APPLY_SCHEMA_VERSION: &str = "forge.patch_apply.v1";
 const PATCH_REVERT_SCHEMA_VERSION: &str = "forge.patch_revert.v1";
 const PATCH_RESTORE_SCHEMA_VERSION: &str = "forge.patch_restore.v1";
@@ -303,6 +304,91 @@ pub struct PatchPathReview {
     pub changed: bool,
     pub status_line: Option<String>,
     pub diff_excerpt: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PatchDiffReport {
+    pub schema_version: String,
+    pub status: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub origin: String,
+    pub applies_changes: bool,
+    pub external_resources_mutated: bool,
+    pub requires_human_approval: bool,
+    pub summary: PatchDiffSummary,
+    pub selection: PatchDiffSelection,
+    pub navigation: PatchDiffNavigation,
+    pub files: Vec<PatchDiffFile>,
+    pub commands: Vec<PatchReviewCommandResult>,
+    pub artifact: Option<PatchApplyArtifactRef>,
+    pub safety_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PatchDiffSummary {
+    pub requested_path_count: usize,
+    pub changed_file_count: usize,
+    pub hunk_count: usize,
+    pub line_count: usize,
+    pub context_lines: usize,
+    pub blocked_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PatchDiffSelection {
+    pub selected_file_index: usize,
+    pub selected_hunk_index: usize,
+    pub selected_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PatchDiffNavigation {
+    pub has_previous_file: bool,
+    pub has_next_file: bool,
+    pub has_previous_hunk: bool,
+    pub has_next_hunk: bool,
+    pub previous_file_command: Option<String>,
+    pub next_file_command: Option<String>,
+    pub previous_hunk_command: Option<String>,
+    pub next_hunk_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PatchDiffFile {
+    pub file_index: usize,
+    pub path: String,
+    pub changed: bool,
+    pub additions: usize,
+    pub deletions: usize,
+    pub hunks: Vec<PatchDiffHunk>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PatchDiffHunk {
+    pub hunk_index: usize,
+    pub header: String,
+    pub old_start: usize,
+    pub old_lines: usize,
+    pub new_start: usize,
+    pub new_lines: usize,
+    pub lines: Vec<PatchDiffLine>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PatchDiffLine {
+    pub kind: String,
+    pub old_lineno: Option<usize>,
+    pub new_lineno: Option<usize>,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PatchDiffOptions<'a> {
+    pub file_index: usize,
+    pub hunk_index: usize,
+    pub context_lines: usize,
+    pub origin: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -490,6 +576,384 @@ fn build_path_review(path: &str, status_output: &str) -> Result<PatchPathReview>
         status_line,
         diff_excerpt,
     })
+}
+
+pub fn build_patch_diff(
+    store: &ForgeStore,
+    workflow_id: &str,
+    task_id: &str,
+    paths: Vec<String>,
+    options: PatchDiffOptions<'_>,
+) -> Result<PatchDiffReport> {
+    ensure_workflow_policy(store, workflow_id, "patch diff")?;
+    if paths.is_empty() {
+        bail!("at least one patch path is required");
+    }
+
+    let workflow = store.load_workflow(workflow_id)?;
+    if !workflow.tasks.iter().any(|task| task.id == task_id) {
+        bail!("task {task_id} not found in workflow {workflow_id}");
+    }
+
+    let requested_path_count = paths.len();
+    let mut allowed_paths = Vec::new();
+    let mut blocked_paths = Vec::new();
+    for path in paths {
+        let normalized = path.trim().to_string();
+        if normalized.is_empty() || !is_repo_relative_path(&normalized) {
+            blocked_paths.push(normalized);
+        } else if !allowed_paths.contains(&normalized) {
+            allowed_paths.push(normalized);
+        }
+    }
+    blocked_paths.sort();
+    blocked_paths.dedup();
+
+    let context_lines = options.context_lines.min(50);
+    let mut commands = Vec::new();
+    let mut files = Vec::new();
+    if !allowed_paths.is_empty() {
+        let unified_arg = format!("--unified={context_lines}");
+        let label = format!("git diff {unified_arg}");
+        let diff_command =
+            run_git_review_command(&label, &["diff", unified_arg.as_str()], &allowed_paths);
+        files = parse_git_diff_files(&diff_command.stdout);
+        files = order_patch_diff_files(files, &allowed_paths);
+        commands.push(diff_command);
+    }
+
+    for (idx, file) in files.iter_mut().enumerate() {
+        file.file_index = idx;
+        for (hunk_idx, hunk) in file.hunks.iter_mut().enumerate() {
+            hunk.hunk_index = hunk_idx;
+        }
+    }
+
+    let changed_file_count = files.iter().filter(|file| file.changed).count();
+    let hunk_count = files.iter().map(|file| file.hunks.len()).sum();
+    let line_count = files
+        .iter()
+        .flat_map(|file| file.hunks.iter())
+        .map(|hunk| hunk.lines.len())
+        .sum();
+    let selected_file_index = if files.is_empty() {
+        0
+    } else {
+        options.file_index.min(files.len() - 1)
+    };
+    let selected_hunk_index = files
+        .get(selected_file_index)
+        .and_then(|file| file.hunks.len().checked_sub(1))
+        .map(|last| options.hunk_index.min(last))
+        .unwrap_or(0);
+    let selected_path = files.get(selected_file_index).map(|file| file.path.clone());
+    let status = if allowed_paths.is_empty() {
+        "patch_diff_blocked"
+    } else if changed_file_count == 0 {
+        "patch_diff_no_changes"
+    } else if commands
+        .iter()
+        .any(|command| command.exit_code != Some(0) && command.status != "passed")
+    {
+        "patch_diff_failed"
+    } else {
+        "patch_diff_ready"
+    }
+    .to_string();
+    let navigation = build_patch_diff_navigation(
+        workflow_id,
+        task_id,
+        &allowed_paths,
+        selected_file_index,
+        selected_hunk_index,
+        context_lines,
+        &files,
+    );
+
+    let mut report = PatchDiffReport {
+        schema_version: PATCH_DIFF_SCHEMA_VERSION.to_string(),
+        status,
+        workflow_id: workflow_id.to_string(),
+        task_id: task_id.to_string(),
+        origin: options.origin.to_string(),
+        applies_changes: false,
+        external_resources_mutated: false,
+        requires_human_approval: true,
+        summary: PatchDiffSummary {
+            requested_path_count,
+            changed_file_count,
+            hunk_count,
+            line_count,
+            context_lines,
+            blocked_paths,
+        },
+        selection: PatchDiffSelection {
+            selected_file_index,
+            selected_hunk_index,
+            selected_path,
+        },
+        navigation,
+        files,
+        commands,
+        artifact: None,
+        safety_notes: vec![
+            "This command builds a multi-file diff navigation model and does not edit source files."
+                .to_string(),
+            "File and hunk indexes are clamped to the available diff model so TUI/MCP callers can page safely."
+                .to_string(),
+            "Git diff runs with separated path arguments to avoid shell expansion.".to_string(),
+        ],
+    };
+
+    if !allowed_paths.is_empty() {
+        let payload = serde_json::to_value(&report)?;
+        let relative_path = format!("tmp/{workflow_id}-{task_id}-patch-diff.json");
+        let (path, _) = write_json_artifact(&store.base_dir(), &relative_path, &payload)?;
+        let attached =
+            attach_workflow_artifact(store, workflow_id, &path, "patch_diff", options.origin)?;
+        report.artifact = Some(PatchApplyArtifactRef::from_artifact(&attached));
+    }
+
+    Ok(report)
+}
+
+fn parse_git_diff_files(diff: &str) -> Vec<PatchDiffFile> {
+    let mut files = Vec::new();
+    let mut current_file: Option<PatchDiffFile> = None;
+    let mut current_hunk: Option<PatchDiffHunk> = None;
+    let mut old_lineno = 0usize;
+    let mut new_lineno = 0usize;
+
+    for line in diff.lines() {
+        if let Some(path) = parse_diff_git_path(line) {
+            push_current_hunk(&mut current_file, &mut current_hunk);
+            if let Some(file) = current_file.take() {
+                files.push(file);
+            }
+            current_file = Some(PatchDiffFile {
+                file_index: files.len(),
+                path,
+                changed: true,
+                additions: 0,
+                deletions: 0,
+                hunks: Vec::new(),
+            });
+            continue;
+        }
+
+        if line.starts_with("@@") {
+            push_current_hunk(&mut current_file, &mut current_hunk);
+            let (old_start, old_lines, new_start, new_lines) = parse_hunk_header(line);
+            old_lineno = old_start;
+            new_lineno = new_start;
+            current_hunk = Some(PatchDiffHunk {
+                hunk_index: 0,
+                header: line.to_string(),
+                old_start,
+                old_lines,
+                new_start,
+                new_lines,
+                lines: Vec::new(),
+            });
+            continue;
+        }
+
+        if let Some(hunk) = current_hunk.as_mut() {
+            if let Some(rest) = line.strip_prefix('+') {
+                hunk.lines.push(PatchDiffLine {
+                    kind: "addition".to_string(),
+                    old_lineno: None,
+                    new_lineno: Some(new_lineno),
+                    content: rest.to_string(),
+                });
+                new_lineno += 1;
+                if let Some(file) = current_file.as_mut() {
+                    file.additions += 1;
+                }
+            } else if let Some(rest) = line.strip_prefix('-') {
+                hunk.lines.push(PatchDiffLine {
+                    kind: "deletion".to_string(),
+                    old_lineno: Some(old_lineno),
+                    new_lineno: None,
+                    content: rest.to_string(),
+                });
+                old_lineno += 1;
+                if let Some(file) = current_file.as_mut() {
+                    file.deletions += 1;
+                }
+            } else if let Some(rest) = line.strip_prefix(' ') {
+                hunk.lines.push(PatchDiffLine {
+                    kind: "context".to_string(),
+                    old_lineno: Some(old_lineno),
+                    new_lineno: Some(new_lineno),
+                    content: rest.to_string(),
+                });
+                old_lineno += 1;
+                new_lineno += 1;
+            } else if line.starts_with('\\') {
+                hunk.lines.push(PatchDiffLine {
+                    kind: "metadata".to_string(),
+                    old_lineno: None,
+                    new_lineno: None,
+                    content: line.to_string(),
+                });
+            }
+        }
+    }
+
+    push_current_hunk(&mut current_file, &mut current_hunk);
+    if let Some(file) = current_file {
+        files.push(file);
+    }
+    files
+}
+
+fn push_current_hunk(
+    current_file: &mut Option<PatchDiffFile>,
+    current_hunk: &mut Option<PatchDiffHunk>,
+) {
+    if let (Some(file), Some(hunk)) = (current_file.as_mut(), current_hunk.take()) {
+        file.hunks.push(hunk);
+    }
+}
+
+fn parse_diff_git_path(line: &str) -> Option<String> {
+    let mut parts = line.split_whitespace();
+    if parts.next() != Some("diff") || parts.next() != Some("--git") {
+        return None;
+    }
+    let _old_path = parts.next()?;
+    let new_path = parts.next()?;
+    Some(new_path.strip_prefix("b/").unwrap_or(new_path).to_string())
+}
+
+fn parse_hunk_header(header: &str) -> (usize, usize, usize, usize) {
+    let mut old_start = 0;
+    let mut old_lines = 0;
+    let mut new_start = 0;
+    let mut new_lines = 0;
+    let parts = header.split_whitespace().collect::<Vec<_>>();
+    for part in parts {
+        if let Some(spec) = part.strip_prefix('-') {
+            let (start, lines) = parse_hunk_range(spec);
+            old_start = start;
+            old_lines = lines;
+        } else if let Some(spec) = part.strip_prefix('+') {
+            let (start, lines) = parse_hunk_range(spec);
+            new_start = start;
+            new_lines = lines;
+        }
+    }
+    (old_start, old_lines, new_start, new_lines)
+}
+
+fn parse_hunk_range(spec: &str) -> (usize, usize) {
+    if let Some((start, lines)) = spec.split_once(',') {
+        (
+            start.parse::<usize>().unwrap_or(0),
+            lines.parse::<usize>().unwrap_or(1),
+        )
+    } else {
+        (spec.parse::<usize>().unwrap_or(0), 1)
+    }
+}
+
+fn order_patch_diff_files(
+    mut files: Vec<PatchDiffFile>,
+    ordered_paths: &[String],
+) -> Vec<PatchDiffFile> {
+    let mut ordered = Vec::new();
+    for path in ordered_paths {
+        if let Some(index) = files.iter().position(|file| &file.path == path) {
+            ordered.push(files.remove(index));
+        }
+    }
+    ordered.extend(files);
+    ordered
+}
+
+fn build_patch_diff_navigation(
+    workflow_id: &str,
+    task_id: &str,
+    paths: &[String],
+    selected_file_index: usize,
+    selected_hunk_index: usize,
+    context_lines: usize,
+    files: &[PatchDiffFile],
+) -> PatchDiffNavigation {
+    let has_previous_file = selected_file_index > 0 && !files.is_empty();
+    let has_next_file = selected_file_index + 1 < files.len();
+    let selected_hunk_count = files
+        .get(selected_file_index)
+        .map(|file| file.hunks.len())
+        .unwrap_or(0);
+    let has_previous_hunk = selected_hunk_index > 0 && selected_hunk_count > 0;
+    let has_next_hunk = selected_hunk_index + 1 < selected_hunk_count;
+
+    PatchDiffNavigation {
+        has_previous_file,
+        has_next_file,
+        has_previous_hunk,
+        has_next_hunk,
+        previous_file_command: has_previous_file.then(|| {
+            patch_diff_navigation_command(
+                workflow_id,
+                task_id,
+                paths,
+                selected_file_index - 1,
+                0,
+                context_lines,
+            )
+        }),
+        next_file_command: has_next_file.then(|| {
+            patch_diff_navigation_command(
+                workflow_id,
+                task_id,
+                paths,
+                selected_file_index + 1,
+                0,
+                context_lines,
+            )
+        }),
+        previous_hunk_command: has_previous_hunk.then(|| {
+            patch_diff_navigation_command(
+                workflow_id,
+                task_id,
+                paths,
+                selected_file_index,
+                selected_hunk_index - 1,
+                context_lines,
+            )
+        }),
+        next_hunk_command: has_next_hunk.then(|| {
+            patch_diff_navigation_command(
+                workflow_id,
+                task_id,
+                paths,
+                selected_file_index,
+                selected_hunk_index + 1,
+                context_lines,
+            )
+        }),
+    }
+}
+
+fn patch_diff_navigation_command(
+    workflow_id: &str,
+    task_id: &str,
+    paths: &[String],
+    file_index: usize,
+    hunk_index: usize,
+    context_lines: usize,
+) -> String {
+    let path_args = paths
+        .iter()
+        .map(|path| format!("--path {path}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "forge patch diff --workflow {workflow_id} --task {task_id} {path_args} --file-index {file_index} --hunk-index {hunk_index} --context-lines {context_lines} --output json"
+    )
 }
 
 fn run_git_review_command(

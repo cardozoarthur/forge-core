@@ -112,8 +112,8 @@ use forge_core::ops::{
     serve_ops_console_with_addon_dirs,
 };
 use forge_core::patch::{
-    build_patch_apply, build_patch_plan, build_patch_restore, build_patch_revert,
-    build_patch_review,
+    build_patch_apply, build_patch_diff, build_patch_plan, build_patch_restore, build_patch_revert,
+    build_patch_review, PatchDiffOptions,
 };
 use forge_core::registry::{
     attach_reuse_candidates_as_child_subflows, context_action_catalog, find_reuse_candidates,
@@ -3137,6 +3137,24 @@ enum PatchCommands {
         origin: String,
         #[arg(long = "plan-artifact")]
         plan_artifact: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Diff {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long = "path")]
+        paths: Vec<String>,
+        #[arg(long = "file-index", default_value_t = 0)]
+        file_index: usize,
+        #[arg(long = "hunk-index", default_value_t = 0)]
+        hunk_index: usize,
+        #[arg(long = "context-lines", default_value_t = 3)]
+        context_lines: usize,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -7138,6 +7156,32 @@ fn run() -> Result<i32> {
                     paths,
                     &origin,
                     plan_artifact.as_deref(),
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            PatchCommands::Diff {
+                workflow,
+                task,
+                paths,
+                file_index,
+                hunk_index,
+                context_lines,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_patch_diff(
+                    &store,
+                    &workflow,
+                    &task,
+                    paths,
+                    PatchDiffOptions {
+                        file_index,
+                        hunk_index,
+                        context_lines,
+                        origin: &origin,
+                    },
                 )?;
                 print_response(output, &report)?;
                 Ok(0)

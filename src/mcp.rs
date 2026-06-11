@@ -89,8 +89,8 @@ use crate::multimodal::{
 };
 use crate::ops::record_addon_renderer_client_event;
 use crate::patch::{
-    build_patch_apply, build_patch_plan, build_patch_restore, build_patch_revert,
-    build_patch_review,
+    build_patch_apply, build_patch_diff, build_patch_plan, build_patch_restore, build_patch_revert,
+    build_patch_review, PatchDiffOptions,
 };
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
@@ -1579,6 +1579,17 @@ struct PatchReviewInput {
     paths: Vec<String>,
     origin: Option<String>,
     plan_artifact: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchDiffInput {
+    workflow_id: String,
+    task_id: String,
+    paths: Vec<String>,
+    file_index: Option<usize>,
+    hunk_index: Option<usize>,
+    context_lines: Option<usize>,
+    origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4957,6 +4968,23 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
+                "forge.patch.diff",
+                "Navigate File Patch Diff",
+                "Build a read-only multi-file diff navigation model with selectable file and hunk indexes.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("task_id", "string", "task id"),
+                    ("paths", "array", "repo-relative file paths to include"),
+                    ("file_index", "number", "selected file index"),
+                    ("hunk_index", "number", "selected hunk index"),
+                    ("context_lines", "number", "git diff context line count"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id", "task_id", "paths"]),
+                "forge.patch_diff.v1",
+                &["forge", "patch", "diff", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
                 "forge.patch.revert",
                 "Revert File Patch",
                 "Record a guarded revert proposal for a previously applied file patch without restoring files automatically.",
@@ -7484,6 +7512,21 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.paths,
                 input.origin.as_deref().unwrap_or("mcp"),
                 input.plan_artifact.as_deref(),
+            )?)?
+        }
+        "forge.patch.diff" => {
+            let input: PatchDiffInput = parse_input(input)?;
+            serde_json::to_value(build_patch_diff(
+                store,
+                &input.workflow_id,
+                &input.task_id,
+                input.paths,
+                PatchDiffOptions {
+                    file_index: input.file_index.unwrap_or(0),
+                    hunk_index: input.hunk_index.unwrap_or(0),
+                    context_lines: input.context_lines.unwrap_or(3),
+                    origin: input.origin.as_deref().unwrap_or("mcp"),
+                },
             )?)?
         }
         "forge.patch.revert" => {

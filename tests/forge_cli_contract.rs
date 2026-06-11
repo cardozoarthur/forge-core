@@ -3335,6 +3335,129 @@ fn patch_review_summarizes_current_diff_without_applying_changes() {
 }
 
 #[test]
+fn patch_diff_builds_multi_file_navigation_without_applying_changes() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let first = temp.path().join("sample.txt");
+    let second = temp.path().join("notes.txt");
+    fs::write(&first, "alpha\nbravo\ncharlie\n").unwrap();
+    fs::write(&second, "one\ntwo\nthree\n").unwrap();
+    assert!(std::process::Command::new("git")
+        .arg("init")
+        .current_dir(temp.path())
+        .status()
+        .expect("git init should run")
+        .success());
+    assert!(std::process::Command::new("git")
+        .args(["add", "sample.txt", "notes.txt"])
+        .current_dir(temp.path())
+        .status()
+        .expect("git add should run")
+        .success());
+    assert!(std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Forge Test",
+            "commit",
+            "-m",
+            "initial",
+        ])
+        .current_dir(temp.path())
+        .status()
+        .expect("git commit should run")
+        .success());
+
+    let planned = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Demonstrate multi-file diff navigation",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let workflow_id = serde_json::from_slice::<Value>(&planned).unwrap()["workflow_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    fs::write(&first, "alpha\nbravo changed\ncharlie\n").unwrap();
+    fs::write(&second, "one\ntwo changed\nthree\n").unwrap();
+
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "patch",
+            "diff",
+            "--workflow",
+            &workflow_id,
+            "--task",
+            "task-001",
+            "--path",
+            "sample.txt",
+            "--path",
+            "notes.txt",
+            "--file-index",
+            "1",
+            "--hunk-index",
+            "0",
+            "--context-lines",
+            "2",
+            "--origin",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(
+        fs::read_to_string(&first).unwrap(),
+        "alpha\nbravo changed\ncharlie\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&second).unwrap(),
+        "one\ntwo changed\nthree\n"
+    );
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.patch_diff.v1");
+    assert_eq!(json["status"], "patch_diff_ready");
+    assert_eq!(json["applies_changes"], false);
+    assert_eq!(json["external_resources_mutated"], false);
+    assert_eq!(json["summary"]["changed_file_count"], 2);
+    assert_eq!(json["selection"]["selected_file_index"], 1);
+    assert_eq!(json["selection"]["selected_hunk_index"], 0);
+    assert_eq!(json["selection"]["selected_path"], "notes.txt");
+    assert_eq!(json["navigation"]["has_previous_file"], true);
+    assert_eq!(json["navigation"]["has_next_file"], false);
+    assert!(json["files"].as_array().unwrap().len() >= 2);
+    assert!(json["files"][0]["hunks"].as_array().unwrap().len() >= 1);
+    assert!(json["files"][1]["hunks"][0]["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line["kind"] == "addition" && line["content"] == "two changed"));
+    assert!(json["artifact"]["path"]
+        .as_str()
+        .unwrap()
+        .contains("attached-patch_diff-"));
+}
+
+#[test]
 fn patch_apply_records_file_state_and_validation() {
     let temp = tempdir().unwrap();
     let store_path = temp.path().join("forge.sqlite");
@@ -3792,6 +3915,44 @@ fn mcp_exposes_patch_review_tool_and_skill_guidance() {
         .find(|tool| tool["name"] == "forge.patch.review")
         .expect("forge.patch.review tool must be in MCP manifest");
     assert_eq!(tool["output_schema"], "forge.patch_review.v1");
+    let required: Vec<&str> = tool["input_schema"]["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert!(required.contains(&"workflow_id"));
+    assert!(required.contains(&"task_id"));
+    assert!(required.contains(&"paths"));
+}
+
+#[test]
+fn mcp_exposes_patch_diff_tool_and_skill_guidance() {
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge patch diff"),
+        "the packaged Forge skill should teach agents to inspect multi-file patch diffs"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.patch.diff"),
+        "the packaged Forge skill should expose the MCP patch diff tool"
+    );
+
+    let output = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tool = json["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "forge.patch.diff")
+        .expect("forge.patch.diff tool must be in MCP manifest");
+    assert_eq!(tool["output_schema"], "forge.patch_diff.v1");
     let required: Vec<&str> = tool["input_schema"]["required"]
         .as_array()
         .unwrap()
@@ -33835,6 +33996,11 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         .unwrap()
         .iter()
         .any(|command| command["name"] == "/patch review" && command["mutates_workflow"] == false));
+    assert!(slash_json["result"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command["name"] == "/patch diff" && command["mutates_workflow"] == false));
     assert!(slash_json["result"]["commands"]
         .as_array()
         .unwrap()

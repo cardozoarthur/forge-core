@@ -1808,7 +1808,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
         slash(
             "/patch",
             "Patch",
-            "File editing workflow: /patch plan --workflow <id> --task <id> --intent \"...\" --path <path>. Subcommands: plan, review, apply, revert, restore.",
+            "File editing workflow: /patch plan --workflow <id> --task <id> --intent \"...\" --path <path>. Subcommands: plan, diff, review, apply, revert, restore.",
             &["forge", "patch", "plan", "--workflow", "<workflow-id>"],
             true,
             "high",
@@ -1818,6 +1818,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Patch Plan",
             "Plan a bounded file edit with permission gates, diff review and file snapshots. Use: /patch plan --workflow <id> --task <id> --intent \"...\" --path <path>",
             &["forge", "patch", "plan", "--workflow", "<workflow-id>", "--task", "<task-id>", "--intent", "...", "--path", "<path>"],
+            false,
+            "medium",
+        ),
+        slash(
+            "/patch diff",
+            "Patch Diff",
+            "Navigate current multi-file diffs without editing files. Use: /patch diff --workflow <id> --task <id> --path <path> --file-index 0 --hunk-index 0",
+            &["forge", "patch", "diff", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>"],
             false,
             "medium",
         ),
@@ -2184,6 +2192,59 @@ fn dispatch_patch_command(
                 println!("  Patch review failed: {stderr}");
             }
         }
+        "diff" => {
+            println!("  Patch Diff: building multi-file diff navigation...");
+            let diff_output = Command::new(
+                std::env::args()
+                    .next()
+                    .unwrap_or_else(|| "forge".to_string()),
+            )
+            .args(["--store", &store_str, "patch", "diff"])
+            .args(rest.split_whitespace().skip(1).collect::<Vec<_>>())
+            .arg("--output")
+            .arg("json")
+            .output()?;
+            if diff_output.status.success() {
+                let stdout = String::from_utf8_lossy(&diff_output.stdout);
+                if let Ok(diff) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                    println!(
+                        "  Status: {}",
+                        diff["status"].as_str().unwrap_or("diff_ready")
+                    );
+                    println!(
+                        "  Changed files: {}",
+                        diff["summary"]["changed_file_count"].as_u64().unwrap_or(0)
+                    );
+                    println!(
+                        "  Hunks: {}",
+                        diff["summary"]["hunk_count"].as_u64().unwrap_or(0)
+                    );
+                    if let Some(path) = diff["selection"]["selected_path"].as_str() {
+                        println!(
+                            "  Selected: file={} hunk={} path={}",
+                            diff["selection"]["selected_file_index"]
+                                .as_u64()
+                                .unwrap_or(0),
+                            diff["selection"]["selected_hunk_index"]
+                                .as_u64()
+                                .unwrap_or(0),
+                            path
+                        );
+                    }
+                    if let Some(command) = diff["navigation"]["next_file_command"].as_str() {
+                        println!("  Next file: {command}");
+                    }
+                    if let Some(command) = diff["navigation"]["next_hunk_command"].as_str() {
+                        println!("  Next hunk: {command}");
+                    }
+                } else {
+                    println!("  Patch diff navigation recorded.");
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&diff_output.stderr);
+                println!("  Patch diff failed: {stderr}");
+            }
+        }
         "revert" => {
             println!("  Patch Revert: recording guarded revert proposal.");
             println!("  WARNING: Revert does NOT silently restore files. It records intent.");
@@ -2283,6 +2344,7 @@ fn dispatch_patch_command(
             println!(
                 "  Usage: /patch plan --workflow <id> --task <id> --intent \"...\" --path <path>"
             );
+            println!("         /patch diff --workflow <id> --task <id> --path <path> --file-index 0 --hunk-index 0");
             println!("         /patch review --workflow <id> --task <id> --path <path>");
             println!("         /patch apply --workflow <id> --task <id> --path <path>");
             println!("         /patch revert --workflow <id> --task <id> --apply-artifact <id>");
@@ -2290,7 +2352,7 @@ fn dispatch_patch_command(
         }
         other => {
             println!(
-                "  Unknown patch subcommand: {other}. Use plan, review, apply, revert, or restore."
+                "  Unknown patch subcommand: {other}. Use plan, diff, review, apply, revert, or restore."
             );
         }
     }
@@ -2804,6 +2866,18 @@ mod tests {
         assert_eq!(route.name, "/patch plan");
         assert!(route.recognized);
         assert!(route.equivalent_command.contains(&"forge".to_string()));
+    }
+
+    #[test]
+    fn slash_patch_diff_is_recognized() {
+        let report =
+            route_slash_command("/patch diff --workflow wf_1 --task task_1 --path Cargo.toml");
+        assert_eq!(report.input_kind, "slash_command");
+        let route = report.slash_command.unwrap();
+        assert_eq!(route.name, "/patch diff");
+        assert!(route.recognized);
+        assert!(!route.mutates_workflow);
+        assert_eq!(route.risk_level, "medium");
     }
 
     #[test]
