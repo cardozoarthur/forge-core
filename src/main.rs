@@ -5136,7 +5136,9 @@ fn run() -> Result<i32> {
                 command,
                 output,
             } => {
+                let store = ForgeStore::open(cli.store)?;
                 let report = run_cli_harness_exec(
+                    Some(&store),
                     &executor,
                     &command,
                     forge_first,

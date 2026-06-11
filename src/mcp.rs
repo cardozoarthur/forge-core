@@ -7131,6 +7131,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let run_id = input.run_id.or(input.run);
             let cwd = input.cwd.as_deref().map(std::path::Path::new);
             serde_json::to_value(run_cli_harness_exec(
+                Some(store),
                 &input.executor,
                 &command,
                 input.forge_first.unwrap_or(true),

@@ -323,6 +323,115 @@ fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environme
 }
 
 #[cfg(unix)]
+#[test]
+fn harness_exec_applies_headroom_to_child_output_and_persists_retrieval_refs() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    write_fake_executor(
+        &bin_dir,
+        "forge-noisy-cli",
+        r#"#!/bin/sh
+for i in $(seq 1 80); do
+  printf 'line %s: error: failed to process request %s\n' "$i" "$i"
+done
+"#,
+    );
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let output = forge()
+        .env("PATH", path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "exec",
+            "--executor",
+            "codex",
+            "--forge-first",
+            "--workflow",
+            "wf_noisy",
+            "--run",
+            "run_noisy",
+            "--context-budget",
+            "120",
+            "--execute",
+            "--allow-exec",
+            "--output",
+            "json",
+            "--",
+            "forge-noisy-cli",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let receipt: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(receipt["schema_version"], "forge.harness.exec_receipt.v1");
+    assert_eq!(receipt["status"], "harness_exec_completed");
+    assert_eq!(receipt["executed"], true);
+    assert_eq!(receipt["output_headroom_enabled"], true);
+    assert_eq!(
+        receipt["stdout_headroom"]["schema_version"],
+        "forge.harness.token_headroom.v1"
+    );
+    assert_eq!(receipt["stdout_headroom"]["content_kind"], "log");
+    assert_eq!(
+        receipt["stdout_headroom"]["strategy"],
+        "signal_log_compressor"
+    );
+    assert_eq!(receipt["stdout_headroom"]["persisted"], true);
+    assert_eq!(
+        receipt["stdout_headroom"]["store_status"],
+        "stored_local_sqlite"
+    );
+    assert_eq!(receipt["stdout_headroom"]["budget_tokens"], 120);
+    assert!(
+        receipt["stdout_headroom"]["estimated_saved_tokens"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(receipt["stdout_headroom"]["retrieval_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("forge://harness/headroom/"));
+
+    let retrieval_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "retrieve-headroom",
+            "--ref",
+            receipt["stdout_headroom"]["retrieval_ref"]
+                .as_str()
+                .unwrap(),
+            "--include-content",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let retrieval: Value = serde_json::from_slice(&retrieval_output).unwrap();
+    assert_eq!(retrieval["status"], "headroom_blob_retrieved");
+    assert_eq!(retrieval["source"], "harness-exec:codex:stdout");
+    assert!(retrieval["original_content"]
+        .as_str()
+        .unwrap()
+        .contains("line 80: error: failed to process request 80"));
+}
+
+#[cfg(unix)]
 fn write_fake_executor(bin_dir: &Path, name: &str, body: &str) {
     let executor_path = bin_dir.join(name);
     fs::write(&executor_path, body).unwrap();

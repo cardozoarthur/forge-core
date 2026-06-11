@@ -86,6 +86,9 @@ pub struct CliHarnessExecReceipt {
     pub stderr_sha256: Option<String>,
     pub stdout_excerpt: Option<String>,
     pub stderr_excerpt: Option<String>,
+    pub output_headroom_enabled: bool,
+    pub stdout_headroom: Option<TokenHeadroomReport>,
+    pub stderr_headroom: Option<TokenHeadroomReport>,
     pub notes: Vec<String>,
 }
 
@@ -371,6 +374,7 @@ pub fn build_cli_wrapper_plan(
 }
 
 pub fn run_cli_harness_exec(
+    store: Option<&ForgeStore>,
     executor: &str,
     command: &[String],
     forge_first: bool,
@@ -429,6 +433,9 @@ pub fn run_cli_harness_exec(
             None,
             None,
             None,
+            token_headroom,
+            None,
+            None,
         ));
     }
     if !allow_exec {
@@ -452,6 +459,9 @@ pub fn run_cli_harness_exec(
             None,
             None,
             None,
+            None,
+            None,
+            token_headroom,
             None,
             None,
         ));
@@ -479,6 +489,9 @@ pub fn run_cli_harness_exec(
             None,
             None,
             None,
+            token_headroom,
+            None,
+            None,
         ));
     };
 
@@ -494,6 +507,22 @@ pub fn run_cli_harness_exec(
     let success = output.status.success();
     let stdout_excerpt = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr_excerpt = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout_headroom = build_output_headroom_report(
+        store,
+        &wrapper_plan.executor,
+        "stdout",
+        &stdout_excerpt,
+        context_budget,
+        token_headroom,
+    )?;
+    let stderr_headroom = build_output_headroom_report(
+        store,
+        &wrapper_plan.executor,
+        "stderr",
+        &stderr_excerpt,
+        context_budget,
+        token_headroom,
+    )?;
     Ok(exec_receipt(
         wrapper_plan,
         command,
@@ -520,7 +549,29 @@ pub fn run_cli_harness_exec(
         Some(hex_sha256(&output.stderr)),
         Some(bounded_excerpt(&stdout_excerpt, 4000)),
         Some(bounded_excerpt(&stderr_excerpt, 4000)),
+        token_headroom,
+        stdout_headroom,
+        stderr_headroom,
     ))
+}
+
+fn build_output_headroom_report(
+    store: Option<&ForgeStore>,
+    executor: &str,
+    stream: &str,
+    content: &str,
+    context_budget: usize,
+    token_headroom: bool,
+) -> Result<Option<TokenHeadroomReport>> {
+    if !token_headroom || content.is_empty() {
+        return Ok(None);
+    }
+    let source = format!("harness-exec:{executor}:{stream}");
+    let report = analyze_token_headroom(content, None, context_budget, &source, true);
+    if let Some(store) = store {
+        return persist_token_headroom_report(store, report, content).map(Some);
+    }
+    Ok(Some(report))
 }
 
 fn headroom_retrieval_report(
@@ -592,6 +643,9 @@ fn exec_receipt(
     stderr_sha256: Option<String>,
     stdout_excerpt: Option<String>,
     stderr_excerpt: Option<String>,
+    output_headroom_enabled: bool,
+    stdout_headroom: Option<TokenHeadroomReport>,
+    stderr_headroom: Option<TokenHeadroomReport>,
 ) -> CliHarnessExecReceipt {
     let executor = wrapper_plan.executor.clone();
     CliHarnessExecReceipt {
@@ -618,6 +672,9 @@ fn exec_receipt(
         stderr_sha256,
         stdout_excerpt,
         stderr_excerpt,
+        output_headroom_enabled,
+        stdout_headroom,
+        stderr_headroom,
         notes: vec![
             "Harness exec is a Forge-owned receipt for brain CLI invocation, not process interception.".to_string(),
             "Use dry-run receipts to validate wrapper shape before opting into guarded execution.".to_string(),
@@ -684,13 +741,6 @@ fn detect_content_kind(content: &str, hint: Option<&str>) -> String {
     if serde_json::from_str::<Value>(content).is_ok() {
         return "json".to_string();
     }
-    if content
-        .lines()
-        .take(20)
-        .any(|line| line.contains(':') && line.matches(':').count() >= 2)
-    {
-        return "search".to_string();
-    }
     let lower = content.to_lowercase();
     if lower.contains("error")
         || lower.contains("failed")
@@ -698,6 +748,13 @@ fn detect_content_kind(content: &str, hint: Option<&str>) -> String {
         || lower.contains("warning")
     {
         return "log".to_string();
+    }
+    if content
+        .lines()
+        .take(20)
+        .any(|line| line.contains(':') && line.matches(':').count() >= 2)
+    {
+        return "search".to_string();
     }
     if lower.contains("fn ")
         || lower.contains("class ")
