@@ -99,7 +99,7 @@ use crate::memory::{
 };
 use crate::milestone::{
     build_milestone_export_demo, build_milestone_manifest, build_milestone_research,
-    build_milestone_status, build_replacement_cli_demo,
+    build_milestone_status, build_replacement_cli_demo_with_options, MilestoneCliDemoOptions,
 };
 use crate::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
@@ -1642,6 +1642,8 @@ struct MilestoneStatusInput {
 #[derive(Debug, Deserialize)]
 struct MilestoneCliDemoInput {
     origin: Option<String>,
+    project_root: Option<String>,
+    connected_brain: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5685,8 +5687,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.milestone.cli_demo",
                 "Generate Replacement CLI Demo",
-                "Generate deterministic Forge-first replacement-grade CLI demo evidence for coding, patch lifecycle artifacts, research/artifact and long-running async workflows without mutating external resources.",
-                object_schema(&[("origin", "string", "codex|opencode|skill|mcp")], &[]),
+                "Generate deterministic Forge-first replacement-grade CLI demo evidence for coding, patch lifecycle artifacts, connected external brain providers, research/artifact and long-running async workflows without mutating external resources.",
+                object_schema(&[
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                    ("project_root", "string", "optional project root containing .forge/connected-brain-runtimes.json"),
+                    ("connected_brain", "string", "optional provider id from the connected brain runtime manifest"),
+                ], &[]),
                 "forge.milestone.cli_demo.v1",
                 &[
                     "forge",
@@ -8726,9 +8732,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.milestone.cli_demo" => {
             let input: MilestoneCliDemoInput = parse_input(input)?;
-            serde_json::to_value(build_replacement_cli_demo(
+            let project_root = input.project_root.as_deref().map(std::path::Path::new);
+            serde_json::to_value(build_replacement_cli_demo_with_options(
                 store,
                 input.origin.as_deref().unwrap_or("mcp"),
+                MilestoneCliDemoOptions {
+                    project_root,
+                    connected_brain: input.connected_brain.as_deref(),
+                },
             )?)?
         }
         "forge.multimodal.status" => {

@@ -5829,6 +5829,137 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
         )));
 }
 
+#[cfg(unix)]
+#[test]
+fn milestone_cli_demo_uses_project_connected_brain_manifest_without_overclaiming_model_execution() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("provider-project");
+    let forge_dir = project.join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+
+    let provider_script = temp.path().join("project-provider.sh");
+    fs::write(
+        &provider_script,
+        r#"#!/bin/sh
+set -eu
+mkdir -p brain-output
+cat > brain-output/plan.json <<EOF
+{"schema_version":"forge.connected_external_brain_stub.v1","workflow_id":"$FORGE_WORKFLOW_ID","task_id":"$FORGE_TASK_ID","run_id":"$FORGE_RUN_ID","brain_id":"project-connected-provider","model_execution_performed":false}
+EOF
+cat > brain-output/provider-output.json <<EOF
+{"schema_version":"forge.connected_external_brain.provider_output.v1","provider_id":"project-connected-provider","quality_score":0.96,"latency_ms":41,"model_execution_performed":false,"real_provider_execution_performed":false}
+EOF
+cat > brain-output/research.md <<EOF
+# Project connected provider
+
+- Workflow: $FORGE_WORKFLOW_ID
+- Provider: project-connected-provider
+EOF
+cat > brain-output/code.rs <<'RS'
+pub fn connected_external_brain_marker() -> &'static str {
+    "project-connected-provider"
+}
+RS
+printf 'project_connected_provider_ok\n'
+"#,
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&provider_script).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&provider_script, perms).unwrap();
+
+    fs::write(
+        forge_dir.join("connected-brain-runtimes.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "providers": [{
+                "id": "project-connected-provider",
+                "brain_id": "project-connected-provider",
+                "model_id": "project-fixture-model",
+                "provider_class": "fixture_external_cli",
+                "capabilities": ["replacement_grade_cli"],
+                "command": [provider_script.display().to_string()],
+                "approved_by": "test-operator",
+                "approval_ref": "test-provider-manifest",
+                "allow_model_execution": false,
+                "network_access": false,
+                "device_access": false,
+                "external_resources_mutated": false
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "milestone",
+            "cli-demo",
+            "--origin",
+            "test",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--connected-brain",
+            "project-connected-provider",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let connected_external_brain = json["flows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|flow| flow["kind"] == "connected_external_brain")
+        .expect("replacement CLI demo should include connected external brain flow");
+    let provider_contract = &connected_external_brain["external_brain"]["provider_contract"];
+    assert_eq!(
+        connected_external_brain["external_brain"]["brain_id"],
+        "project-connected-provider"
+    );
+    assert_eq!(provider_contract["provider_source"], "project_manifest");
+    assert_eq!(provider_contract["manifest_status"], "loaded");
+    assert!(provider_contract["manifest_path"]
+        .as_str()
+        .unwrap()
+        .ends_with(".forge/connected-brain-runtimes.json"));
+    assert_eq!(
+        provider_contract["status"],
+        "connected_external_brain_provider_contract_validated"
+    );
+    assert_eq!(
+        provider_contract["provider_id"],
+        "project-connected-provider"
+    );
+    assert_eq!(provider_contract["model_id"], "project-fixture-model");
+    assert_eq!(provider_contract["approved_by"], "test-operator");
+    assert_eq!(provider_contract["approval_ref"], "test-provider-manifest");
+    assert_eq!(provider_contract["output_quality_score"], "0.96");
+    assert_eq!(provider_contract["output_latency_ms"], "41");
+    assert_eq!(
+        provider_contract["provider_declared_model_execution"],
+        false
+    );
+    assert_eq!(
+        provider_contract["real_provider_execution_performed"],
+        false
+    );
+    assert_eq!(provider_contract["promotion_ready"], false);
+    assert!(connected_external_brain["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge milestone cli-demo --project-root <project-root> --connected-brain project-connected-provider --origin forge_cli --output json"
+        )));
+}
+
 #[test]
 fn milestone_cli_demo_supports_default_relative_store_when_patch_fixture_changes_cwd() {
     let temp = tempdir().unwrap();
@@ -5915,6 +6046,10 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
         forge_core::skill::SKILL_MD
             .contains("forge.milestone.connected_external_brain_provider.v1"),
         "the packaged Forge skill should mention the connected external brain provider contract receipt"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("--connected-brain <provider-id>"),
+        "the packaged Forge skill should teach project connected brain provider selection"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge interactive command-palette"),

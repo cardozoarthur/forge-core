@@ -123,7 +123,7 @@ use forge_core::memory::{
 };
 use forge_core::milestone::{
     build_milestone_export_demo, build_milestone_manifest, build_milestone_research,
-    build_milestone_status, build_replacement_cli_demo,
+    build_milestone_status, build_replacement_cli_demo_with_options, MilestoneCliDemoOptions,
 };
 use forge_core::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
@@ -3339,6 +3339,10 @@ enum MilestoneCommands {
     CliDemo {
         #[arg(long, default_value = "forge_cli")]
         origin: String,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
+        #[arg(long = "connected-brain")]
+        connected_brain: Option<String>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -7967,9 +7971,21 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(0)
             }
-            MilestoneCommands::CliDemo { origin, output } => {
+            MilestoneCommands::CliDemo {
+                origin,
+                project_root,
+                connected_brain,
+                output,
+            } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = build_replacement_cli_demo(&store, &origin)?;
+                let report = build_replacement_cli_demo_with_options(
+                    &store,
+                    &origin,
+                    MilestoneCliDemoOptions {
+                        project_root: project_root.as_deref(),
+                        connected_brain: connected_brain.as_deref(),
+                    },
+                )?;
                 print_response(output, &report)?;
                 Ok(0)
             }
