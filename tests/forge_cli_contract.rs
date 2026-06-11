@@ -37799,6 +37799,27 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         json["schema_version"],
         "forge.interactive.patch_workbench.v1"
     );
+    assert_eq!(
+        json["addon_contract"]["schema_version"],
+        "forge.interactive.patch_addon_contract.v1"
+    );
+    assert_eq!(
+        json["addon_contract"]["source_addon"],
+        "forge.addon.software_development"
+    );
+    assert_eq!(
+        json["addon_contract"]["capability_id"],
+        "source_code_patch_lifecycle"
+    );
+    assert_eq!(
+        json["addon_contract"]["view_id"],
+        "software.patch_workbench"
+    );
+    assert_eq!(
+        json["addon_contract"]["runtime_contract_id"],
+        "source_code_patch_lifecycle.executor"
+    );
+    assert_eq!(json["addon_contract"]["permission_id"], "source_code.patch");
     assert_eq!(json["status"], "patch_workbench_ready");
     assert_eq!(json["clean"], false);
     assert_eq!(json["changed_path_count"], 3);
@@ -38081,6 +38102,10 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     assert_eq!(
         mcp_json["result"]["schema_version"],
         "forge.interactive.patch_workbench.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["addon_contract"]["source_addon"],
+        "forge.addon.software_development"
     );
     assert_eq!(mcp_json["result"]["changed_path_count"], 3);
     assert_eq!(
@@ -39278,6 +39303,10 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("source_code_patch_lifecycle"),
         "the packaged Forge skill should route source-code editing through the software development Addon capability"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("addon_contract"),
+        "the packaged Forge skill should tell agents to inspect the patch workbench Addon contract"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.permissions"),

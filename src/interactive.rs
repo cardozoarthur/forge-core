@@ -1,6 +1,6 @@
 use crate::addon::{
     default_addon_dirs, list_addon_permission_authorizations, list_addon_views,
-    load_addon_catalog_from_store,
+    load_addon_catalog_from_store, CAP_SOURCE_CODE_PATCH_LIFECYCLE,
 };
 use crate::checkpoint::TaskCheckpoint;
 use crate::cost::build_cost_ledger;
@@ -51,6 +51,8 @@ const INTERACTIVE_SESSIONS_SCHEMA_VERSION: &str = "forge.interactive.sessions.v1
 const INTERACTIVE_COMMAND_PALETTE_SCHEMA_VERSION: &str = "forge.interactive.command_palette.v1";
 const INTERACTIVE_AUTOCOMPLETE_SCHEMA_VERSION: &str = "forge.interactive.autocomplete.v1";
 const INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION: &str = "forge.interactive.patch_workbench.v1";
+const INTERACTIVE_PATCH_ADDON_CONTRACT_SCHEMA_VERSION: &str =
+    "forge.interactive.patch_addon_contract.v1";
 const INTERACTIVE_PATCH_EDIT_INTAKE_SCHEMA_VERSION: &str = "forge.interactive.patch_edit_intake.v1";
 const INTERACTIVE_PERMISSIONS_SCHEMA_VERSION: &str = "forge.interactive.permissions.v1";
 const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
@@ -421,6 +423,7 @@ pub struct InteractiveSessionsCommands {
 #[derive(Debug, Clone, Serialize)]
 pub struct InteractivePatchWorkbenchPanel {
     pub schema_version: String,
+    pub addon_contract: InteractivePatchAddonContract,
     pub status: String,
     pub repository_path: String,
     pub clean: bool,
@@ -438,6 +441,18 @@ pub struct InteractivePatchWorkbenchPanel {
     pub files: Vec<InteractivePatchWorkbenchFile>,
     pub approval_flow: InteractivePatchApprovalFlow,
     pub commands: InteractivePatchWorkbenchCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchAddonContract {
+    pub schema_version: String,
+    pub source_addon: String,
+    pub capability_id: String,
+    pub permission_id: String,
+    pub view_id: String,
+    pub runtime_contract_id: String,
+    pub runtime: String,
+    pub entrypoint: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2212,6 +2227,7 @@ pub fn build_interactive_patch_workbench(
         let operation_plan = build_patch_operation_plan(&edit_intake, &approval_flow);
         return Ok(InteractivePatchWorkbenchPanel {
             schema_version: INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION.to_string(),
+            addon_contract: patch_addon_contract(),
             status: "patch_workbench_unavailable".to_string(),
             repository_path,
             clean: true,
@@ -2256,6 +2272,7 @@ pub fn build_interactive_patch_workbench(
 
     Ok(InteractivePatchWorkbenchPanel {
         schema_version: INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION.to_string(),
+        addon_contract: patch_addon_contract(),
         status: status.to_string(),
         repository_path,
         clean,
@@ -2274,6 +2291,19 @@ pub fn build_interactive_patch_workbench(
         approval_flow,
         commands,
     })
+}
+
+fn patch_addon_contract() -> InteractivePatchAddonContract {
+    InteractivePatchAddonContract {
+        schema_version: INTERACTIVE_PATCH_ADDON_CONTRACT_SCHEMA_VERSION.to_string(),
+        source_addon: "forge.addon.software_development".to_string(),
+        capability_id: CAP_SOURCE_CODE_PATCH_LIFECYCLE.to_string(),
+        permission_id: "source_code.patch".to_string(),
+        view_id: "software.patch_workbench".to_string(),
+        runtime_contract_id: "source_code_patch_lifecycle.executor".to_string(),
+        runtime: "forge_core_builtin".to_string(),
+        entrypoint: "forge.patch.lifecycle".to_string(),
+    }
 }
 
 pub fn build_interactive_permissions(store: &ForgeStore) -> Result<InteractivePermissionsPanel> {
