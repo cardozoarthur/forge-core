@@ -47,6 +47,9 @@ const OPS_ADDON_VIEW_INTERACTION_STATE_SCHEMA_VERSION: &str =
 const OPS_ADDON_VIEW_RUNTIME_STATE_SCHEMA_VERSION: &str = "forge.ops.addon_view_runtime_state.v1";
 const OPS_ADDON_RENDERER_CLIENT_EVENT_SCHEMA_VERSION: &str =
     "forge.ops.addon_renderer_client_event.v1";
+const OPS_OPERATIONAL_DIGITAL_TWIN_SCHEMA_VERSION: &str = "forge.ops.operational_digital_twin.v1";
+const OPS_WORKFLOW_DIGITAL_TWIN_SCHEMA_VERSION: &str = "forge.ops.workflow_digital_twin.v1";
+const OPS_WORKFLOW_LIVE_STATE_SCHEMA_VERSION: &str = "forge.ops.workflow_live_state.v1";
 const OPS_MODIFIER_PROPOSAL_CREATED_EVENT: &str = "ops_modifier_proposal_created";
 const OPS_MODIFIER_PROPOSAL_APPLIED_EVENT: &str = "ops_modifier_proposal_applied";
 const MAX_HTTP_REQUEST_BYTES: usize = 1024 * 1024;
@@ -64,6 +67,7 @@ pub struct OpsSnapshot {
     pub addon_observability: AddonObservabilityReport,
     pub addon_views: AddonViewReport,
     pub addon_view_renderers: OpsAddonViewRendererReport,
+    pub operational_digital_twin: OpsOperationalDigitalTwin,
     pub visual_workflows: Vec<OpsWorkflowVisual>,
     pub actions: Vec<OpsActionSpec>,
 }
@@ -86,6 +90,54 @@ pub struct OpsActionSpec {
     pub path: String,
     pub description: String,
     pub mutates_workflow: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsOperationalDigitalTwin {
+    pub schema_version: String,
+    pub workflow_count: usize,
+    pub global_counts: OpsWorkflowDigitalTwinCounts,
+    pub workflows: Vec<OpsWorkflowDigitalTwin>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsWorkflowDigitalTwin {
+    pub schema_version: String,
+    pub workflow_id: String,
+    pub goal: String,
+    pub status: String,
+    pub live_state: OpsWorkflowLiveState,
+    pub counts: OpsWorkflowDigitalTwinCounts,
+    pub commands: OpsWorkflowDigitalTwinCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsWorkflowLiveState {
+    pub schema_version: String,
+    pub what_is_happening: String,
+    pub what_already_done: Vec<String>,
+    pub what_remains: Vec<String>,
+    pub what_validated: Vec<String>,
+    pub what_rejected: Vec<String>,
+    pub awaiting_approval: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct OpsWorkflowDigitalTwinCounts {
+    pub happening_now_count: usize,
+    pub done_count: usize,
+    pub remaining_count: usize,
+    pub validated_count: usize,
+    pub rejected_count: usize,
+    pub awaiting_approval_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsWorkflowDigitalTwinCommands {
+    pub inspect: Vec<String>,
+    pub task_board: Vec<String>,
+    pub validate: Vec<String>,
+    pub events: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -500,6 +552,7 @@ pub fn build_ops_snapshot_with_addon_dirs_and_project(
     let addon_views = list_addon_views(&addon_catalog, None, Some("ops_console"), Some("enabled"));
     let addon_view_renderers = build_addon_view_renderer_report_with_store(store, &addon_views)?;
     let memory_context_governance = build_memory_context_governance(store, project_root)?;
+    let operational_digital_twin = build_operational_digital_twin(store, &modifier_lane)?;
     let visual_workflows = build_visual_workflows(store)?;
     Ok(OpsSnapshot {
         status: "ok".to_string(),
@@ -524,6 +577,7 @@ pub fn build_ops_snapshot_with_addon_dirs_and_project(
         addon_observability,
         addon_views,
         addon_view_renderers,
+        operational_digital_twin,
         visual_workflows,
         actions: ops_actions(),
     })
@@ -1295,6 +1349,188 @@ fn parse_renderer_event_payload(payload: Option<&str>) -> Result<Value> {
     match serde_json::from_str::<Value>(payload) {
         Ok(value) => Ok(value),
         Err(_) => Ok(serde_json::json!({ "raw": payload })),
+    }
+}
+
+fn build_operational_digital_twin(
+    store: &ForgeStore,
+    modifier_lane: &OpsModifierLane,
+) -> Result<OpsOperationalDigitalTwin> {
+    let mut workflows = store
+        .load_workflows()?
+        .into_iter()
+        .map(|workflow| build_workflow_digital_twin(&workflow, modifier_lane))
+        .collect::<Vec<_>>();
+    workflows.sort_by(|left, right| left.workflow_id.cmp(&right.workflow_id));
+
+    let mut global_counts = OpsWorkflowDigitalTwinCounts::default();
+    for workflow in &workflows {
+        global_counts.add(&workflow.counts);
+    }
+
+    Ok(OpsOperationalDigitalTwin {
+        schema_version: OPS_OPERATIONAL_DIGITAL_TWIN_SCHEMA_VERSION.to_string(),
+        workflow_count: workflows.len(),
+        global_counts,
+        workflows,
+    })
+}
+
+fn build_workflow_digital_twin(
+    workflow: &crate::graph::Workflow,
+    modifier_lane: &OpsModifierLane,
+) -> OpsWorkflowDigitalTwin {
+    let (live_state, counts) = workflow_live_state(workflow, modifier_lane);
+    OpsWorkflowDigitalTwin {
+        schema_version: OPS_WORKFLOW_DIGITAL_TWIN_SCHEMA_VERSION.to_string(),
+        workflow_id: workflow.id.clone(),
+        goal: workflow.goal.clone(),
+        status: workflow.status.clone(),
+        live_state,
+        counts,
+        commands: OpsWorkflowDigitalTwinCommands {
+            inspect: vec![
+                "forge".to_string(),
+                "inspect".to_string(),
+                "--workflow".to_string(),
+                workflow.id.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            task_board: vec![
+                "forge".to_string(),
+                "interactive".to_string(),
+                "task-board".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            validate: vec![
+                "forge".to_string(),
+                "validate".to_string(),
+                "--workflow".to_string(),
+                workflow.id.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            events: vec![
+                "forge".to_string(),
+                "events".to_string(),
+                "timeline".to_string(),
+                "--workflow".to_string(),
+                workflow.id.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        },
+    }
+}
+
+fn workflow_live_state(
+    workflow: &crate::graph::Workflow,
+    modifier_lane: &OpsModifierLane,
+) -> (OpsWorkflowLiveState, OpsWorkflowDigitalTwinCounts) {
+    let mut what_already_done = Vec::new();
+    let mut what_remains = Vec::new();
+    let mut what_validated = Vec::new();
+    let mut what_rejected = Vec::new();
+    let mut awaiting_approval = Vec::new();
+    let mut counts = OpsWorkflowDigitalTwinCounts::default();
+
+    for task in &workflow.tasks {
+        match &task.status {
+            TaskStatus::Running => {
+                counts.happening_now_count += 1;
+                what_remains.push(format!("running task: {}", task.title));
+            }
+            TaskStatus::Pending => {
+                counts.remaining_count += 1;
+                what_remains.push(format!("pending task: {}", task.title));
+            }
+            TaskStatus::Completed => {
+                counts.done_count += 1;
+                counts.validated_count += 1;
+                what_already_done.push(format!("completed task: {}", task.title));
+                what_validated.push(format!("completed task: {}", task.title));
+            }
+            TaskStatus::Blocked => {
+                counts.remaining_count += 1;
+                what_remains.push(format!("blocked task: {}", task.title));
+            }
+            TaskStatus::Failed => {
+                counts.rejected_count += 1;
+                counts.remaining_count += 1;
+                what_rejected.push(format!("failed task: {}", task.title));
+                what_remains.push(format!("failed task: {}", task.title));
+            }
+        }
+
+        if task.human_required
+            && !matches!(&task.status, TaskStatus::Completed | TaskStatus::Failed)
+        {
+            awaiting_approval.push(format!("human approval required: {}", task.title));
+        }
+        if let Some(interaction) = &task.human_interaction {
+            let state = interaction.state.trim().to_ascii_lowercase();
+            if interaction.required
+                && !matches!(
+                    state.as_str(),
+                    "answered" | "completed" | "cancelled" | "canceled"
+                )
+            {
+                awaiting_approval.push(format!(
+                    "human interaction {}: {}",
+                    interaction.kind, interaction.prompt
+                ));
+            }
+        }
+    }
+
+    for proposal in modifier_lane
+        .proposals
+        .iter()
+        .filter(|proposal| proposal.workflow_id == workflow.id && proposal.status == "pending")
+    {
+        awaiting_approval.push(format!("modifier proposal pending: {}", proposal.title));
+    }
+    awaiting_approval = unique_sorted(awaiting_approval);
+    counts.awaiting_approval_count = awaiting_approval.len();
+
+    let what_is_happening = if counts.happening_now_count > 0 {
+        "running_tasks_active"
+    } else if counts.awaiting_approval_count > 0 {
+        "pending_human_or_modifier_approval"
+    } else if counts.remaining_count > 0 {
+        "pending_work_waiting_for_handoff"
+    } else if counts.rejected_count > 0 {
+        "failed_work_needs_rework"
+    } else if counts.done_count > 0 {
+        "completed_work_waiting_for_validation_or_delivery"
+    } else {
+        "idle_no_tasks"
+    };
+
+    (
+        OpsWorkflowLiveState {
+            schema_version: OPS_WORKFLOW_LIVE_STATE_SCHEMA_VERSION.to_string(),
+            what_is_happening: what_is_happening.to_string(),
+            what_already_done,
+            what_remains,
+            what_validated,
+            what_rejected,
+            awaiting_approval,
+        },
+        counts,
+    )
+}
+
+impl OpsWorkflowDigitalTwinCounts {
+    fn add(&mut self, other: &Self) {
+        self.happening_now_count += other.happening_now_count;
+        self.done_count += other.done_count;
+        self.remaining_count += other.remaining_count;
+        self.validated_count += other.validated_count;
+        self.rejected_count += other.rejected_count;
+        self.awaiting_approval_count += other.awaiting_approval_count;
     }
 }
 
@@ -2577,6 +2813,52 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
             escape_html(&truncate(&workflow.current_goal, 120)),
         ));
     }
+    let mut digital_twin_rows = String::new();
+    for twin in &snapshot.operational_digital_twin.workflows {
+        let done = if twin.live_state.what_already_done.is_empty() {
+            "none".to_string()
+        } else {
+            twin.live_state.what_already_done.join("; ")
+        };
+        let remaining = if twin.live_state.what_remains.is_empty() {
+            "none".to_string()
+        } else {
+            twin.live_state.what_remains.join("; ")
+        };
+        let validated = if twin.live_state.what_validated.is_empty() {
+            "none".to_string()
+        } else {
+            twin.live_state.what_validated.join("; ")
+        };
+        let rejected = if twin.live_state.what_rejected.is_empty() {
+            "none".to_string()
+        } else {
+            twin.live_state.what_rejected.join("; ")
+        };
+        let approvals = if twin.live_state.awaiting_approval.is_empty() {
+            "none".to_string()
+        } else {
+            twin.live_state.awaiting_approval.join("; ")
+        };
+        digital_twin_rows.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}/{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><code>{}</code><br><code>{}</code></td></tr>",
+            escape_html(&twin.workflow_id),
+            escape_html(&twin.status),
+            escape_html(&twin.live_state.what_is_happening),
+            twin.counts.done_count,
+            twin.counts.remaining_count,
+            escape_html(&truncate(&done, 120)),
+            escape_html(&truncate(&remaining, 160)),
+            escape_html(&truncate(&validated, 120)),
+            escape_html(&truncate(&rejected, 120)),
+            escape_html(&truncate(&approvals, 120)),
+            escape_html(&twin.commands.inspect.join(" ")),
+            escape_html(&twin.commands.validate.join(" ")),
+        ));
+    }
+    if digital_twin_rows.is_empty() {
+        digital_twin_rows.push_str("<tr><td colspan=\"10\">Nenhum workflow disponível para gêmeo digital operacional.</td></tr>");
+    }
     let mut visual_sections = String::new();
     for workflow in &snapshot.visual_workflows {
         let design = &workflow.design_surface;
@@ -2974,6 +3256,12 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
     <thead><tr><th>Workflow</th><th>Status</th><th>Lifecycle</th><th>Runtime</th><th>Ação runtime</th><th>Tasks</th><th>Active runs</th><th>Runs</th><th>Outcome</th><th>Goal</th></tr></thead>
     <tbody>{}</tbody>
   </table>
+  <h2>Gêmeo digital operacional</h2>
+  <p class="section-note"><code>{}</code>: visão por workflow do que está acontecendo, o que já foi feito, o que falta, o que foi validado, o que foi rejeitado e o que aguarda aprovação.</p>
+  <table>
+    <thead><tr><th>Workflow</th><th>Status</th><th>Acontecendo</th><th>Feito/Falta</th><th>Já feito</th><th>Falta fazer</th><th>Validado</th><th>Rejeitado</th><th>Aprovação</th><th>Comandos</th></tr></thead>
+    <tbody>{}</tbody>
+  </table>
   <h2>Visualização operacional</h2>
   <p class="section-note">Tarefas e subtarefas em formato visual, com resumo do workspace criativo para whiteboard, telas, componentes, páginas, tokens e colaboração humano+IA.</p>
   {}
@@ -3080,6 +3368,8 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
         snapshot.addon_views.view_count,
         escape_html(&memory_governance.project_governance.status),
         rows,
+        escape_html(&snapshot.operational_digital_twin.schema_version),
+        digital_twin_rows,
         visual_sections,
         escape_html(&memory_governance.schema_version),
         escape_html(&memory_governance.project_governance.project_root),

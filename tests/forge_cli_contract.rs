@@ -29463,6 +29463,60 @@ views:
         .unwrap()
         .iter()
         .any(|workflow| workflow["workflow_id"] == workflow_id));
+    assert_eq!(
+        snapshot_json["operational_digital_twin"]["schema_version"],
+        "forge.ops.operational_digital_twin.v1"
+    );
+    assert!(
+        snapshot_json["operational_digital_twin"]["workflow_count"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    let workflow_twin = snapshot_json["operational_digital_twin"]["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["workflow_id"] == workflow_id)
+        .unwrap();
+    assert_eq!(
+        workflow_twin["schema_version"],
+        "forge.ops.workflow_digital_twin.v1"
+    );
+    assert_eq!(
+        workflow_twin["live_state"]["schema_version"],
+        "forge.ops.workflow_live_state.v1"
+    );
+    assert!(workflow_twin["live_state"]["what_is_happening"]
+        .as_str()
+        .unwrap()
+        .contains("pending"));
+    assert!(!workflow_twin["live_state"]["what_remains"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        workflow_twin["commands"]["inspect"],
+        serde_json::json!([
+            "forge",
+            "inspect",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json"
+        ])
+    );
+    assert_eq!(
+        workflow_twin["commands"]["validate"],
+        serde_json::json!([
+            "forge",
+            "validate",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json"
+        ])
+    );
     assert!(snapshot_json["actions"]
         .as_array()
         .unwrap()
@@ -29570,6 +29624,14 @@ views:
         mcp_ops_snapshot_json["result"]["memory_context_governance"]["project_governance"]
             ["status"],
         "configured"
+    );
+    assert!(
+        mcp_ops_snapshot_json["result"]["operational_digital_twin"]["workflows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["workflow_id"] == workflow_id
+                && entry["live_state"]["schema_version"] == "forge.ops.workflow_live_state.v1")
     );
     assert!(
         snapshot_json["addon_observability"]["addon_count"]
@@ -29783,6 +29845,8 @@ views:
     assert!(html.contains(workflow_id));
     assert!(html.contains("Lane modificadora"));
     assert!(html.contains("Visualização operacional"));
+    assert!(html.contains("Gêmeo digital operacional"));
+    assert!(html.contains("pending_work_waiting_for_handoff"));
     assert!(html.contains("Views de Addons"));
     assert!(html.contains("Renderers seguros de Addons"));
     assert!(html.contains("Observabilidade de Addons"));
