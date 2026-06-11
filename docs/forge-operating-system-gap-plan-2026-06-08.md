@@ -297,7 +297,7 @@ Status: primeiro corte por arquivo de projeto, registry SQLite, memberships com 
 
 - Expandir gestão de memberships para múltiplos usuários por organização, ambientes reais e UX operacional.
 - Integrar `tenant-policy --mode enforce` nos caminhos restantes de leitura sensível, listas globais e adapters externos sem `workflow_id`; egresso externo com workflow alvo já bloqueia por `workflow:deliver` antes do transporte.
-- Associar cada tabela operacional crítica diretamente a `organization_id`, `brand_id`, `product_id`, `user_id` e `channel_id` quando o schema deixar de depender da projeção.
+- Associar cada tabela operacional crítica diretamente a `organization_id`, `brand_id`, `product_id`, `user_id` e `channel_id`; `runs`, `task_leases` e `task_checkpoints` já têm chaves tenant físicas, índices tenant e backfill por workflow, mas o restante do schema operacional ainda precisa de cobertura direta.
 - Eventos de workflow já recebem projeção tenant-aware via `forge.event_stream.v1` e agora também entram em `tenant_index`; falta enforcement físico obrigatório nos writes.
 - Expandir o uso de brand identity, design system, tom de voz e políticas para heurísticas de decisão, adapters externos, validadores e UI operacional; o pacote de contexto e o contrato de persona já carregam esses dados.
 - Bloquear resposta/planning sem contexto organizacional resolvido quando multi-tenant estiver habilitado.

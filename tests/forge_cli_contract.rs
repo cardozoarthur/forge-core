@@ -22,6 +22,26 @@ fn forge() -> Command {
     Command::cargo_bin("forge").expect("forge binary should build")
 }
 
+fn sqlite_table_columns(connection: &Connection, table: &str) -> Vec<String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap();
+    rows.map(|row| row.unwrap()).collect()
+}
+
+fn sqlite_index_names(connection: &Connection, table: &str) -> Vec<String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA index_list({table})"))
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap();
+    rows.map(|row| row.unwrap()).collect()
+}
+
 #[test]
 fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environment() {
     let content = (0..80)
@@ -15642,6 +15662,235 @@ fn request_start_returns_async_run_identifier_for_skill_callers() {
         .assert()
         .success()
         .stdout(predicates::str::contains("Improve Forge asynchronously"));
+}
+
+#[test]
+fn operational_runtime_tables_persist_physical_tenant_keys() {
+    let temp = tempdir().unwrap();
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: runtime-org
+  label: Runtime Org
+brand:
+  scope: brand
+  id: runtime-brand
+  label: Runtime Brand
+product:
+  scope: product
+  id: runtime-product
+  label: Runtime Product
+user:
+  scope: user
+  id: runtime-user
+  label: Runtime User
+channel:
+  scope: channel
+  id: runtime-channel
+  label: Runtime Channel
+tenant_policy_mode: audit
+"#,
+    )
+    .unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Executar runtime com chaves tenant físicas",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+    let task_id = started_json["handoff_contract"]["task_id"]
+        .as_str()
+        .unwrap_or("task-001");
+
+    let handoff = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
+    assert_eq!(handoff_json["status"], "handoff_ready");
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+    let workflow_revision = context["workflow_revision"].as_u64().unwrap().to_string();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "checkpoint",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "codex",
+            "--state",
+            "paused",
+            "--summary",
+            "Checkpoint criado para validar chaves tenant físicas",
+            "--context-sha256",
+            context["context_sha256"].as_str().unwrap(),
+            "--workflow-revision",
+            workflow_revision.as_str(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let connection = Connection::open(&store).unwrap();
+    let tenant_columns = [
+        "organization_id",
+        "brand_id",
+        "product_id",
+        "user_id",
+        "channel_id",
+    ];
+    for table in ["runs", "task_leases", "task_checkpoints"] {
+        let columns = sqlite_table_columns(&connection, table);
+        for column in tenant_columns {
+            assert!(
+                columns.contains(&column.to_string()),
+                "{table} should persist physical {column}"
+            );
+        }
+        let indexes = sqlite_index_names(&connection, table);
+        assert!(
+            indexes.iter().any(|index| index.contains("tenant")),
+            "{table} should expose a tenant index"
+        );
+    }
+
+    let expected_tenant = (
+        "runtime-org".to_string(),
+        "runtime-brand".to_string(),
+        "runtime-product".to_string(),
+        "runtime-user".to_string(),
+        "runtime-channel".to_string(),
+    );
+    let run_tenant: (String, String, String, String, String) = connection
+        .query_row(
+            r#"
+            SELECT organization_id, brand_id, product_id, user_id, channel_id
+            FROM runs
+            WHERE id = ?1
+            "#,
+            [run_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(run_tenant, expected_tenant);
+
+    let lease_tenant: (String, String, String, String, String) = connection
+        .query_row(
+            r#"
+            SELECT organization_id, brand_id, product_id, user_id, channel_id
+            FROM task_leases
+            WHERE workflow_id = ?1 AND task_id = ?2
+            "#,
+            [workflow_id, task_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(lease_tenant, expected_tenant);
+
+    let checkpoint_tenant: (String, String, String, String, String) = connection
+        .query_row(
+            r#"
+            SELECT organization_id, brand_id, product_id, user_id, channel_id
+            FROM task_checkpoints
+            WHERE workflow_id = ?1 AND task_id = ?2
+            "#,
+            [workflow_id, task_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(checkpoint_tenant, expected_tenant);
 }
 
 #[test]

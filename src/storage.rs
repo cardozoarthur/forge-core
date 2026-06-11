@@ -880,6 +880,11 @@ impl ForgeStore {
             CREATE TABLE IF NOT EXISTS runs (
                 id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
+                organization_id TEXT NOT NULL DEFAULT '',
+                brand_id TEXT NOT NULL DEFAULT '',
+                product_id TEXT NOT NULL DEFAULT '',
+                user_id TEXT NOT NULL DEFAULT '',
+                channel_id TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL,
                 data_json TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -890,6 +895,11 @@ impl ForgeStore {
                 task_id TEXT NOT NULL,
                 lease_id TEXT NOT NULL,
                 executor TEXT NOT NULL,
+                organization_id TEXT NOT NULL DEFAULT '',
+                brand_id TEXT NOT NULL DEFAULT '',
+                product_id TEXT NOT NULL DEFAULT '',
+                user_id TEXT NOT NULL DEFAULT '',
+                channel_id TEXT NOT NULL DEFAULT '',
                 acquired_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
                 data_json TEXT NOT NULL,
@@ -900,6 +910,11 @@ impl ForgeStore {
                 workflow_id TEXT NOT NULL,
                 task_id TEXT NOT NULL,
                 executor TEXT NOT NULL,
+                organization_id TEXT NOT NULL DEFAULT '',
+                brand_id TEXT NOT NULL DEFAULT '',
+                product_id TEXT NOT NULL DEFAULT '',
+                user_id TEXT NOT NULL DEFAULT '',
+                channel_id TEXT NOT NULL DEFAULT '',
                 state TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 data_json TEXT NOT NULL
@@ -922,6 +937,7 @@ impl ForgeStore {
         self.ensure_event_observability_context_columns()?;
         self.backfill_event_observability_index()?;
         self.ensure_memory_promotion_tenant_columns()?;
+        self.ensure_operational_tenant_columns()?;
         Ok(())
     }
 
@@ -989,6 +1005,81 @@ impl ForgeStore {
                 ON memory_promotions (organization_id, brand_id, product_id);
             "#,
         )?;
+        Ok(())
+    }
+
+    fn ensure_operational_tenant_columns(&self) -> Result<()> {
+        for table in ["runs", "task_leases", "task_checkpoints"] {
+            for column in [
+                "organization_id",
+                "brand_id",
+                "product_id",
+                "user_id",
+                "channel_id",
+            ] {
+                if !self.table_has_column(table, column)? {
+                    let result = self.connection.execute(
+                        &format!(
+                            "ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                        ),
+                        [],
+                    );
+                    if let Err(error) = result {
+                        if !error.to_string().contains("duplicate column name") {
+                            return Err(error.into());
+                        }
+                    }
+                }
+            }
+        }
+        self.connection.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_runs_tenant
+                ON runs (organization_id, brand_id, product_id, status);
+            CREATE INDEX IF NOT EXISTS idx_task_leases_tenant
+                ON task_leases (organization_id, brand_id, product_id, expires_at);
+            CREATE INDEX IF NOT EXISTS idx_task_checkpoints_tenant
+                ON task_checkpoints (organization_id, brand_id, product_id, created_at);
+            "#,
+        )?;
+        self.backfill_operational_tenant_columns()?;
+        Ok(())
+    }
+
+    fn backfill_operational_tenant_columns(&self) -> Result<()> {
+        for workflow in self.load_workflows()? {
+            let tenant = operational_tenant_columns(Some(&workflow));
+            for table in ["runs", "task_leases", "task_checkpoints"] {
+                self.connection.execute(
+                    &format!(
+                        r#"
+                        UPDATE {table}
+                        SET organization_id = ?2,
+                            brand_id = ?3,
+                            product_id = ?4,
+                            user_id = ?5,
+                            channel_id = ?6
+                        WHERE workflow_id = ?1
+                          AND (
+                            organization_id = ''
+                            OR brand_id = ''
+                            OR product_id = ''
+                            OR user_id = ''
+                            OR channel_id = ''
+                          )
+                        "#
+                    ),
+                    params![
+                        workflow.id,
+                        tenant.organization_id,
+                        tenant.brand_id,
+                        tenant.product_id,
+                        tenant.user_id,
+                        tenant.channel_id,
+                    ],
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -3982,19 +4073,47 @@ impl ForgeStore {
         status: &str,
         data: &serde_json::Value,
     ) -> Result<()> {
+        let workflow = self.load_workflow(workflow_id).ok();
+        let tenant = operational_tenant_columns(workflow.as_ref());
         self.connection.execute(
             r#"
-            INSERT INTO runs (id, workflow_id, status, data_json, updated_at)
-            VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+            INSERT INTO runs (
+                id,
+                workflow_id,
+                organization_id,
+                brand_id,
+                product_id,
+                user_id,
+                channel_id,
+                status,
+                data_json,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, CURRENT_TIMESTAMP)
             ON CONFLICT(id) DO UPDATE SET
                 workflow_id=excluded.workflow_id,
+                organization_id=excluded.organization_id,
+                brand_id=excluded.brand_id,
+                product_id=excluded.product_id,
+                user_id=excluded.user_id,
+                channel_id=excluded.channel_id,
                 status=excluded.status,
                 data_json=excluded.data_json,
                 updated_at=CURRENT_TIMESTAMP
             "#,
-            params![id, workflow_id, status, serde_json::to_string(data)?],
+            params![
+                id,
+                workflow_id,
+                tenant.organization_id,
+                tenant.brand_id,
+                tenant.product_id,
+                tenant.user_id,
+                tenant.channel_id,
+                status,
+                serde_json::to_string(data)?
+            ],
         )?;
-        if let Ok(workflow) = self.load_workflow(workflow_id) {
+        if let Some(workflow) = workflow {
             self.save_tenant_index_record(
                 "run",
                 id,
@@ -4036,6 +4155,8 @@ impl ForgeStore {
     }
 
     pub fn try_save_task_lease(&self, lease: TaskLeaseWrite<'_>) -> Result<bool> {
+        let workflow = self.load_workflow(lease.workflow_id).ok();
+        let tenant = operational_tenant_columns(workflow.as_ref());
         let changed = self.connection.execute(
             r#"
             INSERT INTO task_leases (
@@ -4043,24 +4164,39 @@ impl ForgeStore {
                 task_id,
                 lease_id,
                 executor,
+                organization_id,
+                brand_id,
+                product_id,
+                user_id,
+                channel_id,
                 acquired_at,
                 expires_at,
                 data_json
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             ON CONFLICT(workflow_id, task_id) DO UPDATE SET
                 lease_id=excluded.lease_id,
                 executor=excluded.executor,
+                organization_id=excluded.organization_id,
+                brand_id=excluded.brand_id,
+                product_id=excluded.product_id,
+                user_id=excluded.user_id,
+                channel_id=excluded.channel_id,
                 acquired_at=excluded.acquired_at,
                 expires_at=excluded.expires_at,
                 data_json=excluded.data_json
-            WHERE task_leases.expires_at <= ?8
+            WHERE task_leases.expires_at <= ?13
             "#,
             params![
                 lease.workflow_id,
                 lease.task_id,
                 lease.lease_id,
                 lease.executor,
+                tenant.organization_id,
+                tenant.brand_id,
+                tenant.product_id,
+                tenant.user_id,
+                tenant.channel_id,
                 lease.acquired_at,
                 lease.expires_at,
                 serde_json::to_string(lease.data)?,
@@ -4117,6 +4253,8 @@ impl ForgeStore {
     }
 
     pub fn save_task_checkpoint(&self, checkpoint: &TaskCheckpoint) -> Result<()> {
+        let workflow = self.load_workflow(&checkpoint.workflow_id).ok();
+        let tenant = operational_tenant_columns(workflow.as_ref());
         self.connection.execute(
             r#"
             INSERT INTO task_checkpoints (
@@ -4124,17 +4262,27 @@ impl ForgeStore {
                 workflow_id,
                 task_id,
                 executor,
+                organization_id,
+                brand_id,
+                product_id,
+                user_id,
+                channel_id,
                 state,
                 created_at,
                 data_json
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             "#,
             params![
                 &checkpoint.checkpoint_id,
                 &checkpoint.workflow_id,
                 &checkpoint.task_id,
                 &checkpoint.executor,
+                tenant.organization_id,
+                tenant.brand_id,
+                tenant.product_id,
+                tenant.user_id,
+                tenant.channel_id,
                 &checkpoint.state,
                 checkpoint.created_at.to_rfc3339(),
                 serde_json::to_string(checkpoint)?
@@ -4253,6 +4401,31 @@ impl ForgeStore {
 
 fn default_operating_context_json() -> serde_json::Value {
     serde_json::to_value(OperatingContextSpec::default()).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+struct OperationalTenantColumns {
+    organization_id: String,
+    brand_id: String,
+    product_id: String,
+    user_id: String,
+    channel_id: String,
+}
+
+fn operational_tenant_columns(workflow: Option<&Workflow>) -> OperationalTenantColumns {
+    let default_context;
+    let context = if let Some(workflow) = workflow {
+        &workflow.intent.operating_context
+    } else {
+        default_context = OperatingContextSpec::default();
+        &default_context
+    };
+    OperationalTenantColumns {
+        organization_id: context.organization.id.clone(),
+        brand_id: context.brand.id.clone(),
+        product_id: context.product.id.clone(),
+        user_id: context.user.id.clone(),
+        channel_id: context.channel.id.clone(),
+    }
 }
 
 fn stored_event_service_from_row(row: &Row<'_>) -> rusqlite::Result<StoredEventServiceRecord> {
