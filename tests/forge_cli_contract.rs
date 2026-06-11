@@ -40224,6 +40224,11 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         .iter()
         .any(|file| file["path"] == "sample.txt"
             && file["review_status"] == "pending_review"
+            && file["action_hint"]["schema_version"]
+                == "forge.interactive.patch_file_action_hint.v1"
+            && file["action_hint"]["suggested_next_action"] == "review_diff"
+            && file["action_hint"]["review_required"] == true
+            && file["action_hint"]["apply_blocked_until_review"] == true
             && file["hunk_count"].as_u64().unwrap() > 0
             && file["addition_count"].as_u64().unwrap() > 0
             && file["commands"]["diff"]
@@ -40331,6 +40336,13 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     assert!(json["files"].as_array().unwrap().iter().any(|file| {
         file["path"] == "sample.txt"
             && file["status_label"] == "modified"
+            && file["action_hint"]["schema_version"]
+                == "forge.interactive.patch_file_action_hint.v1"
+            && file["action_hint"]["suggested_next_action"] == "review_diff"
+            && file["action_hint"]["primary_command"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("review"))
             && file["unstaged"] == true
             && file["commands"]["review"]
                 .as_array()
@@ -40340,6 +40352,9 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     assert!(json["files"].as_array().unwrap().iter().any(|file| {
         file["path"] == "notes.txt"
             && file["status_label"] == "untracked"
+            && file["action_hint"]["suggested_next_action"] == "create_patch_plan"
+            && file["action_hint"]["review_required"] == false
+            && file["action_hint"]["blocked_reason"] == "untracked_file_needs_patch_plan"
             && file["untracked"] == true
     }));
     assert!(json["commands"]["plan"]
@@ -40412,6 +40427,8 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("sample.txt"));
     assert!(text.contains("tracked.txt"));
     assert!(text.contains("notes.txt"));
+    assert!(text.contains("review_diff"));
+    assert!(text.contains("create_patch_plan"));
 
     let manifest = forge()
         .args(["mcp", "tools", "--output", "json"])
@@ -40434,6 +40451,10 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         .as_str()
         .unwrap()
         .contains("multi-file review queue"));
+    assert!(tool["description"]
+        .as_str()
+        .unwrap()
+        .contains("per-file action hints"));
     assert!(tool["description"]
         .as_str()
         .unwrap()
@@ -41891,6 +41912,10 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("edit_intake"),
         "the packaged Forge skill should teach agents to inspect patch edit intake before presenting file-editing actions"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("action_hint"),
+        "the packaged Forge skill should teach agents to inspect per-file action hints before presenting file buttons"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("operation_plan"),

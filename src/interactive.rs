@@ -67,6 +67,8 @@ const INTERACTIVE_ADDON_ACTION_CONTRACT_SCHEMA_VERSION: &str =
 const INTERACTIVE_PATCH_ADDON_CONTRACT_SCHEMA_VERSION: &str =
     "forge.interactive.patch_addon_contract.v1";
 const INTERACTIVE_PATCH_EDIT_INTAKE_SCHEMA_VERSION: &str = "forge.interactive.patch_edit_intake.v1";
+const INTERACTIVE_PATCH_FILE_ACTION_HINT_SCHEMA_VERSION: &str =
+    "forge.interactive.patch_file_action_hint.v1";
 const INTERACTIVE_PERMISSIONS_SCHEMA_VERSION: &str = "forge.interactive.permissions.v1";
 const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
 const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
@@ -676,6 +678,7 @@ pub struct InteractivePatchDiffReviewQueue {
 pub struct InteractivePatchDiffReviewQueueFile {
     pub path: String,
     pub review_status: String,
+    pub action_hint: InteractivePatchFileActionHint,
     pub selected: bool,
     pub staged: bool,
     pub unstaged: bool,
@@ -777,10 +780,22 @@ pub struct InteractivePatchWorkbenchFile {
     pub index_status: String,
     pub worktree_status: String,
     pub status_label: String,
+    pub action_hint: InteractivePatchFileActionHint,
     pub staged: bool,
     pub unstaged: bool,
     pub untracked: bool,
     pub commands: InteractivePatchWorkbenchFileCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchFileActionHint {
+    pub schema_version: String,
+    pub suggested_next_action: String,
+    pub review_required: bool,
+    pub apply_blocked_until_review: bool,
+    pub primary_command: Vec<String>,
+    pub blocked_reason: String,
+    pub rationale: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3339,13 +3354,16 @@ fn parse_patch_workbench_files(
             let unstaged =
                 worktree_status != ' ' && worktree_status != '?' && worktree_status != '!';
             let status_label = patch_workbench_status_label(staged, unstaged, untracked);
+            let commands = patch_workbench_file_commands(&path);
+            let action_hint = patch_file_action_hint(staged, unstaged, untracked, &commands);
 
             Some(InteractivePatchWorkbenchFile {
-                commands: patch_workbench_file_commands(&path),
+                commands,
                 path,
                 index_status: index_status.to_string(),
                 worktree_status: worktree_status.to_string(),
                 status_label,
+                action_hint,
                 staged,
                 unstaged,
                 untracked,
@@ -3365,6 +3383,59 @@ fn patch_workbench_status_label(staged: bool, unstaged: bool, untracked: bool) -
         "modified".to_string()
     } else {
         "changed".to_string()
+    }
+}
+
+fn patch_file_action_hint(
+    staged: bool,
+    unstaged: bool,
+    untracked: bool,
+    commands: &InteractivePatchWorkbenchFileCommands,
+) -> InteractivePatchFileActionHint {
+    let (
+        suggested_next_action,
+        review_required,
+        apply_blocked_until_review,
+        primary_command,
+        blocked_reason,
+        rationale,
+    ) = if untracked {
+        (
+            "create_patch_plan",
+            false,
+            true,
+            commands.plan.clone(),
+            "untracked_file_needs_patch_plan",
+            "Untracked files are not part of the tracked diff review queue; create a patch plan with explicit workflow/task lineage before applying.",
+        )
+    } else if staged || unstaged {
+        (
+            "review_diff",
+            true,
+            true,
+            commands.review.clone(),
+            "diff_review_required",
+            "Tracked changes must produce review evidence before apply approval can be offered.",
+        )
+    } else {
+        (
+            "inspect_diff",
+            false,
+            false,
+            commands.diff.clone(),
+            "ready_for_inspection",
+            "No blocking file-specific action was detected; inspect the diff if more evidence is needed.",
+        )
+    };
+
+    InteractivePatchFileActionHint {
+        schema_version: INTERACTIVE_PATCH_FILE_ACTION_HINT_SCHEMA_VERSION.to_string(),
+        suggested_next_action: suggested_next_action.to_string(),
+        review_required,
+        apply_blocked_until_review,
+        primary_command,
+        blocked_reason: blocked_reason.to_string(),
+        rationale: rationale.to_string(),
     }
 }
 
@@ -3509,6 +3580,7 @@ fn build_patch_diff_review_queue(
         queue_files.push(InteractivePatchDiffReviewQueueFile {
             path: file.path.clone(),
             review_status: "pending_review".to_string(),
+            action_hint: file.action_hint.clone(),
             selected: queue_files.is_empty(),
             staged: file.staged,
             unstaged: file.unstaged,
@@ -5677,7 +5749,12 @@ fn render_patch_workbench_file_summary(panel: &InteractivePatchWorkbenchPanel) -
             .files
             .iter()
             .take(12)
-            .map(|file| format!("{} ({})", file.path, file.status_label))
+            .map(|file| {
+                format!(
+                    "{} ({} -> {})",
+                    file.path, file.status_label, file.action_hint.suggested_next_action
+                )
+            })
             .collect::<Vec<_>>()
             .join(" | ")
     }
