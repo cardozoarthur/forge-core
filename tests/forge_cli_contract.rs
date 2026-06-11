@@ -37567,6 +37567,23 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     assert_eq!(json["diff_present"], true);
     assert_eq!(json["diff_check_status"], "passed");
     assert!(json["diff_stat"].as_str().unwrap().contains("sample.txt"));
+    assert_eq!(
+        json["diff_preview"]["schema_version"],
+        "forge.interactive.patch_diff_preview.v1"
+    );
+    assert_eq!(json["diff_preview"]["status"], "diff_preview_ready");
+    assert_eq!(json["diff_preview"]["selected_path"], "sample.txt");
+    assert!(json["diff_preview"]["line_count"].as_u64().unwrap() > 0);
+    assert!(json["diff_preview"]["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line["line_kind"] == "addition" && line["text"] == "beta"));
+    assert!(json["diff_preview"]["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line["line_kind"] == "hunk_header"));
     assert!(json["files"].as_array().unwrap().iter().any(|file| {
         file["path"] == "sample.txt"
             && file["status_label"] == "modified"
@@ -37642,6 +37659,8 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     let text = String::from_utf8(text_output).unwrap();
     assert!(text.contains("Patch workbench"));
     assert!(text.contains("Approval flow"));
+    assert!(text.contains("Diff preview"));
+    assert!(text.contains("+beta"));
     assert!(text.contains("sample.txt"));
     assert!(text.contains("notes.txt"));
 
@@ -37658,6 +37677,10 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         tool["output_schema"],
         "forge.interactive.patch_workbench.v1"
     );
+    assert!(tool["description"]
+        .as_str()
+        .unwrap()
+        .contains("inline diff preview"));
     assert_eq!(tool["async_safe"], true);
     assert_eq!(tool["mutates_workflow"], false);
 
@@ -37678,6 +37701,14 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         "forge.interactive.patch_workbench.v1"
     );
     assert_eq!(mcp_json["result"]["changed_path_count"], 2);
+    assert_eq!(
+        mcp_json["result"]["diff_preview"]["schema_version"],
+        "forge.interactive.patch_diff_preview.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["diff_preview"]["selected_path"],
+        "sample.txt"
+    );
     assert_eq!(
         mcp_json["result"]["approval_flow"]["schema_version"],
         "forge.interactive.patch_approval_flow.v1"

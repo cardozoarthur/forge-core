@@ -429,9 +429,30 @@ pub struct InteractivePatchWorkbenchPanel {
     pub diff_present: bool,
     pub diff_check_status: String,
     pub diff_stat: String,
+    pub diff_preview: InteractivePatchDiffPreview,
     pub files: Vec<InteractivePatchWorkbenchFile>,
     pub approval_flow: InteractivePatchApprovalFlow,
     pub commands: InteractivePatchWorkbenchCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchDiffPreview {
+    pub schema_version: String,
+    pub status: String,
+    pub selected_path: Option<String>,
+    pub line_count: usize,
+    pub truncated: bool,
+    pub command: Vec<String>,
+    pub lines: Vec<InteractivePatchDiffPreviewLine>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchDiffPreviewLine {
+    pub line_kind: String,
+    pub old_line: Option<usize>,
+    pub new_line: Option<usize>,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2103,6 +2124,7 @@ pub fn build_interactive_patch_workbench(
             diff_present: false,
             diff_check_status: "not_run".to_string(),
             diff_stat: status_output.stderr,
+            diff_preview: build_patch_diff_preview(&[], false),
             files: Vec::new(),
             approval_flow: build_patch_approval_flow(true, false, "not_run", &commands),
             commands,
@@ -2126,6 +2148,7 @@ pub fn build_interactive_patch_workbench(
     let commands = patch_workbench_commands();
     let approval_flow =
         build_patch_approval_flow(clean, diff_present, &diff_check_status, &commands);
+    let diff_preview = build_patch_diff_preview(&files, diff_present);
 
     Ok(InteractivePatchWorkbenchPanel {
         schema_version: INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION.to_string(),
@@ -2139,6 +2162,7 @@ pub fn build_interactive_patch_workbench(
         diff_present,
         diff_check_status,
         diff_stat,
+        diff_preview,
         files,
         approval_flow,
         commands,
@@ -2288,6 +2312,29 @@ fn git_command(args: &[&str]) -> GitCommandOutput {
     }
 }
 
+fn git_command_with_paths(args: &[&str], paths: &[String]) -> GitCommandOutput {
+    let mut command = Command::new("git");
+    command.args(args);
+    command.arg("--");
+    command.args(paths);
+    match command.output() {
+        Ok(output) => GitCommandOutput {
+            success: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout)
+                .trim_end()
+                .to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr)
+                .trim_end()
+                .to_string(),
+        },
+        Err(error) => GitCommandOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: error.to_string(),
+        },
+    }
+}
+
 fn patch_workbench_ignored_paths(store: &ForgeStore, repository_path: &str) -> BTreeSet<String> {
     let root = PathBuf::from(repository_path);
     let mut ignored = BTreeSet::new();
@@ -2381,6 +2428,191 @@ fn patch_workbench_diff_check_status() -> String {
     } else {
         "failed".to_string()
     }
+}
+
+fn build_patch_diff_preview(
+    files: &[InteractivePatchWorkbenchFile],
+    diff_present: bool,
+) -> InteractivePatchDiffPreview {
+    const MAX_PREVIEW_LINES: usize = 48;
+    let selected_path = files
+        .iter()
+        .find(|file| !file.untracked && (file.unstaged || file.staged))
+        .or_else(|| files.iter().find(|file| !file.untracked))
+        .map(|file| file.path.clone());
+
+    let Some(path) = selected_path else {
+        return InteractivePatchDiffPreview {
+            schema_version: "forge.interactive.patch_diff_preview.v1".to_string(),
+            status: if diff_present {
+                "diff_preview_unavailable".to_string()
+            } else {
+                "diff_preview_idle".to_string()
+            },
+            selected_path: None,
+            line_count: 0,
+            truncated: false,
+            command: Vec::new(),
+            lines: Vec::new(),
+            notes: vec![
+                "Inline diff preview is read-only and does not apply patches.".to_string(),
+                "No tracked file diff is available for preview; untracked files should be opened through file-specific commands.".to_string(),
+            ],
+        };
+    };
+
+    let paths = vec![path.clone()];
+    let mut command = patch_diff_preview_command(&path, false);
+    let mut diff_output = git_command_with_paths(&["diff", "--unified=3"], &paths);
+    if diff_output.success && diff_output.stdout.trim().is_empty() {
+        command = patch_diff_preview_command(&path, true);
+        diff_output = git_command_with_paths(&["diff", "--cached", "--unified=3"], &paths);
+    }
+
+    if !diff_output.success {
+        return InteractivePatchDiffPreview {
+            schema_version: "forge.interactive.patch_diff_preview.v1".to_string(),
+            status: "diff_preview_failed".to_string(),
+            selected_path: Some(path),
+            line_count: 0,
+            truncated: false,
+            command,
+            lines: Vec::new(),
+            notes: vec![
+                "Inline diff preview is read-only and does not apply patches.".to_string(),
+                format!("git diff failed: {}", diff_output.stderr),
+            ],
+        };
+    }
+
+    let (lines, truncated) = parse_patch_diff_preview_lines(&diff_output.stdout, MAX_PREVIEW_LINES);
+    let status = if lines.is_empty() {
+        "diff_preview_empty"
+    } else {
+        "diff_preview_ready"
+    };
+    InteractivePatchDiffPreview {
+        schema_version: "forge.interactive.patch_diff_preview.v1".to_string(),
+        status: status.to_string(),
+        selected_path: Some(path),
+        line_count: lines.len(),
+        truncated,
+        command,
+        lines,
+        notes: vec![
+            "Inline diff preview is read-only, bounded and intended for TUI/web/MCP rendering before review approval.".to_string(),
+            "Use forge patch diff for full multi-file navigation and workflow artifact lineage.".to_string(),
+        ],
+    }
+}
+
+fn patch_diff_preview_command(path: &str, cached: bool) -> Vec<String> {
+    let mut command = vec!["git".to_string(), "diff".to_string()];
+    if cached {
+        command.push("--cached".to_string());
+    }
+    command.extend([
+        "--unified=3".to_string(),
+        "--".to_string(),
+        path.to_string(),
+    ]);
+    command
+}
+
+fn parse_patch_diff_preview_lines(
+    diff: &str,
+    max_lines: usize,
+) -> (Vec<InteractivePatchDiffPreviewLine>, bool) {
+    let mut lines = Vec::new();
+    let mut old_line = None;
+    let mut new_line = None;
+    let mut truncated = false;
+
+    for raw_line in diff.lines() {
+        if lines.len() >= max_lines {
+            truncated = true;
+            break;
+        }
+
+        if raw_line.starts_with("@@") {
+            let (old_start, new_start) = parse_patch_diff_hunk_starts(raw_line);
+            old_line = old_start;
+            new_line = new_start;
+            lines.push(InteractivePatchDiffPreviewLine {
+                line_kind: "hunk_header".to_string(),
+                old_line: None,
+                new_line: None,
+                text: raw_line.to_string(),
+            });
+        } else if raw_line.starts_with('+') && !raw_line.starts_with("+++") {
+            let current_new_line = new_line;
+            if let Some(value) = new_line.as_mut() {
+                *value += 1;
+            }
+            lines.push(InteractivePatchDiffPreviewLine {
+                line_kind: "addition".to_string(),
+                old_line: None,
+                new_line: current_new_line,
+                text: raw_line.strip_prefix('+').unwrap_or(raw_line).to_string(),
+            });
+        } else if raw_line.starts_with('-') && !raw_line.starts_with("---") {
+            let current_old_line = old_line;
+            if let Some(value) = old_line.as_mut() {
+                *value += 1;
+            }
+            lines.push(InteractivePatchDiffPreviewLine {
+                line_kind: "deletion".to_string(),
+                old_line: current_old_line,
+                new_line: None,
+                text: raw_line.strip_prefix('-').unwrap_or(raw_line).to_string(),
+            });
+        } else if let Some(context_text) = raw_line.strip_prefix(' ') {
+            let current_old_line = old_line;
+            let current_new_line = new_line;
+            if let Some(value) = old_line.as_mut() {
+                *value += 1;
+            }
+            if let Some(value) = new_line.as_mut() {
+                *value += 1;
+            }
+            lines.push(InteractivePatchDiffPreviewLine {
+                line_kind: "context".to_string(),
+                old_line: current_old_line,
+                new_line: current_new_line,
+                text: context_text.to_string(),
+            });
+        } else {
+            lines.push(InteractivePatchDiffPreviewLine {
+                line_kind: "metadata".to_string(),
+                old_line: None,
+                new_line: None,
+                text: raw_line.to_string(),
+            });
+        }
+    }
+
+    (lines, truncated)
+}
+
+fn parse_patch_diff_hunk_starts(header: &str) -> (Option<usize>, Option<usize>) {
+    let mut old_line = None;
+    let mut new_line = None;
+    for part in header.split_whitespace() {
+        if old_line.is_none() && part.starts_with('-') {
+            old_line = parse_patch_diff_hunk_start(part, '-');
+        } else if new_line.is_none() && part.starts_with('+') {
+            new_line = parse_patch_diff_hunk_start(part, '+');
+        }
+    }
+    (old_line, new_line)
+}
+
+fn parse_patch_diff_hunk_start(part: &str, marker: char) -> Option<usize> {
+    part.strip_prefix(marker)?
+        .split(',')
+        .next()?
+        .parse::<usize>()
+        .ok()
 }
 
 fn build_patch_approval_flow(
@@ -3602,7 +3834,7 @@ pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> Strin
 
 pub fn render_interactive_patch_workbench(panel: &InteractivePatchWorkbenchPanel) -> String {
     format!(
-        "Patch workbench: {status}; clean {clean}, files {changed_path_count}, staged {staged_path_count}, unstaged {unstaged_path_count}, untracked {untracked_path_count}, diff {diff_present}, check {diff_check_status}\nRepository: {repository_path}\nFiles: {files}\nApproval flow: {approval_status}; gate {approval_gate}; approval {requires_human_approval}; apply ready {apply_ready}\n",
+        "Patch workbench: {status}; clean {clean}, files {changed_path_count}, staged {staged_path_count}, unstaged {unstaged_path_count}, untracked {untracked_path_count}, diff {diff_present}, check {diff_check_status}\nRepository: {repository_path}\nFiles: {files}\nDiff preview: {diff_preview}\nApproval flow: {approval_status}; gate {approval_gate}; approval {requires_human_approval}; apply ready {apply_ready}\n",
         status = panel.status,
         clean = panel.clean,
         changed_path_count = panel.changed_path_count,
@@ -3613,11 +3845,43 @@ pub fn render_interactive_patch_workbench(panel: &InteractivePatchWorkbenchPanel
         diff_check_status = panel.diff_check_status,
         repository_path = panel.repository_path,
         files = render_patch_workbench_file_summary(panel),
+        diff_preview = render_patch_diff_preview(&panel.diff_preview),
         approval_status = panel.approval_flow.status,
         approval_gate = panel.approval_flow.current_gate,
         requires_human_approval = panel.approval_flow.requires_human_approval,
         apply_ready = panel.approval_flow.apply_ready,
     )
+}
+
+fn render_patch_diff_preview(preview: &InteractivePatchDiffPreview) -> String {
+    let path = preview.selected_path.as_deref().unwrap_or("-");
+    let rendered_lines = preview
+        .lines
+        .iter()
+        .take(8)
+        .map(|line| {
+            let prefix = match line.line_kind.as_str() {
+                "addition" => "+",
+                "deletion" => "-",
+                "context" => " ",
+                "hunk_header" => "@",
+                _ => "#",
+            };
+            format!("{prefix}{}", line.text)
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if rendered_lines.is_empty() {
+        format!(
+            "{} for {}; lines {}; truncated {}",
+            preview.status, path, preview.line_count, preview.truncated
+        )
+    } else {
+        format!(
+            "{} for {}; lines {}; truncated {}; {}",
+            preview.status, path, preview.line_count, preview.truncated, rendered_lines
+        )
+    }
 }
 
 pub fn render_interactive_permissions(panel: &InteractivePermissionsPanel) -> String {
