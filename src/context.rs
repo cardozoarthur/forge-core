@@ -23,6 +23,8 @@ const CONTEXT_DELTA_SCHEMA_VERSION: &str = "forge.context.delta.v1";
 const ROUTING_ECONOMY_SCHEMA_VERSION: &str = "forge.context.routing_economy.v1";
 const PROMPT_PACKET_SCHEMA_VERSION: &str = "forge.context.prompt_packet.v2";
 const EXECUTOR_PROMPT_PACKET_VERSION: &str = "forge.executor.prompt_packet.v2";
+const ORGANIZATION_PROMPT_CONTEXT_SCHEMA_VERSION: &str =
+    "forge.context.organization_prompt_context.v1";
 const CONTEXT_REPLAY_MANIFEST_SCHEMA_VERSION: &str = "forge.context.replay_manifest.v1";
 const CONTEXT_SELECTION_RECEIPT_SCHEMA_VERSION: &str = "forge.context.selection_receipt.v1";
 const EXECUTION_POLICY_DECISION_SCHEMA_VERSION: &str = "forge.context.execution_policy_decision.v1";
@@ -262,6 +264,8 @@ pub struct ContextPromptPacket {
     pub persona_profile_id: Option<String>,
     pub instruction_sources: Vec<String>,
     pub validation_gates: Vec<String>,
+    pub organization_context: ContextOrganizationPromptContext,
+    pub organization_context_sha256: String,
     pub context_sha256: String,
     pub lineage_sha256: String,
     pub replay_manifest_sha256: String,
@@ -269,6 +273,34 @@ pub struct ContextPromptPacket {
     pub routing_quality_status: String,
     pub handoff_status: String,
     pub packet_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextOrganizationPromptContext {
+    pub schema_version: String,
+    pub organization_id: String,
+    pub organization_label: String,
+    pub brand_id: String,
+    pub brand_label: String,
+    pub product_id: String,
+    pub product_label: String,
+    pub user_id: String,
+    pub channel_id: String,
+    pub memory_scope: String,
+    pub personality_scope: String,
+    pub tenant_policy_mode: String,
+    pub brand_voice: String,
+    pub brand_tone: String,
+    pub brand_audience: Vec<String>,
+    pub brand_values: Vec<String>,
+    pub terminology: Vec<String>,
+    pub design_token_source: String,
+    pub component_source: String,
+    pub design_guidelines: Vec<String>,
+    pub data_classification: String,
+    pub memory_visibility: String,
+    pub sharing_policy: String,
+    pub approval_policy: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -850,6 +882,8 @@ struct ContextPromptPacketSeed {
     persona_profile_id: Option<String>,
     instruction_sources: Vec<String>,
     validation_gates: Vec<String>,
+    organization_context: ContextOrganizationPromptContext,
+    organization_context_sha256: String,
     context_sha256: String,
     lineage_sha256: String,
     replay_manifest_sha256: String,
@@ -981,6 +1015,7 @@ struct PromptPacketInput<'a> {
     task: &'a AtomicTask,
     profile: &'a ExecutorContextProfile,
     persona_profile: Option<&'a ContextPersonaProfile>,
+    operating_context: &'a OperatingContextSpec,
     lineage: &'a ContextLineage,
     workflow_revision: u64,
     context_sha256: &'a str,
@@ -1524,6 +1559,7 @@ pub fn build_context_package_with_checkpoint_and_project(
         task,
         profile: &profile,
         persona_profile: persona_profile.as_ref(),
+        operating_context: &operating_context,
         lineage: &lineage,
         workflow_revision,
         context_sha256: &context_sha256,
@@ -1958,6 +1994,9 @@ fn build_continuation_plan(
 
 fn build_prompt_packet(input: PromptPacketInput<'_>) -> Result<ContextPromptPacket> {
     let persona = input.task.persona.as_ref();
+    let organization_context = build_organization_prompt_context(input.operating_context);
+    let organization_context_sha256 =
+        hex_sha256(serde_json::to_string(&organization_context)?.as_bytes());
     let seed = ContextPromptPacketSeed {
         schema_version: PROMPT_PACKET_SCHEMA_VERSION,
         packet_version: EXECUTOR_PROMPT_PACKET_VERSION,
@@ -1976,6 +2015,8 @@ fn build_prompt_packet(input: PromptPacketInput<'_>) -> Result<ContextPromptPack
             .map(|profile| profile.profile_id.clone()),
         instruction_sources: prompt_packet_instruction_sources(persona),
         validation_gates: prompt_packet_validation_gates(input.task, persona),
+        organization_context: organization_context.clone(),
+        organization_context_sha256: organization_context_sha256.clone(),
         context_sha256: input.context_sha256.to_string(),
         lineage_sha256: input.lineage.lineage_sha256.clone(),
         replay_manifest_sha256: input.replay_manifest_sha256.to_string(),
@@ -2001,6 +2042,8 @@ fn build_prompt_packet(input: PromptPacketInput<'_>) -> Result<ContextPromptPack
         persona_profile_id: seed.persona_profile_id,
         instruction_sources: seed.instruction_sources,
         validation_gates: seed.validation_gates,
+        organization_context: seed.organization_context,
+        organization_context_sha256: seed.organization_context_sha256,
         context_sha256: seed.context_sha256,
         lineage_sha256: seed.lineage_sha256,
         replay_manifest_sha256: seed.replay_manifest_sha256,
@@ -2009,6 +2052,37 @@ fn build_prompt_packet(input: PromptPacketInput<'_>) -> Result<ContextPromptPack
         handoff_status: seed.handoff_status,
         packet_sha256,
     })
+}
+
+fn build_organization_prompt_context(
+    context: &OperatingContextSpec,
+) -> ContextOrganizationPromptContext {
+    ContextOrganizationPromptContext {
+        schema_version: ORGANIZATION_PROMPT_CONTEXT_SCHEMA_VERSION.to_string(),
+        organization_id: context.organization.id.clone(),
+        organization_label: context.organization.label.clone(),
+        brand_id: context.brand.id.clone(),
+        brand_label: context.brand.label.clone(),
+        product_id: context.product.id.clone(),
+        product_label: context.product.label.clone(),
+        user_id: context.user.id.clone(),
+        channel_id: context.channel.id.clone(),
+        memory_scope: context.memory_scope.clone(),
+        personality_scope: context.personality_scope.clone(),
+        tenant_policy_mode: context.tenant_policy_mode.clone(),
+        brand_voice: context.brand_identity.voice.clone(),
+        brand_tone: context.brand_identity.tone.clone(),
+        brand_audience: context.brand_identity.audience.clone(),
+        brand_values: context.brand_identity.values.clone(),
+        terminology: context.brand_identity.terminology.clone(),
+        design_token_source: context.design_system.token_source.clone(),
+        component_source: context.design_system.component_source.clone(),
+        design_guidelines: context.design_system.guidelines.clone(),
+        data_classification: context.operating_policy.data_classification.clone(),
+        memory_visibility: context.operating_policy.memory_visibility.clone(),
+        sharing_policy: context.operating_policy.sharing_policy.clone(),
+        approval_policy: context.operating_policy.approval_policy.clone(),
+    }
 }
 
 fn build_replay_manifest(input: ReplayManifestInput<'_>) -> Result<ContextReplayManifest> {
@@ -2303,6 +2377,7 @@ fn prompt_packet_validation_gates(
     persona: Option<&PersonaRoutingSpec>,
 ) -> Vec<String> {
     let mut gates = BTreeSet::new();
+    gates.insert("organization_context_required".to_string());
     if !task.execution_policy.validation_gate.trim().is_empty() {
         gates.insert(task.execution_policy.validation_gate.clone());
     }

@@ -410,8 +410,14 @@ can distinguish fresh handoff, dependency waits, context-budget repair, stale
 checkpoint refresh and partial retry with fresh context without first asking for a
 separate inspection projection. Packets now include a versioned `prompt_packet`
 contract that binds the context schema, routing policy, executor profile, persona
-mode/profile, instruction sources, validation gates, context checksum and lineage
-checksum into a stable adapter-facing hash. Packets also include a versioned
+mode/profile, instruction sources, validation gates, a compact versioned
+`organization_context` with organization/brand/product/user/channel, memory/personality
+scope, tenant policy, brand voice/tone/values, terminology, design token/component
+sources, design guidelines and operating policy, plus context checksum and lineage
+checksum into a stable adapter-facing hash. The prompt packet also carries
+`organization_context_sha256` and the `organization_context_required` validation gate,
+so adapters cannot silently ignore organizational context while still using a bounded
+task-local packet. Packets also include a versioned
 `replay_manifest` that records the replay command, selector version, budget,
 context checksum and content-addressed shard refs; prompt packets bind its checksum
 so async executors can pause and resume against the exact route. Packets also

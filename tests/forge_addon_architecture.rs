@@ -5993,6 +5993,57 @@ capabilities:
         .unwrap()
         .iter()
         .any(|source| source == "forge_operating_context"));
+    let organization_context = &context_json["prompt_packet"]["organization_context"];
+    assert_eq!(
+        organization_context["schema_version"],
+        "forge.context.organization_prompt_context.v1"
+    );
+    assert_eq!(organization_context["organization_id"], "digital-directive");
+    assert_eq!(organization_context["brand_id"], "forge");
+    assert_eq!(organization_context["product_id"], "forge-core");
+    assert_eq!(organization_context["user_id"], "arthur");
+    assert_eq!(organization_context["channel_id"], "local_cli");
+    assert_eq!(
+        organization_context["memory_scope"],
+        "organization_project_session"
+    );
+    assert_eq!(
+        organization_context["personality_scope"],
+        "organization_workflow_node"
+    );
+    assert_eq!(organization_context["tenant_policy_mode"], "audit");
+    assert_eq!(organization_context["brand_voice"], "consultivo");
+    assert_eq!(organization_context["brand_tone"], "direto");
+    assert!(organization_context["brand_values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "clareza"));
+    assert_eq!(
+        organization_context["design_token_source"],
+        ".forge/design/tokens.json"
+    );
+    assert_eq!(
+        organization_context["component_source"],
+        ".forge/design/components"
+    );
+    assert!(organization_context["design_guidelines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|guideline| guideline == "usar componentes densos e operacionais"));
+    assert_eq!(organization_context["data_classification"], "confidential");
+    assert_eq!(
+        context_json["prompt_packet"]["organization_context_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert!(context_json["prompt_packet"]["validation_gates"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("organization_context_required")));
     assert_eq!(
         context_json["lineage"]["operating_context_sha256"]
             .as_str()
