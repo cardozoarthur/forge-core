@@ -12422,6 +12422,156 @@ runtime_contracts:
 }
 
 #[test]
+fn multimodal_addon_runtime_dispatch_uses_guarded_builtin_benchmark() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let input = serde_json::json!({
+        "project_root": temp.path().display().to_string(),
+        "capability_id": "image_understanding",
+        "fixture_id": "static_image_labels",
+        "approved_by": "addon-dispatch-test",
+        "confirm_runtime_execution": true,
+        "allow_model": true
+    })
+    .to_string();
+
+    let blocked_dispatch = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "dispatch-contract",
+            "--addon",
+            "forge.addon.multimodal",
+            "--contract",
+            "multimodal_runtime_benchmark.executor",
+            "--input",
+            &input,
+            "--source",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let blocked_dispatch_json: Value = serde_json::from_slice(&blocked_dispatch).unwrap();
+    let blocked_dispatch_id = blocked_dispatch_json["dispatches"][0]["id"]
+        .as_str()
+        .unwrap();
+
+    let blocked_run = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "run-dispatch",
+            "--dispatch",
+            blocked_dispatch_id,
+            "--worker",
+            "builtin-multimodal-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let blocked_run_json: Value = serde_json::from_slice(&blocked_run).unwrap();
+    assert_eq!(
+        blocked_run_json["status"],
+        "runtime_contract_dispatch_blocked"
+    );
+    assert_eq!(blocked_run_json["dispatches"][0]["status"], "blocked");
+    assert_eq!(
+        blocked_run_json["dispatches"][0]["data"]["runtime_processing"]["outcome"]["outcome"],
+        "builtin_execution_failed"
+    );
+    assert!(
+        blocked_run_json["dispatches"][0]["data"]["runtime_processing"]["outcome"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("experimental multimodal opt-in")
+    );
+
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("multimodal.json"),
+        r#"{"experimental_enabled":true,"approved_by":"addon-dispatch-test","reason":"runtime dispatch test","scope":"project"}"#,
+    )
+    .unwrap();
+
+    let dispatch_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "dispatch-contract",
+            "--addon",
+            "forge.addon.multimodal",
+            "--contract",
+            "multimodal_runtime_benchmark.executor",
+            "--input",
+            &input,
+            "--source",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let dispatch_json: Value = serde_json::from_slice(&dispatch_output).unwrap();
+    let dispatch_id = dispatch_json["dispatches"][0]["id"].as_str().unwrap();
+
+    let run_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "run-dispatch",
+            "--dispatch",
+            dispatch_id,
+            "--worker",
+            "builtin-multimodal-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let run_json: Value = serde_json::from_slice(&run_output).unwrap();
+    assert_eq!(run_json["status"], "runtime_contract_dispatch_completed");
+    assert_eq!(run_json["completed_count"], 1);
+    assert_eq!(run_json["dispatches"][0]["status"], "completed");
+    let output = &run_json["dispatches"][0]["data"]["runtime_processing"]["outcome"]["output"];
+    assert_eq!(output["kind"], "forge_multimodal_runtime_benchmark");
+    assert_eq!(
+        output["report"]["schema_version"],
+        "forge.multimodal.runtime_benchmark.v1"
+    );
+    assert_eq!(
+        output["report"]["status"],
+        "guarded_runtime_benchmark_recorded"
+    );
+    assert_eq!(output["report"]["runtime_execution_performed"], true);
+    assert_eq!(output["report"]["model_execution_performed"], true);
+    assert_eq!(output["report"]["network_access_performed"], false);
+    assert_eq!(
+        output["report"]["promotion_gate"],
+        "production_model_runtime_benchmark_required"
+    );
+}
+
+#[test]
 fn addon_validation_reports_missing_dependencies_without_planning() {
     let temp = tempdir().unwrap();
     let addon_dir = temp.path().join("addons");

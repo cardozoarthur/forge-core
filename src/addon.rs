@@ -5,6 +5,10 @@ use crate::graph::{
     WorkflowRevision,
 };
 use crate::intent::{parse_intent, parse_intent_with_catalog};
+use crate::multimodal::{
+    build_multimodal_runtime_benchmark, resolve_multimodal_feature_flag,
+    MultimodalRuntimeBenchmarkOptions,
+};
 use crate::storage::{
     AddonMarketplacePackageWrite, AddonPermissionAuthorizationWrite, AddonTrustKeyWrite,
     ForgeStore, RuntimeContractDispatchWrite, RuntimeWorkerWrite, StoredAddonCapabilityRecord,
@@ -2825,23 +2829,46 @@ pub fn run_addon_runtime_contract_dispatch(
     }
 
     if entry.runtime == "forge_core_builtin" {
-        if let Some(output) = execute_builtin_runtime_contract(&entry) {
-            return update_runtime_dispatch_entry(
-                store,
-                entry,
-                RuntimeDispatchUpdateInput {
-                    policy: policy_entry,
-                    status: "completed",
-                    report_status: "runtime_contract_dispatch_completed",
-                    worker,
-                    dry_run,
-                    outcome: serde_json::json!({
-                        "outcome": "completed",
-                        "runtime": "forge_core_builtin",
-                        "output": output,
-                    }),
-                },
-            );
+        match execute_builtin_runtime_contract(&entry) {
+            Ok(Some(output)) => {
+                return update_runtime_dispatch_entry(
+                    store,
+                    entry,
+                    RuntimeDispatchUpdateInput {
+                        policy: policy_entry,
+                        status: "completed",
+                        report_status: "runtime_contract_dispatch_completed",
+                        worker,
+                        dry_run,
+                        outcome: serde_json::json!({
+                            "outcome": "completed",
+                            "runtime": "forge_core_builtin",
+                            "output": output,
+                        }),
+                    },
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let entrypoint = entry.entrypoint.clone();
+                return update_runtime_dispatch_entry(
+                    store,
+                    entry,
+                    RuntimeDispatchUpdateInput {
+                        policy: policy_entry,
+                        status: "blocked",
+                        report_status: "runtime_contract_dispatch_blocked",
+                        worker,
+                        dry_run,
+                        outcome: serde_json::json!({
+                            "outcome": "builtin_execution_failed",
+                            "runtime": "forge_core_builtin",
+                            "entrypoint": entrypoint,
+                            "reason": error.to_string(),
+                        }),
+                    },
+                );
+            }
         }
         let entrypoint = entry.entrypoint.clone();
         return update_runtime_dispatch_entry(
@@ -6679,26 +6706,80 @@ fn hex_nibble(byte: u8) -> Result<u8> {
 
 fn execute_builtin_runtime_contract(
     entry: &AddonRuntimeContractDispatchEntry,
-) -> Option<serde_json::Value> {
+) -> Result<Option<serde_json::Value>> {
     match entry.entrypoint.as_str() {
-        "builtin:echo" | "forge_core.echo" => Some(serde_json::json!({
+        "builtin:echo" | "forge_core.echo" => Ok(Some(serde_json::json!({
             "kind": "forge_core_builtin_echo",
             "dispatch_id": entry.id.clone(),
             "addon_id": entry.addon_id.clone(),
             "contract_id": entry.contract_id.clone(),
             "capability_id": entry.capability_id.clone(),
             "input": entry.input.clone(),
-        })),
-        "builtin:ack" | "forge_core.ack" => Some(serde_json::json!({
+        }))),
+        "builtin:ack" | "forge_core.ack" => Ok(Some(serde_json::json!({
             "kind": "forge_core_builtin_ack",
             "dispatch_id": entry.id.clone(),
             "addon_id": entry.addon_id.clone(),
             "contract_id": entry.contract_id.clone(),
             "capability_id": entry.capability_id.clone(),
             "accepted": true,
-        })),
-        _ => None,
+        }))),
+        "forge.multimodal.runtime_benchmark" => {
+            Ok(Some(execute_builtin_multimodal_runtime_benchmark(entry)?))
+        }
+        _ => Ok(None),
     }
+}
+
+fn execute_builtin_multimodal_runtime_benchmark(
+    entry: &AddonRuntimeContractDispatchEntry,
+) -> Result<serde_json::Value> {
+    let project_root =
+        optional_dispatch_input_string(&entry.input, "project_root").map(PathBuf::from);
+    let feature_flag = resolve_multimodal_feature_flag(false, project_root.as_deref());
+    let capability_id = required_dispatch_input_string(&entry.input, "capability_id")?;
+    let fixture_id = required_dispatch_input_string(&entry.input, "fixture_id")?;
+    let approved_by = optional_dispatch_input_string(&entry.input, "approved_by");
+    let confirm_runtime_execution =
+        optional_dispatch_input_bool(&entry.input, "confirm_runtime_execution").unwrap_or(false);
+    let allow_model = optional_dispatch_input_bool(&entry.input, "allow_model").unwrap_or(false);
+    let report = build_multimodal_runtime_benchmark(MultimodalRuntimeBenchmarkOptions {
+        capability_id,
+        fixture_id,
+        enable_experimental: feature_flag.enabled,
+        approved_by,
+        confirm_runtime_execution,
+        allow_model,
+    })?;
+    Ok(serde_json::json!({
+        "kind": "forge_multimodal_runtime_benchmark",
+        "dispatch_id": entry.id.clone(),
+        "addon_id": entry.addon_id.clone(),
+        "contract_id": entry.contract_id.clone(),
+        "capability_id": entry.capability_id.clone(),
+        "feature_flag": feature_flag,
+        "report": report,
+    }))
+}
+
+fn required_dispatch_input_string<'a>(
+    input: &'a serde_json::Value,
+    field: &str,
+) -> Result<&'a str> {
+    optional_dispatch_input_string(input, field)
+        .filter(|value| !value.trim().is_empty())
+        .with_context(|| format!("runtime dispatch input missing required string field `{field}`"))
+}
+
+fn optional_dispatch_input_string<'a>(
+    input: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a str> {
+    input.get(field).and_then(|value| value.as_str())
+}
+
+fn optional_dispatch_input_bool(input: &serde_json::Value, field: &str) -> Option<bool> {
+    input.get(field).and_then(|value| value.as_bool())
 }
 
 fn update_runtime_dispatch_entry(
