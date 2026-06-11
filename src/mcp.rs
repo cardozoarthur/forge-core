@@ -80,9 +80,9 @@ use crate::interaction::{
     expire_human_interaction, list_human_interactions, CreateChoiceInteractionRequest,
 };
 use crate::interactive::{
-    build_interactive_harness, build_interactive_home, build_interactive_patch_workbench,
-    build_interactive_permissions, build_interactive_readiness, build_interactive_sessions,
-    build_interactive_structured_logs, build_interactive_task_board,
+    build_interactive_command_palette, build_interactive_harness, build_interactive_home,
+    build_interactive_patch_workbench, build_interactive_permissions, build_interactive_readiness,
+    build_interactive_sessions, build_interactive_structured_logs, build_interactive_task_board,
     build_interactive_workflow_dag, route_interactive_input, slash_command_catalog,
     InteractiveHarnessOptions, InteractiveSessionsOptions,
 };
@@ -492,6 +492,11 @@ struct InteractiveHarnessInput {
     run_id: Option<String>,
     context_budget: Option<usize>,
     token_headroom: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InteractiveCommandPaletteInput {
+    query: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2836,6 +2841,17 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &[]),
                 "forge.interactive.sessions.v1",
                 &["forge", "interactive", "sessions", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.command_palette",
+                "Inspect Interactive Command Palette",
+                "Return contextual Forge operator commands grouped by panel, including workflow, patch, permission, harness and observability actions without mutating state.",
+                object_schema(&[
+                    ("query", "string", "optional search query used to filter non-workflow command entries"),
+                ], &[]),
+                "forge.interactive.command_palette.v1",
+                &["forge", "interactive", "command-palette", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -6602,6 +6618,17 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     lifecycle_state: input.lifecycle_state.or(input.state),
                     readiness: input.readiness,
                 },
+            )?)?
+        }
+        "forge.interactive.command_palette" => {
+            let input: InteractiveCommandPaletteInput = if input.is_null() {
+                InteractiveCommandPaletteInput::default()
+            } else {
+                parse_input(input)?
+            };
+            serde_json::to_value(build_interactive_command_palette(
+                store,
+                input.query.as_deref(),
             )?)?
         }
         "forge.interactive.patch_workbench" => {

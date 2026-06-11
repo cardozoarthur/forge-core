@@ -2980,6 +2980,14 @@ fn milestone_boundary_document_matches_validated_export_demo_runtime_state() {
         docs.contains("forge.milestone.cli_demo"),
         "the visible 0.5 milestone boundary should expose the MCP CLI demo surface"
     );
+    assert!(
+        docs.contains("forge interactive command-palette"),
+        "the visible 0.5 milestone boundary should point to the replacement-grade command palette"
+    );
+    assert!(
+        docs.contains("forge.interactive.command_palette"),
+        "the visible 0.5 milestone boundary should expose the MCP command palette surface"
+    );
 }
 
 #[test]
@@ -4170,6 +4178,14 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.milestone.cli_demo"),
         "the packaged Forge skill should expose the MCP replacement CLI demo tool"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge interactive command-palette"),
+        "the packaged Forge skill should teach agents how to inspect replacement-grade command palette actions"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.command_palette"),
+        "the packaged Forge skill should expose the MCP command palette tool"
     );
 
     let tools = forge()
@@ -36464,6 +36480,176 @@ fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
         "forge.interactive.readiness.v1"
     );
     assert_eq!(mcp_json["result"]["status"], "interactive_readiness_ready");
+}
+
+#[test]
+fn interactive_command_palette_surfaces_contextual_actions_for_replacement_cli() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Operate command palette evidence for a replacement-grade CLI workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "command-palette",
+            "--query",
+            "patch",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.interactive.command_palette.v1"
+    );
+    assert_eq!(json["status"], "command_palette_ready");
+    assert_eq!(json["query"], "patch");
+    assert!(json["entry_count"].as_u64().unwrap() >= 2);
+    assert!(json["groups"].as_array().unwrap().iter().any(|group| {
+        group["group_id"] == "patch"
+            && group["entries"].as_array().unwrap().iter().any(|entry| {
+                entry["action_id"] == "patch.diff"
+                    && entry["source_panel"] == "patch_workbench_panel"
+                    && entry["mutates_workflow"] == false
+            })
+    }));
+    assert!(json["groups"].as_array().unwrap().iter().any(|group| {
+        group["group_id"] == "workflow"
+            && group["entries"].as_array().unwrap().iter().any(|entry| {
+                entry["workflow_id"] == workflow_id
+                    && entry["commands"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!("inspect"))
+            })
+    }));
+    assert!(json["entries"].as_array().unwrap().iter().all(|entry| {
+        let haystack = format!(
+            "{} {} {}",
+            entry["action_id"].as_str().unwrap_or_default(),
+            entry["title"].as_str().unwrap_or_default(),
+            entry["description"].as_str().unwrap_or_default()
+        )
+        .to_ascii_lowercase();
+        haystack.contains("patch") || entry["group_id"] == "workflow"
+    }));
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "command-palette",
+            "--query",
+            "patch",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Command palette"));
+    assert!(text.contains("patch.diff"));
+    assert!(text.contains(workflow_id));
+
+    let home_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["command_palette_panel"]["schema_version"],
+        "forge.interactive.command_palette.v1"
+    );
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |region| region["widgets"].as_array().unwrap().iter().any(|widget| {
+                widget["widget_id"] == "command_palette_panel"
+                    && widget["commands"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!(
+                            "forge interactive command-palette --output json"
+                        ))
+            })
+        ));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.command_palette");
+    assert_eq!(
+        tool["output_schema"],
+        "forge.interactive.command_palette.v1"
+    );
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.command_palette"])
+        .arg("--input")
+        .arg(r#"{"query":"permissions"}"#)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.command_palette.v1"
+    );
+    assert!(mcp_json["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["action_id"] == "permissions.open"));
 }
 
 #[test]

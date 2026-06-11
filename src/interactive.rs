@@ -48,6 +48,7 @@ const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflo
 const INTERACTIVE_READINESS_SCHEMA_VERSION: &str = "forge.interactive.readiness.v1";
 const INTERACTIVE_HARNESS_SCHEMA_VERSION: &str = "forge.interactive.harness.v1";
 const INTERACTIVE_SESSIONS_SCHEMA_VERSION: &str = "forge.interactive.sessions.v1";
+const INTERACTIVE_COMMAND_PALETTE_SCHEMA_VERSION: &str = "forge.interactive.command_palette.v1";
 const INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION: &str = "forge.interactive.patch_workbench.v1";
 const INTERACTIVE_PERMISSIONS_SCHEMA_VERSION: &str = "forge.interactive.permissions.v1";
 const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
@@ -89,6 +90,7 @@ pub struct InteractiveDashboard {
     pub shell_entrypoints: Vec<String>,
     pub harness_panel: InteractiveHarnessPanel,
     pub sessions_panel: InteractiveSessionsPanel,
+    pub command_palette_panel: InteractiveCommandPalettePanel,
     pub harness_mode_panel: HarnessModeReport,
     pub harness_doctor_panel: HarnessDoctorReport,
     pub runtime_node_status: String,
@@ -222,6 +224,41 @@ pub struct InteractiveReadinessCommands {
     pub shells: Vec<String>,
     pub harness_mode: Vec<String>,
     pub harness_doctor: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveCommandPalettePanel {
+    pub schema_version: String,
+    pub status: String,
+    pub query: String,
+    pub group_count: usize,
+    pub entry_count: usize,
+    pub groups: Vec<InteractiveCommandPaletteGroup>,
+    pub entries: Vec<InteractiveCommandPaletteEntry>,
+    pub navigation: Vec<InteractiveKeyBinding>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveCommandPaletteGroup {
+    pub group_id: String,
+    pub title: String,
+    pub entry_count: usize,
+    pub entries: Vec<InteractiveCommandPaletteEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveCommandPaletteEntry {
+    pub action_id: String,
+    pub group_id: String,
+    pub title: String,
+    pub description: String,
+    pub source_panel: String,
+    pub workflow_id: Option<String>,
+    pub commands: Vec<String>,
+    pub mutates_workflow: bool,
+    pub requires_approval: bool,
+    pub risk_level: String,
+    pub keywords: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -867,6 +904,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
         },
     )?;
     let sessions_panel = build_interactive_sessions(store, InteractiveSessionsOptions::default())?;
+    let command_palette_panel = build_interactive_command_palette(store, None)?;
     let harness_mode_panel = harness_panel.mode.clone();
     let harness_doctor_panel = harness_panel.doctor.clone();
     let runtime_node_status = if runtimes.usable.is_empty() {
@@ -1070,6 +1108,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             shell_entrypoints,
             harness_panel,
             sessions_panel,
+            command_palette_panel,
             harness_mode_panel,
             harness_doctor_panel,
             runtime_node_status,
@@ -1374,6 +1413,450 @@ pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveRead
         next_actions,
         commands: readiness_commands(),
     })
+}
+
+pub fn build_interactive_command_palette(
+    store: &ForgeStore,
+    query: Option<&str>,
+) -> Result<InteractiveCommandPalettePanel> {
+    let workflows = list_workflows_with_filters(
+        store,
+        WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
+    )?;
+    let query = query.unwrap_or_default().trim().to_string();
+    let mut entries = base_command_palette_entries();
+    entries.extend(workflow_command_palette_entries(&workflows.workflows));
+    let entries = entries
+        .into_iter()
+        .filter(|entry| command_palette_entry_matches(entry, &query))
+        .collect::<Vec<_>>();
+    let groups = command_palette_groups(&entries);
+
+    Ok(InteractiveCommandPalettePanel {
+        schema_version: INTERACTIVE_COMMAND_PALETTE_SCHEMA_VERSION.to_string(),
+        status: "command_palette_ready".to_string(),
+        query,
+        group_count: groups.len(),
+        entry_count: entries.len(),
+        groups,
+        entries,
+        navigation: vec![
+            navigation_key(
+                "/",
+                "open_command_palette",
+                "global",
+                "Open command palette",
+            ),
+            navigation_key(
+                "enter",
+                "run_selected_action",
+                "command",
+                "Run selected action",
+            ),
+            navigation_key(
+                "esc",
+                "close_command_palette",
+                "global",
+                "Close command palette",
+            ),
+        ],
+    })
+}
+
+fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
+    vec![
+        command_palette_entry(
+            "navigation.home",
+            "navigation",
+            "Open interactive home",
+            "Inspect the full Forge operator dashboard.",
+            "navigation_panel",
+            None,
+            &["interactive", "home", "--output", "json"],
+            false,
+            false,
+            "low",
+            &["home", "dashboard", "navigation", "tui"],
+        ),
+        command_palette_entry(
+            "navigation.slash_commands",
+            "navigation",
+            "Open slash commands",
+            "List conversational slash-command equivalents for the TUI.",
+            "navigation_panel",
+            None,
+            &["interactive", "slash-commands", "--output", "json"],
+            false,
+            false,
+            "low",
+            &["slash", "command", "palette", "route"],
+        ),
+        command_palette_entry(
+            "readiness.open",
+            "readiness",
+            "Open interactive readiness",
+            "Audit executors, brains, shells, Forge-controlled surfaces and harness diagnostics.",
+            "readiness_panel",
+            None,
+            &["interactive", "readiness", "--output", "json"],
+            false,
+            false,
+            "low",
+            &["readiness", "executor", "brain", "shell", "harness"],
+        ),
+        command_palette_entry(
+            "harness.open",
+            "harness",
+            "Open harness center",
+            "Inspect Forge-first CLI controls, wrap plans, shims and token headroom.",
+            "harness_panel",
+            None,
+            &["interactive", "harness", "--output", "json"],
+            false,
+            false,
+            "low",
+            &["harness", "shim", "forge-first", "brain", "cli"],
+        ),
+        command_palette_entry(
+            "sessions.open",
+            "sessions",
+            "Open session center",
+            "Inspect provider sessions, lifecycle state, shell history and lifecycle controls.",
+            "sessions_panel",
+            None,
+            &["interactive", "sessions", "--output", "json"],
+            false,
+            false,
+            "low",
+            &["session", "shell", "provider", "brain", "history"],
+        ),
+        command_palette_entry(
+            "patch.plan",
+            "patch",
+            "Create patch plan",
+            "Create a bounded Forge patch plan artifact before file edits.",
+            "patch_workbench_panel",
+            None,
+            &[
+                "patch",
+                "plan",
+                "--workflow",
+                "<workflow-id>",
+                "--task",
+                "<task-id>",
+                "--intent",
+                "<intent>",
+                "--output",
+                "json",
+            ],
+            true,
+            false,
+            "medium",
+            &["patch", "plan", "artifact", "edit", "bounds"],
+        ),
+        command_palette_entry(
+            "patch.diff",
+            "patch",
+            "Review patch diff",
+            "Open read-only multi-file diff navigation for the current bounded patch.",
+            "patch_workbench_panel",
+            None,
+            &[
+                "patch",
+                "diff",
+                "--workflow",
+                "<workflow-id>",
+                "--task",
+                "<task-id>",
+                "--output",
+                "json",
+            ],
+            false,
+            false,
+            "low",
+            &["patch", "diff", "review", "file", "hunk"],
+        ),
+        command_palette_entry(
+            "patch.review",
+            "patch",
+            "Record patch review",
+            "Persist current diff/status/check evidence before an apply approval.",
+            "patch_workbench_panel",
+            None,
+            &[
+                "patch",
+                "review",
+                "--workflow",
+                "<workflow-id>",
+                "--task",
+                "<task-id>",
+                "--output",
+                "json",
+            ],
+            true,
+            false,
+            "medium",
+            &["patch", "review", "evidence", "status", "diff"],
+        ),
+        command_palette_entry(
+            "patch.apply",
+            "patch",
+            "Record patch apply",
+            "Record applied file snapshots and validation evidence after approved edits.",
+            "patch_workbench_panel",
+            None,
+            &[
+                "patch",
+                "apply",
+                "--workflow",
+                "<workflow-id>",
+                "--task",
+                "<task-id>",
+                "--output",
+                "json",
+            ],
+            true,
+            true,
+            "high",
+            &["patch", "apply", "approval", "validation", "snapshot"],
+        ),
+        command_palette_entry(
+            "patch.restore",
+            "patch",
+            "Restore from approved patch rollback",
+            "Execute an explicitly approved patch restore path.",
+            "patch_workbench_panel",
+            None,
+            &[
+                "patch",
+                "restore",
+                "--workflow",
+                "<workflow-id>",
+                "--task",
+                "<task-id>",
+                "--confirm-restore",
+                "--approved-by",
+                "<operator>",
+                "--output",
+                "json",
+            ],
+            true,
+            true,
+            "high",
+            &["patch", "restore", "rollback", "approval", "file"],
+        ),
+        command_palette_entry(
+            "permissions.open",
+            "permissions",
+            "Open permission center",
+            "Inspect tenant memberships, Addon authorizations and pending human approvals.",
+            "permissions_panel",
+            None,
+            &["interactive", "permissions", "--output", "json"],
+            false,
+            false,
+            "low",
+            &["permissions", "approval", "tenant", "addon", "membership"],
+        ),
+        command_palette_entry(
+            "workflow.task_board",
+            "workflow",
+            "Open task board",
+            "Inspect operable task lanes, ready handoffs, checkpoints and artifacts.",
+            "task_board_panel",
+            None,
+            &["interactive", "task-board", "--output", "json"],
+            false,
+            false,
+            "low",
+            &["workflow", "task", "board", "handoff", "checkpoint"],
+        ),
+        command_palette_entry(
+            "workflow.dag",
+            "workflow",
+            "Open workflow DAG",
+            "Inspect workflow dependency graphs, readiness and human waits.",
+            "dag_panel",
+            None,
+            &["interactive", "workflow-dag", "--output", "json"],
+            false,
+            false,
+            "low",
+            &["workflow", "dag", "graph", "dependency", "wait"],
+        ),
+        command_palette_entry(
+            "observability.structured_logs",
+            "observability",
+            "Open structured logs",
+            "Inspect recent Forge event logs with workflow and correlation context.",
+            "structured_logs_panel",
+            None,
+            &["interactive", "structured-logs", "--output", "json"],
+            false,
+            false,
+            "low",
+            &["observability", "logs", "events", "timeline", "debug"],
+        ),
+    ]
+}
+
+fn workflow_command_palette_entries(
+    workflows: &[WorkflowRegistryRow],
+) -> Vec<InteractiveCommandPaletteEntry> {
+    workflows
+        .iter()
+        .take(24)
+        .map(|workflow| {
+            let goal = truncate_display(&workflow.current_goal, 80);
+            let mut entry = command_palette_entry(
+                &format!("workflow.inspect.{}", workflow.workflow_id),
+                "workflow",
+                &format!("Inspect {}", workflow.workflow_id),
+                &format!("Inspect workflow state before patch, handoff or validation work: {goal}"),
+                "task_board_panel",
+                Some(workflow.workflow_id.clone()),
+                &["inspect", &workflow.workflow_id, "--output", "json"],
+                false,
+                false,
+                "low",
+                &[
+                    "workflow",
+                    "inspect",
+                    "task-board",
+                    "patch",
+                    "handoff",
+                    "validation",
+                ],
+            );
+            entry.keywords.push(workflow.workflow_id.clone());
+            entry.keywords.push(workflow.lifecycle_state.clone());
+            entry.keywords.push(goal);
+            entry
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn command_palette_entry(
+    action_id: &str,
+    group_id: &str,
+    title: &str,
+    description: &str,
+    source_panel: &str,
+    workflow_id: Option<String>,
+    commands: &[&str],
+    mutates_workflow: bool,
+    requires_approval: bool,
+    risk_level: &str,
+    keywords: &[&str],
+) -> InteractiveCommandPaletteEntry {
+    InteractiveCommandPaletteEntry {
+        action_id: action_id.to_string(),
+        group_id: group_id.to_string(),
+        title: title.to_string(),
+        description: description.to_string(),
+        source_panel: source_panel.to_string(),
+        workflow_id,
+        commands: commands
+            .iter()
+            .map(|command| (*command).to_string())
+            .collect(),
+        mutates_workflow,
+        requires_approval,
+        risk_level: risk_level.to_string(),
+        keywords: keywords
+            .iter()
+            .map(|keyword| (*keyword).to_string())
+            .collect(),
+    }
+}
+
+fn command_palette_entry_matches(entry: &InteractiveCommandPaletteEntry, query: &str) -> bool {
+    let terms = query
+        .split_whitespace()
+        .map(|term| term.trim().to_ascii_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if terms.is_empty() || entry.group_id == "workflow" {
+        return true;
+    }
+
+    let haystack = format!(
+        "{} {} {} {} {} {}",
+        entry.action_id,
+        entry.group_id,
+        entry.title,
+        entry.description,
+        entry.source_panel,
+        entry
+            .commands
+            .iter()
+            .chain(entry.keywords.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+    .to_ascii_lowercase();
+    terms.iter().all(|term| haystack.contains(term))
+}
+
+fn command_palette_groups(
+    entries: &[InteractiveCommandPaletteEntry],
+) -> Vec<InteractiveCommandPaletteGroup> {
+    let mut grouped: BTreeMap<String, Vec<InteractiveCommandPaletteEntry>> = BTreeMap::new();
+    for entry in entries {
+        grouped
+            .entry(entry.group_id.clone())
+            .or_default()
+            .push(entry.clone());
+    }
+
+    let preferred_order = [
+        "navigation",
+        "workflow",
+        "patch",
+        "permissions",
+        "sessions",
+        "harness",
+        "readiness",
+        "observability",
+    ];
+    let mut ordered_groups = Vec::new();
+    for group_id in preferred_order {
+        if let Some(entries) = grouped.remove(group_id) {
+            ordered_groups.push(command_palette_group(group_id, entries));
+        }
+    }
+    for (group_id, entries) in grouped {
+        ordered_groups.push(command_palette_group(&group_id, entries));
+    }
+    ordered_groups
+}
+
+fn command_palette_group(
+    group_id: &str,
+    entries: Vec<InteractiveCommandPaletteEntry>,
+) -> InteractiveCommandPaletteGroup {
+    InteractiveCommandPaletteGroup {
+        group_id: group_id.to_string(),
+        title: command_palette_group_title(group_id).to_string(),
+        entry_count: entries.len(),
+        entries,
+    }
+}
+
+fn command_palette_group_title(group_id: &str) -> &'static str {
+    match group_id {
+        "navigation" => "Navigation",
+        "workflow" => "Workflows",
+        "patch" => "Patch Workbench",
+        "permissions" => "Permissions",
+        "sessions" => "Sessions",
+        "harness" => "Harness",
+        "readiness" => "Readiness",
+        "observability" => "Observability",
+        _ => "Other",
+    }
 }
 
 pub fn build_interactive_patch_workbench(
@@ -2537,6 +3020,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
             .join(" | ")
     };
     let navigation_keys = render_navigation_keybindings(&d.navigation_panel);
+    let command_palette_entries = render_command_palette_entry_summary(&d.command_palette_panel);
     let ui_composition_regions = render_ui_composition_region_summary(&d.ui_composition_panel);
     let session_cards = render_session_card_summary(&d.sessions_panel);
     let patch_workbench_files = render_patch_workbench_file_summary(&d.patch_workbench_panel);
@@ -2604,6 +3088,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Scheduler worker status: {scheduler_worker_status}\n\
          Workflow focus: {workflow_focus}\n\
          Navigation panel: {navigation_status}; default {navigation_default_mode}, theme {navigation_theme}, modes {navigation_modes}, keys {navigation_keys}\n\
+         Command palette: {command_palette_status}; query {command_palette_query}, groups {command_palette_groups}, entries {command_palette_entry_count}; {command_palette_entries}\n\
          UI composition: {ui_composition_status}; layout {ui_composition_layout}, regions {ui_composition_regions_count}, widgets {ui_composition_widgets} ({ui_composition_core_widgets} core, {ui_composition_addon_widgets} addon); {ui_composition_regions}\n\
          Patch workbench: {patch_workbench_status}; clean {patch_workbench_clean}, files {patch_workbench_files_count}, staged {patch_workbench_staged}, unstaged {patch_workbench_unstaged}, untracked {patch_workbench_untracked}, diff {patch_workbench_diff_present}, check {patch_workbench_diff_check}; {patch_workbench_files}\n\
          Permission center: {permissions_status}; memberships {permissions_memberships}, active {permissions_active}, addon permissions {permissions_addons}, approved {permissions_approved_addons}, pending approvals {permissions_pending}, timed out {permissions_timed_out}; memberships {permission_memberships}; approvals {permission_approvals}\n\
@@ -2666,6 +3151,15 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         navigation_theme = d.navigation_panel.active_theme,
         navigation_modes = d.navigation_panel.display_modes.join(", "),
         navigation_keys = navigation_keys,
+        command_palette_status = d.command_palette_panel.status,
+        command_palette_query = if d.command_palette_panel.query.is_empty() {
+            "none"
+        } else {
+            d.command_palette_panel.query.as_str()
+        },
+        command_palette_groups = d.command_palette_panel.group_count,
+        command_palette_entry_count = d.command_palette_panel.entry_count,
+        command_palette_entries = command_palette_entries,
         ui_composition_status = d.ui_composition_panel.status,
         ui_composition_layout = d.ui_composition_panel.layout_kind,
         ui_composition_regions_count = d.ui_composition_panel.region_count,
@@ -2853,6 +3347,22 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         project_root = panel.project_root,
         shim_dir = panel.shim_dir,
         next_actions = next_actions,
+    )
+}
+
+pub fn render_interactive_command_palette(panel: &InteractiveCommandPalettePanel) -> String {
+    let query = if panel.query.is_empty() {
+        "none"
+    } else {
+        panel.query.as_str()
+    };
+    format!(
+        "Command palette: {status}; query {query}, groups {group_count}, entries {entry_count}\nEntries: {entries}\n",
+        status = panel.status,
+        query = query,
+        group_count = panel.group_count,
+        entry_count = panel.entry_count,
+        entries = render_command_palette_entry_summary(panel),
     )
 }
 
@@ -3240,6 +3750,15 @@ fn build_ui_composition_panel(
                     vec!["forge interactive home --output json".to_string()],
                 ),
                 core_ui_widget(
+                    "command_palette_panel",
+                    "Command palette",
+                    "command_palette_panel",
+                    "command_palette_renderer",
+                    "compact",
+                    "full",
+                    vec!["forge interactive command-palette --output json".to_string()],
+                ),
+                core_ui_widget(
                     "harness_panel",
                     "Harness center",
                     "harness_panel",
@@ -3514,6 +4033,31 @@ fn render_navigation_keybindings(panel: &InteractiveNavigationPanel) -> String {
         .map(|binding| format!("{}={}", binding.key, binding.action))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn render_command_palette_entry_summary(panel: &InteractiveCommandPalettePanel) -> String {
+    if panel.entries.is_empty() {
+        return "none".to_string();
+    }
+
+    panel
+        .entries
+        .iter()
+        .take(12)
+        .map(|entry| {
+            let workflow = entry.workflow_id.as_deref().unwrap_or("global");
+            format!(
+                "{} [{}] {} workflow={} mutates={} approval={}",
+                entry.action_id,
+                entry.source_panel,
+                entry.commands.join(" "),
+                workflow,
+                entry.mutates_workflow,
+                entry.requires_approval
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 fn render_structured_log_summary(panel: &InteractiveStructuredLogsPanel) -> String {
