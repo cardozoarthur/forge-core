@@ -6,6 +6,7 @@ use crate::memory::memory_policy_report;
 use crate::ops::build_addon_view_renderer_report;
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
+    WorkflowRegistryRow,
 };
 use crate::request::start_async_request;
 use crate::runtime::load_runtimes;
@@ -19,6 +20,7 @@ use std::io::IsTerminal;
 use std::process::Command;
 
 const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
+const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_board.v1";
 const SLASH_COMMANDS_SCHEMA_VERSION: &str = "forge.interactive.slash_commands.v1";
 const INTERACTIVE_ROUTE_SCHEMA_VERSION: &str = "forge.interactive.route.v1";
 
@@ -58,6 +60,7 @@ pub struct InteractiveDashboard {
     pub estimated_costs: String,
     pub scheduler_worker_status: String,
     pub workflow_focus: Vec<InteractiveWorkflowCard>,
+    pub task_board_panel: InteractiveTaskBoardPanel,
     pub schedule_panel: InteractiveSchedulePanel,
     pub event_panel: InteractiveEventPanel,
     pub cost_panel: InteractiveCostPanel,
@@ -78,6 +81,40 @@ pub struct InteractiveWorkflowCard {
     pub quality_action: String,
     pub tasks: String,
     pub schedule: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveTaskBoardPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub workflow_count: usize,
+    pub task_count: usize,
+    pub ready_handoffs: usize,
+    pub blocked_tasks: usize,
+    pub failed_tasks: usize,
+    pub running_tasks: usize,
+    pub checkpoint_resume_candidates: usize,
+    pub pending_human_interactions: usize,
+    pub artifact_count: usize,
+    pub lanes: Vec<InteractiveTaskBoardLane>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveTaskBoardLane {
+    pub workflow_id: String,
+    pub lifecycle_state: String,
+    pub goal: String,
+    pub total_tasks: usize,
+    pub pending_tasks: usize,
+    pub running_tasks: usize,
+    pub completed_tasks: usize,
+    pub blocked_tasks: usize,
+    pub failed_tasks: usize,
+    pub ready_handoffs: usize,
+    pub checkpoint_resume_candidates: usize,
+    pub pending_human_interactions: usize,
+    pub artifact_count: usize,
+    pub next_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -375,6 +412,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             ),
         })
         .collect::<Vec<_>>();
+    let task_board_panel = build_task_board_panel(store, &workflows.workflows)?;
     let event_panel = build_global_event_timeline(store, None, None, None, None, Some(5), None)
         .ok()
         .map(|timeline| InteractiveEventPanel {
@@ -488,6 +526,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 .to_string(),
             scheduler_worker_status,
             workflow_focus,
+            task_board_panel,
             schedule_panel,
             event_panel,
             cost_panel,
@@ -701,6 +740,28 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
             .collect::<Vec<_>>()
             .join(" | ")
     };
+    let task_board_lanes = if d.task_board_panel.lanes.is_empty() {
+        "none".to_string()
+    } else {
+        d.task_board_panel
+            .lanes
+            .iter()
+            .map(|lane| {
+                format!(
+                    "{} [{}] tasks {}/{}, ready handoffs {}, human waits {}, checkpoints {}, artifacts {}",
+                    lane.workflow_id,
+                    lane.lifecycle_state,
+                    lane.completed_tasks,
+                    lane.total_tasks,
+                    lane.ready_handoffs,
+                    lane.pending_human_interactions,
+                    lane.checkpoint_resume_candidates,
+                    lane.artifact_count
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
     let latest_events = if d.event_panel.latest_events.is_empty() {
         "none".to_string()
     } else {
@@ -735,6 +796,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Runtime/node status: {runtime_node_status}\n\
          Scheduler worker status: {scheduler_worker_status}\n\
          Workflow focus: {workflow_focus}\n\
+         Task board: {task_board_status}; workflows {task_board_workflows}, tasks {task_board_tasks}, ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, checkpoints {task_board_checkpoints}, artifacts {task_board_artifacts}; lanes {task_board_lanes}\n\
          Schedule panel: {schedule_status}; due {schedule_due}, runnable {schedule_runnable}, cron {schedule_cron}, wait_until {schedule_wait_until}, next {schedule_next}\n\
          Event timeline: {event_status}; visible {event_visible}/{event_total}; latest {latest_events}\n\
          Cost panel: {cost_status}; workflows {cost_workflows}, nodes {cost_nodes}, estimated ${cost_estimated:.4}, observed ${cost_observed:.4}\n\
@@ -764,6 +826,14 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         runtime_node_status = d.runtime_node_status,
         scheduler_worker_status = d.scheduler_worker_status,
         workflow_focus = workflow_focus,
+        task_board_status = d.task_board_panel.status,
+        task_board_workflows = d.task_board_panel.workflow_count,
+        task_board_tasks = d.task_board_panel.task_count,
+        task_board_ready_handoffs = d.task_board_panel.ready_handoffs,
+        task_board_human_waits = d.task_board_panel.pending_human_interactions,
+        task_board_checkpoints = d.task_board_panel.checkpoint_resume_candidates,
+        task_board_artifacts = d.task_board_panel.artifact_count,
+        task_board_lanes = task_board_lanes,
         schedule_status = d.schedule_panel.status,
         schedule_due = d.schedule_panel.due_workflows,
         schedule_runnable = d.schedule_panel.runnable_due_workflows,
@@ -798,6 +868,112 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         quick_actions = quick_actions,
         next_commands = next_commands,
     )
+}
+
+fn build_task_board_panel(
+    store: &ForgeStore,
+    rows: &[WorkflowRegistryRow],
+) -> Result<InteractiveTaskBoardPanel> {
+    let mut ready_handoffs = 0;
+    let mut checkpoint_resume_candidates = 0;
+    let mut task_count = 0;
+    let mut blocked_tasks = 0;
+    let mut failed_tasks = 0;
+    let mut running_tasks = 0;
+    let mut pending_human_interactions = 0;
+    let mut artifact_count = 0;
+    let mut lanes = Vec::new();
+    for row in rows {
+        let checkpoints = store.load_task_checkpoints(&row.workflow_id, None)?;
+        let lane_ready_handoffs = row
+            .context_action_refs
+            .iter()
+            .filter(|action| action.ready_for_handoff)
+            .count();
+        let lane_checkpoint_resume_candidates = checkpoints.len();
+        let lane_pending_human_interactions = row.human_interaction_summary.pending_required;
+        task_count += row.task_summary.total;
+        blocked_tasks += row.task_summary.blocked;
+        failed_tasks += row.task_summary.failed;
+        running_tasks += row.task_summary.running;
+        ready_handoffs += lane_ready_handoffs;
+        checkpoint_resume_candidates += lane_checkpoint_resume_candidates;
+        pending_human_interactions += lane_pending_human_interactions;
+        artifact_count += row.artifact_count;
+
+        if lanes.len() < 12 {
+            lanes.push(InteractiveTaskBoardLane {
+                workflow_id: row.workflow_id.clone(),
+                lifecycle_state: row.lifecycle_state.clone(),
+                goal: truncate_display(&row.current_goal, 96),
+                total_tasks: row.task_summary.total,
+                pending_tasks: row.task_summary.pending,
+                running_tasks: row.task_summary.running,
+                completed_tasks: row.task_summary.completed,
+                blocked_tasks: row.task_summary.blocked,
+                failed_tasks: row.task_summary.failed,
+                ready_handoffs: lane_ready_handoffs,
+                checkpoint_resume_candidates: lane_checkpoint_resume_candidates,
+                pending_human_interactions: lane_pending_human_interactions,
+                artifact_count: row.artifact_count,
+                next_actions: task_board_next_actions(row, &checkpoints),
+            });
+        }
+    }
+
+    Ok(InteractiveTaskBoardPanel {
+        schema_version: INTERACTIVE_TASK_BOARD_SCHEMA_VERSION.to_string(),
+        status: "task_board_ready".to_string(),
+        workflow_count: rows.len(),
+        task_count,
+        ready_handoffs,
+        blocked_tasks,
+        failed_tasks,
+        running_tasks,
+        checkpoint_resume_candidates,
+        pending_human_interactions,
+        artifact_count,
+        lanes,
+    })
+}
+
+fn task_board_next_actions(
+    row: &WorkflowRegistryRow,
+    checkpoints: &[serde_json::Value],
+) -> Vec<String> {
+    let mut actions = vec![format!("forge inspect {}", row.workflow_id)];
+
+    if let Some(handoff) = row
+        .context_action_refs
+        .iter()
+        .find(|action| action.ready_for_handoff)
+    {
+        actions.push(format!(
+            "forge task handoff --workflow {} --task {} --executor {}",
+            row.workflow_id, handoff.task_id, handoff.executor
+        ));
+    }
+
+    if let Some(task_id) = checkpoints
+        .iter()
+        .rev()
+        .find_map(|checkpoint| checkpoint["task_id"].as_str())
+    {
+        actions.push(format!(
+            "forge context --workflow {} --task {}",
+            row.workflow_id, task_id
+        ));
+    }
+
+    if row.human_interaction_summary.pending_required > 0 {
+        actions.push("forge interaction list".to_string());
+    }
+
+    if row.artifact_count > 0 {
+        actions.push(format!("forge artifacts --workflow {}", row.workflow_id));
+    }
+
+    actions
 }
 
 fn truncate_display(value: &str, max_chars: usize) -> String {

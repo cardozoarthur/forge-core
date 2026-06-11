@@ -30762,6 +30762,7 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     assert!(text.contains("Runtime/node status"));
     assert!(text.contains("Scheduler worker status"));
     assert!(text.contains("Workflow focus"));
+    assert!(text.contains("Task board"));
     assert!(text.contains("Schedule panel"));
     assert!(text.contains("Event timeline"));
     assert!(text.contains("Cost panel"));
@@ -30890,6 +30891,168 @@ fn interactive_home_surfaces_needs_attention_runs_with_recovery_actions() {
     assert!(text.contains("Runs needing attention: 1"));
     assert!(text.contains("forge request list --status needs_attention"));
     assert!(text.contains(&format!("forge request status --run {run_id}")));
+}
+
+#[test]
+fn interactive_home_exposes_task_board_handoffs_checkpoints_and_artifacts() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Build an operator task board with human approval and checkpoint evidence",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let blocked_task = find_task(
+        planned_json["tasks"].as_array().unwrap(),
+        "Extract requirements",
+    );
+    let blocked_task_id = blocked_task["id"].as_str().unwrap();
+    let checkpoint_task = find_task(planned_json["tasks"].as_array().unwrap(), "Validate build");
+    let checkpoint_task_id = checkpoint_task["id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interaction",
+            "create-choice",
+            "--workflow",
+            workflow_id,
+            "--task",
+            blocked_task_id,
+            "--kind",
+            "approve_reject_refine_combine",
+            "--prompt",
+            "Choose whether the operator task board can proceed",
+            "--choice",
+            "approve=Approve",
+            "--choice",
+            "refine=Refine",
+            "--timeout-seconds",
+            "3600",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "checkpoint",
+            "--workflow",
+            workflow_id,
+            "--task",
+            checkpoint_task_id,
+            "--executor",
+            "codex",
+            "--state",
+            "paused",
+            "--summary",
+            "Operator paused with enough context to resume from the task board",
+            "--context-sha256",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "--context-routing-cache-key",
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "--workflow-revision",
+            "0",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let artifact_path = temp.path().join("operator-task-board-evidence.md");
+    fs::write(&artifact_path, "task board evidence").unwrap();
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "attach-artifact",
+            "--workflow",
+            workflow_id,
+            "--path",
+            artifact_path.to_str().unwrap(),
+            "--kind",
+            "operator-task-board-evidence",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let json_home = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&json_home).unwrap();
+    let task_board = &home["dashboard"]["task_board_panel"];
+    assert_eq!(
+        task_board["schema_version"],
+        "forge.interactive.task_board.v1"
+    );
+    assert_eq!(task_board["status"], "task_board_ready");
+    assert!(task_board["workflow_count"].as_u64().unwrap() >= 1);
+    assert!(task_board["task_count"].as_u64().unwrap() >= 1);
+    assert!(task_board["blocked_tasks"].as_u64().unwrap() >= 1);
+    assert_eq!(task_board["pending_human_interactions"], 1);
+    assert_eq!(task_board["artifact_count"], 1);
+
+    let lane = task_board["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|lane| lane["workflow_id"] == workflow_id)
+        .unwrap();
+    assert_eq!(lane["pending_human_interactions"], 1);
+    assert_eq!(lane["artifact_count"], 1);
+    assert!(lane["checkpoint_resume_candidates"].as_u64().unwrap() >= 1);
+    assert!(lane["next_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(format!("forge inspect {workflow_id}"))));
+
+    let text_home = forge()
+        .args(["--store", store.to_str().unwrap(), "interactive", "home"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_home).unwrap();
+    assert!(text.contains("Task board"));
+    assert!(text.contains("human waits 1"));
+    assert!(text.contains("checkpoints 1"));
 }
 
 #[test]
@@ -31397,6 +31560,11 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         .unwrap()
         .contains(&serde_json::json!("/brains")));
     assert!(home_json["result"]["dashboard"]["workflow_focus"].is_array());
+    assert!(
+        home_json["result"]["dashboard"]["task_board_panel"]["schema_version"]
+            == "forge.interactive.task_board.v1",
+        "interactive home should expose task-board state for agent dashboards"
+    );
     assert!(
         home_json["result"]["dashboard"]["schedule_panel"]["status"].is_string(),
         "interactive home should expose scheduler panel state for agent dashboards"
