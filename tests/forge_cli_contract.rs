@@ -34566,6 +34566,7 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     assert!(text.contains("Forge-controlled surfaces"));
     assert!(text.contains("Shell entrypoints"));
     assert!(text.contains("Harness mode"));
+    assert!(text.contains("Harness doctor"));
     assert!(text.contains("forge_first"));
     assert!(text.contains("project_config"));
     assert!(text.contains("Runtime/node status"));
@@ -35676,6 +35677,10 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("/harness")));
+    assert!(home_json["result"]["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/harness doctor")));
     assert!(home_json["result"]["dashboard"]["workflow_focus"].is_array());
     assert_eq!(
         home_json["result"]["dashboard"]["harness_mode_panel"]["schema_version"],
@@ -35684,6 +35689,18 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
     assert!(
         home_json["result"]["dashboard"]["harness_mode_panel"]["effective_mode"].is_string(),
         "interactive home should expose harness mode for shell and brain dashboards"
+    );
+    assert_eq!(
+        home_json["result"]["dashboard"]["harness_doctor_panel"]["schema_version"],
+        "forge.harness.doctor.v1"
+    );
+    assert_eq!(
+        home_json["result"]["dashboard"]["harness_doctor_panel"]["executor"],
+        "codex"
+    );
+    assert!(
+        home_json["result"]["dashboard"]["harness_doctor_panel"]["readiness_checks"].is_array(),
+        "interactive home should expose full harness readiness checks before brain shell handoff"
     );
     assert!(
         home_json["result"]["dashboard"]["task_board_panel"]["schema_version"]

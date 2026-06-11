@@ -4,7 +4,10 @@ use crate::cost::build_cost_ledger;
 use crate::event::build_global_event_timeline;
 use crate::executor::load_executors;
 use crate::graph::{AtomicTask, ExecutorKind, TaskStatus};
-use crate::harness::{build_harness_mode_report, HarnessModeOptions, HarnessModeReport};
+use crate::harness::{
+    build_harness_doctor_report, build_harness_mode_report, HarnessDoctorOptions,
+    HarnessDoctorReport, HarnessModeOptions, HarnessModeReport,
+};
 use crate::memory::memory_policy_report;
 use crate::ops::build_addon_view_renderer_report;
 use crate::registry::{
@@ -20,6 +23,7 @@ use anyhow::Result;
 use serde::Serialize;
 use std::env;
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::process::Command;
 
 const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
@@ -59,6 +63,7 @@ pub struct InteractiveDashboard {
     pub forge_controlled_surfaces: Vec<String>,
     pub shell_entrypoints: Vec<String>,
     pub harness_mode_panel: HarnessModeReport,
+    pub harness_doctor_panel: HarnessDoctorReport,
     pub runtime_node_status: String,
     pub repository_context: String,
     pub estimated_costs: String,
@@ -349,6 +354,20 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
         observe_only: false,
         project_root: None,
     });
+    let repository_context_path = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let harness_shim_dir = default_interactive_harness_shim_dir();
+    let harness_doctor_panel = build_harness_doctor_report(HarnessDoctorOptions {
+        shim_dir: &harness_shim_dir,
+        executor: "codex",
+        forge_first: false,
+        observe_only: false,
+        project_root: Some(&repository_context_path),
+        workflow_id: None,
+        task_id: None,
+        run_id: None,
+        context_budget: 1200,
+        token_headroom: true,
+    })?;
     let runtime_node_status = if runtimes.usable.is_empty() {
         "no allowed async run substrates".to_string()
     } else {
@@ -545,10 +564,9 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             forge_controlled_surfaces,
             shell_entrypoints,
             harness_mode_panel,
+            harness_doctor_panel,
             runtime_node_status,
-            repository_context: env::current_dir()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|_| "unknown".to_string()),
+            repository_context: repository_context_path.display().to_string(),
             estimated_costs: "available per workflow via /costs or forge run --simulate"
                 .to_string(),
             scheduler_worker_status,
@@ -607,6 +625,13 @@ pub fn build_interactive_task_board(store: &ForgeStore) -> Result<InteractiveTas
         WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
     )?;
     build_task_board_panel(store, &workflows.workflows)
+}
+
+fn default_interactive_harness_shim_dir() -> PathBuf {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".forge/bin")
 }
 
 pub fn route_interactive_input(
@@ -761,6 +786,11 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     } else {
         d.attention_actions.join(" | ")
     };
+    let harness_doctor_checks = if d.harness_doctor_panel.readiness_checks.is_empty() {
+        "none".to_string()
+    } else {
+        d.harness_doctor_panel.readiness_checks.join(", ")
+    };
     let workflow_focus = if d.workflow_focus.is_empty() {
         "none".to_string()
     } else {
@@ -812,6 +842,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Forge-controlled surfaces: {forge_controlled_surfaces}\n\
          Shell entrypoints: {shell_entrypoints}\n\
          Harness mode: {harness_effective_mode} from {harness_source}; project config {harness_project_status}; audit {harness_audit_command}\n\
+         Harness doctor: {harness_doctor_status} for {harness_doctor_executor}; shim {harness_doctor_shim_dir}; checks {harness_doctor_checks}; audit {harness_doctor_command}\n\
          Runtime/node status: {runtime_node_status}\n\
          Scheduler worker status: {scheduler_worker_status}\n\
          Workflow focus: {workflow_focus}\n\
@@ -846,6 +877,11 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         harness_source = d.harness_mode_panel.forge_first_source,
         harness_project_status = d.harness_mode_panel.project_config_status,
         harness_audit_command = "forge harness mode --output json",
+        harness_doctor_status = d.harness_doctor_panel.status,
+        harness_doctor_executor = d.harness_doctor_panel.executor,
+        harness_doctor_shim_dir = d.harness_doctor_panel.shim_dir,
+        harness_doctor_checks = harness_doctor_checks,
+        harness_doctor_command = "forge harness doctor --executor codex --shim-dir $HOME/.forge/bin --project-root . --output json",
         runtime_node_status = d.runtime_node_status,
         scheduler_worker_status = d.scheduler_worker_status,
         workflow_focus = workflow_focus,
