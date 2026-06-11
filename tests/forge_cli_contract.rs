@@ -5207,13 +5207,14 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
     assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
 
     let flows = json["flows"].as_array().unwrap();
-    assert_eq!(flows.len(), 7);
+    assert_eq!(flows.len(), 8);
     for kind in [
         "coding_task",
         "harness_control",
         "executor_project",
         "brain_handoff_rehearsal",
         "real_project_coding_research",
+        "connected_external_brain",
         "research_artifact",
         "long_running_async",
     ] {
@@ -5497,6 +5498,75 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
             "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --output json"
         )));
 
+    let connected_external_brain = flows
+        .iter()
+        .find(|flow| flow["kind"] == "connected_external_brain")
+        .expect("replacement CLI demo should include a connected external brain adapter flow");
+    assert_eq!(
+        connected_external_brain["external_brain"]["schema_version"],
+        "forge.milestone.connected_external_brain_demo.v1"
+    );
+    assert_eq!(
+        connected_external_brain["external_brain"]["status"],
+        "connected_external_brain_demo_completed"
+    );
+    assert_eq!(
+        connected_external_brain["external_brain"]["brain_id"],
+        "codex-compatible-stub"
+    );
+    assert_eq!(
+        connected_external_brain["external_brain"]["external_brain_process_executed"],
+        true
+    );
+    assert_eq!(
+        connected_external_brain["external_brain"]["model_execution_performed"],
+        false
+    );
+    assert_eq!(
+        connected_external_brain["external_brain"]["handoff_ready"],
+        true
+    );
+    assert_eq!(
+        connected_external_brain["external_brain"]["harness_exec_status"],
+        "harness_exec_completed"
+    );
+    assert_eq!(
+        connected_external_brain["external_brain"]["exec_event_recorded"],
+        true
+    );
+    assert_eq!(
+        connected_external_brain["external_brain"]["validation_status"],
+        "validated"
+    );
+    assert!(connected_external_brain["external_brain"]["target_paths"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("brain-output/plan.json")));
+    assert!(connected_external_brain["external_brain"]["target_paths"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("brain-output/research.md")));
+    assert!(connected_external_brain["external_brain"]["target_paths"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("brain-output/code.rs")));
+    assert!(connected_external_brain["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "connected_external_brain_executed_under_harness"
+        )));
+    assert!(connected_external_brain["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("model_execution_not_performed")));
+    assert!(connected_external_brain["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge harness exec --executor codex-compatible-stub --project-root <project-root> --workflow <workflow-id> --task <task-id> --run <run-id> --forge-first --execute --allow-exec -- /bin/sh -c <connected-external-brain-script>"
+        )));
+
     let brain_rehearsal = flows
         .iter()
         .find(|flow| flow["kind"] == "brain_handoff_rehearsal")
@@ -5630,6 +5700,10 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.milestone.real_project_workflow_demo.v1"),
         "the packaged Forge skill should mention the replacement CLI real project workflow demo receipt"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.milestone.connected_external_brain_demo.v1"),
+        "the packaged Forge skill should mention the connected external brain demo receipt"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge interactive command-palette"),
