@@ -87,8 +87,9 @@ use crate::milestone::{
 };
 use crate::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
-    build_multimodal_demo_plan, build_multimodal_install_plan, build_multimodal_status,
-    evaluate_multimodal_guard, MultimodalBenchmarkResultOptions,
+    build_multimodal_demo_plan, build_multimodal_install_plan,
+    build_multimodal_status_with_feature_flag, evaluate_multimodal_guard,
+    resolve_multimodal_feature_flag, MultimodalBenchmarkResultOptions,
 };
 use crate::ops::record_addon_renderer_client_event;
 use crate::patch::{
@@ -1482,6 +1483,7 @@ struct MilestoneCliDemoInput {
 #[derive(Debug, Deserialize)]
 struct MultimodalStatusInput {
     enable_experimental: Option<bool>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1489,6 +1491,7 @@ struct MultimodalInstallPlanInput {
     capability: Option<String>,
     capability_id: Option<String>,
     enable_experimental: Option<bool>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1496,6 +1499,7 @@ struct MultimodalBenchmarkTemplateInput {
     capability: Option<String>,
     capability_id: Option<String>,
     enable_experimental: Option<bool>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1505,6 +1509,7 @@ struct MultimodalBenchmarkResultInput {
     fixture: Option<String>,
     fixture_id: Option<String>,
     enable_experimental: Option<bool>,
+    project_root: Option<String>,
     approved_by: Option<String>,
     confirm_fixture_only: Option<bool>,
 }
@@ -1514,6 +1519,7 @@ struct MultimodalDemoPlanInput {
     demo: Option<String>,
     demo_id: Option<String>,
     enable_experimental: Option<bool>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1521,6 +1527,7 @@ struct MultimodalGuardInput {
     capability: String,
     action: String,
     enable_experimental: Option<bool>,
+    project_root: Option<String>,
     allow: Option<bool>,
 }
 
@@ -5185,6 +5192,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "List Forge-owned experimental multimodal capabilities, missing model/runtime gaps, disabled-by-default feature flag state and runtime guard requirements without accessing devices or installing models.",
                 object_schema(&[
                     ("enable_experimental", "boolean", "optional explicit experimental flag for planning output only"),
+                    ("project_root", "string", "optional project root containing .forge/multimodal.json"),
                 ], &[]),
                 "forge.multimodal.status.v1",
                 &[
@@ -5203,6 +5211,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[
                     ("capability_id", "string", "capability id from forge.multimodal.status"),
                     ("enable_experimental", "boolean", "optional explicit experimental flag for planning output only"),
+                    ("project_root", "string", "optional project root containing .forge/multimodal.json"),
                 ], &["capability_id"]),
                 "forge.multimodal.install_plan.v1",
                 &[
@@ -5223,6 +5232,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[
                     ("capability_id", "string", "capability id from forge.multimodal.status"),
                     ("enable_experimental", "boolean", "optional explicit experimental flag for planning output only"),
+                    ("project_root", "string", "optional project root containing .forge/multimodal.json"),
                 ], &["capability_id"]),
                 "forge.multimodal.benchmark_template.v1",
                 &[
@@ -5247,6 +5257,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         ("approved_by", "string", "required human/operator approval identity"),
                         ("confirm_fixture_only", "boolean", "must be true to confirm no model/device/network execution"),
                         ("enable_experimental", "boolean", "optional explicit experimental flag for evidence output only"),
+                        ("project_root", "string", "optional project root containing .forge/multimodal.json"),
                     ],
                     &["capability_id", "fixture_id", "approved_by", "confirm_fixture_only"],
                 ),
@@ -5274,6 +5285,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[
                     ("demo_id", "string", "local_image_recognition|audio_transcription_synthesis|blender_avatar_preparation"),
                     ("enable_experimental", "boolean", "optional explicit experimental flag for planning output only"),
+                    ("project_root", "string", "optional project root containing .forge/multimodal.json"),
                 ], &["demo_id"]),
                 "forge.multimodal.demo_plan.v1",
                 &[
@@ -5295,6 +5307,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("capability", "string", "capability id or permission scope"),
                     ("action", "string", "requested action such as access, capture, transcribe or automate"),
                     ("enable_experimental", "boolean", "experimental feature flag"),
+                    ("project_root", "string", "optional project root containing .forge/multimodal.json"),
                     ("allow", "boolean", "explicit human/runtime allow for this action"),
                 ], &["capability", "action"]),
                 "forge.multimodal.guard.v1",
@@ -7716,34 +7729,48 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.multimodal.status" => {
             let input: MultimodalStatusInput = parse_input(input)?;
-            serde_json::to_value(build_multimodal_status(
+            let feature_flag = resolve_multimodal_feature_flag(
                 input.enable_experimental.unwrap_or(false),
-            ))?
+                input.project_root.as_deref().map(std::path::Path::new),
+            );
+            serde_json::to_value(build_multimodal_status_with_feature_flag(feature_flag))?
         }
         "forge.multimodal.install_plan" => {
             let input: MultimodalInstallPlanInput = parse_input(input)?;
+            let feature_flag = resolve_multimodal_feature_flag(
+                input.enable_experimental.unwrap_or(false),
+                input.project_root.as_deref().map(std::path::Path::new),
+            );
             let capability = input
                 .capability_id
                 .or(input.capability)
                 .ok_or_else(|| anyhow::anyhow!("capability_id is required"))?;
             serde_json::to_value(build_multimodal_install_plan(
                 &capability,
-                input.enable_experimental.unwrap_or(false),
+                feature_flag.enabled,
             )?)?
         }
         "forge.multimodal.benchmark_template" => {
             let input: MultimodalBenchmarkTemplateInput = parse_input(input)?;
+            let feature_flag = resolve_multimodal_feature_flag(
+                input.enable_experimental.unwrap_or(false),
+                input.project_root.as_deref().map(std::path::Path::new),
+            );
             let capability = input
                 .capability_id
                 .or(input.capability)
                 .ok_or_else(|| anyhow::anyhow!("capability_id is required"))?;
             serde_json::to_value(build_multimodal_benchmark_template(
                 &capability,
-                input.enable_experimental.unwrap_or(false),
+                feature_flag.enabled,
             )?)?
         }
         "forge.multimodal.benchmark_result" => {
             let input: MultimodalBenchmarkResultInput = parse_input(input)?;
+            let feature_flag = resolve_multimodal_feature_flag(
+                input.enable_experimental.unwrap_or(false),
+                input.project_root.as_deref().map(std::path::Path::new),
+            );
             let capability = input
                 .capability_id
                 .or(input.capability)
@@ -7756,7 +7783,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 MultimodalBenchmarkResultOptions {
                     capability_id: &capability,
                     fixture_id: &fixture,
-                    enable_experimental: input.enable_experimental.unwrap_or(false),
+                    enable_experimental: feature_flag.enabled,
                     approved_by: input.approved_by.as_deref(),
                     confirm_fixture_only: input.confirm_fixture_only.unwrap_or(false),
                 },
@@ -7764,21 +7791,26 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.multimodal.demo_plan" => {
             let input: MultimodalDemoPlanInput = parse_input(input)?;
+            let feature_flag = resolve_multimodal_feature_flag(
+                input.enable_experimental.unwrap_or(false),
+                input.project_root.as_deref().map(std::path::Path::new),
+            );
             let demo = input
                 .demo_id
                 .or(input.demo)
                 .ok_or_else(|| anyhow::anyhow!("demo_id is required"))?;
-            serde_json::to_value(build_multimodal_demo_plan(
-                &demo,
-                input.enable_experimental.unwrap_or(false),
-            )?)?
+            serde_json::to_value(build_multimodal_demo_plan(&demo, feature_flag.enabled)?)?
         }
         "forge.multimodal.guard" => {
             let input: MultimodalGuardInput = parse_input(input)?;
+            let feature_flag = resolve_multimodal_feature_flag(
+                input.enable_experimental.unwrap_or(false),
+                input.project_root.as_deref().map(std::path::Path::new),
+            );
             serde_json::to_value(evaluate_multimodal_guard(
                 &input.capability,
                 &input.action,
-                input.enable_experimental.unwrap_or(false),
+                feature_flag.enabled,
                 input.allow.unwrap_or(false),
             )?)?
         }

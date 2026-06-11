@@ -293,7 +293,9 @@ Estado verificado em `forge 0.4.177`, branch `main` alinhado com `origin/main`.
 - `forge multimodal benchmark-result --approved-by <operator> --confirm-fixture-only --output json` adiciona o primeiro artifact `forge.multimodal.benchmark_result.v1` para benchmark multimodal aprovado e fixture-only.
 - MCP `forge.multimodal.benchmark_result` expõe o mesmo contrato para agentes, com `async_safe=true`, `mutates_workflow=false` e schema estável para anexar evidência a workflows/milestones.
 - O resultado registra explicitamente `installs_performed=false`, `model_execution_performed=false`, `device_access_performed=false` e `network_access_performed=false`, além do guard check `no_camera_microphone_screen_or_input_access`.
-- O milestone 0.5 continua bloqueado: essa evidência prova a fronteira segura fixture-only, mas ainda não substitui feature flag explícita nem benchmark/demo real com runtime guard aprovado.
+- O milestone 0.5 continua bloqueado: essa evidência prova a fronteira segura fixture-only, mas ainda não substitui benchmark/demo real com runtime guard aprovado.
+- `forge multimodal status --project-root <path>` e MCP `forge.multimodal.status` com `project_root` agora leem `.forge/multimodal.json` quando o arquivo declara `experimental_enabled` e `approved_by`; a configuração habilita apenas planejamento experimental, enquanto `guard --allow` continua obrigatório para qualquer permissão sensível.
+- O gap do milestone multimodal foi reduzido: a feature flag explícita existe, mas ainda falta benchmark/demo real com runtime guard aprovado antes de promover a capacidade além de `groundwork`.
 
 ## Plano Incremental
 

@@ -1826,6 +1826,10 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .as_str()
         .unwrap()
         .contains("forge multimodal benchmark-result"));
+    assert!(multimodal["evidence"]
+        .as_str()
+        .unwrap()
+        .contains(".forge/multimodal.json"));
     assert!(multimodal["gap_before_promotion"]
         .as_str()
         .unwrap()
@@ -2043,6 +2047,10 @@ fn milestone_boundary_document_matches_validated_export_demo_runtime_state() {
         "the visible 0.5 milestone boundary should expose the MCP benchmark result surface"
     );
     assert!(
+        docs.contains(".forge/multimodal.json"),
+        "the visible 0.5 milestone boundary should point to explicit multimodal feature-flag config"
+    );
+    assert!(
         docs.contains("forge milestone cli-demo"),
         "the visible 0.5 milestone boundary should point to replacement-grade CLI demo evidence"
     );
@@ -2099,6 +2107,14 @@ fn packaged_skill_mentions_multimodal_benchmark_and_demo_plan_surfaces() {
         "the packaged Forge skill should expose the MCP benchmark-result tool to agent callers"
     );
     assert!(
+        forge_core::skill::SKILL_MD.contains(".forge/multimodal.json"),
+        "the packaged Forge skill should teach agents where explicit multimodal feature-flag config lives"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("\"project_root\""),
+        "the packaged Forge skill should expose project-root based multimodal MCP inspection"
+    );
+    assert!(
         forge_core::skill::SKILL_MD.contains("forge multimodal demo-plan"),
         "the packaged Forge skill should teach agents how to generate guarded multimodal demo plans"
     );
@@ -2145,6 +2161,155 @@ fn multimodal_status_is_experimental_disabled_by_default() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("kill_switch")));
+}
+
+#[test]
+fn multimodal_feature_flag_config_is_project_scoped_and_guarded() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("multimodal.json"),
+        r#"{"experimental_enabled":true,"approved_by":"contract-test","reason":"fixture-only runtime planning","scope":"project"}"#,
+    )
+    .unwrap();
+
+    let status_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .current_dir(temp.path())
+        .args(["multimodal", "status", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status_output).unwrap();
+    assert_eq!(status_json["schema_version"], "forge.multimodal.status.v1");
+    assert_eq!(status_json["status"], "experimental_enabled");
+    assert_eq!(status_json["feature_flag"]["enabled"], true);
+    assert_eq!(status_json["feature_flag"]["source"], "project_config");
+    assert_eq!(
+        status_json["feature_flag"]["project_config_status"],
+        "loaded"
+    );
+    assert_eq!(status_json["feature_flag"]["approved_by"], "contract-test");
+    assert!(status_json["feature_flag"]["project_config_path"]
+        .as_str()
+        .unwrap()
+        .ends_with(".forge/multimodal.json"));
+    assert_eq!(status_json["installs_performed"], false);
+
+    let denied_without_allow = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .current_dir(temp.path())
+        .args([
+            "multimodal",
+            "guard",
+            "--capability",
+            "camera",
+            "--action",
+            "access",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let denied_json: Value = serde_json::from_slice(&denied_without_allow).unwrap();
+    assert_eq!(denied_json["feature_flag_enabled"], true);
+    assert_eq!(denied_json["explicit_allow"], false);
+    assert_eq!(denied_json["allowed"], false);
+
+    let allowed_with_explicit_allow = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .current_dir(temp.path())
+        .args([
+            "multimodal",
+            "guard",
+            "--capability",
+            "camera",
+            "--action",
+            "access",
+            "--allow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let allowed_json: Value = serde_json::from_slice(&allowed_with_explicit_allow).unwrap();
+    assert_eq!(allowed_json["feature_flag_enabled"], true);
+    assert_eq!(allowed_json["explicit_allow"], true);
+    assert_eq!(allowed_json["allowed"], true);
+
+    let mcp_tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tools_json: Value = serde_json::from_slice(&mcp_tools).unwrap();
+    let status_tool = find_mcp_tool(&tools_json, "forge.multimodal.status");
+    assert_eq!(
+        status_tool["input_schema"]["properties"]["project_root"]["type"],
+        "string"
+    );
+
+    let mcp_status = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.multimodal.status"])
+        .arg("--input")
+        .arg(serde_json::json!({"project_root": temp.path().display().to_string()}).to_string())
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_status).unwrap();
+    assert_eq!(mcp_json["result"]["feature_flag"]["enabled"], true);
+    assert_eq!(
+        mcp_json["result"]["feature_flag"]["source"],
+        "project_config"
+    );
+
+    let unapproved = tempdir().unwrap();
+    let unapproved_forge_dir = unapproved.path().join(".forge");
+    fs::create_dir_all(&unapproved_forge_dir).unwrap();
+    fs::write(
+        unapproved_forge_dir.join("multimodal.json"),
+        r#"{"experimental_enabled":true,"reason":"missing human approval"}"#,
+    )
+    .unwrap();
+    let unapproved_output = forge()
+        .current_dir(unapproved.path())
+        .args(["multimodal", "status", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let unapproved_json: Value = serde_json::from_slice(&unapproved_output).unwrap();
+    assert_eq!(unapproved_json["status"], "experimental_disabled");
+    assert_eq!(unapproved_json["feature_flag"]["enabled"], false);
+    assert_eq!(
+        unapproved_json["feature_flag"]["source"],
+        "default_disabled"
+    );
+    assert_eq!(
+        unapproved_json["feature_flag"]["project_config_status"],
+        "missing_approval"
+    );
 }
 
 #[test]

@@ -1,5 +1,10 @@
 use anyhow::{bail, Result};
 use serde::Serialize;
+use serde_json::Value;
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 const STATUS_SCHEMA_VERSION: &str = "forge.multimodal.status.v1";
 const INSTALL_PLAN_SCHEMA_VERSION: &str = "forge.multimodal.install_plan.v1";
@@ -7,6 +12,7 @@ const BENCHMARK_TEMPLATE_SCHEMA_VERSION: &str = "forge.multimodal.benchmark_temp
 const BENCHMARK_RESULT_SCHEMA_VERSION: &str = "forge.multimodal.benchmark_result.v1";
 const DEMO_PLAN_SCHEMA_VERSION: &str = "forge.multimodal.demo_plan.v1";
 const GUARD_SCHEMA_VERSION: &str = "forge.multimodal.guard.v1";
+const MULTIMODAL_CONFIG_RELATIVE_PATH: &str = ".forge/multimodal.json";
 
 macro_rules! capability {
     (
@@ -57,6 +63,15 @@ pub struct MultimodalFeatureFlag {
     pub enabled: bool,
     pub default_state: String,
     pub activation: String,
+    pub source: String,
+    pub project_config_path: String,
+    pub project_config_status: String,
+    pub project_enabled: Option<bool>,
+    pub approved_by: Option<String>,
+    pub reason: Option<String>,
+    pub scope: Option<String>,
+    pub approval_required: bool,
+    pub precedence: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -215,7 +230,14 @@ pub struct MultimodalGuardReport {
 }
 
 pub fn build_multimodal_status(enable_experimental: bool) -> MultimodalStatusReport {
-    let capabilities = capability_inventory(enable_experimental);
+    let feature_flag = default_multimodal_feature_flag(enable_experimental);
+    build_multimodal_status_with_feature_flag(feature_flag)
+}
+
+pub fn build_multimodal_status_with_feature_flag(
+    feature_flag: MultimodalFeatureFlag,
+) -> MultimodalStatusReport {
+    let capabilities = capability_inventory(feature_flag.enabled);
     let available_count = capabilities
         .iter()
         .filter(|capability| capability.state == "available")
@@ -227,20 +249,13 @@ pub fn build_multimodal_status(enable_experimental: bool) -> MultimodalStatusRep
 
     MultimodalStatusReport {
         schema_version: STATUS_SCHEMA_VERSION.to_string(),
-        status: if enable_experimental {
+        status: if feature_flag.enabled {
             "experimental_enabled"
         } else {
             "experimental_disabled"
         }
         .to_string(),
-        feature_flag: MultimodalFeatureFlag {
-            name: "forge.experimental.multimodal".to_string(),
-            enabled: enable_experimental,
-            default_state: "disabled".to_string(),
-            activation:
-                "Pass --enable-experimental or set the future Forge-owned config flag after human approval."
-                    .to_string(),
-        },
+        feature_flag,
         installs_performed: false,
         capability_count: capabilities.len(),
         available_count,
@@ -256,6 +271,53 @@ pub fn build_multimodal_status(enable_experimental: bool) -> MultimodalStatusRep
         next_action:
             "Generate install plans and benchmarks for missing capabilities; do not install models or access devices until the experimental flag and runtime guard allow it."
                 .to_string(),
+    }
+}
+
+pub fn resolve_multimodal_feature_flag(
+    enable_experimental: bool,
+    project_root: Option<&Path>,
+) -> MultimodalFeatureFlag {
+    let project_config = read_multimodal_project_config(project_root);
+    let project_approval_present = project_config
+        .approved_by
+        .as_deref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let project_config_status = if project_config.status == "loaded"
+        && project_config.enabled == Some(true)
+        && !project_approval_present
+    {
+        "missing_approval"
+    } else {
+        project_config.status
+    };
+    let (enabled, source) = if enable_experimental {
+        (true, "explicit_flag")
+    } else if project_config.enabled == Some(true) && project_approval_present {
+        (true, "project_config")
+    } else {
+        (false, "default_disabled")
+    };
+
+    MultimodalFeatureFlag {
+        name: "forge.experimental.multimodal".to_string(),
+        enabled,
+        default_state: "disabled".to_string(),
+        activation: multimodal_feature_flag_activation(source, project_config_status).to_string(),
+        source: source.to_string(),
+        project_config_path: project_config.path.display().to_string(),
+        project_config_status: project_config_status.to_string(),
+        project_enabled: project_config.enabled,
+        approved_by: project_config.approved_by,
+        reason: project_config.reason,
+        scope: project_config.scope,
+        approval_required: true,
+        precedence: vec![
+            "explicit_flag".to_string(),
+            "project_config_with_approval".to_string(),
+            "default_disabled".to_string(),
+        ],
     }
 }
 
@@ -908,6 +970,115 @@ fn find_benchmark_fixture(fixture_id: &str) -> Result<MultimodalBenchmarkFixture
                 "unknown multimodal benchmark fixture: {fixture_id}; run forge multimodal benchmark-template"
             )
         })
+}
+
+fn default_multimodal_feature_flag(enable_experimental: bool) -> MultimodalFeatureFlag {
+    let source = if enable_experimental {
+        "explicit_flag"
+    } else {
+        "default_disabled"
+    };
+    MultimodalFeatureFlag {
+        name: "forge.experimental.multimodal".to_string(),
+        enabled: enable_experimental,
+        default_state: "disabled".to_string(),
+        activation: multimodal_feature_flag_activation(source, "not_checked").to_string(),
+        source: source.to_string(),
+        project_config_path: MULTIMODAL_CONFIG_RELATIVE_PATH.to_string(),
+        project_config_status: "not_checked".to_string(),
+        project_enabled: None,
+        approved_by: None,
+        reason: None,
+        scope: None,
+        approval_required: true,
+        precedence: vec![
+            "explicit_flag".to_string(),
+            "project_config_with_approval".to_string(),
+            "default_disabled".to_string(),
+        ],
+    }
+}
+
+struct MultimodalProjectConfig {
+    path: PathBuf,
+    status: &'static str,
+    enabled: Option<bool>,
+    approved_by: Option<String>,
+    reason: Option<String>,
+    scope: Option<String>,
+}
+
+fn read_multimodal_project_config(project_root: Option<&Path>) -> MultimodalProjectConfig {
+    let project_root = project_root
+        .map(Path::to_path_buf)
+        .or_else(|| env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let path = project_root.join(MULTIMODAL_CONFIG_RELATIVE_PATH);
+    let Ok(content) = fs::read_to_string(&path) else {
+        return MultimodalProjectConfig {
+            path,
+            status: "missing",
+            enabled: None,
+            approved_by: None,
+            reason: None,
+            scope: None,
+        };
+    };
+    let Ok(config) = serde_json::from_str::<Value>(&content) else {
+        return MultimodalProjectConfig {
+            path,
+            status: "invalid_json",
+            enabled: None,
+            approved_by: None,
+            reason: None,
+            scope: None,
+        };
+    };
+    let enabled = config
+        .get("experimental_enabled")
+        .or_else(|| config.get("enabled"))
+        .and_then(Value::as_bool);
+    MultimodalProjectConfig {
+        path,
+        status: if enabled.is_some() {
+            "loaded"
+        } else {
+            "missing_experimental_enabled"
+        },
+        enabled,
+        approved_by: string_field(&config, "approved_by"),
+        reason: string_field(&config, "reason"),
+        scope: string_field(&config, "scope"),
+    }
+}
+
+fn string_field(config: &Value, field: &str) -> Option<String> {
+    config
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn multimodal_feature_flag_activation(source: &str, project_config_status: &str) -> &'static str {
+    match (source, project_config_status) {
+        ("explicit_flag", _) => {
+            "Enabled by explicit --enable-experimental or MCP enable_experimental input; runtime guard still requires explicit allow."
+        }
+        ("project_config", _) => {
+            "Enabled by approved .forge/multimodal.json project config; runtime guard still requires explicit allow."
+        }
+        (_, "missing_approval") => {
+            "Project config requested enablement but is missing approved_by; keep disabled until human approval is recorded."
+        }
+        (_, "invalid_json") => {
+            "Project config is invalid JSON; keep disabled until the Forge-owned config is repaired and approved."
+        }
+        _ => {
+            "Pass --enable-experimental or create approved .forge/multimodal.json with experimental_enabled and approved_by after human approval."
+        }
+    }
 }
 
 fn normalize_capability_alias(capability: &str) -> String {

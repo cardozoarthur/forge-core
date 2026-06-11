@@ -107,8 +107,9 @@ use forge_core::milestone::{
 };
 use forge_core::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
-    build_multimodal_demo_plan, build_multimodal_install_plan, build_multimodal_status,
-    evaluate_multimodal_guard, MultimodalBenchmarkResultOptions,
+    build_multimodal_demo_plan, build_multimodal_install_plan,
+    build_multimodal_status_with_feature_flag, evaluate_multimodal_guard,
+    resolve_multimodal_feature_flag, MultimodalBenchmarkResultOptions,
 };
 use forge_core::ops::{
     build_ops_snapshot_with_addon_dirs, record_addon_renderer_client_event,
@@ -3086,6 +3087,8 @@ enum MultimodalCommands {
     Status {
         #[arg(long = "enable-experimental")]
         enable_experimental: bool,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -3094,6 +3097,8 @@ enum MultimodalCommands {
         capability: String,
         #[arg(long = "enable-experimental")]
         enable_experimental: bool,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -3102,6 +3107,8 @@ enum MultimodalCommands {
         capability: String,
         #[arg(long = "enable-experimental")]
         enable_experimental: bool,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -3112,6 +3119,8 @@ enum MultimodalCommands {
         fixture: String,
         #[arg(long = "enable-experimental")]
         enable_experimental: bool,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long = "approved-by")]
         approved_by: Option<String>,
         #[arg(long = "confirm-fixture-only")]
@@ -3124,6 +3133,8 @@ enum MultimodalCommands {
         demo: String,
         #[arg(long = "enable-experimental")]
         enable_experimental: bool,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -3134,6 +3145,8 @@ enum MultimodalCommands {
         action: String,
         #[arg(long = "enable-experimental")]
         enable_experimental: bool,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long)]
         allow: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -7139,27 +7152,37 @@ fn run() -> Result<i32> {
         Commands::Multimodal { command } => match command {
             MultimodalCommands::Status {
                 enable_experimental,
+                project_root,
                 output,
             } => {
-                let report = build_multimodal_status(enable_experimental);
+                let feature_flag =
+                    resolve_multimodal_feature_flag(enable_experimental, project_root.as_deref());
+                let report = build_multimodal_status_with_feature_flag(feature_flag);
                 print_response(output, &report)?;
                 Ok(0)
             }
             MultimodalCommands::InstallPlan {
                 capability,
                 enable_experimental,
+                project_root,
                 output,
             } => {
-                let report = build_multimodal_install_plan(&capability, enable_experimental)?;
+                let feature_flag =
+                    resolve_multimodal_feature_flag(enable_experimental, project_root.as_deref());
+                let report = build_multimodal_install_plan(&capability, feature_flag.enabled)?;
                 print_response(output, &report)?;
                 Ok(0)
             }
             MultimodalCommands::BenchmarkTemplate {
                 capability,
                 enable_experimental,
+                project_root,
                 output,
             } => {
-                let report = build_multimodal_benchmark_template(&capability, enable_experimental)?;
+                let feature_flag =
+                    resolve_multimodal_feature_flag(enable_experimental, project_root.as_deref());
+                let report =
+                    build_multimodal_benchmark_template(&capability, feature_flag.enabled)?;
                 print_response(output, &report)?;
                 Ok(0)
             }
@@ -7167,14 +7190,17 @@ fn run() -> Result<i32> {
                 capability,
                 fixture,
                 enable_experimental,
+                project_root,
                 approved_by,
                 confirm_fixture_only,
                 output,
             } => {
+                let feature_flag =
+                    resolve_multimodal_feature_flag(enable_experimental, project_root.as_deref());
                 let report = build_multimodal_benchmark_result(MultimodalBenchmarkResultOptions {
                     capability_id: &capability,
                     fixture_id: &fixture,
-                    enable_experimental,
+                    enable_experimental: feature_flag.enabled,
                     approved_by: approved_by.as_deref(),
                     confirm_fixture_only,
                 })?;
@@ -7184,9 +7210,12 @@ fn run() -> Result<i32> {
             MultimodalCommands::DemoPlan {
                 demo,
                 enable_experimental,
+                project_root,
                 output,
             } => {
-                let report = build_multimodal_demo_plan(&demo, enable_experimental)?;
+                let feature_flag =
+                    resolve_multimodal_feature_flag(enable_experimental, project_root.as_deref());
+                let report = build_multimodal_demo_plan(&demo, feature_flag.enabled)?;
                 print_response(output, &report)?;
                 Ok(0)
             }
@@ -7194,11 +7223,14 @@ fn run() -> Result<i32> {
                 capability,
                 action,
                 enable_experimental,
+                project_root,
                 allow,
                 output,
             } => {
+                let feature_flag =
+                    resolve_multimodal_feature_flag(enable_experimental, project_root.as_deref());
                 let report =
-                    evaluate_multimodal_guard(&capability, &action, enable_experimental, allow)?;
+                    evaluate_multimodal_guard(&capability, &action, feature_flag.enabled, allow)?;
                 let exit_code = if report.allowed { 0 } else { 1 };
                 print_response(output, &report)?;
                 Ok(exit_code)
