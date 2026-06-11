@@ -9081,6 +9081,16 @@ fn software_development_addon() -> AddonManifest {
                     payload_schema: vec!["artifact_ref".to_string()],
                 },
                 AddonViewAction {
+                    id: "patch.diff".to_string(),
+                    label: "Inspect patch diff".to_string(),
+                    action_type: "command".to_string(),
+                    target: "forge patch diff".to_string(),
+                    method: "CLI".to_string(),
+                    permission: "source_code.patch".to_string(),
+                    requires_confirmation: false,
+                    payload_schema: vec!["workflow_id".to_string(), "task_id".to_string()],
+                },
+                AddonViewAction {
                     id: "patch.apply".to_string(),
                     label: "Apply patch".to_string(),
                     action_type: "command".to_string(),

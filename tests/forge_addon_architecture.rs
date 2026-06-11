@@ -781,7 +781,14 @@ fn addons_catalog_exposes_core_kernel_and_first_party_addons() {
             && view["permissions"]
                 .as_array()
                 .unwrap()
-                .contains(&serde_json::json!("source_code.patch"))));
+                .contains(&serde_json::json!("source_code.patch"))
+            && view["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|action| action["id"] == "patch.diff"
+                    && action["permission"] == "source_code.patch"
+                    && action["requires_confirmation"] == false)));
     assert!(software_development["runtime_contracts"]
         .as_array()
         .unwrap()

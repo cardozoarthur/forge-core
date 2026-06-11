@@ -1,6 +1,7 @@
 use crate::addon::{
     default_addon_dirs, list_addon_permission_authorizations, list_addon_views,
-    load_addon_catalog_from_store, CAP_SOURCE_CODE_PATCH_LIFECYCLE,
+    load_addon_catalog_from_store, AddonCatalog, AddonViewAction, AddonViewEntry,
+    CAP_SOURCE_CODE_PATCH_LIFECYCLE,
 };
 use crate::checkpoint::TaskCheckpoint;
 use crate::cost::build_cost_ledger;
@@ -260,6 +261,10 @@ pub struct InteractiveCommandPaletteEntry {
     pub source_panel: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub addon_contract: Option<InteractivePatchAddonContract>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_view_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_view_action_id: Option<String>,
     pub workflow_id: Option<String>,
     pub commands: Vec<String>,
     pub mutates_workflow: bool,
@@ -290,6 +295,10 @@ pub struct InteractiveAutocompleteSuggestion {
     pub source_panel: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub addon_contract: Option<InteractivePatchAddonContract>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_view_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_view_action_id: Option<String>,
     pub workflow_id: Option<String>,
     pub equivalent_command: Vec<String>,
     pub mutates_workflow: bool,
@@ -1615,6 +1624,7 @@ pub fn build_interactive_command_palette(
     )?;
     let query = query.unwrap_or_default().trim().to_string();
     let mut entries = base_command_palette_entries();
+    entries.extend(addon_command_palette_entries(store)?);
     entries.extend(workflow_command_palette_entries(&workflows.workflows));
     let entries = entries
         .into_iter()
@@ -1720,121 +1730,6 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             "low",
             &["session", "shell", "provider", "brain", "history"],
         ),
-        patch_command_palette_entry(command_palette_entry(
-            "patch.plan",
-            "patch",
-            "Create patch plan",
-            "Create a bounded Forge patch plan artifact before file edits.",
-            "patch_workbench_panel",
-            None,
-            &[
-                "patch",
-                "plan",
-                "--workflow",
-                "<workflow-id>",
-                "--task",
-                "<task-id>",
-                "--intent",
-                "<intent>",
-                "--output",
-                "json",
-            ],
-            true,
-            false,
-            "medium",
-            &["patch", "plan", "artifact", "edit", "bounds"],
-        )),
-        patch_command_palette_entry(command_palette_entry(
-            "patch.diff",
-            "patch",
-            "Review patch diff",
-            "Open read-only multi-file diff navigation for the current bounded patch.",
-            "patch_workbench_panel",
-            None,
-            &[
-                "patch",
-                "diff",
-                "--workflow",
-                "<workflow-id>",
-                "--task",
-                "<task-id>",
-                "--output",
-                "json",
-            ],
-            false,
-            false,
-            "low",
-            &["patch", "diff", "review", "file", "hunk"],
-        )),
-        patch_command_palette_entry(command_palette_entry(
-            "patch.review",
-            "patch",
-            "Record patch review",
-            "Persist current diff/status/check evidence before an apply approval.",
-            "patch_workbench_panel",
-            None,
-            &[
-                "patch",
-                "review",
-                "--workflow",
-                "<workflow-id>",
-                "--task",
-                "<task-id>",
-                "--output",
-                "json",
-            ],
-            true,
-            false,
-            "medium",
-            &["patch", "review", "evidence", "status", "diff"],
-        )),
-        patch_command_palette_entry(command_palette_entry(
-            "patch.apply",
-            "patch",
-            "Record patch apply",
-            "Record applied file snapshots and validation evidence after approved edits.",
-            "patch_workbench_panel",
-            None,
-            &[
-                "patch",
-                "apply",
-                "--workflow",
-                "<workflow-id>",
-                "--task",
-                "<task-id>",
-                "--output",
-                "json",
-            ],
-            true,
-            true,
-            "high",
-            &["patch", "apply", "approval", "validation", "snapshot"],
-        )),
-        patch_command_palette_entry(command_palette_entry(
-            "patch.restore",
-            "patch",
-            "Restore from approved patch rollback",
-            "Execute an explicitly approved patch restore path.",
-            "patch_workbench_panel",
-            None,
-            &[
-                "patch",
-                "restore",
-                "--workflow",
-                "<workflow-id>",
-                "--task",
-                "<task-id>",
-                "--confirm-restore",
-                "--approved-by",
-                "<operator>",
-                "--output",
-                "json",
-            ],
-            true,
-            true,
-            "high",
-            &["patch", "restore", "rollback", "approval", "file"],
-        )),
         command_palette_entry(
             "permissions.open",
             "permissions",
@@ -1888,6 +1783,164 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             &["observability", "logs", "events", "timeline", "debug"],
         ),
     ]
+}
+
+fn addon_command_palette_entries(
+    store: &ForgeStore,
+) -> Result<Vec<InteractiveCommandPaletteEntry>> {
+    let addon_dirs = default_addon_dirs();
+    let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
+    Ok(patch_command_palette_entries(&catalog))
+}
+
+fn patch_command_palette_entries(catalog: &AddonCatalog) -> Vec<InteractiveCommandPaletteEntry> {
+    let views = list_addon_views(
+        catalog,
+        Some("forge.addon.software_development"),
+        Some("tui"),
+        Some("enabled"),
+    );
+    views
+        .views
+        .iter()
+        .filter(|view| view.view.id == "software.patch_workbench")
+        .flat_map(|view| {
+            view.view
+                .actions
+                .iter()
+                .filter_map(|action| patch_command_palette_entry_for_action(view, action))
+        })
+        .collect()
+}
+
+fn patch_command_palette_entry_for_action(
+    view: &AddonViewEntry,
+    action: &AddonViewAction,
+) -> Option<InteractiveCommandPaletteEntry> {
+    let template = patch_command_palette_template(&action.id)?;
+    let mut entry = command_palette_entry(
+        &action.id,
+        "patch",
+        template.title,
+        template.description,
+        "patch_workbench_panel",
+        None,
+        template.commands,
+        template.mutates_workflow,
+        action.requires_confirmation,
+        template.risk_level,
+        template.keywords,
+    );
+    entry.addon_contract = Some(patch_addon_contract());
+    entry.addon_view_id = Some(view.view.id.clone());
+    entry.addon_view_action_id = Some(action.id.clone());
+    Some(entry)
+}
+
+struct PatchCommandPaletteTemplate {
+    title: &'static str,
+    description: &'static str,
+    commands: &'static [&'static str],
+    mutates_workflow: bool,
+    risk_level: &'static str,
+    keywords: &'static [&'static str],
+}
+
+fn patch_command_palette_template(action_id: &str) -> Option<PatchCommandPaletteTemplate> {
+    match action_id {
+        "patch.plan" => Some(PatchCommandPaletteTemplate {
+            title: "Create patch plan",
+            description: "Create a bounded Forge patch plan artifact before file edits.",
+            commands: &[
+                "patch",
+                "plan",
+                "--workflow",
+                "<workflow-id>",
+                "--task",
+                "<task-id>",
+                "--intent",
+                "<intent>",
+                "--output",
+                "json",
+            ],
+            mutates_workflow: true,
+            risk_level: "medium",
+            keywords: &["patch", "plan", "artifact", "edit", "bounds"],
+        }),
+        "patch.diff" => Some(PatchCommandPaletteTemplate {
+            title: "Review patch diff",
+            description: "Open read-only multi-file diff navigation for the current bounded patch.",
+            commands: &[
+                "patch",
+                "diff",
+                "--workflow",
+                "<workflow-id>",
+                "--task",
+                "<task-id>",
+                "--output",
+                "json",
+            ],
+            mutates_workflow: false,
+            risk_level: "low",
+            keywords: &["patch", "diff", "review", "file", "hunk"],
+        }),
+        "patch.review" => Some(PatchCommandPaletteTemplate {
+            title: "Record patch review",
+            description: "Persist current diff/status/check evidence before an apply approval.",
+            commands: &[
+                "patch",
+                "review",
+                "--workflow",
+                "<workflow-id>",
+                "--task",
+                "<task-id>",
+                "--output",
+                "json",
+            ],
+            mutates_workflow: true,
+            risk_level: "medium",
+            keywords: &["patch", "review", "evidence", "status", "diff"],
+        }),
+        "patch.apply" => Some(PatchCommandPaletteTemplate {
+            title: "Record patch apply",
+            description:
+                "Record applied file snapshots and validation evidence after approved edits.",
+            commands: &[
+                "patch",
+                "apply",
+                "--workflow",
+                "<workflow-id>",
+                "--task",
+                "<task-id>",
+                "--output",
+                "json",
+            ],
+            mutates_workflow: true,
+            risk_level: "high",
+            keywords: &["patch", "apply", "approval", "validation", "snapshot"],
+        }),
+        "patch.restore" => Some(PatchCommandPaletteTemplate {
+            title: "Restore from approved patch rollback",
+            description: "Execute an explicitly approved patch restore path.",
+            commands: &[
+                "patch",
+                "restore",
+                "--workflow",
+                "<workflow-id>",
+                "--task",
+                "<task-id>",
+                "--confirm-restore",
+                "--approved-by",
+                "<operator>",
+                "--output",
+                "json",
+            ],
+            mutates_workflow: true,
+            risk_level: "high",
+            keywords: &["patch", "restore", "rollback", "approval", "file"],
+        }),
+        _ => None,
+    }
 }
 
 fn workflow_command_palette_entries(
@@ -1947,6 +2000,8 @@ fn command_palette_entry(
         description: description.to_string(),
         source_panel: source_panel.to_string(),
         addon_contract: None,
+        addon_view_id: None,
+        addon_view_action_id: None,
         workflow_id,
         commands: commands
             .iter()
@@ -1960,13 +2015,6 @@ fn command_palette_entry(
             .map(|keyword| (*keyword).to_string())
             .collect(),
     }
-}
-
-fn patch_command_palette_entry(
-    mut entry: InteractiveCommandPaletteEntry,
-) -> InteractiveCommandPaletteEntry {
-    entry.addon_contract = Some(patch_addon_contract());
-    entry
 }
 
 fn command_palette_entry_matches(entry: &InteractiveCommandPaletteEntry, query: &str) -> bool {
@@ -2140,6 +2188,8 @@ fn slash_autocomplete_suggestions(query: &str) -> Vec<InteractiveAutocompleteSug
                 source: "slash_command_catalog".to_string(),
                 source_panel: "slash_command_catalog".to_string(),
                 addon_contract: None,
+                addon_view_id: None,
+                addon_view_action_id: None,
                 workflow_id: None,
                 equivalent_command: command.equivalent_command,
                 mutates_workflow: command.mutates_workflow,
@@ -2174,6 +2224,8 @@ fn command_palette_autocomplete_suggestions(
                 source: "command_palette_panel".to_string(),
                 source_panel: entry.source_panel.clone(),
                 addon_contract: entry.addon_contract.clone(),
+                addon_view_id: entry.addon_view_id.clone(),
+                addon_view_action_id: entry.addon_view_action_id.clone(),
                 workflow_id: entry.workflow_id.clone(),
                 equivalent_command: entry.commands.clone(),
                 mutates_workflow: entry.mutates_workflow,
