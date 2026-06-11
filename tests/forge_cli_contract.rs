@@ -538,6 +538,95 @@ fn harness_cli_honors_project_forge_first_default_mode_config() {
     assert_eq!(observe_only["forge_first_source"], "observe_only_flag");
 }
 
+#[test]
+fn harness_mode_reports_effective_default_source_and_project_config_precedence() {
+    let temp = tempdir().unwrap();
+    let output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .current_dir(temp.path())
+        .args(["harness", "mode", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let default_mode: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(default_mode["schema_version"], "forge.harness.mode.v1");
+    assert_eq!(default_mode["status"], "harness_mode_resolved");
+    assert_eq!(default_mode["forge_first"], false);
+    assert_eq!(default_mode["effective_mode"], "observe_only");
+    assert_eq!(default_mode["forge_first_source"], "default_observe_only");
+    assert_eq!(default_mode["env_default_present"], false);
+    assert_eq!(default_mode["project_config_status"], "missing");
+    assert!(default_mode["project_config_path"]
+        .as_str()
+        .unwrap()
+        .ends_with(".forge/harness.json"));
+    assert_eq!(
+        default_mode["precedence"],
+        serde_json::json!([
+            "observe_only_flag",
+            "explicit_flag",
+            "env_default",
+            "project_config",
+            "default_observe_only"
+        ])
+    );
+
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("harness.json"),
+        r#"{"default_mode":"forge_first"}"#,
+    )
+    .unwrap();
+    let project_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .current_dir(temp.path())
+        .args(["harness", "mode", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let project_mode: Value = serde_json::from_slice(&project_output).unwrap();
+    assert_eq!(project_mode["forge_first"], true);
+    assert_eq!(project_mode["effective_mode"], "forge_first");
+    assert_eq!(project_mode["forge_first_source"], "project_config");
+    assert_eq!(project_mode["project_config_status"], "loaded");
+    assert_eq!(project_mode["project_default_mode"], "forge_first");
+
+    let env_output = forge()
+        .env("FORGE_HARNESS_DEFAULT_MODE", "forge_first")
+        .current_dir(temp.path())
+        .args(["harness", "mode", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let env_mode: Value = serde_json::from_slice(&env_output).unwrap();
+    assert_eq!(env_mode["forge_first"], true);
+    assert_eq!(env_mode["forge_first_source"], "env_default");
+    assert_eq!(env_mode["env_default_present"], true);
+    assert_eq!(env_mode["env_default_value"], "forge_first");
+    assert_eq!(env_mode["project_config_status"], "loaded");
+
+    let observe_output = forge()
+        .env("FORGE_HARNESS_DEFAULT_MODE", "forge_first")
+        .current_dir(temp.path())
+        .args(["harness", "mode", "--observe-only", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let observe_mode: Value = serde_json::from_slice(&observe_output).unwrap();
+    assert_eq!(observe_mode["forge_first"], false);
+    assert_eq!(observe_mode["effective_mode"], "observe_only");
+    assert_eq!(observe_mode["forge_first_source"], "observe_only_flag");
+}
+
 #[cfg(unix)]
 #[test]
 fn harness_exec_applies_headroom_to_child_output_and_persists_retrieval_refs() {

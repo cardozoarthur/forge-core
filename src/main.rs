@@ -597,6 +597,14 @@ enum HarnessCommands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
+    Mode {
+        #[arg(long = "forge-first")]
+        forge_first: bool,
+        #[arg(long = "observe-only", conflicts_with = "forge_first")]
+        observe_only: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
     WrapPlan {
         #[arg(long)]
         executor: String,
@@ -5172,6 +5180,15 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(0)
             }
+            HarnessCommands::Mode {
+                forge_first,
+                observe_only,
+                output,
+            } => {
+                let report = build_harness_mode_report(forge_first, observe_only);
+                print_response(output, &report)?;
+                Ok(0)
+            }
             HarnessCommands::WrapPlan {
                 executor,
                 command,
@@ -7252,6 +7269,63 @@ struct HarnessForgeFirstMode {
     source: &'static str,
 }
 
+#[derive(Serialize)]
+struct HarnessModeReport {
+    schema_version: String,
+    status: String,
+    forge_first: bool,
+    effective_mode: String,
+    forge_first_source: String,
+    env_default_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    env_default_value: Option<String>,
+    project_config_path: String,
+    project_config_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_default_mode: Option<String>,
+    precedence: Vec<String>,
+    notes: Vec<String>,
+}
+
+struct HarnessProjectDefaultMode {
+    path: PathBuf,
+    status: &'static str,
+    forge_first: Option<bool>,
+}
+
+fn build_harness_mode_report(flag_forge_first: bool, flag_observe_only: bool) -> HarnessModeReport {
+    let mode = resolve_harness_forge_first(flag_forge_first, flag_observe_only);
+    let env_default_value = std::env::var("FORGE_HARNESS_DEFAULT_MODE").ok();
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project = read_harness_project_mode(&project_root);
+    HarnessModeReport {
+        schema_version: "forge.harness.mode.v1".to_string(),
+        status: "harness_mode_resolved".to_string(),
+        forge_first: mode.forge_first,
+        effective_mode: harness_effective_mode(mode.forge_first).to_string(),
+        forge_first_source: mode.source.to_string(),
+        env_default_present: env_default_value.is_some(),
+        env_default_value,
+        project_config_path: project.path.display().to_string(),
+        project_config_status: project.status.to_string(),
+        project_default_mode: project
+            .forge_first
+            .map(harness_effective_mode)
+            .map(ToString::to_string),
+        precedence: vec![
+            "observe_only_flag".to_string(),
+            "explicit_flag".to_string(),
+            "env_default".to_string(),
+            "project_config".to_string(),
+            "default_observe_only".to_string(),
+        ],
+        notes: vec![
+            "This report is read-only and does not install shims or execute brain CLIs.".to_string(),
+            "Use it before wrap-plan, install-shims or exec when the active Forge-first policy is unclear.".to_string(),
+        ],
+    }
+}
+
 fn resolve_harness_forge_first(
     flag_forge_first: bool,
     flag_observe_only: bool,
@@ -7295,17 +7369,46 @@ fn harness_default_mode_prefers_forge_first() -> bool {
 
 fn harness_project_default_mode() -> Option<bool> {
     let current_dir = std::env::current_dir().ok()?;
-    read_harness_project_default_mode(&current_dir)
+    read_harness_project_mode(&current_dir).forge_first
 }
 
-fn read_harness_project_default_mode(project_root: &Path) -> Option<bool> {
+fn read_harness_project_mode(project_root: &Path) -> HarnessProjectDefaultMode {
     let path = project_root.join(".forge/harness.json");
-    let content = std::fs::read_to_string(path).ok()?;
-    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
-    match config.get("default_mode") {
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return HarnessProjectDefaultMode {
+            path,
+            status: "missing",
+            forge_first: None,
+        };
+    };
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return HarnessProjectDefaultMode {
+            path,
+            status: "invalid_json",
+            forge_first: None,
+        };
+    };
+    let forge_first = match config.get("default_mode") {
         Some(serde_json::Value::String(value)) => Some(harness_mode_prefers_forge_first(value)),
         Some(serde_json::Value::Bool(value)) => Some(*value),
         _ => None,
+    };
+    HarnessProjectDefaultMode {
+        path,
+        status: if forge_first.is_some() {
+            "loaded"
+        } else {
+            "missing_default_mode"
+        },
+        forge_first,
+    }
+}
+
+fn harness_effective_mode(forge_first: bool) -> &'static str {
+    if forge_first {
+        "forge_first"
+    } else {
+        "observe_only"
     }
 }
 
