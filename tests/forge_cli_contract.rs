@@ -21248,6 +21248,238 @@ tenant_policy_mode: enforce
 }
 
 #[test]
+fn cost_retention_enforces_project_tenant_policy_for_stale_index_rows() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: cost-retention-org
+  label: Cost Retention Org
+brand:
+  scope: brand
+  id: cost-retention-brand
+  label: Cost Retention Brand
+product:
+  scope: product
+  id: cost-retention-product
+  label: Cost Retention Product
+user:
+  scope: user
+  id: cost-retention-user
+  label: Cost Retention User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let visible_row_key = "planned:visible-cost-retention:task-001";
+    let hidden_row_key = "planned:hidden-cost-retention:task-001";
+    {
+        let connection = Connection::open(&store).unwrap();
+        connection
+            .execute_batch(
+                r#"
+                INSERT INTO cost_ledger_index (
+                    row_key, source_kind, workflow_id, task_id, event_id,
+                    organization_id, brand_id, product_id, addon_id, executor,
+                    model_call_required, model_call_avoided,
+                    estimated_task_cost_usd, observed_event_cost_usd,
+                    tokens_in, tokens_out, data_json, created_at, updated_at
+                )
+                VALUES
+                (
+                    'planned:visible-cost-retention:task-001', 'planned_task', 'wf_visible_cost_retention', 'task-001', NULL,
+                    'cost-retention-org', 'cost-retention-brand', 'cost-retention-product', 'forge.addon.visible_cost', 'codex',
+                    1, 0, 0.42, 0.0,
+                    0, 0, '{}', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z'
+                ),
+                (
+                    'planned:hidden-cost-retention:task-001', 'planned_task', 'wf_hidden_cost_retention', 'task-001', NULL,
+                    'other-cost-retention-org', 'other-cost-retention-brand', 'other-cost-retention-product', 'forge.addon.hidden_cost', 'codex',
+                    1, 0, 9.99, 0.0,
+                    0, 0, '{}', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z'
+                );
+                "#,
+            )
+            .unwrap();
+    }
+
+    let retention_plan_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "retention",
+            "--retention-days",
+            "31",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let retention_plan_json: Value = serde_json::from_slice(&retention_plan_output).unwrap();
+    assert_eq!(
+        retention_plan_json["filters"]["organization_id"],
+        "cost-retention-org"
+    );
+    assert_eq!(retention_plan_json["candidate_row_count"], 1);
+    assert_eq!(
+        retention_plan_json["candidates"][0]["row_key"],
+        visible_row_key
+    );
+
+    let mcp_retention_input = serde_json::json!({
+        "project_root": temp.path().display().to_string(),
+        "retention_days": 31
+    });
+    let mcp_retention_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.cost.retention",
+            "--input",
+            &mcp_retention_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_retention_json: Value = serde_json::from_slice(&mcp_retention_output).unwrap();
+    assert_eq!(
+        mcp_retention_json["result"]["filters"]["organization_id"],
+        "cost-retention-org"
+    );
+    assert_eq!(mcp_retention_json["result"]["candidate_row_count"], 1);
+
+    let retention_apply_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "retention",
+            "--retention-days",
+            "31",
+            "--apply",
+            "--approved-by",
+            "codex-test",
+            "--reason",
+            "Prune visible stale Cost OS rows after validated retention window.",
+            "--confirm",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let retention_apply_json: Value = serde_json::from_slice(&retention_apply_output).unwrap();
+    assert_eq!(
+        retention_apply_json["status"],
+        "cost_ledger_retention_applied"
+    );
+    assert_eq!(retention_apply_json["deleted_row_count"], 1);
+    {
+        let connection = Connection::open(&store).unwrap();
+        let visible_remaining: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM cost_ledger_index WHERE row_key = ?1",
+                rusqlite::params![visible_row_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let hidden_remaining: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM cost_ledger_index WHERE row_key = ?1",
+                rusqlite::params![hidden_row_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(visible_remaining, 0);
+        assert_eq!(hidden_remaining, 1);
+    }
+
+    forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "membership-update",
+            "--subject",
+            "cost-retention-user",
+            "--organization",
+            "cost-retention-org",
+            "--brand",
+            "cost-retention-brand",
+            "--product",
+            "cost-retention-product",
+            "--deny",
+            "context:read",
+            "--source",
+            "test-cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let denied_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "retention",
+            "--retention-days",
+            "31",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let denied_stderr = String::from_utf8(denied_output).unwrap();
+    assert!(denied_stderr.contains("multi-tenant enforcement blocked cost ledger retention"));
+    assert!(denied_stderr.contains("context:read"));
+}
+
+#[test]
 fn cost_history_enforces_project_tenant_policy_for_global_rollups() {
     let temp = tempdir().unwrap();
     let forge_dir = temp.path().join(".forge");

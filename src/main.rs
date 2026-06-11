@@ -32,7 +32,7 @@ use forge_core::cluster::{
 };
 use forge_core::context::build_context_package_with_checkpoint;
 use forge_core::cost::{
-    apply_cost_ledger_retention, build_cost_ledger_for_context,
+    apply_cost_ledger_retention_for_context, build_cost_ledger_for_context,
     build_cost_ledger_history_for_context, maintain_cost_ledger_for_context,
     materialize_cost_ledger_incremental_for_context, materialize_cost_ledger_index_for_context,
     run_cost_ledger_daemon_for_context,
@@ -516,6 +516,8 @@ enum CostCommands {
         confirm: bool,
         #[arg(long, default_value = "forge_cli")]
         origin: String,
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -5340,10 +5342,12 @@ fn run() -> Result<i32> {
                 reason,
                 confirm,
                 origin,
+                project_root,
                 output,
             } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = apply_cost_ledger_retention(
+                let operating_context = load_project_operating_context(&project_root)?;
+                let report = apply_cost_ledger_retention_for_context(
                     &store,
                     workflow.as_deref(),
                     organization.as_deref(),
@@ -5358,6 +5362,7 @@ fn run() -> Result<i32> {
                     reason.as_deref(),
                     confirm,
                     &origin,
+                    &operating_context,
                 )?;
                 print_response(output, &report)?;
                 Ok(0)
