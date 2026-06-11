@@ -38165,6 +38165,32 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
         json["headroom_preview"]["schema_version"],
         "forge.harness.token_headroom.v1"
     );
+    assert_eq!(
+        json["headroom_plan"]["schema_version"],
+        "forge.harness.headroom_plan.v1"
+    );
+    assert_eq!(
+        json["headroom_plan"]["status"],
+        "harness_headroom_plan_ready"
+    );
+    assert_eq!(json["headroom_plan"]["executor"], "codex");
+    assert_eq!(json["headroom_plan"]["token_headroom_enabled"], true);
+    assert_eq!(
+        json["headroom_plan"]["session_lifecycle_plan"]["schema_version"],
+        "forge.harness.session_lifecycle_plan.v1"
+    );
+    assert_eq!(
+        json["session_lifecycle_plan"]["schema_version"],
+        "forge.harness.session_lifecycle_plan.v1"
+    );
+    assert_eq!(json["session_lifecycle_plan"]["session_id"], "codex-shell");
+    let headroom_next_commands = json["headroom_plan"]["next_commands"].as_array().unwrap();
+    assert!(headroom_next_commands
+        .iter()
+        .any(|command| command.as_str().unwrap_or("").contains("wrap-plan")));
+    assert!(headroom_next_commands
+        .iter()
+        .any(|command| command.as_str().unwrap_or("").contains("token-headroom")));
     assert_eq!(json["wrapper_plan"]["forge_first"], true);
     assert_eq!(json["wrapper_plan"]["token_headroom_enabled"], true);
     assert!(json["commands"]["doctor"]
@@ -38207,6 +38233,7 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("Harness center"));
     assert!(text.contains("codex"));
     assert!(text.contains("wrap-plan"));
+    assert!(text.contains("headroom-plan"));
     assert!(text.contains("session lifecycle"));
 
     let home_output = forge()
@@ -38228,6 +38255,14 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert_eq!(
         home["dashboard"]["harness_panel"]["schema_version"],
         "forge.interactive.harness.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["harness_panel"]["headroom_plan"]["schema_version"],
+        "forge.harness.headroom_plan.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["harness_panel"]["session_lifecycle_plan"]["schema_version"],
+        "forge.harness.session_lifecycle_plan.v1"
     );
     assert!(home["dashboard"]["ui_composition_panel"]["regions"]
         .as_array()
@@ -38284,6 +38319,14 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
         "forge.interactive.harness.v1"
     );
     assert_eq!(mcp_json["result"]["wrapper_plan"]["forge_first"], true);
+    assert_eq!(
+        mcp_json["result"]["headroom_plan"]["schema_version"],
+        "forge.harness.headroom_plan.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["session_lifecycle_plan"]["schema_version"],
+        "forge.harness.session_lifecycle_plan.v1"
+    );
 }
 
 #[cfg(unix)]

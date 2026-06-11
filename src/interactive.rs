@@ -12,12 +12,13 @@ use crate::executor::{
 };
 use crate::graph::{AtomicTask, ExecutorKind, TaskStatus};
 use crate::harness::{
-    analyze_token_headroom, build_cli_wrapper_plan, build_harness_doctor_report,
+    analyze_token_headroom, build_harness_doctor_report, build_harness_headroom_plan,
     build_harness_mode_report, inspect_cli_harness_shim_status,
     resolve_harness_forge_first_source_for_project, resolve_harness_runtime_policy,
-    CliShimStatusOptions, CliShimStatusReport, CliWrapperPlanOptions, CliWrapperPlanReport,
-    HarnessDoctorOptions, HarnessDoctorReport, HarnessModeOptions, HarnessModeReport,
-    HarnessRuntimePolicyOptions, TokenHeadroomReport,
+    CliShimStatusOptions, CliShimStatusReport, CliWrapperPlanReport, HarnessDoctorOptions,
+    HarnessDoctorReport, HarnessHeadroomPlanOptions, HarnessHeadroomPlanReport, HarnessModeOptions,
+    HarnessModeReport, HarnessRuntimePolicyOptions, HarnessSessionLifecyclePlan,
+    TokenHeadroomReport,
 };
 use crate::identity::list_identity_memberships;
 use crate::interaction::list_human_interactions;
@@ -452,6 +453,8 @@ pub struct InteractiveHarnessPanel {
     pub doctor: HarnessDoctorReport,
     pub shim_status: CliShimStatusReport,
     pub wrapper_plan: CliWrapperPlanReport,
+    pub headroom_plan: HarnessHeadroomPlanReport,
+    pub session_lifecycle_plan: HarnessSessionLifecyclePlan,
     pub headroom_preview: TokenHeadroomReport,
     pub next_actions: Vec<String>,
     pub notes: Vec<String>,
@@ -465,6 +468,7 @@ pub struct InteractiveHarnessCommands {
     pub doctor: Vec<String>,
     pub shim_status: Vec<String>,
     pub wrap_plan: Vec<String>,
+    pub headroom_plan: Vec<String>,
     pub install_shims: Vec<String>,
     pub exec: Vec<String>,
     pub sessions: Vec<String>,
@@ -1550,11 +1554,12 @@ pub fn build_interactive_harness(
         executor: &options.executor,
     })?;
     let command = vec![options.executor.clone()];
-    let wrapper_plan = build_cli_wrapper_plan(CliWrapperPlanOptions {
+    let headroom_plan = build_harness_headroom_plan(HarnessHeadroomPlanOptions {
         executor: &options.executor,
         command: &command,
         forge_first: mode.forge_first,
         forge_first_source: &mode.forge_first_source,
+        project_root: Some(&project_root),
         workflow_id: options.workflow_id.as_deref(),
         task_id: options.task_id.as_deref(),
         run_id: options.run_id.as_deref(),
@@ -1565,6 +1570,8 @@ pub fn build_interactive_harness(
         require_token_headroom_for_forge_first: runtime_policy
             .require_token_headroom_for_forge_first,
     });
+    let wrapper_plan = headroom_plan.wrapper_plan.clone();
+    let session_lifecycle_plan = headroom_plan.session_lifecycle_plan.clone();
     let headroom_preview = analyze_token_headroom(
         "Forge harness preview: route bounded context, shell receipts, logs, tool output and CLI stdout through local token headroom while preserving retrieval references.",
         Some("text"),
@@ -1597,6 +1604,8 @@ pub fn build_interactive_harness(
         doctor,
         shim_status,
         wrapper_plan,
+        headroom_plan,
+        session_lifecycle_plan,
         headroom_preview,
         next_actions,
         notes: vec![
@@ -4465,6 +4474,23 @@ fn interactive_harness_commands(
             "--output".to_string(),
             "json".to_string(),
         ],
+        headroom_plan: vec![
+            "harness".to_string(),
+            "headroom-plan".to_string(),
+            "--executor".to_string(),
+            executor.to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--context-budget".to_string(),
+            context_budget.to_string(),
+            if token_headroom {
+                "--token-headroom".to_string()
+            } else {
+                "--no-token-headroom".to_string()
+            },
+            "--output".to_string(),
+            "json".to_string(),
+        ],
         install_shims: vec![
             "harness".to_string(),
             "install-shims".to_string(),
@@ -5303,15 +5329,16 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         panel.next_actions.join(" | ")
     };
     format!(
-        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | install-shims | exec\nNext actions: {next_actions}\n",
+        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; headroom-plan {headroom_plan}; session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | headroom-plan | install-shims | exec\nNext actions: {next_actions}\n",
         status = panel.status,
         executor = panel.executor,
         mode = panel.mode.effective_mode,
         doctor = panel.doctor.status,
         shim = panel.shim_status.status,
         headroom = panel.headroom_preview.status,
-        session_lifecycle_status = panel.wrapper_plan.session_lifecycle_plan.status,
-        session_id = panel.wrapper_plan.session_lifecycle_plan.session_id,
+        headroom_plan = panel.headroom_plan.status,
+        session_lifecycle_status = panel.session_lifecycle_plan.status,
+        session_id = panel.session_lifecycle_plan.session_id,
         project_root = panel.project_root,
         shim_dir = panel.shim_dir,
         next_actions = next_actions,

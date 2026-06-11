@@ -2844,7 +2844,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.interactive.harness",
                 "Inspect Interactive Harness Center",
-                "Return the Forge interactive harness center for one brain CLI, combining mode, doctor, shim status, wrap-plan, session lifecycle plan and token-headroom preview without installing shims or launching child processes.",
+                "Return the Forge interactive harness center for one brain CLI, combining mode, doctor, shim status, wrap-plan, headroom plan, session lifecycle plan and token-headroom preview without installing shims or launching child processes.",
                 object_schema(&[
                     ("executor", "string", "codex|claude|gemini|opencode"),
                     ("shim_dir", "string", "directory where Forge-owned shims should live"),
