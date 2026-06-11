@@ -430,6 +430,7 @@ pub struct InteractivePatchWorkbenchPanel {
     pub diff_check_status: String,
     pub diff_stat: String,
     pub diff_preview: InteractivePatchDiffPreview,
+    pub diff_review_queue: InteractivePatchDiffReviewQueue,
     pub files: Vec<InteractivePatchWorkbenchFile>,
     pub approval_flow: InteractivePatchApprovalFlow,
     pub commands: InteractivePatchWorkbenchCommands,
@@ -453,6 +454,34 @@ pub struct InteractivePatchDiffPreviewLine {
     pub old_line: Option<usize>,
     pub new_line: Option<usize>,
     pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchDiffReviewQueue {
+    pub schema_version: String,
+    pub status: String,
+    pub selected_path: Option<String>,
+    pub file_count: usize,
+    pub pending_review_count: usize,
+    pub total_hunk_count: usize,
+    pub total_addition_count: usize,
+    pub total_deletion_count: usize,
+    pub files: Vec<InteractivePatchDiffReviewQueueFile>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchDiffReviewQueueFile {
+    pub path: String,
+    pub review_status: String,
+    pub selected: bool,
+    pub staged: bool,
+    pub unstaged: bool,
+    pub hunk_count: usize,
+    pub addition_count: usize,
+    pub deletion_count: usize,
+    pub line_count: usize,
+    pub commands: InteractivePatchWorkbenchFileCommands,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2125,6 +2154,7 @@ pub fn build_interactive_patch_workbench(
             diff_check_status: "not_run".to_string(),
             diff_stat: status_output.stderr,
             diff_preview: build_patch_diff_preview(&[], false),
+            diff_review_queue: build_patch_diff_review_queue(&[], false),
             files: Vec::new(),
             approval_flow: build_patch_approval_flow(true, false, "not_run", &commands),
             commands,
@@ -2149,6 +2179,7 @@ pub fn build_interactive_patch_workbench(
     let approval_flow =
         build_patch_approval_flow(clean, diff_present, &diff_check_status, &commands);
     let diff_preview = build_patch_diff_preview(&files, diff_present);
+    let diff_review_queue = build_patch_diff_review_queue(&files, diff_present);
 
     Ok(InteractivePatchWorkbenchPanel {
         schema_version: INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION.to_string(),
@@ -2163,6 +2194,7 @@ pub fn build_interactive_patch_workbench(
         diff_check_status,
         diff_stat,
         diff_preview,
+        diff_review_queue,
         files,
         approval_flow,
         commands,
@@ -2517,6 +2549,100 @@ fn patch_diff_preview_command(path: &str, cached: bool) -> Vec<String> {
         path.to_string(),
     ]);
     command
+}
+
+fn build_patch_diff_review_queue(
+    files: &[InteractivePatchWorkbenchFile],
+    diff_present: bool,
+) -> InteractivePatchDiffReviewQueue {
+    let mut queue_files = Vec::new();
+    for file in files
+        .iter()
+        .filter(|file| !file.untracked && (file.unstaged || file.staged))
+    {
+        let diff = patch_workbench_file_diff(file);
+        let (lines, _) = parse_patch_diff_preview_lines(&diff, usize::MAX);
+        if lines.is_empty() {
+            continue;
+        }
+        let hunk_count = lines
+            .iter()
+            .filter(|line| line.line_kind == "hunk_header")
+            .count();
+        let addition_count = lines
+            .iter()
+            .filter(|line| line.line_kind == "addition")
+            .count();
+        let deletion_count = lines
+            .iter()
+            .filter(|line| line.line_kind == "deletion")
+            .count();
+        queue_files.push(InteractivePatchDiffReviewQueueFile {
+            path: file.path.clone(),
+            review_status: "pending_review".to_string(),
+            selected: queue_files.is_empty(),
+            staged: file.staged,
+            unstaged: file.unstaged,
+            hunk_count,
+            addition_count,
+            deletion_count,
+            line_count: lines.len(),
+            commands: file.commands.clone(),
+        });
+    }
+
+    let file_count = queue_files.len();
+    let pending_review_count = queue_files
+        .iter()
+        .filter(|file| file.review_status == "pending_review")
+        .count();
+    let total_hunk_count = queue_files.iter().map(|file| file.hunk_count).sum();
+    let total_addition_count = queue_files.iter().map(|file| file.addition_count).sum();
+    let total_deletion_count = queue_files.iter().map(|file| file.deletion_count).sum();
+    let selected_path = queue_files.first().map(|file| file.path.clone());
+    let status = if file_count > 0 {
+        "diff_review_queue_ready"
+    } else if diff_present {
+        "diff_review_queue_unavailable"
+    } else {
+        "diff_review_queue_idle"
+    };
+
+    InteractivePatchDiffReviewQueue {
+        schema_version: "forge.interactive.patch_diff_review_queue.v1".to_string(),
+        status: status.to_string(),
+        selected_path,
+        file_count,
+        pending_review_count,
+        total_hunk_count,
+        total_addition_count,
+        total_deletion_count,
+        files: queue_files,
+        notes: vec![
+            "Review queue is read-only and only indexes tracked file diffs; untracked files remain visible in file lanes."
+                .to_string(),
+            "Use each file's diff command for full hunk navigation and review evidence before apply approval."
+                .to_string(),
+        ],
+    }
+}
+
+fn patch_workbench_file_diff(file: &InteractivePatchWorkbenchFile) -> String {
+    let paths = vec![file.path.clone()];
+    let mut parts = Vec::new();
+    if file.unstaged {
+        let output = git_command_with_paths(&["diff", "--unified=3"], &paths);
+        if output.success && !output.stdout.trim().is_empty() {
+            parts.push(output.stdout);
+        }
+    }
+    if file.staged {
+        let output = git_command_with_paths(&["diff", "--cached", "--unified=3"], &paths);
+        if output.success && !output.stdout.trim().is_empty() {
+            parts.push(output.stdout);
+        }
+    }
+    parts.join("\n")
 }
 
 fn parse_patch_diff_preview_lines(
@@ -3834,7 +3960,7 @@ pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> Strin
 
 pub fn render_interactive_patch_workbench(panel: &InteractivePatchWorkbenchPanel) -> String {
     format!(
-        "Patch workbench: {status}; clean {clean}, files {changed_path_count}, staged {staged_path_count}, unstaged {unstaged_path_count}, untracked {untracked_path_count}, diff {diff_present}, check {diff_check_status}\nRepository: {repository_path}\nFiles: {files}\nDiff preview: {diff_preview}\nApproval flow: {approval_status}; gate {approval_gate}; approval {requires_human_approval}; apply ready {apply_ready}\n",
+        "Patch workbench: {status}; clean {clean}, files {changed_path_count}, staged {staged_path_count}, unstaged {unstaged_path_count}, untracked {untracked_path_count}, diff {diff_present}, check {diff_check_status}\nRepository: {repository_path}\nFiles: {files}\nDiff preview: {diff_preview}\nReview queue: {review_queue}\nApproval flow: {approval_status}; gate {approval_gate}; approval {requires_human_approval}; apply ready {apply_ready}\n",
         status = panel.status,
         clean = panel.clean,
         changed_path_count = panel.changed_path_count,
@@ -3846,11 +3972,46 @@ pub fn render_interactive_patch_workbench(panel: &InteractivePatchWorkbenchPanel
         repository_path = panel.repository_path,
         files = render_patch_workbench_file_summary(panel),
         diff_preview = render_patch_diff_preview(&panel.diff_preview),
+        review_queue = render_patch_diff_review_queue(&panel.diff_review_queue),
         approval_status = panel.approval_flow.status,
         approval_gate = panel.approval_flow.current_gate,
         requires_human_approval = panel.approval_flow.requires_human_approval,
         apply_ready = panel.approval_flow.apply_ready,
     )
+}
+
+fn render_patch_diff_review_queue(queue: &InteractivePatchDiffReviewQueue) -> String {
+    let files = queue
+        .files
+        .iter()
+        .take(6)
+        .map(|file| {
+            format!(
+                "{} [{} hunks, +{}, -{}, {}]",
+                file.path,
+                file.hunk_count,
+                file.addition_count,
+                file.deletion_count,
+                file.review_status
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    if files.is_empty() {
+        format!(
+            "{}; files {}; pending {}; hunks {}",
+            queue.status, queue.file_count, queue.pending_review_count, queue.total_hunk_count
+        )
+    } else {
+        format!(
+            "{}; files {}; pending {}; hunks {}; {}",
+            queue.status,
+            queue.file_count,
+            queue.pending_review_count,
+            queue.total_hunk_count,
+            files
+        )
+    }
 }
 
 fn render_patch_diff_preview(preview: &InteractivePatchDiffPreview) -> String {

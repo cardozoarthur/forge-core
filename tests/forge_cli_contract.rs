@@ -37507,8 +37507,10 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
     let sample = temp.path().join("sample.txt");
+    let tracked = temp.path().join("tracked.txt");
     let notes = temp.path().join("notes.txt");
     fs::write(&sample, "alpha\n").unwrap();
+    fs::write(&tracked, "first\n").unwrap();
     assert!(std::process::Command::new("git")
         .arg("init")
         .current_dir(temp.path())
@@ -37516,7 +37518,7 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         .expect("git init should run")
         .success());
     assert!(std::process::Command::new("git")
-        .args(["add", "sample.txt"])
+        .args(["add", "sample.txt", "tracked.txt"])
         .current_dir(temp.path())
         .status()
         .expect("git add should run")
@@ -37537,6 +37539,7 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         .success());
 
     fs::write(&sample, "alpha\nbeta\n").unwrap();
+    fs::write(&tracked, "first\nsecond\n").unwrap();
     fs::write(&notes, "one\ntwo\n").unwrap();
 
     let output = forge()
@@ -37561,8 +37564,8 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     );
     assert_eq!(json["status"], "patch_workbench_ready");
     assert_eq!(json["clean"], false);
-    assert_eq!(json["changed_path_count"], 2);
-    assert_eq!(json["unstaged_path_count"], 1);
+    assert_eq!(json["changed_path_count"], 3);
+    assert_eq!(json["unstaged_path_count"], 2);
     assert_eq!(json["untracked_path_count"], 1);
     assert_eq!(json["diff_present"], true);
     assert_eq!(json["diff_check_status"], "passed");
@@ -37584,6 +37587,36 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         .unwrap()
         .iter()
         .any(|line| line["line_kind"] == "hunk_header"));
+    assert_eq!(
+        json["diff_review_queue"]["schema_version"],
+        "forge.interactive.patch_diff_review_queue.v1"
+    );
+    assert_eq!(
+        json["diff_review_queue"]["status"],
+        "diff_review_queue_ready"
+    );
+    assert_eq!(json["diff_review_queue"]["file_count"], 2);
+    assert_eq!(json["diff_review_queue"]["pending_review_count"], 2);
+    assert_eq!(json["diff_review_queue"]["selected_path"], "sample.txt");
+    assert!(json["diff_review_queue"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|file| file["path"] == "sample.txt"
+            && file["review_status"] == "pending_review"
+            && file["hunk_count"].as_u64().unwrap() > 0
+            && file["addition_count"].as_u64().unwrap() > 0
+            && file["commands"]["diff"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("sample.txt"))));
+    assert!(json["diff_review_queue"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|file| file["path"] == "tracked.txt"
+            && file["review_status"] == "pending_review"
+            && file["addition_count"].as_u64().unwrap() > 0));
     assert!(json["files"].as_array().unwrap().iter().any(|file| {
         file["path"] == "sample.txt"
             && file["status_label"] == "modified"
@@ -37660,8 +37693,10 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("Patch workbench"));
     assert!(text.contains("Approval flow"));
     assert!(text.contains("Diff preview"));
+    assert!(text.contains("Review queue"));
     assert!(text.contains("+beta"));
     assert!(text.contains("sample.txt"));
+    assert!(text.contains("tracked.txt"));
     assert!(text.contains("notes.txt"));
 
     let manifest = forge()
@@ -37681,6 +37716,10 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         .as_str()
         .unwrap()
         .contains("inline diff preview"));
+    assert!(tool["description"]
+        .as_str()
+        .unwrap()
+        .contains("multi-file review queue"));
     assert_eq!(tool["async_safe"], true);
     assert_eq!(tool["mutates_workflow"], false);
 
@@ -37700,7 +37739,7 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         mcp_json["result"]["schema_version"],
         "forge.interactive.patch_workbench.v1"
     );
-    assert_eq!(mcp_json["result"]["changed_path_count"], 2);
+    assert_eq!(mcp_json["result"]["changed_path_count"], 3);
     assert_eq!(
         mcp_json["result"]["diff_preview"]["schema_version"],
         "forge.interactive.patch_diff_preview.v1"
@@ -37708,6 +37747,14 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     assert_eq!(
         mcp_json["result"]["diff_preview"]["selected_path"],
         "sample.txt"
+    );
+    assert_eq!(
+        mcp_json["result"]["diff_review_queue"]["schema_version"],
+        "forge.interactive.patch_diff_review_queue.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["diff_review_queue"]["pending_review_count"],
+        2
     );
     assert_eq!(
         mcp_json["result"]["approval_flow"]["schema_version"],
