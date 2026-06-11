@@ -23,6 +23,10 @@ use crate::harness::{
 use crate::identity::list_identity_memberships;
 use crate::interaction::list_human_interactions;
 use crate::memory::memory_policy_report;
+use crate::milestone::{
+    build_milestone_manifest, build_milestone_status, MilestonePromotionDecision,
+    MilestoneStatusSummary,
+};
 use crate::ops::{
     build_addon_view_renderer_report, build_operational_digital_twin, load_modifier_lane,
     OpsAddonViewRendererReport, OpsOperationalDigitalTwin,
@@ -48,6 +52,7 @@ const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
 const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_board.v1";
 const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
 const INTERACTIVE_READINESS_SCHEMA_VERSION: &str = "forge.interactive.readiness.v1";
+const INTERACTIVE_RELEASE_GATES_SCHEMA_VERSION: &str = "forge.interactive.release_gates.v1";
 const INTERACTIVE_HARNESS_SCHEMA_VERSION: &str = "forge.interactive.harness.v1";
 const INTERACTIVE_SESSIONS_SCHEMA_VERSION: &str = "forge.interactive.sessions.v1";
 const INTERACTIVE_COMMAND_PALETTE_SCHEMA_VERSION: &str = "forge.interactive.command_palette.v1";
@@ -105,6 +110,7 @@ pub struct InteractiveDashboard {
     pub command_palette_panel: InteractiveCommandPalettePanel,
     pub action_registry_panel: InteractiveActionRegistryPanel,
     pub autocomplete_panel: InteractiveAutocompletePanel,
+    pub release_gates_panel: InteractiveReleaseGatesPanel,
     pub harness_mode_panel: HarnessModeReport,
     pub harness_doctor_panel: HarnessDoctorReport,
     pub runtime_node_status: String,
@@ -238,6 +244,43 @@ pub struct InteractiveReadinessCommands {
     pub shells: Vec<String>,
     pub harness_mode: Vec<String>,
     pub harness_doctor: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveReleaseGatesPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub milestone: String,
+    pub promotion_ready: bool,
+    pub promotion_decision: MilestonePromotionDecision,
+    pub blocked_by: Vec<String>,
+    pub summary: MilestoneStatusSummary,
+    pub gate_count: usize,
+    pub blocked_gate_count: usize,
+    pub gate_cards: Vec<InteractiveReleaseGateCard>,
+    pub commands: InteractiveReleaseGateCommands,
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveReleaseGateCard {
+    pub capability_id: String,
+    pub title: String,
+    pub status: String,
+    pub promotion_ready: bool,
+    pub required_evidence: String,
+    pub evidence: String,
+    pub gap_before_promotion: String,
+    pub next_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveReleaseGateCommands {
+    pub refresh: Vec<String>,
+    pub status: Vec<String>,
+    pub manifest: Vec<String>,
+    pub cli_demo: Vec<String>,
+    pub multimodal_readiness: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1232,6 +1275,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
     let command_palette_panel = build_interactive_command_palette(store, None)?;
     let action_registry_panel = build_action_registry_from_palette(&command_palette_panel);
     let autocomplete_panel = build_interactive_autocomplete(store, "")?;
+    let release_gates_panel = build_interactive_release_gates(store, "0.5")?;
     let harness_mode_panel = harness_panel.mode.clone();
     let harness_doctor_panel = harness_panel.doctor.clone();
     let runtime_node_status = if runtimes.usable.is_empty() {
@@ -1437,6 +1481,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             command_palette_panel,
             action_registry_panel,
             autocomplete_panel,
+            release_gates_panel,
             harness_mode_panel,
             harness_doctor_panel,
             runtime_node_status,
@@ -1468,6 +1513,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 "forge interactive harness --output json".to_string(),
                 "forge interactive sessions --output json".to_string(),
                 "forge interactive action-registry --output json".to_string(),
+                "forge interactive release-gates --output json".to_string(),
                 "forge interactive patch-workbench --output json".to_string(),
                 "forge interactive permissions --output json".to_string(),
             ],
@@ -1746,6 +1792,72 @@ pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveRead
         harness_doctor,
         next_actions,
         commands: readiness_commands(),
+    })
+}
+
+pub fn build_interactive_release_gates(
+    _store: &ForgeStore,
+    version: &str,
+) -> Result<InteractiveReleaseGatesPanel> {
+    let status = build_milestone_status(version)?;
+    let manifest = build_milestone_manifest(version)?;
+    let required_evidence_by_capability = manifest
+        .requirements
+        .iter()
+        .map(|requirement| {
+            (
+                requirement.capability_id.clone(),
+                requirement.required_evidence.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let gate_cards = status
+        .capabilities
+        .iter()
+        .map(|capability| {
+            let promotion_ready = matches!(capability.status.as_str(), "implemented" | "validated");
+            InteractiveReleaseGateCard {
+                capability_id: capability.id.clone(),
+                title: capability.title.clone(),
+                status: capability.status.clone(),
+                promotion_ready,
+                required_evidence: required_evidence_by_capability
+                    .get(&capability.id)
+                    .cloned()
+                    .unwrap_or_else(|| "milestone evidence required".to_string()),
+                evidence: capability.evidence.clone(),
+                gap_before_promotion: capability.gap_before_promotion.clone(),
+                next_commands: release_gate_next_commands(&capability.id),
+            }
+        })
+        .collect::<Vec<_>>();
+    let blocked_gate_count = gate_cards
+        .iter()
+        .filter(|gate| !gate.promotion_ready)
+        .count();
+    let commands = release_gate_commands(&status.milestone);
+    let mut next_actions = manifest
+        .known_gaps
+        .iter()
+        .map(|gap| format!("{}: {}", gap.capability_id, gap.next_action))
+        .collect::<Vec<_>>();
+    if next_actions.is_empty() {
+        next_actions.push(status.promotion_decision.next_action.clone());
+    }
+
+    Ok(InteractiveReleaseGatesPanel {
+        schema_version: INTERACTIVE_RELEASE_GATES_SCHEMA_VERSION.to_string(),
+        status: "interactive_release_gates_ready".to_string(),
+        milestone: status.milestone,
+        promotion_ready: status.promotion_decision.promotable,
+        promotion_decision: status.promotion_decision.clone(),
+        blocked_by: status.promotion_decision.blocked_by.clone(),
+        summary: status.summary,
+        gate_count: gate_cards.len(),
+        blocked_gate_count,
+        gate_cards,
+        commands,
+        next_actions,
     })
 }
 
@@ -4698,6 +4810,71 @@ fn readiness_commands() -> InteractiveReadinessCommands {
     }
 }
 
+fn release_gate_commands(version: &str) -> InteractiveReleaseGateCommands {
+    InteractiveReleaseGateCommands {
+        refresh: vec![
+            "interactive".to_string(),
+            "release-gates".to_string(),
+            "--version".to_string(),
+            version.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        status: vec![
+            "milestone".to_string(),
+            "status".to_string(),
+            "--version".to_string(),
+            version.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        manifest: vec![
+            "milestone".to_string(),
+            "manifest".to_string(),
+            "--version".to_string(),
+            version.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        cli_demo: vec![
+            "milestone".to_string(),
+            "cli-demo".to_string(),
+            "--origin".to_string(),
+            "codex".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        multimodal_readiness: vec![
+            "multimodal".to_string(),
+            "readiness".to_string(),
+            "--capability".to_string(),
+            "image_understanding".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
+fn release_gate_next_commands(capability_id: &str) -> Vec<String> {
+    match capability_id {
+        "replacement_grade_cli" => vec![
+            "forge milestone cli-demo --origin codex --output json".to_string(),
+            "forge interactive harness --output json".to_string(),
+            "forge interactive patch-workbench --output json".to_string(),
+        ],
+        "experimental_multimodal_runtime" => vec![
+            "forge multimodal status --output json".to_string(),
+            "forge multimodal readiness --capability image_understanding --output json".to_string(),
+            "forge multimodal benchmark-template --capability image_understanding --output json"
+                .to_string(),
+        ],
+        _ => vec![
+            "forge milestone status --version 0.5 --output json".to_string(),
+            "forge milestone manifest --version 0.5 --output json".to_string(),
+        ],
+    }
+}
+
 pub fn route_interactive_input(
     store: &ForgeStore,
     input: &str,
@@ -5318,6 +5495,41 @@ pub fn render_interactive_readiness(panel: &InteractiveReadinessPanel) -> String
         harness_mode = panel.harness_mode.status,
         harness_doctor = panel.harness_doctor.status,
         usable_executors = usable_executors,
+        next_actions = next_actions,
+    )
+}
+
+pub fn render_interactive_release_gates(panel: &InteractiveReleaseGatesPanel) -> String {
+    let blocked_by = if panel.blocked_by.is_empty() {
+        "none".to_string()
+    } else {
+        panel.blocked_by.join(", ")
+    };
+    let gate_summary = if panel.gate_cards.is_empty() {
+        "none".to_string()
+    } else {
+        panel
+            .gate_cards
+            .iter()
+            .filter(|gate| !gate.promotion_ready)
+            .map(|gate| format!("{} [{}]", gate.capability_id, gate.status))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let next_actions = if panel.next_actions.is_empty() {
+        "none".to_string()
+    } else {
+        panel.next_actions.join(" | ")
+    };
+    format!(
+        "Release gates: {status}; milestone {milestone}; promotion {decision}; blocked {blocked_gate_count}/{gate_count}; blocked by {blocked_by}\nGates: {gate_summary}\nNext actions: {next_actions}\n",
+        status = panel.status,
+        milestone = panel.milestone,
+        decision = panel.promotion_decision.decision,
+        blocked_gate_count = panel.blocked_gate_count,
+        gate_count = panel.gate_count,
+        blocked_by = blocked_by,
+        gate_summary = gate_summary,
         next_actions = next_actions,
     )
 }
@@ -5944,6 +6156,15 @@ fn build_ui_composition_panel(
                     "standard",
                     "half",
                     vec!["forge interactive structured-logs --output json".to_string()],
+                ),
+                core_ui_widget(
+                    "release_gates_panel",
+                    "Release gates",
+                    "release_gates_panel",
+                    "release_gate_renderer",
+                    "standard",
+                    "half",
+                    vec!["forge interactive release-gates --output json".to_string()],
                 ),
                 core_ui_widget(
                     "cost_panel",

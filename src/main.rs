@@ -100,12 +100,13 @@ use forge_core::interactive::{
     build_interactive_action_invocation, build_interactive_action_registry,
     build_interactive_autocomplete, build_interactive_command_palette, build_interactive_harness,
     build_interactive_home, build_interactive_patch_workbench, build_interactive_permissions,
-    build_interactive_readiness, build_interactive_sessions, build_interactive_structured_logs,
-    build_interactive_task_board, build_interactive_workflow_dag,
-    render_interactive_action_invocation, render_interactive_action_registry,
-    render_interactive_autocomplete, render_interactive_command_palette,
-    render_interactive_harness, render_interactive_home, render_interactive_patch_workbench,
-    render_interactive_permissions, render_interactive_readiness, render_interactive_sessions,
+    build_interactive_readiness, build_interactive_release_gates, build_interactive_sessions,
+    build_interactive_structured_logs, build_interactive_task_board,
+    build_interactive_workflow_dag, render_interactive_action_invocation,
+    render_interactive_action_registry, render_interactive_autocomplete,
+    render_interactive_command_palette, render_interactive_harness, render_interactive_home,
+    render_interactive_patch_workbench, render_interactive_permissions,
+    render_interactive_readiness, render_interactive_release_gates, render_interactive_sessions,
     render_interactive_structured_logs, render_interactive_task_board,
     render_interactive_workflow_dag, route_interactive_input, run_interactive_repl,
     slash_command_catalog, InteractiveHarnessOptions, InteractiveSessionsOptions,
@@ -3088,6 +3089,12 @@ enum InteractiveCommands {
         output: OutputFormat,
     },
     Readiness {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ReleaseGates {
+        #[arg(long, default_value = "0.5")]
+        version: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -7453,6 +7460,17 @@ fn run() -> Result<i32> {
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => println!("{}", render_interactive_readiness(&report)),
+                }
+                Ok(0)
+            }
+            InteractiveCommands::ReleaseGates { version, output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_interactive_release_gates(&store, &version)?;
+                match output {
+                    OutputFormat::Json => print_response(output, &report)?,
+                    OutputFormat::Human => {
+                        println!("{}", render_interactive_release_gates(&report))
+                    }
                 }
                 Ok(0)
             }

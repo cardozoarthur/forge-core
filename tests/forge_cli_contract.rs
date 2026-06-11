@@ -39393,6 +39393,158 @@ tenant_policy_mode: enforce
 }
 
 #[test]
+fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "release-gates",
+            "--version",
+            "0.5",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.interactive.release_gates.v1");
+    assert_eq!(json["status"], "interactive_release_gates_ready");
+    assert_eq!(json["milestone"], "0.5");
+    assert_eq!(json["promotion_decision"]["decision"], "fail");
+    assert_eq!(json["promotion_ready"], false);
+    assert!(json["blocked_by"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("replacement_grade_cli")));
+    assert!(json["gate_cards"].as_array().unwrap().iter().any(|gate| {
+        gate["capability_id"] == "replacement_grade_cli"
+            && gate["status"] == "groundwork"
+            && gate["promotion_ready"] == false
+            && gate["next_commands"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(
+                    "forge milestone cli-demo --origin codex --output json"
+                ))
+    }));
+    assert!(json["gate_cards"].as_array().unwrap().iter().any(|gate| {
+        gate["capability_id"] == "experimental_multimodal_runtime"
+            && gate["status"] == "groundwork"
+            && gate["next_commands"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(
+                    "forge multimodal readiness --capability image_understanding --output json"
+                ))
+    }));
+    assert!(json["commands"]["refresh"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("release-gates")));
+    assert!(json["commands"]["manifest"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("manifest")));
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "release-gates",
+            "--version",
+            "0.5",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Release gates"));
+    assert!(text.contains("replacement_grade_cli"));
+    assert!(text.contains("experimental_multimodal_runtime"));
+
+    let home_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["release_gates_panel"]["schema_version"],
+        "forge.interactive.release_gates.v1"
+    );
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |region| region["widgets"].as_array().unwrap().iter().any(|widget| {
+                widget["widget_id"] == "release_gates_panel"
+                    && widget["commands"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!(
+                            "forge interactive release-gates --output json"
+                        ))
+            })
+        ));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.release_gates");
+    assert_eq!(tool["output_schema"], "forge.interactive.release_gates.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.release_gates"])
+        .arg("--input")
+        .arg(r#"{"version":"0.5"}"#)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.release_gates.v1"
+    );
+    assert_eq!(mcp_json["result"]["promotion_ready"], false);
+    assert!(mcp_json["result"]["blocked_by"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("experimental_multimodal_runtime")));
+}
+
+#[test]
 fn interactive_task_board_lanes_include_operable_task_cards() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -40325,6 +40477,14 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge interactive readiness"),
         "the packaged Forge skill should include the readiness CLI command"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.release_gates"),
+        "the packaged Forge skill should expose the dedicated release-gates surface through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge interactive release-gates"),
+        "the packaged Forge skill should include the release-gates CLI command"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.harness"),

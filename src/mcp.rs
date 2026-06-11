@@ -84,9 +84,10 @@ use crate::interactive::{
     build_interactive_action_invocation, build_interactive_action_registry,
     build_interactive_autocomplete, build_interactive_command_palette, build_interactive_harness,
     build_interactive_home, build_interactive_patch_workbench, build_interactive_permissions,
-    build_interactive_readiness, build_interactive_sessions, build_interactive_structured_logs,
-    build_interactive_task_board, build_interactive_workflow_dag, route_interactive_input,
-    slash_command_catalog, InteractiveHarnessOptions, InteractiveSessionsOptions,
+    build_interactive_readiness, build_interactive_release_gates, build_interactive_sessions,
+    build_interactive_structured_logs, build_interactive_task_board,
+    build_interactive_workflow_dag, route_interactive_input, slash_command_catalog,
+    InteractiveHarnessOptions, InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -2848,6 +2849,25 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.readiness.v1",
                 &["forge", "interactive", "readiness", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.release_gates",
+                "Inspect Interactive Release Gates",
+                "Return the Forge interactive release-gates panel for one milestone, including promotion decision, blocked capabilities, required evidence, current evidence and next commands without mutating state.",
+                object_schema(&[
+                    ("version", "string", "milestone version, currently 0.5"),
+                ], &[]),
+                "forge.interactive.release_gates.v1",
+                &[
+                    "forge",
+                    "interactive",
+                    "release-gates",
+                    "--version",
+                    "0.5",
+                    "--output",
+                    "json",
+                ],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -6696,6 +6716,17 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.interactive.home" => serde_json::to_value(build_interactive_home(store)?)?,
         "forge.interactive.readiness" => serde_json::to_value(build_interactive_readiness(store)?)?,
+        "forge.interactive.release_gates" => {
+            let input: MilestoneStatusInput = if input.is_null() {
+                MilestoneStatusInput { version: None }
+            } else {
+                parse_input(input)?
+            };
+            serde_json::to_value(build_interactive_release_gates(
+                store,
+                input.version.as_deref().unwrap_or("0.5"),
+            )?)?
+        }
         "forge.interactive.harness" => {
             let input: InteractiveHarnessInput = if input.is_null() {
                 InteractiveHarnessInput::default()
