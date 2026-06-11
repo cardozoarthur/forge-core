@@ -434,6 +434,7 @@ pub struct InteractivePatchWorkbenchPanel {
     pub diff_preview: InteractivePatchDiffPreview,
     pub diff_review_queue: InteractivePatchDiffReviewQueue,
     pub edit_intake: InteractivePatchEditIntake,
+    pub operation_plan: InteractivePatchOperationPlan,
     pub files: Vec<InteractivePatchWorkbenchFile>,
     pub approval_flow: InteractivePatchApprovalFlow,
     pub commands: InteractivePatchWorkbenchCommands,
@@ -521,6 +522,32 @@ pub struct InteractivePatchEditForm {
     pub required_input_ids: Vec<String>,
     pub missing_input_ids: Vec<String>,
     pub command_template: Vec<String>,
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchOperationPlan {
+    pub schema_version: String,
+    pub status: String,
+    pub current_step: String,
+    pub step_count: usize,
+    pub ready_step_count: usize,
+    pub blocked_step_count: usize,
+    pub requires_human_approval_count: usize,
+    pub steps: Vec<InteractivePatchOperationStep>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchOperationStep {
+    pub step_id: String,
+    pub title: String,
+    pub status: String,
+    pub action_id: String,
+    pub command: Vec<String>,
+    pub mutates_workflow: bool,
+    pub requires_human_approval: bool,
+    pub depends_on: Vec<String>,
     pub rationale: String,
 }
 
@@ -2181,6 +2208,9 @@ pub fn build_interactive_patch_workbench(
     let status_output = git_command(&["status", "--porcelain=v1"]);
     if !status_output.success {
         let commands = patch_workbench_commands();
+        let edit_intake = build_patch_edit_intake(&[], &commands);
+        let approval_flow = build_patch_approval_flow(true, false, "not_run", &commands);
+        let operation_plan = build_patch_operation_plan(&edit_intake, &approval_flow);
         return Ok(InteractivePatchWorkbenchPanel {
             schema_version: INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION.to_string(),
             status: "patch_workbench_unavailable".to_string(),
@@ -2195,9 +2225,10 @@ pub fn build_interactive_patch_workbench(
             diff_stat: status_output.stderr,
             diff_preview: build_patch_diff_preview(&[], false),
             diff_review_queue: build_patch_diff_review_queue(&[], false),
-            edit_intake: build_patch_edit_intake(&[], &commands),
+            edit_intake,
+            operation_plan,
             files: Vec::new(),
-            approval_flow: build_patch_approval_flow(true, false, "not_run", &commands),
+            approval_flow,
             commands,
         });
     }
@@ -2222,6 +2253,7 @@ pub fn build_interactive_patch_workbench(
     let diff_preview = build_patch_diff_preview(&files, diff_present);
     let diff_review_queue = build_patch_diff_review_queue(&files, diff_present);
     let edit_intake = build_patch_edit_intake(&files, &commands);
+    let operation_plan = build_patch_operation_plan(&edit_intake, &approval_flow);
 
     Ok(InteractivePatchWorkbenchPanel {
         schema_version: INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION.to_string(),
@@ -2238,6 +2270,7 @@ pub fn build_interactive_patch_workbench(
         diff_preview,
         diff_review_queue,
         edit_intake,
+        operation_plan,
         files,
         approval_flow,
         commands,
@@ -2899,6 +2932,116 @@ fn patch_edit_form(
         missing_input_ids,
         command_template,
         rationale: rationale.to_string(),
+    }
+}
+
+fn build_patch_operation_plan(
+    intake: &InteractivePatchEditIntake,
+    approval_flow: &InteractivePatchApprovalFlow,
+) -> InteractivePatchOperationPlan {
+    let clean = approval_flow.current_gate == "no_changes";
+    let blocked_by_diff_check = approval_flow.current_gate == "fix_diff_check";
+    let steps = intake
+        .forms
+        .iter()
+        .map(|form| patch_operation_step(form, clean, blocked_by_diff_check))
+        .collect::<Vec<_>>();
+    let ready_step_count = steps.iter().filter(|step| step.status == "ready").count();
+    let blocked_step_count = steps.iter().filter(|step| step.status == "blocked").count();
+    let requires_human_approval_count = steps
+        .iter()
+        .filter(|step| step.requires_human_approval)
+        .count();
+    let current_step = if clean {
+        "none".to_string()
+    } else {
+        steps
+            .iter()
+            .find(|step| step.status != "complete" && step.status != "idle")
+            .map(|step| step.step_id.clone())
+            .unwrap_or_else(|| "none".to_string())
+    };
+    let status = if clean {
+        "patch_operation_plan_idle"
+    } else if blocked_by_diff_check || blocked_step_count > 0 {
+        "patch_operation_plan_blocked"
+    } else if ready_step_count > 0 {
+        "patch_operation_plan_ready"
+    } else {
+        "patch_operation_plan_waiting_for_input"
+    };
+
+    InteractivePatchOperationPlan {
+        schema_version: "forge.interactive.patch_operation_plan.v1".to_string(),
+        status: status.to_string(),
+        current_step,
+        step_count: steps.len(),
+        ready_step_count,
+        blocked_step_count,
+        requires_human_approval_count,
+        steps,
+        notes: vec![
+            "Operation plan is derived from edit intake and approval flow; it does not mutate files."
+                .to_string(),
+            "Render these steps as the ordered patch lifecycle before enabling apply or restore actions."
+                .to_string(),
+        ],
+    }
+}
+
+fn patch_operation_step(
+    form: &InteractivePatchEditForm,
+    clean: bool,
+    blocked_by_diff_check: bool,
+) -> InteractivePatchOperationStep {
+    let status = if clean {
+        "idle"
+    } else if blocked_by_diff_check {
+        "blocked"
+    } else if form.ready {
+        "ready"
+    } else if !form.missing_input_ids.is_empty() {
+        "waiting_for_input"
+    } else if form.requires_human_approval {
+        "needs_human_approval"
+    } else {
+        "blocked"
+    };
+    let depends_on = patch_operation_dependencies(&form.action_id);
+
+    InteractivePatchOperationStep {
+        step_id: form.action_id.clone(),
+        title: form.title.clone(),
+        status: status.to_string(),
+        action_id: form.action_id.clone(),
+        command: form.command_template.clone(),
+        mutates_workflow: matches!(
+            form.action_id.as_str(),
+            "apply_reviewed_patch" | "propose_patch_rollback" | "restore_approved_rollback"
+        ),
+        requires_human_approval: form.requires_human_approval,
+        depends_on,
+        rationale: form.rationale.clone(),
+    }
+}
+
+fn patch_operation_dependencies(action_id: &str) -> Vec<String> {
+    match action_id {
+        "create_patch_plan" => Vec::new(),
+        "review_current_diff" => vec!["create_patch_plan".to_string()],
+        "inspect_patch_diff" => vec!["review_current_diff".to_string()],
+        "apply_reviewed_patch" => vec![
+            "create_patch_plan".to_string(),
+            "review_current_diff".to_string(),
+            "inspect_patch_diff".to_string(),
+            "human_approval_before_apply".to_string(),
+        ],
+        "propose_patch_rollback" => vec!["apply_reviewed_patch".to_string()],
+        "restore_approved_rollback" => vec![
+            "propose_patch_rollback".to_string(),
+            "rollback_restore_approval".to_string(),
+        ],
+        _ => Vec::new(),
     }
 }
 
@@ -4236,7 +4379,7 @@ pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> Strin
 
 pub fn render_interactive_patch_workbench(panel: &InteractivePatchWorkbenchPanel) -> String {
     format!(
-        "Patch workbench: {status}; clean {clean}, files {changed_path_count}, staged {staged_path_count}, unstaged {unstaged_path_count}, untracked {untracked_path_count}, diff {diff_present}, check {diff_check_status}\nRepository: {repository_path}\nFiles: {files}\nDiff preview: {diff_preview}\nReview queue: {review_queue}\nEdit intake: {edit_intake}\nApproval flow: {approval_status}; gate {approval_gate}; approval {requires_human_approval}; apply ready {apply_ready}\n",
+        "Patch workbench: {status}; clean {clean}, files {changed_path_count}, staged {staged_path_count}, unstaged {unstaged_path_count}, untracked {untracked_path_count}, diff {diff_present}, check {diff_check_status}\nRepository: {repository_path}\nFiles: {files}\nDiff preview: {diff_preview}\nReview queue: {review_queue}\nEdit intake: {edit_intake}\nOperation plan: {operation_plan}\nApproval flow: {approval_status}; gate {approval_gate}; approval {requires_human_approval}; apply ready {apply_ready}\n",
         status = panel.status,
         clean = panel.clean,
         changed_path_count = panel.changed_path_count,
@@ -4250,10 +4393,31 @@ pub fn render_interactive_patch_workbench(panel: &InteractivePatchWorkbenchPanel
         diff_preview = render_patch_diff_preview(&panel.diff_preview),
         review_queue = render_patch_diff_review_queue(&panel.diff_review_queue),
         edit_intake = render_patch_edit_intake(&panel.edit_intake),
+        operation_plan = render_patch_operation_plan(&panel.operation_plan),
         approval_status = panel.approval_flow.status,
         approval_gate = panel.approval_flow.current_gate,
         requires_human_approval = panel.approval_flow.requires_human_approval,
         apply_ready = panel.approval_flow.apply_ready,
+    )
+}
+
+fn render_patch_operation_plan(plan: &InteractivePatchOperationPlan) -> String {
+    let steps = if plan.steps.is_empty() {
+        "none".to_string()
+    } else {
+        plan.steps
+            .iter()
+            .map(|step| format!("{}:{}", step.step_id, step.status))
+            .collect::<Vec<_>>()
+            .join(" -> ")
+    };
+    format!(
+        "{status}; current {current}; steps {step_count}; approval steps {approval_count}; {steps}",
+        status = plan.status,
+        current = plan.current_step,
+        step_count = plan.step_count,
+        approval_count = plan.requires_human_approval_count,
+        steps = steps,
     )
 }
 

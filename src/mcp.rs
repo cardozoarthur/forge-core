@@ -2892,7 +2892,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.interactive.patch_workbench",
                 "Inspect Interactive Patch Workbench",
-                "Return the Forge interactive file-editing and diff-review workbench with Git status, inline diff preview, multi-file review queue, edit intake required inputs, diff checks, approval-flow gates and permission-gated patch lifecycle commands without mutating files.",
+                "Return the Forge interactive file-editing and diff-review workbench with Git status, inline diff preview, multi-file review queue, edit intake required inputs, an ordered operation plan, diff checks, approval-flow gates and permission-gated patch lifecycle commands without mutating files.",
                 object_schema(&[], &[]),
                 "forge.interactive.patch_workbench.v1",
                 &["forge", "interactive", "patch-workbench", "--output", "json"],

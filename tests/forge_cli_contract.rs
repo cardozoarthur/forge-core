@@ -37895,6 +37895,42 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         .any(|form| form["action_id"] == "apply_reviewed_patch"
             && form["requires_human_approval"] == true
             && form["ready"] == false));
+    assert_eq!(
+        json["operation_plan"]["schema_version"],
+        "forge.interactive.patch_operation_plan.v1"
+    );
+    assert_eq!(
+        json["operation_plan"]["status"],
+        "patch_operation_plan_waiting_for_input"
+    );
+    assert_eq!(json["operation_plan"]["current_step"], "create_patch_plan");
+    assert_eq!(json["operation_plan"]["step_count"], 6);
+    assert!(
+        json["operation_plan"]["requires_human_approval_count"]
+            .as_u64()
+            .unwrap()
+            >= 3
+    );
+    assert!(json["operation_plan"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|step| step["step_id"] == "create_patch_plan"
+            && step["status"] == "waiting_for_input"
+            && step["command"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("plan"))));
+    assert!(json["operation_plan"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|step| step["step_id"] == "apply_reviewed_patch"
+            && step["requires_human_approval"] == true
+            && step["depends_on"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("review_current_diff"))));
     assert!(json["files"].as_array().unwrap().iter().any(|file| {
         file["path"] == "sample.txt"
             && file["status_label"] == "modified"
@@ -37973,6 +38009,7 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("Diff preview"));
     assert!(text.contains("Review queue"));
     assert!(text.contains("Edit intake"));
+    assert!(text.contains("Operation plan"));
     assert!(text.contains("missing workflow_id, task_id, intent"));
     assert!(text.contains("+beta"));
     assert!(text.contains("sample.txt"));
@@ -38008,6 +38045,10 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         .as_str()
         .unwrap()
         .contains("required inputs"));
+    assert!(tool["description"]
+        .as_str()
+        .unwrap()
+        .contains("operation plan"));
     assert_eq!(tool["async_safe"], true);
     assert_eq!(tool["mutates_workflow"], false);
 
@@ -38051,6 +38092,14 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     assert_eq!(
         mcp_json["result"]["edit_intake"]["status"],
         "patch_edit_intake_ready"
+    );
+    assert_eq!(
+        mcp_json["result"]["operation_plan"]["schema_version"],
+        "forge.interactive.patch_operation_plan.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["operation_plan"]["current_step"],
+        "create_patch_plan"
     );
     assert_eq!(
         mcp_json["result"]["approval_flow"]["schema_version"],
@@ -39207,6 +39256,10 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("edit_intake"),
         "the packaged Forge skill should teach agents to inspect patch edit intake before presenting file-editing actions"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("operation_plan"),
+        "the packaged Forge skill should teach agents to inspect the ordered patch operation plan before presenting file-editing actions"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.permissions"),
