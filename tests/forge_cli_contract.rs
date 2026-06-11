@@ -35905,6 +35905,153 @@ fn interactive_task_board_command_and_mcp_surface_are_dedicated() {
 }
 
 #[test]
+fn interactive_workflow_dag_command_and_mcp_surface_are_dedicated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Operate a dedicated workflow DAG with human waiting state",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let task = find_task(
+        planned_json["tasks"].as_array().unwrap(),
+        "Extract requirements",
+    );
+    let task_id = task["id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interaction",
+            "create-choice",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--kind",
+            "approve_reject_refine_combine",
+            "--prompt",
+            "Choose whether the dedicated DAG can proceed",
+            "--choice",
+            "approve=Approve",
+            "--choice",
+            "refine=Refine",
+            "--timeout-seconds",
+            "3600",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let dag_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "workflow-dag",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let dag: Value = serde_json::from_slice(&dag_output).unwrap();
+    assert_eq!(dag["schema_version"], "forge.interactive.workflow_dag.v1");
+    assert_eq!(dag["status"], "workflow_dag_ready");
+    assert_eq!(dag["workflow_count"], 1);
+    assert!(dag["node_count"].as_u64().unwrap() >= 1);
+    assert!(dag["edge_count"].as_u64().unwrap() >= 1);
+    let dag_workflow = dag["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["workflow_id"] == workflow_id)
+        .unwrap();
+    assert!(dag_workflow["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["task_id"] == task_id
+            && node["human_required"] == true
+            && node["human_interaction_state"] == "pending"));
+    assert!(dag_workflow["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|edge| edge["edge_kind"] == "dependency" && edge["dependency_status"].is_string()));
+    assert!(dag_workflow["commands"]["inspect"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("inspect")));
+
+    let dag_text = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "workflow-dag",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(dag_text).unwrap();
+    assert!(text.contains("Workflow DAG"));
+    assert!(text.contains(workflow_id));
+    assert!(text.contains("human waits"));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.workflow_dag");
+    assert_eq!(tool["output_schema"], "forge.interactive.workflow_dag.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.workflow_dag"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.workflow_dag.v1"
+    );
+    assert_eq!(mcp_json["result"]["workflow_count"], 1);
+}
+
+#[test]
 fn interactive_structured_logs_command_and_mcp_surface_are_dedicated() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -36880,6 +37027,14 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.task_board"),
         "the packaged Forge skill should expose the dedicated interactive task board through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.workflow_dag"),
+        "the packaged Forge skill should expose the dedicated workflow DAG surface through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge interactive workflow-dag"),
+        "the packaged Forge skill should include the workflow DAG CLI command"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.structured_logs"),

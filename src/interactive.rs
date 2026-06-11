@@ -813,6 +813,14 @@ pub fn build_interactive_task_board(store: &ForgeStore) -> Result<InteractiveTas
     build_task_board_panel(store, &workflows.workflows)
 }
 
+pub fn build_interactive_workflow_dag(store: &ForgeStore) -> Result<InteractiveWorkflowDagPanel> {
+    let workflows = list_workflows_with_filters(
+        store,
+        WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
+    )?;
+    build_workflow_dag_panel(store, &workflows.workflows)
+}
+
 pub fn build_interactive_structured_logs(
     store: &ForgeStore,
 ) -> Result<InteractiveStructuredLogsPanel> {
@@ -1205,6 +1213,21 @@ pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> Strin
     )
 }
 
+pub fn render_interactive_workflow_dag(panel: &InteractiveWorkflowDagPanel) -> String {
+    format!(
+        "Workflow DAG: {status}; workflows {workflow_count}, nodes {node_count}, edges {edge_count}, running {running}, blocked {blocked}, waits {waits}, human waits {human_waits}\nWorkflows: {workflows}\n",
+        status = panel.status,
+        workflow_count = panel.workflow_count,
+        node_count = panel.node_count,
+        edge_count = panel.edge_count,
+        running = panel.running_node_count,
+        blocked = panel.blocked_node_count,
+        waits = panel.wait_node_count,
+        human_waits = panel.human_wait_count,
+        workflows = render_workflow_dag_summary(panel),
+    )
+}
+
 pub fn render_interactive_structured_logs(panel: &InteractiveStructuredLogsPanel) -> String {
     let next_cursor = panel
         .next_cursor
@@ -1498,7 +1521,7 @@ fn build_ui_composition_panel(
                     "graph_renderer",
                     "detailed",
                     "full",
-                    vec!["forge interactive home --output json".to_string()],
+                    vec!["forge interactive workflow-dag --output json".to_string()],
                 ),
                 core_ui_widget(
                     "task_board_panel",
@@ -1542,7 +1565,7 @@ fn build_ui_composition_panel(
                     "log_renderer",
                     "standard",
                     "half",
-                    vec!["forge interactive home --output json".to_string()],
+                    vec!["forge interactive structured-logs --output json".to_string()],
                 ),
                 core_ui_widget(
                     "cost_panel",
