@@ -4829,7 +4829,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.harness.exec",
                 "Execute Forge Harness Receipt",
-                "Return a dry-run or explicitly guarded execution receipt for a Forge-first brain CLI invocation, including executable resolution, env overlay and bounded output hashes.",
+                "Return a dry-run or explicitly guarded execution receipt for a Forge-first brain CLI invocation, including executable resolution, env overlay, bounded output hashes and workflow timeline event evidence when lineage is present.",
                 object_schema(&[
                     ("executor", "string", "codex|claude|gemini|opencode"),
                     ("command", "array", "command argv to launch under the harness"),

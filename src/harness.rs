@@ -1,4 +1,5 @@
 use crate::artifact::hex_sha256;
+use crate::intent::OperatingContextSpec;
 use crate::storage::{ForgeStore, HeadroomBlobWrite, StoredHeadroomBlobRecord};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -12,6 +13,7 @@ pub const TOKEN_HEADROOM_SCHEMA_VERSION: &str = "forge.harness.token_headroom.v1
 pub const CLI_WRAPPER_PLAN_SCHEMA_VERSION: &str = "forge.harness.cli_wrapper_plan.v1";
 pub const HEADROOM_RETRIEVAL_SCHEMA_VERSION: &str = "forge.harness.headroom_retrieval.v1";
 pub const CLI_HARNESS_EXEC_SCHEMA_VERSION: &str = "forge.harness.exec_receipt.v1";
+pub const CLI_HARNESS_EXEC_EVENT_SCHEMA_VERSION: &str = "forge.harness.exec_event.v1";
 pub const CLI_SHIM_INSTALL_SCHEMA_VERSION: &str = "forge.harness.shim_install.v1";
 pub const CLI_SHIM_STATUS_SCHEMA_VERSION: &str = "forge.harness.shim_status.v1";
 const CLI_SHIM_MARKER: &str = "# forge-harness-shim:v1";
@@ -93,6 +95,9 @@ pub struct CliHarnessExecReceipt {
     pub output_headroom_enabled: bool,
     pub stdout_headroom: Option<TokenHeadroomReport>,
     pub stderr_headroom: Option<TokenHeadroomReport>,
+    pub event_recorded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub global_event_id: Option<i64>,
     pub notes: Vec<String>,
 }
 
@@ -462,7 +467,7 @@ pub fn build_cli_wrapper_plan(
         harness_checks: vec![
             "resolve real CLI before PATH shim precedence".to_string(),
             "prepend Forge shim directory only for the child process".to_string(),
-            "record argv, cwd, workflow/run lineage and token-headroom metrics".to_string(),
+            "record argv, cwd, workflow/run lineage, token-headroom metrics and timeline event evidence".to_string(),
             "persist reversible headroom blobs in the Forge store when compression is applied".to_string(),
             "fall back to observe_only when Forge context is unavailable".to_string(),
         ],
@@ -757,11 +762,11 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         "resolved executable is recorded before running the child process".to_string(),
         "Forge env overlay is applied only to the child process".to_string(),
         "stdout and stderr are summarized by bytes, sha256 and bounded excerpts".to_string(),
-        "workflow/run lineage and token-headroom settings stay explicit in the receipt".to_string(),
+        "workflow/run lineage, token-headroom settings and harness events stay explicit in the receipt".to_string(),
     ];
 
     if dry_run {
-        return Ok(exec_receipt(CliExecReceiptInput {
+        let mut receipt = exec_receipt(CliExecReceiptInput {
             wrapper_plan,
             command,
             command_sha256,
@@ -786,10 +791,12 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             output_headroom_enabled: token_headroom,
             stdout_headroom: None,
             stderr_headroom: None,
-        }));
+        });
+        record_harness_exec_event_if_possible(store, workflow_id, run_id, &mut receipt)?;
+        return Ok(receipt);
     }
     if !allow_exec {
-        return Ok(exec_receipt(CliExecReceiptInput {
+        let mut receipt = exec_receipt(CliExecReceiptInput {
             wrapper_plan,
             command,
             command_sha256,
@@ -814,10 +821,12 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             output_headroom_enabled: token_headroom,
             stdout_headroom: None,
             stderr_headroom: None,
-        }));
+        });
+        record_harness_exec_event_if_possible(store, workflow_id, run_id, &mut receipt)?;
+        return Ok(receipt);
     }
     let Some(executable) = resolved_executable.clone() else {
-        return Ok(exec_receipt(CliExecReceiptInput {
+        let mut receipt = exec_receipt(CliExecReceiptInput {
             wrapper_plan,
             command,
             command_sha256,
@@ -842,7 +851,9 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             output_headroom_enabled: token_headroom,
             stdout_headroom: None,
             stderr_headroom: None,
-        }));
+        });
+        record_harness_exec_event_if_possible(store, workflow_id, run_id, &mut receipt)?;
+        return Ok(receipt);
     };
 
     let mut child = Command::new(&executable);
@@ -873,7 +884,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         context_budget,
         token_headroom,
     )?;
-    Ok(exec_receipt(CliExecReceiptInput {
+    let mut receipt = exec_receipt(CliExecReceiptInput {
         wrapper_plan,
         command,
         command_sha256,
@@ -903,7 +914,76 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         output_headroom_enabled: token_headroom,
         stdout_headroom,
         stderr_headroom,
-    }))
+    });
+    record_harness_exec_event_if_possible(store, workflow_id, run_id, &mut receipt)?;
+    Ok(receipt)
+}
+
+fn record_harness_exec_event_if_possible(
+    store: Option<&ForgeStore>,
+    workflow_id: Option<&str>,
+    run_id: Option<&str>,
+    receipt: &mut CliHarnessExecReceipt,
+) -> Result<()> {
+    let Some(store) = store else {
+        return Ok(());
+    };
+    if workflow_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+        && run_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+    {
+        return Ok(());
+    }
+    let data = json!({
+        "schema_version": CLI_HARNESS_EXEC_EVENT_SCHEMA_VERSION,
+        "status": harness_event_status(&receipt.status),
+        "run_id": run_id,
+        "executor": receipt.executor,
+        "command_sha256": receipt.command_sha256,
+        "receipt": receipt,
+    });
+    let source_id = format!(
+        "harness_{}",
+        &hex_sha256(serde_json::to_string(&data)?.as_bytes())[..16]
+    );
+    let tenant_context = harness_tenant_context(store, workflow_id)?;
+    let global_event_id = store.record_global_event(
+        "forge_harness",
+        &source_id,
+        workflow_id,
+        &receipt.status,
+        "forge_harness",
+        harness_event_status(&receipt.status),
+        &data,
+        &tenant_context,
+    )?;
+    receipt.event_recorded = true;
+    receipt.global_event_id = Some(global_event_id);
+    Ok(())
+}
+
+fn harness_tenant_context(store: &ForgeStore, workflow_id: Option<&str>) -> Result<Value> {
+    if let Some(workflow_id) = workflow_id {
+        if let Ok(workflow) = store.load_workflow(workflow_id) {
+            return Ok(serde_json::to_value(&workflow.intent.operating_context)?);
+        }
+    }
+    Ok(serde_json::to_value(OperatingContextSpec::default())?)
+}
+
+fn harness_event_status(status: &str) -> &'static str {
+    match status {
+        "harness_exec_completed" => "completed",
+        "harness_exec_failed" => "failed",
+        "harness_exec_dry_run" => "planned",
+        status if status.starts_with("harness_exec_blocked") => "blocked",
+        _ => "recorded",
+    }
 }
 
 struct CliShimScriptOptions<'a> {
@@ -1392,6 +1472,8 @@ fn exec_receipt(input: CliExecReceiptInput) -> CliHarnessExecReceipt {
         output_headroom_enabled: input.output_headroom_enabled,
         stdout_headroom: input.stdout_headroom,
         stderr_headroom: input.stderr_headroom,
+        event_recorded: false,
+        global_event_id: None,
         notes: vec![
             "Harness exec is a Forge-owned receipt for brain CLI invocation, not process interception.".to_string(),
             "Use dry-run receipts to validate wrapper shape before opting into guarded execution.".to_string(),

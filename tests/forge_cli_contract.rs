@@ -320,6 +320,8 @@ fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environme
     );
     assert_eq!(mcp_exec["result"]["status"], "harness_exec_dry_run");
     assert_eq!(mcp_exec["result"]["executed"], false);
+    assert_eq!(mcp_exec["result"]["event_recorded"], true);
+    assert!(mcp_exec["result"]["global_event_id"].as_i64().unwrap() > 0);
 }
 
 #[cfg(unix)]
@@ -376,6 +378,8 @@ done
     assert_eq!(receipt["schema_version"], "forge.harness.exec_receipt.v1");
     assert_eq!(receipt["status"], "harness_exec_completed");
     assert_eq!(receipt["executed"], true);
+    assert_eq!(receipt["event_recorded"], true);
+    assert!(receipt["global_event_id"].as_i64().unwrap() > 0);
     assert_eq!(receipt["output_headroom_enabled"], true);
     assert_eq!(
         receipt["stdout_headroom"]["schema_version"],
@@ -429,6 +433,42 @@ done
         .as_str()
         .unwrap()
         .contains("line 80: error: failed to process request 80"));
+
+    let timeline_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "timeline",
+            "--workflow",
+            "wf_noisy",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let timeline: Value = serde_json::from_slice(&timeline_output).unwrap();
+    let harness_event = timeline["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["kind"] == "harness_exec_completed")
+        .unwrap();
+    assert_eq!(harness_event["source"], "forge_harness");
+    assert_eq!(harness_event["data"]["status"], "completed");
+    assert_eq!(harness_event["data"]["global_event"]["status"], "completed");
+    assert_eq!(harness_event["correlation"]["run_id"], "run_noisy");
+    assert_eq!(
+        harness_event["data"]["receipt"]["schema_version"],
+        "forge.harness.exec_receipt.v1"
+    );
+    assert_eq!(
+        harness_event["data"]["receipt"]["stdout_headroom"]["retrieval_ref"],
+        receipt["stdout_headroom"]["retrieval_ref"]
+    );
 }
 
 #[cfg(unix)]
@@ -519,6 +559,8 @@ printf 'argc:%s env:%s args:%s\n' "$#" "$FORGE_HARNESS" "$*"
     let shim_receipt: Value = serde_json::from_slice(&shim_output.stdout).unwrap();
     assert_eq!(shim_receipt["status"], "harness_exec_completed");
     assert_eq!(shim_receipt["executed"], true);
+    assert_eq!(shim_receipt["event_recorded"], true);
+    assert!(shim_receipt["global_event_id"].as_i64().unwrap() > 0);
     assert_eq!(shim_receipt["command"][0], real_cmd.to_str().unwrap());
     assert_eq!(shim_receipt["command"][1], "alpha");
     assert_eq!(shim_receipt["command"][2], "beta");
