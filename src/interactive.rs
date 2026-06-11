@@ -24,6 +24,7 @@ use crate::storage::ForgeStore;
 use crate::workflow::{record_product_decision, ProductDecisionInput};
 use anyhow::Result;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::env;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -31,6 +32,7 @@ use std::process::Command;
 
 const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
 const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_board.v1";
+const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
 const SLASH_COMMANDS_SCHEMA_VERSION: &str = "forge.interactive.slash_commands.v1";
 const INTERACTIVE_ROUTE_SCHEMA_VERSION: &str = "forge.interactive.route.v1";
 
@@ -72,6 +74,7 @@ pub struct InteractiveDashboard {
     pub estimated_costs: String,
     pub scheduler_worker_status: String,
     pub workflow_focus: Vec<InteractiveWorkflowCard>,
+    pub dag_panel: InteractiveWorkflowDagPanel,
     pub task_board_panel: InteractiveTaskBoardPanel,
     pub schedule_panel: InteractiveSchedulePanel,
     pub event_panel: InteractiveEventPanel,
@@ -94,6 +97,63 @@ pub struct InteractiveWorkflowCard {
     pub quality_action: String,
     pub tasks: String,
     pub schedule: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowDagPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub workflow_count: usize,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub running_node_count: usize,
+    pub blocked_node_count: usize,
+    pub wait_node_count: usize,
+    pub human_wait_count: usize,
+    pub workflows: Vec<InteractiveWorkflowDag>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowDag {
+    pub workflow_id: String,
+    pub lifecycle_state: String,
+    pub goal: String,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub ready_root_count: usize,
+    pub blocked_node_count: usize,
+    pub human_wait_count: usize,
+    pub nodes: Vec<InteractiveWorkflowDagNode>,
+    pub edges: Vec<InteractiveWorkflowDagEdge>,
+    pub commands: InteractiveWorkflowDagCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowDagNode {
+    pub task_id: String,
+    pub title: String,
+    pub status: String,
+    pub executor: String,
+    pub dependency_count: usize,
+    pub dependent_count: usize,
+    pub ready_for_execution: bool,
+    pub human_required: bool,
+    pub human_interaction_state: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowDagEdge {
+    pub from_task_id: String,
+    pub to_task_id: String,
+    pub edge_kind: String,
+    pub dependency_status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowDagCommands {
+    pub inspect: Vec<String>,
+    pub task_board: Vec<String>,
+    pub validate: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -464,6 +524,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             ),
         })
         .collect::<Vec<_>>();
+    let dag_panel = build_workflow_dag_panel(store, &workflows.workflows)?;
     let task_board_panel = build_task_board_panel(store, &workflows.workflows)?;
     let modifier_lane = load_modifier_lane(store)?;
     let digital_twin_panel = build_operational_digital_twin(store, &modifier_lane)?;
@@ -580,6 +641,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 .to_string(),
             scheduler_worker_status,
             workflow_focus,
+            dag_panel,
             task_board_panel,
             schedule_panel,
             event_panel,
@@ -820,6 +882,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
             .join(" | ")
     };
     let task_board_lanes = render_task_board_lane_summary(&d.task_board_panel);
+    let dag_workflows = render_workflow_dag_summary(&d.dag_panel);
     let digital_twin_workflows = if d.digital_twin_panel.workflows.is_empty() {
         "none".to_string()
     } else {
@@ -877,6 +940,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Scheduler worker status: {scheduler_worker_status}\n\
          Workflow focus: {workflow_focus}\n\
          Operational digital twin: {digital_twin_status}; workflows {digital_twin_workflows_count}, happening {digital_twin_happening}, done {digital_twin_done}, remaining {digital_twin_remaining}, validated {digital_twin_validated}, rejected {digital_twin_rejected}, approvals {digital_twin_approvals}; {digital_twin_workflows}\n\
+         DAG panel: {dag_status}; workflows {dag_workflows_count}, nodes {dag_nodes}, edges {dag_edges}, running {dag_running}, blocked {dag_blocked}, waits {dag_waits}, human waits {dag_human_waits}; {dag_workflows}\n\
          Task board: {task_board_status}; workflows {task_board_workflows}, tasks {task_board_tasks}, ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, checkpoints {task_board_checkpoints}, artifacts {task_board_artifacts}; lanes {task_board_lanes}\n\
          Schedule panel: {schedule_status}; due {schedule_due}, runnable {schedule_runnable}, cron {schedule_cron}, wait_until {schedule_wait_until}, next {schedule_next}\n\
          Event timeline: {event_status}; visible {event_visible}/{event_total}; latest {latest_events}\n\
@@ -925,6 +989,15 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         digital_twin_rejected = d.digital_twin_panel.global_counts.rejected_count,
         digital_twin_approvals = d.digital_twin_panel.global_counts.awaiting_approval_count,
         digital_twin_workflows = digital_twin_workflows,
+        dag_status = d.dag_panel.status,
+        dag_workflows_count = d.dag_panel.workflow_count,
+        dag_nodes = d.dag_panel.node_count,
+        dag_edges = d.dag_panel.edge_count,
+        dag_running = d.dag_panel.running_node_count,
+        dag_blocked = d.dag_panel.blocked_node_count,
+        dag_waits = d.dag_panel.wait_node_count,
+        dag_human_waits = d.dag_panel.human_wait_count,
+        dag_workflows = dag_workflows,
         task_board_status = d.task_board_panel.status,
         task_board_workflows = d.task_board_panel.workflow_count,
         task_board_tasks = d.task_board_panel.task_count,
@@ -1006,6 +1079,175 @@ fn render_task_board_lane_summary(panel: &InteractiveTaskBoardPanel) -> String {
         })
         .collect::<Vec<_>>()
         .join(" | ")
+}
+
+fn render_workflow_dag_summary(panel: &InteractiveWorkflowDagPanel) -> String {
+    if panel.workflows.is_empty() {
+        return "none".to_string();
+    }
+
+    panel
+        .workflows
+        .iter()
+        .take(5)
+        .map(|workflow| {
+            format!(
+                "{} [{}] nodes {}, edges {}, roots {}, blocked {}, human waits {}",
+                workflow.workflow_id,
+                workflow.lifecycle_state,
+                workflow.node_count,
+                workflow.edge_count,
+                workflow.ready_root_count,
+                workflow.blocked_node_count,
+                workflow.human_wait_count
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn build_workflow_dag_panel(
+    store: &ForgeStore,
+    rows: &[WorkflowRegistryRow],
+) -> Result<InteractiveWorkflowDagPanel> {
+    let mut node_count = 0;
+    let mut edge_count = 0;
+    let mut running_node_count = 0;
+    let mut blocked_node_count = 0;
+    let mut wait_node_count = 0;
+    let mut human_wait_count = 0;
+    let mut workflows = Vec::new();
+
+    for row in rows {
+        let workflow = store.load_workflow(&row.workflow_id)?;
+        let dag = build_workflow_dag(row, &workflow.tasks);
+        node_count += dag.node_count;
+        edge_count += dag.edge_count;
+        running_node_count += dag
+            .nodes
+            .iter()
+            .filter(|node| node.status == "running")
+            .count();
+        blocked_node_count += dag.blocked_node_count;
+        wait_node_count += dag
+            .nodes
+            .iter()
+            .filter(|node| node.executor == "wait")
+            .count();
+        human_wait_count += dag.human_wait_count;
+
+        if workflows.len() < 12 {
+            workflows.push(dag);
+        }
+    }
+
+    Ok(InteractiveWorkflowDagPanel {
+        schema_version: INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION.to_string(),
+        status: "workflow_dag_ready".to_string(),
+        workflow_count: rows.len(),
+        node_count,
+        edge_count,
+        running_node_count,
+        blocked_node_count,
+        wait_node_count,
+        human_wait_count,
+        workflows,
+    })
+}
+
+fn build_workflow_dag(row: &WorkflowRegistryRow, tasks: &[AtomicTask]) -> InteractiveWorkflowDag {
+    let mut dependent_counts = BTreeMap::<String, usize>::new();
+    let task_statuses = tasks
+        .iter()
+        .map(|task| (task.id.clone(), task_status_label(&task.status).to_string()))
+        .collect::<BTreeMap<_, _>>();
+    let mut edges = Vec::new();
+
+    for task in tasks {
+        for dependency in &task.dependencies {
+            *dependent_counts.entry(dependency.clone()).or_default() += 1;
+            edges.push(InteractiveWorkflowDagEdge {
+                from_task_id: dependency.clone(),
+                to_task_id: task.id.clone(),
+                edge_kind: "dependency".to_string(),
+                dependency_status: task_statuses
+                    .get(dependency)
+                    .cloned()
+                    .unwrap_or_else(|| "missing".to_string()),
+            });
+        }
+    }
+
+    let completed_tasks = tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::Completed)
+        .map(|task| task.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let nodes = tasks
+        .iter()
+        .map(|task| {
+            let human_interaction_state = task
+                .human_interaction
+                .as_ref()
+                .map(|interaction| interaction.state.clone())
+                .unwrap_or_else(|| "none".to_string());
+            let human_required = task.human_required
+                || task
+                    .human_interaction
+                    .as_ref()
+                    .is_some_and(|interaction| interaction.required);
+            let ready_for_execution = task.status == TaskStatus::Pending
+                && task
+                    .dependencies
+                    .iter()
+                    .all(|dependency| completed_tasks.contains(dependency.as_str()));
+
+            InteractiveWorkflowDagNode {
+                task_id: task.id.clone(),
+                title: task.title.clone(),
+                status: task_status_label(&task.status).to_string(),
+                executor: executor_kind_label(&task.executor).to_string(),
+                dependency_count: task.dependencies.len(),
+                dependent_count: dependent_counts.get(&task.id).copied().unwrap_or(0),
+                ready_for_execution,
+                human_required,
+                human_interaction_state,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let ready_root_count = nodes
+        .iter()
+        .filter(|node| node.ready_for_execution && node.dependency_count == 0)
+        .count();
+    let blocked_node_count = nodes.iter().filter(|node| node.status == "blocked").count();
+    let human_wait_count = nodes
+        .iter()
+        .filter(|node| node.human_required && node.human_interaction_state == "pending")
+        .count();
+    let edge_count = edges.len();
+
+    InteractiveWorkflowDag {
+        workflow_id: row.workflow_id.clone(),
+        lifecycle_state: row.lifecycle_state.clone(),
+        goal: truncate_display(&row.current_goal, 96),
+        node_count: nodes.len(),
+        edge_count,
+        ready_root_count,
+        blocked_node_count,
+        human_wait_count,
+        nodes,
+        edges,
+        commands: InteractiveWorkflowDagCommands {
+            inspect: vec!["inspect".to_string(), row.workflow_id.clone()],
+            task_board: vec!["interactive".to_string(), "task-board".to_string()],
+            validate: vec![
+                "validate".to_string(),
+                "--workflow".to_string(),
+                row.workflow_id.clone(),
+            ],
+        },
+    }
 }
 
 fn build_task_board_panel(

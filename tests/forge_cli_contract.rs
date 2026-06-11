@@ -35597,6 +35597,35 @@ fn interactive_home_exposes_task_board_handoffs_checkpoints_and_artifacts() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("inspect")));
+    let dag_panel = &home["dashboard"]["dag_panel"];
+    assert_eq!(
+        dag_panel["schema_version"],
+        "forge.interactive.workflow_dag.v1"
+    );
+    assert_eq!(dag_panel["status"], "workflow_dag_ready");
+    assert!(dag_panel["workflow_count"].as_u64().unwrap() >= 1);
+    assert!(dag_panel["node_count"].as_u64().unwrap() >= 1);
+    assert!(dag_panel["edge_count"].as_u64().unwrap() >= 1);
+    let dag_workflow = dag_panel["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["workflow_id"] == workflow_id)
+        .unwrap();
+    assert!(dag_workflow["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["task_id"] == blocked_task_id));
+    assert!(dag_workflow["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|edge| edge["to_task_id"] == checkpoint_task_id));
+    assert!(dag_workflow["commands"]["inspect"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("inspect")));
 
     let lane = task_board["lanes"]
         .as_array()
@@ -35622,6 +35651,7 @@ fn interactive_home_exposes_task_board_handoffs_checkpoints_and_artifacts() {
     let text = String::from_utf8(text_home).unwrap();
     assert!(text.contains("Operational digital twin"));
     assert!(text.contains("pending_human_or_modifier_approval"));
+    assert!(text.contains("DAG panel"));
     assert!(text.contains("Task board"));
     assert!(text.contains("human waits 1"));
     assert!(text.contains("checkpoints 1"));
