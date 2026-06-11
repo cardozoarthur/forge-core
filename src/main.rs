@@ -33,7 +33,7 @@ use forge_core::cluster::{
 use forge_core::context::build_context_package_with_checkpoint;
 use forge_core::cost::{
     apply_cost_ledger_retention, build_cost_ledger_for_context,
-    build_cost_ledger_history_for_context, maintain_cost_ledger,
+    build_cost_ledger_history_for_context, maintain_cost_ledger_for_context,
     materialize_cost_ledger_incremental, materialize_cost_ledger_index, run_cost_ledger_daemon,
 };
 use forge_core::credential_vault::{
@@ -445,6 +445,8 @@ enum CostCommands {
         limit: Option<usize>,
         #[arg(long = "retention-days")]
         retention_days: Option<i64>,
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -5248,10 +5250,12 @@ fn run() -> Result<i32> {
                 group_by,
                 limit,
                 retention_days,
+                project_root,
                 output,
             } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = maintain_cost_ledger(
+                let operating_context = load_project_operating_context(&project_root)?;
+                let report = maintain_cost_ledger_for_context(
                     &store,
                     workflow.as_deref(),
                     organization.as_deref(),
@@ -5263,6 +5267,7 @@ fn run() -> Result<i32> {
                     Some(&group_by),
                     limit,
                     retention_days,
+                    &operating_context,
                 )?;
                 print_response(output, &report)?;
                 Ok(0)

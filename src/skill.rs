@@ -120,7 +120,7 @@ forge improve apply-event-policy --workflow <workflow-id> --recommendation <reco
 forge improve benchmark-event-policy --workflow <workflow-id> --policy prefer_deterministic_node --output json
 forge improve promote-event-policy --workflow <workflow-id> --policy prefer_deterministic_node --approved-by <operator> --output json
 forge cost incremental --after-sequence <global-event-id> --output json
-forge cost maintain --workflow <workflow-id> --bucket day --group-by source_kind --retention-days 31 --output json
+forge cost maintain --project-root . --workflow <workflow-id> --bucket day --group-by source_kind --retention-days 31 --output json
 forge cost daemon --workflow <workflow-id> --bucket day --group-by workflow --max-cycles 2 --interval-seconds 300 --retention-days 31 --output json
 forge cost retention --organization <organization-id> --retention-days 31 --apply --approved-by <operator> --reason "Validated retention window." --confirm --output json
 forge mcp tools --output json

@@ -20946,6 +20946,227 @@ tenant_policy_mode: enforce
 }
 
 #[test]
+fn cost_maintain_enforces_project_tenant_policy_for_global_rollups() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let visible_root = temp.path().join("visible");
+    let hidden_root = temp.path().join("hidden");
+    fs::create_dir_all(visible_root.join(".forge")).unwrap();
+    fs::create_dir_all(hidden_root.join(".forge")).unwrap();
+    fs::write(
+        visible_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: cost-maintain-org
+  label: Cost Maintain Org
+brand:
+  scope: brand
+  id: cost-maintain-brand
+  label: Cost Maintain Brand
+product:
+  scope: product
+  id: cost-maintain-product
+  label: Cost Maintain Product
+user:
+  scope: user
+  id: cost-maintain-user
+  label: Cost Maintain User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+    fs::write(
+        hidden_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: other-cost-maintain-org
+  label: Other Cost Maintain Org
+brand:
+  scope: brand
+  id: other-cost-maintain-brand
+  label: Other Cost Maintain Brand
+product:
+  scope: product
+  id: other-cost-maintain-product
+  label: Other Cost Maintain Product
+user:
+  scope: user
+  id: other-cost-maintain-user
+  label: Other Cost Maintain User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+
+    for project_root in [&visible_root, &hidden_root] {
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "identity",
+                "sync",
+                "--project-root",
+                project_root.to_str().unwrap(),
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Visible tenant cost maintenance workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    forge()
+        .current_dir(&hidden_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Hidden tenant cost maintenance workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let maintenance_output = forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "maintain",
+            "--bucket",
+            "day",
+            "--group-by",
+            "tenant",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let maintenance_json: Value = serde_json::from_slice(&maintenance_output).unwrap();
+    assert_eq!(
+        maintenance_json["filters"]["organization_id"],
+        "cost-maintain-org"
+    );
+    assert_eq!(maintenance_json["summary"]["workflow_count"], 1);
+    assert_eq!(
+        maintenance_json["materialization"]["filters"]["organization_id"],
+        "cost-maintain-org"
+    );
+    assert_eq!(
+        maintenance_json["history"]["filters"]["organization_id"],
+        "cost-maintain-org"
+    );
+    assert_eq!(
+        maintenance_json["history"]["buckets"][0]["group_id"],
+        "cost-maintain-org|cost-maintain-brand|cost-maintain-product"
+    );
+
+    let mcp_maintenance_input = serde_json::json!({
+        "project_root": visible_root.display().to_string(),
+        "bucket": "day",
+        "group_by": "tenant"
+    });
+    let mcp_maintenance_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.cost.maintain",
+            "--input",
+            &mcp_maintenance_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_maintenance_json: Value = serde_json::from_slice(&mcp_maintenance_output).unwrap();
+    assert_eq!(
+        mcp_maintenance_json["result"]["filters"]["organization_id"],
+        "cost-maintain-org"
+    );
+    assert_eq!(
+        mcp_maintenance_json["result"]["summary"]["workflow_count"],
+        1
+    );
+
+    forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "membership-update",
+            "--subject",
+            "cost-maintain-user",
+            "--organization",
+            "cost-maintain-org",
+            "--brand",
+            "cost-maintain-brand",
+            "--product",
+            "cost-maintain-product",
+            "--deny",
+            "context:read",
+            "--source",
+            "test-cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let denied_output = forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "maintain",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let denied_stderr = String::from_utf8(denied_output).unwrap();
+    assert!(denied_stderr.contains("multi-tenant enforcement blocked cost ledger maintenance"));
+    assert!(denied_stderr.contains("context:read"));
+}
+
+#[test]
 fn task_validate_response_rejects_completed_executor_response_without_passing_evidence() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

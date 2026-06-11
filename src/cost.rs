@@ -714,6 +714,67 @@ pub fn maintain_cost_ledger(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn maintain_cost_ledger_for_context(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    source_kind: Option<&str>,
+    addon_id: Option<&str>,
+    bucket: Option<&str>,
+    group_by: Option<&str>,
+    limit: Option<usize>,
+    retention_days: Option<i64>,
+    operating_context: &OperatingContextSpec,
+) -> Result<CostLedgerMaintenanceReport> {
+    if operating_context.tenant_policy_mode != "enforce" {
+        return maintain_cost_ledger(
+            store,
+            workflow_id,
+            organization_id,
+            brand_id,
+            product_id,
+            source_kind,
+            addon_id,
+            bucket,
+            group_by,
+            limit,
+            retention_days,
+        );
+    }
+    let operation = "cost ledger maintenance list";
+    ensure_operating_context_policy(store, operating_context, operation)?;
+    let organization_id = enforce_cost_tenant_filter(
+        operation,
+        "organization",
+        organization_id,
+        &operating_context.organization.id,
+    )?;
+    let brand_id =
+        enforce_cost_tenant_filter(operation, "brand", brand_id, &operating_context.brand.id)?;
+    let product_id = enforce_cost_tenant_filter(
+        operation,
+        "product",
+        product_id,
+        &operating_context.product.id,
+    )?;
+    maintain_cost_ledger(
+        store,
+        workflow_id,
+        Some(&organization_id),
+        Some(&brand_id),
+        Some(&product_id),
+        source_kind,
+        addon_id,
+        bucket,
+        group_by,
+        limit,
+        retention_days,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn run_cost_ledger_daemon(
     store: &ForgeStore,
     workflow_id: Option<&str>,
