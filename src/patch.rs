@@ -264,6 +264,7 @@ fn diff_review_commands(paths: &[String]) -> Vec<String> {
 const PATCH_REVIEW_SCHEMA_VERSION: &str = "forge.patch_review.v1";
 const PATCH_APPLY_SCHEMA_VERSION: &str = "forge.patch_apply.v1";
 const PATCH_REVERT_SCHEMA_VERSION: &str = "forge.patch_revert.v1";
+const PATCH_RESTORE_SCHEMA_VERSION: &str = "forge.patch_restore.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PatchReviewReport {
@@ -568,6 +569,29 @@ pub struct PatchRevertReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PatchRestoreReport {
+    pub schema_version: String,
+    pub status: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub origin: String,
+    pub restore_executed: bool,
+    pub requires_human_approval: bool,
+    pub approved_by: String,
+    pub confirm_restore: bool,
+    pub external_resources_mutated: bool,
+    pub revert_artifact: PatchApplyArtifactRef,
+    pub apply_artifact: PatchApplyArtifactRef,
+    pub restored_paths: Vec<String>,
+    pub pre_restore_snapshots: Vec<PatchFileSnapshot>,
+    pub post_restore_snapshots: Vec<PatchFileSnapshot>,
+    pub restore_command: PatchReviewCommandResult,
+    pub validation: PatchValidationSummary,
+    pub artifact: Option<PatchApplyArtifactRef>,
+    pub safety_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PatchApplyArtifactRef {
     pub kind: String,
     pub path: String,
@@ -792,6 +816,156 @@ pub fn build_patch_revert(
         artifact: Some(PatchApplyArtifactRef::from_artifact(&attached)),
         ..report
     })
+}
+
+pub fn build_patch_restore(
+    store: &ForgeStore,
+    workflow_id: &str,
+    task_id: &str,
+    revert_artifact_path: &str,
+    approved_by: &str,
+    confirm_restore: bool,
+    origin: &str,
+) -> Result<PatchRestoreReport> {
+    ensure_workflow_policy(store, workflow_id, "patch restore")?;
+    let approved_by = approved_by.trim();
+    if approved_by.is_empty() {
+        bail!("--approved-by is required for patch restore");
+    }
+    if !confirm_restore {
+        bail!("--confirm-restore is required before Forge restores files");
+    }
+
+    let workflow = store.load_workflow(workflow_id)?;
+    if !workflow.tasks.iter().any(|task| task.id == task_id) {
+        bail!("task {task_id} not found in workflow {workflow_id}");
+    }
+
+    let revert_bytes = fs::read(revert_artifact_path)
+        .with_context(|| format!("failed to read revert artifact: {revert_artifact_path}"))?;
+    let revert_artifact_ref = PatchApplyArtifactRef {
+        kind: "patch_revert".to_string(),
+        path: revert_artifact_path.to_string(),
+        sha256: hex_sha256(&revert_bytes),
+        bytes: revert_bytes.len() as u64,
+    };
+    let revert_report: serde_json::Value = serde_json::from_slice(&revert_bytes)?;
+    ensure_artifact_matches_workflow_task(&revert_report, workflow_id, task_id, "revert")?;
+    if revert_report["restore_executed"].as_bool().unwrap_or(false) {
+        bail!("revert artifact already reports restore_executed=true");
+    }
+
+    let apply_artifact_path = revert_report["apply_artifact"]["path"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("revert artifact is missing apply_artifact.path"))?;
+    let apply_artifact_path = resolve_artifact_path(&store.base_dir(), apply_artifact_path);
+    let apply_bytes = fs::read(&apply_artifact_path).with_context(|| {
+        format!(
+            "failed to read apply artifact: {}",
+            apply_artifact_path.display()
+        )
+    })?;
+    let apply_artifact_ref = PatchApplyArtifactRef {
+        kind: "patch_apply".to_string(),
+        path: apply_artifact_path.display().to_string(),
+        sha256: hex_sha256(&apply_bytes),
+        bytes: apply_bytes.len() as u64,
+    };
+    let apply_report: serde_json::Value = serde_json::from_slice(&apply_bytes)?;
+    ensure_artifact_matches_workflow_task(&apply_report, workflow_id, task_id, "apply")?;
+
+    let mut paths: Vec<String> = apply_report["file_snapshots"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|value| value["path"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    paths.retain(|path| is_repo_relative_path(path));
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        bail!("apply artifact contains no repo-relative file paths to restore");
+    }
+
+    let pre_restore_snapshots = paths
+        .iter()
+        .map(|path| snapshot_file(path))
+        .collect::<Result<Vec<_>>>()?;
+    let restore_command = run_git_review_command("git checkout", &["checkout"], &paths);
+    let post_restore_snapshots = paths
+        .iter()
+        .map(|path| snapshot_file(path))
+        .collect::<Result<Vec<_>>>()?;
+    let restore_executed = restore_command.exit_code == Some(0);
+    let status = if restore_executed {
+        "patch_restored"
+    } else {
+        "patch_restore_failed"
+    };
+    let validation = PatchValidationSummary {
+        passed: restore_executed,
+        commands: Vec::new(),
+    };
+
+    let mut report = PatchRestoreReport {
+        schema_version: PATCH_RESTORE_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        workflow_id: workflow_id.to_string(),
+        task_id: task_id.to_string(),
+        origin: origin.to_string(),
+        restore_executed,
+        requires_human_approval: true,
+        approved_by: approved_by.to_string(),
+        confirm_restore,
+        external_resources_mutated: false,
+        revert_artifact: revert_artifact_ref,
+        apply_artifact: apply_artifact_ref,
+        restored_paths: paths,
+        pre_restore_snapshots,
+        post_restore_snapshots,
+        restore_command,
+        validation,
+        artifact: None,
+        safety_notes: vec![
+            "Forge executed an approved repo-local restore using git checkout with separated path arguments.".to_string(),
+            "The restore was allowed only because --confirm-restore and --approved-by were present.".to_string(),
+            "External resources, Docker, Kubernetes, Knative and device interfaces were not touched.".to_string(),
+        ],
+    };
+
+    let payload = serde_json::to_value(&report)?;
+    let relative_path = format!("tmp/{workflow_id}-{task_id}-patch-restore.json");
+    let (path, _) = write_json_artifact(&store.base_dir(), &relative_path, &payload)?;
+    let attached = attach_workflow_artifact(store, workflow_id, &path, "patch_restore", origin)?;
+    report.artifact = Some(PatchApplyArtifactRef::from_artifact(&attached));
+
+    Ok(report)
+}
+
+fn ensure_artifact_matches_workflow_task(
+    artifact: &serde_json::Value,
+    workflow_id: &str,
+    task_id: &str,
+    artifact_kind: &str,
+) -> Result<()> {
+    if artifact["workflow_id"].as_str() != Some(workflow_id) {
+        bail!("{artifact_kind} artifact workflow_id does not match {workflow_id}");
+    }
+    if artifact["task_id"].as_str() != Some(task_id) {
+        bail!("{artifact_kind} artifact task_id does not match {task_id}");
+    }
+    Ok(())
+}
+
+fn resolve_artifact_path(base_dir: &Path, artifact_path: &str) -> PathBuf {
+    let path = PathBuf::from(artifact_path);
+    if path.is_absolute() {
+        path
+    } else {
+        base_dir.join(path)
+    }
 }
 
 fn run_patch_validation(commands: &[String]) -> Result<PatchValidationSummary> {

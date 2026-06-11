@@ -88,7 +88,10 @@ use crate::multimodal::{
     build_multimodal_status, evaluate_multimodal_guard,
 };
 use crate::ops::record_addon_renderer_client_event;
-use crate::patch::{build_patch_apply, build_patch_plan, build_patch_revert, build_patch_review};
+use crate::patch::{
+    build_patch_apply, build_patch_plan, build_patch_restore, build_patch_revert,
+    build_patch_review,
+};
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
@@ -1583,6 +1586,16 @@ struct PatchRevertInput {
     workflow_id: String,
     task_id: String,
     apply_artifact: String,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchRestoreInput {
+    workflow_id: String,
+    task_id: String,
+    revert_artifact: String,
+    approved_by: String,
+    confirm_restore: bool,
     origin: Option<String>,
 }
 
@@ -4958,6 +4971,22 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
+                "forge.patch.restore",
+                "Restore File Patch",
+                "Execute an explicitly approved repo-local file restore from a patch revert artifact and persist restore evidence.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("task_id", "string", "task id"),
+                    ("revert_artifact", "string", "path to patch revert artifact"),
+                    ("approved_by", "string", "human or operator identity approving restore"),
+                    ("confirm_restore", "boolean", "must be true to execute restore"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                ], &["workflow_id", "task_id", "revert_artifact", "approved_by", "confirm_restore"]),
+                "forge.patch_restore.v1",
+                &["forge", "patch", "restore", "--workflow", "<workflow-id>", "--task", "<task-id>", "--revert-artifact", "<path>", "--approved-by", "<operator>", "--confirm-restore", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
                 "forge.validation.status",
                 "Query Validation Status",
                 "Run the current validation gate projection without promoting unfinished work.",
@@ -7466,6 +7495,18 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &input.apply_artifact,
                 input.origin.as_deref().unwrap_or("mcp"),
                 None,
+            )?)?
+        }
+        "forge.patch.restore" => {
+            let input: PatchRestoreInput = parse_input(input)?;
+            serde_json::to_value(build_patch_restore(
+                store,
+                &input.workflow_id,
+                &input.task_id,
+                &input.revert_artifact,
+                &input.approved_by,
+                input.confirm_restore,
+                input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
         "forge.validation.status" => {

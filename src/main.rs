@@ -112,7 +112,8 @@ use forge_core::ops::{
     serve_ops_console_with_addon_dirs,
 };
 use forge_core::patch::{
-    build_patch_apply, build_patch_plan, build_patch_revert, build_patch_review,
+    build_patch_apply, build_patch_plan, build_patch_restore, build_patch_revert,
+    build_patch_review,
 };
 use forge_core::registry::{
     attach_reuse_candidates_as_child_subflows, context_action_catalog, find_reuse_candidates,
@@ -3146,6 +3147,22 @@ enum PatchCommands {
         task: String,
         #[arg(long = "apply-artifact")]
         apply_artifact: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Restore {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long = "revert-artifact")]
+        revert_artifact: String,
+        #[arg(long = "approved-by")]
+        approved_by: String,
+        #[arg(long = "confirm-restore")]
+        confirm_restore: bool,
         #[arg(long, default_value = "forge_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -7135,6 +7152,28 @@ fn run() -> Result<i32> {
                 let store = ForgeStore::open(cli.store)?;
                 let report =
                     build_patch_revert(&store, &workflow, &task, &apply_artifact, &origin, None)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            PatchCommands::Restore {
+                workflow,
+                task,
+                revert_artifact,
+                approved_by,
+                confirm_restore,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_patch_restore(
+                    &store,
+                    &workflow,
+                    &task,
+                    &revert_artifact,
+                    &approved_by,
+                    confirm_restore,
+                    &origin,
+                )?;
                 print_response(output, &report)?;
                 Ok(0)
             }

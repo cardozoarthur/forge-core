@@ -3445,6 +3445,200 @@ fn patch_revert_records_proposal_without_restoring_files_automatically() {
 }
 
 #[test]
+fn patch_restore_executes_git_restore_only_with_explicit_approval() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let target = temp.path().join("sample.txt");
+    fs::write(&target, "alpha\n").unwrap();
+    assert!(std::process::Command::new("git")
+        .arg("init")
+        .current_dir(temp.path())
+        .status()
+        .expect("git init should run")
+        .success());
+    assert!(std::process::Command::new("git")
+        .args(["add", "sample.txt"])
+        .current_dir(temp.path())
+        .status()
+        .expect("git add should run")
+        .success());
+    assert!(std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Forge Test",
+            "commit",
+            "-m",
+            "initial",
+        ])
+        .current_dir(temp.path())
+        .status()
+        .expect("git commit should run")
+        .success());
+
+    let planned = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Demonstrate approved patch restore",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let workflow_id = serde_json::from_slice::<Value>(&planned).unwrap()["workflow_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    fs::write(&target, "alpha\nbeta\n").unwrap();
+
+    let apply_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "patch",
+            "apply",
+            "--workflow",
+            &workflow_id,
+            "--task",
+            "task-001",
+            "--path",
+            "sample.txt",
+            "--origin",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let apply_json: Value = serde_json::from_slice(&apply_output).unwrap();
+    let apply_artifact = apply_json["artifact"]["path"].as_str().unwrap();
+    let apply_artifact_path = if Path::new(apply_artifact).is_absolute() {
+        apply_artifact.to_string()
+    } else {
+        temp.path()
+            .join(apply_artifact)
+            .to_string_lossy()
+            .to_string()
+    };
+
+    let revert_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "patch",
+            "revert",
+            "--workflow",
+            &workflow_id,
+            "--task",
+            "task-001",
+            "--apply-artifact",
+            &apply_artifact_path,
+            "--origin",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let revert_json: Value = serde_json::from_slice(&revert_output).unwrap();
+    let revert_artifact = revert_json["artifact"]["path"].as_str().unwrap();
+    let revert_artifact_path = if Path::new(revert_artifact).is_absolute() {
+        revert_artifact.to_string()
+    } else {
+        temp.path()
+            .join(revert_artifact)
+            .to_string_lossy()
+            .to_string()
+    };
+
+    forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "patch",
+            "restore",
+            "--workflow",
+            &workflow_id,
+            "--task",
+            "task-001",
+            "--revert-artifact",
+            &revert_artifact_path,
+            "--approved-by",
+            "tester",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--confirm-restore"));
+    assert_eq!(fs::read_to_string(&target).unwrap(), "alpha\nbeta\n");
+
+    let restore_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "patch",
+            "restore",
+            "--workflow",
+            &workflow_id,
+            "--task",
+            "task-001",
+            "--revert-artifact",
+            &revert_artifact_path,
+            "--approved-by",
+            "tester",
+            "--confirm-restore",
+            "--origin",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(fs::read_to_string(&target).unwrap(), "alpha\n");
+    let json: Value = serde_json::from_slice(&restore_output).unwrap();
+    assert_eq!(json["schema_version"], "forge.patch_restore.v1");
+    assert_eq!(json["status"], "patch_restored");
+    assert_eq!(json["workflow_id"], workflow_id);
+    assert_eq!(json["task_id"], "task-001");
+    assert_eq!(json["restore_executed"], true);
+    assert_eq!(json["requires_human_approval"], true);
+    assert_eq!(json["approved_by"], "tester");
+    assert!(json["restored_paths"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("sample.txt")));
+    assert_eq!(json["restore_command"]["status"], "passed");
+    assert!(json["artifact"]["path"]
+        .as_str()
+        .unwrap()
+        .contains("attached-patch_restore-"));
+}
+
+#[test]
 fn patch_apply_blocks_non_repo_paths() {
     let temp = tempdir().unwrap();
     let store_path = temp.path().join("forge.sqlite");
@@ -3607,6 +3801,46 @@ fn mcp_exposes_patch_review_tool_and_skill_guidance() {
     assert!(required.contains(&"workflow_id"));
     assert!(required.contains(&"task_id"));
     assert!(required.contains(&"paths"));
+}
+
+#[test]
+fn mcp_exposes_patch_restore_tool_and_skill_guidance() {
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge patch restore"),
+        "the packaged Forge skill should teach agents to execute approved patch restores"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.patch.restore"),
+        "the packaged Forge skill should expose the MCP patch restore tool"
+    );
+
+    let output = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tool = json["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "forge.patch.restore")
+        .expect("forge.patch.restore tool must be in MCP manifest");
+    assert_eq!(tool["output_schema"], "forge.patch_restore.v1");
+    let required: Vec<&str> = tool["input_schema"]["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert!(required.contains(&"workflow_id"));
+    assert!(required.contains(&"task_id"));
+    assert!(required.contains(&"revert_artifact"));
+    assert!(required.contains(&"approved_by"));
+    assert!(required.contains(&"confirm_restore"));
 }
 
 #[test]
@@ -33601,6 +33835,11 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         .unwrap()
         .iter()
         .any(|command| command["name"] == "/patch review" && command["mutates_workflow"] == false));
+    assert!(slash_json["result"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command["name"] == "/patch restore" && command["mutates_workflow"] == true));
 
     let route_input = serde_json::json!({
         "input": "What is the current Forge status?",

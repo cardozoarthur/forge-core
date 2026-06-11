@@ -1808,7 +1808,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
         slash(
             "/patch",
             "Patch",
-            "File editing workflow: /patch plan --workflow <id> --task <id> --intent \"...\" --path <path>. Subcommands: plan, apply, revert.",
+            "File editing workflow: /patch plan --workflow <id> --task <id> --intent \"...\" --path <path>. Subcommands: plan, review, apply, revert, restore.",
             &["forge", "patch", "plan", "--workflow", "<workflow-id>"],
             true,
             "high",
@@ -1842,6 +1842,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Patch Revert",
             "Record a guarded revert proposal without silently restoring files. Use: /patch revert --workflow <id> --task <id> --apply-artifact <id>",
             &["forge", "patch", "revert", "--workflow", "<workflow-id>", "--task", "<task-id>", "--apply-artifact", "<artifact-id>"],
+            true,
+            "high",
+        ),
+        slash(
+            "/patch restore",
+            "Patch Restore",
+            "Execute an explicitly approved file restore from a revert artifact. Use: /patch restore --workflow <id> --task <id> --revert-artifact <id> --approved-by <operator> --confirm-restore",
+            &["forge", "patch", "restore", "--workflow", "<workflow-id>", "--task", "<task-id>", "--revert-artifact", "<artifact-id>", "--approved-by", "<operator>", "--confirm-restore"],
             true,
             "high",
         ),
@@ -2207,6 +2215,70 @@ fn dispatch_patch_command(
                 println!("  Patch revert failed: {stderr}");
             }
         }
+        "restore" => {
+            println!("  Patch Restore: you are about to restore repository files.");
+            println!(
+                "  WARNING: this executes git checkout for paths recorded in a revert artifact."
+            );
+            print!("  Approve restore? (y/N): ");
+            std::io::Write::flush(&mut std::io::stdout())?;
+            let mut confirm = String::new();
+            std::io::stdin().read_line(&mut confirm)?;
+            let confirmed = confirm.trim().eq_ignore_ascii_case("y")
+                || confirm.trim().eq_ignore_ascii_case("yes");
+            if !confirmed {
+                println!("  Restore cancelled by user.");
+                return Ok(());
+            }
+
+            let mut args = rest
+                .split_whitespace()
+                .skip(1)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            if !args
+                .iter()
+                .any(|arg| arg == "--approved-by" || arg.starts_with("--approved-by="))
+            {
+                args.push("--approved-by".to_string());
+                args.push("human".to_string());
+            }
+            if !args.iter().any(|arg| arg == "--confirm-restore") {
+                args.push("--confirm-restore".to_string());
+            }
+            let restore_output = Command::new(
+                std::env::args()
+                    .next()
+                    .unwrap_or_else(|| "forge".to_string()),
+            )
+            .args(["--store", &store_str, "patch", "restore"])
+            .args(args.iter().map(String::as_str))
+            .arg("--output")
+            .arg("json")
+            .output()?;
+            if restore_output.status.success() {
+                let stdout = String::from_utf8_lossy(&restore_output.stdout);
+                if let Ok(restore) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                    println!(
+                        "  Status: {}",
+                        restore["status"].as_str().unwrap_or("restored")
+                    );
+                    println!(
+                        "  Restored paths: {}",
+                        restore["restored_paths"].as_array().map_or(0, Vec::len)
+                    );
+                    println!(
+                        "  Approved by: {}",
+                        restore["approved_by"].as_str().unwrap_or("unknown")
+                    );
+                } else {
+                    println!("  Restore executed.");
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&restore_output.stderr);
+                println!("  Patch restore failed: {stderr}");
+            }
+        }
         "" => {
             println!(
                 "  Usage: /patch plan --workflow <id> --task <id> --intent \"...\" --path <path>"
@@ -2214,9 +2286,12 @@ fn dispatch_patch_command(
             println!("         /patch review --workflow <id> --task <id> --path <path>");
             println!("         /patch apply --workflow <id> --task <id> --path <path>");
             println!("         /patch revert --workflow <id> --task <id> --apply-artifact <id>");
+            println!("         /patch restore --workflow <id> --task <id> --revert-artifact <id> --approved-by <operator> --confirm-restore");
         }
         other => {
-            println!("  Unknown patch subcommand: {other}. Use plan, review, apply, or revert.");
+            println!(
+                "  Unknown patch subcommand: {other}. Use plan, review, apply, revert, or restore."
+            );
         }
     }
 
@@ -2761,6 +2836,19 @@ mod tests {
         assert_eq!(report.input_kind, "slash_command");
         let route = report.slash_command.unwrap();
         assert_eq!(route.name, "/patch revert");
+        assert!(route.recognized);
+        assert!(route.mutates_workflow);
+        assert_eq!(route.risk_level, "high");
+    }
+
+    #[test]
+    fn slash_patch_restore_is_recognized() {
+        let report = route_slash_command(
+            "/patch restore --workflow wf_1 --task task_1 --revert-artifact art_1 --approved-by tester --confirm-restore",
+        );
+        assert_eq!(report.input_kind, "slash_command");
+        let route = report.slash_command.unwrap();
+        assert_eq!(route.name, "/patch restore");
         assert!(route.recognized);
         assert!(route.mutates_workflow);
         assert_eq!(route.risk_level, "high");
