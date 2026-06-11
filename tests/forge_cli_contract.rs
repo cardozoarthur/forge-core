@@ -2996,6 +2996,10 @@ fn milestone_boundary_document_matches_validated_export_demo_runtime_state() {
         docs.contains("forge.interactive.autocomplete"),
         "the visible 0.5 milestone boundary should expose the MCP autocomplete surface"
     );
+    assert!(
+        docs.contains("Full terminal TUI loop and richer inline mode"),
+        "the visible 0.5 milestone boundary should no longer list autocomplete as missing after autocomplete evidence exists"
+    );
 }
 
 #[test]

@@ -681,7 +681,7 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
             "Interactive Forge CLI baseline",
             "validated",
             "0.4.97 validates the no-argument TTY home, slash-command catalog, conversational routing and retention decisions. Cycle 24 confirms all 14 required slash commands, conversational routing with direct-answer vs workflow classification, retention decisions with delete/retain/archive policy, and CLI contract tests for TTY/non-TTY behavior with 175 passing tests.",
-            "Full terminal TUI loop, autocomplete and inline mode still need implementation evidence.",
+            "Full terminal TUI loop and richer inline mode still need implementation evidence; autocomplete now has read-only CLI, MCP and dashboard evidence.",
         ),
         capability(
             "human_decision_form_nodes",
