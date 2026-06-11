@@ -6,8 +6,8 @@ use crate::checkpoint::TaskCheckpoint;
 use crate::cost::build_cost_ledger;
 use crate::event::{build_global_event_timeline, GlobalEventTimelineReport, WorkflowEventEnvelope};
 use crate::executor::{
-    build_brain_sessions_report_with_options, load_executors, BrainSessionState,
-    BrainSessionsReport, BrainSessionsReportOptions,
+    build_brain_sessions_report_with_options, load_executors, BrainSessionOperationPlan,
+    BrainSessionState, BrainSessionsReport, BrainSessionsReportOptions,
 };
 use crate::graph::{AtomicTask, ExecutorKind, TaskStatus};
 use crate::harness::{
@@ -396,6 +396,7 @@ pub struct InteractiveSessionCard {
     pub last_workflow_id: Option<String>,
     pub last_task_id: Option<String>,
     pub last_run_id: Option<String>,
+    pub operation_plan: BrainSessionOperationPlan,
     pub commands: InteractiveSessionCardCommands,
 }
 
@@ -3374,6 +3375,7 @@ fn interactive_session_card(session: &BrainSessionState) -> InteractiveSessionCa
         last_workflow_id: session.last_workflow_id.clone(),
         last_task_id: session.last_task_id.clone(),
         last_run_id: session.last_run_id.clone(),
+        operation_plan: session.operation_plan.clone(),
         commands: InteractiveSessionCardCommands {
             history: vec![
                 "sessions".to_string(),
@@ -4171,11 +4173,12 @@ fn render_session_card_summary(panel: &InteractiveSessionsPanel) -> String {
             .take(8)
             .map(|session| {
                 format!(
-                    "{} {} {} {}",
+                    "{} {} {} {} {}",
                     session.session_id,
                     session.provider_id,
                     session.readiness,
-                    session.lifecycle_state
+                    session.lifecycle_state,
+                    session.operation_plan.recommended_action
                 )
             })
             .collect::<Vec<_>>()

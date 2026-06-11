@@ -353,7 +353,40 @@ pub struct BrainSessionState {
     pub last_lifecycle_at: Option<String>,
     pub last_lifecycle_origin: Option<String>,
     pub last_lifecycle_note: Option<String>,
+    pub operation_plan: BrainSessionOperationPlan,
     pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainSessionOperationPlan {
+    pub schema_version: String,
+    pub status: String,
+    pub session_id: String,
+    pub provider_id: String,
+    pub lifecycle_state: String,
+    pub readiness: String,
+    pub recommended_action: String,
+    pub lineage_complete: bool,
+    pub requires_context: bool,
+    pub requires_handoff: bool,
+    pub requires_heartbeat: bool,
+    pub commands: BrainSessionOperationCommands,
+    pub warnings: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainSessionOperationCommands {
+    pub history: Vec<String>,
+    pub launch_plan: Vec<String>,
+    pub record_plan: Vec<String>,
+    pub open: Option<Vec<String>>,
+    pub attach: Option<Vec<String>>,
+    pub detach: Option<Vec<String>>,
+    pub close: Option<Vec<String>>,
+    pub context: Option<Vec<String>>,
+    pub handoff: Option<Vec<String>>,
+    pub heartbeat: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1925,13 +1958,16 @@ fn brain_session_state(
     let lifecycle_state = last_lifecycle_event
         .and_then(|event| event.lifecycle_state.clone())
         .unwrap_or_else(|| "untracked".to_string());
+    let readiness = shell_session_readiness(session, brain).to_string();
+    let operation_plan =
+        brain_session_operation_plan(session, &readiness, &lifecycle_state, last_event);
     BrainSessionState {
         session_id: session.id.clone(),
         provider_id: session.brain_id.clone(),
         provider_kind: brain
             .map(|candidate| candidate.execution_mode.clone())
             .unwrap_or_else(|| "forge_control_plane".to_string()),
-        readiness: shell_session_readiness(session, brain).to_string(),
+        readiness,
         entry_command: session.entry_command.clone(),
         attachable: session.attachable,
         launch_mode: session.launch_mode.clone(),
@@ -1949,6 +1985,7 @@ fn brain_session_state(
         last_lifecycle_at: last_lifecycle_event.map(|event| event.created_at.clone()),
         last_lifecycle_origin: last_lifecycle_event.map(|event| event.origin.clone()),
         last_lifecycle_note: last_lifecycle_event.and_then(|event| event.note.clone()),
+        operation_plan,
         next_actions: shell_next_actions(session),
     }
 }
@@ -2189,6 +2226,292 @@ fn shell_heartbeat_command(
         "--output".to_string(),
         "json".to_string(),
     ])
+}
+
+fn brain_session_operation_plan(
+    session: &BrainShellSessionSpec,
+    readiness: &str,
+    lifecycle_state: &str,
+    last_plan_event: Option<&BrainSessionEventSummary>,
+) -> BrainSessionOperationPlan {
+    let external_brain = session.brain_id != "forge";
+    let context = brain_session_context_command(last_plan_event, 1200);
+    let handoff = brain_session_handoff_command(session, last_plan_event, 1200, 900);
+    let heartbeat = brain_session_heartbeat_command(session, last_plan_event, 900);
+    let lineage_complete = last_plan_event.is_some_and(|event| {
+        event.workflow_id.is_some() && event.task_id.is_some() && event.run_id.is_some()
+    });
+    let requires_context = external_brain
+        && context.is_some()
+        && matches!(
+            lifecycle_state,
+            "untracked" | "opened" | "attached" | "detached"
+        );
+    let requires_handoff = external_brain
+        && handoff.is_some()
+        && matches!(
+            lifecycle_state,
+            "untracked" | "opened" | "attached" | "detached"
+        );
+    let requires_heartbeat = external_brain
+        && heartbeat.is_some()
+        && matches!(lifecycle_state, "opened" | "attached" | "detached");
+    let recommended_action =
+        brain_session_recommended_action(session, readiness, lifecycle_state, last_plan_event);
+    let status = if matches!(readiness, "needs_sync_or_authorization" | "not_installed") {
+        "session_operation_needs_attention"
+    } else if matches!(lifecycle_state, "closed" | "abandoned") {
+        "session_operation_idle"
+    } else {
+        "session_operation_ready"
+    };
+    let mut warnings = Vec::new();
+    if external_brain && !lineage_complete {
+        warnings.push(
+            "Session does not yet have complete workflow/task/run lineage; record a shell plan before production handoff."
+                .to_string(),
+        );
+    }
+    if matches!(readiness, "needs_sync_or_authorization" | "not_installed") {
+        warnings.push(
+            "Provider is not ready for Forge-controlled shell operation; sync executors and resolve authorization or installation first."
+                .to_string(),
+        );
+    }
+
+    BrainSessionOperationPlan {
+        schema_version: "forge.brain_session_operation_plan.v1".to_string(),
+        status: status.to_string(),
+        session_id: session.id.clone(),
+        provider_id: session.brain_id.clone(),
+        lifecycle_state: lifecycle_state.to_string(),
+        readiness: readiness.to_string(),
+        recommended_action,
+        lineage_complete,
+        requires_context,
+        requires_handoff,
+        requires_heartbeat,
+        commands: BrainSessionOperationCommands {
+            history: brain_session_history_command(&session.id),
+            launch_plan: brain_session_launch_plan_command(session, last_plan_event),
+            record_plan: brain_session_record_plan_command(session, last_plan_event),
+            open: brain_session_lifecycle_command(&session.id, "opened", last_plan_event),
+            attach: brain_session_lifecycle_command(&session.id, "attached", last_plan_event),
+            detach: brain_session_lifecycle_command(&session.id, "detached", last_plan_event),
+            close: brain_session_lifecycle_command(&session.id, "closed", last_plan_event),
+            context,
+            handoff,
+            heartbeat,
+        },
+        warnings,
+        notes: vec![
+            "Operation plan is read-only and gives TUI/MCP clients the next safe session controls without launching child CLIs."
+                .to_string(),
+            "External brains remain execution resources; Forge owns context, handoff, heartbeat, lifecycle and validation gates."
+                .to_string(),
+        ],
+    }
+}
+
+fn brain_session_recommended_action(
+    session: &BrainShellSessionSpec,
+    readiness: &str,
+    lifecycle_state: &str,
+    last_plan_event: Option<&BrainSessionEventSummary>,
+) -> String {
+    if session.brain_id == "forge" {
+        return "open_forge_control_surface".to_string();
+    }
+    if matches!(readiness, "needs_sync_or_authorization" | "not_installed") {
+        return "sync_or_authorize_provider".to_string();
+    }
+    match lifecycle_state {
+        "untracked" if last_plan_event.is_some() => "record_opened_lifecycle".to_string(),
+        "untracked" => "record_shell_launch_plan".to_string(),
+        "opened" => "attach_session_before_handoff".to_string(),
+        "attached" => "heartbeat_or_close_session".to_string(),
+        "detached" => "reattach_or_close_session".to_string(),
+        "closed" => "open_session_when_needed".to_string(),
+        "failed" => "inspect_history_before_reopen".to_string(),
+        "abandoned" => "recover_or_archive_session".to_string(),
+        _ => "inspect_session_history".to_string(),
+    }
+}
+
+fn brain_session_history_command(session_id: &str) -> Vec<String> {
+    vec![
+        "forge".to_string(),
+        "sessions".to_string(),
+        "history".to_string(),
+        "--session".to_string(),
+        session_id.to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]
+}
+
+fn brain_session_launch_plan_command(
+    session: &BrainShellSessionSpec,
+    last_plan_event: Option<&BrainSessionEventSummary>,
+) -> Vec<String> {
+    let mut command = vec![
+        "forge".to_string(),
+        "shells".to_string(),
+        "--executor".to_string(),
+        session.brain_id.clone(),
+    ];
+    append_shell_lineage_args(&mut command, last_plan_event, false);
+    command.extend(["--output".to_string(), "json".to_string()]);
+    command
+}
+
+fn brain_session_record_plan_command(
+    session: &BrainShellSessionSpec,
+    last_plan_event: Option<&BrainSessionEventSummary>,
+) -> Vec<String> {
+    let mut command = vec![
+        "forge".to_string(),
+        "shells".to_string(),
+        "--executor".to_string(),
+        session.brain_id.clone(),
+    ];
+    append_shell_lineage_args(&mut command, last_plan_event, false);
+    command.extend([
+        "--record-session".to_string(),
+        "--origin".to_string(),
+        "forge_cli".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]);
+    command
+}
+
+fn brain_session_lifecycle_command(
+    session_id: &str,
+    state: &str,
+    last_plan_event: Option<&BrainSessionEventSummary>,
+) -> Option<Vec<String>> {
+    let mut command = vec![
+        "forge".to_string(),
+        "sessions".to_string(),
+        "lifecycle".to_string(),
+        "--session".to_string(),
+        session_id.to_string(),
+        "--state".to_string(),
+        state.to_string(),
+    ];
+    append_shell_lineage_args(&mut command, last_plan_event, true);
+    command.extend([
+        "--origin".to_string(),
+        "forge_cli".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]);
+    Some(command)
+}
+
+fn brain_session_context_command(
+    last_plan_event: Option<&BrainSessionEventSummary>,
+    context_budget: usize,
+) -> Option<Vec<String>> {
+    let event = last_plan_event?;
+    let workflow_id = event.workflow_id.as_ref()?;
+    let task_id = event.task_id.as_ref()?;
+    Some(vec![
+        "forge".to_string(),
+        "context".to_string(),
+        "--workflow".to_string(),
+        workflow_id.clone(),
+        "--task".to_string(),
+        task_id.clone(),
+        "--budget".to_string(),
+        context_budget.to_string(),
+        "--strict".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ])
+}
+
+fn brain_session_handoff_command(
+    session: &BrainShellSessionSpec,
+    last_plan_event: Option<&BrainSessionEventSummary>,
+    context_budget: usize,
+    ttl_seconds: u64,
+) -> Option<Vec<String>> {
+    if session.brain_id == "forge" {
+        return None;
+    }
+    let event = last_plan_event?;
+    let workflow_id = event.workflow_id.as_ref()?;
+    let task_id = event.task_id.as_ref()?;
+    Some(vec![
+        "forge".to_string(),
+        "task".to_string(),
+        "handoff".to_string(),
+        "--workflow".to_string(),
+        workflow_id.clone(),
+        "--task".to_string(),
+        task_id.clone(),
+        "--executor".to_string(),
+        session.brain_id.clone(),
+        "--budget".to_string(),
+        context_budget.to_string(),
+        "--ttl-seconds".to_string(),
+        ttl_seconds.to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ])
+}
+
+fn brain_session_heartbeat_command(
+    session: &BrainShellSessionSpec,
+    last_plan_event: Option<&BrainSessionEventSummary>,
+    ttl_seconds: u64,
+) -> Option<Vec<String>> {
+    if session.brain_id == "forge" {
+        return None;
+    }
+    let event = last_plan_event?;
+    let run_id = event.run_id.as_ref()?;
+    Some(vec![
+        "forge".to_string(),
+        "request".to_string(),
+        "heartbeat".to_string(),
+        "--run".to_string(),
+        run_id.clone(),
+        "--executor".to_string(),
+        session.brain_id.clone(),
+        "--summary".to_string(),
+        "shell session active".to_string(),
+        "--ttl-seconds".to_string(),
+        ttl_seconds.to_string(),
+        "--origin".to_string(),
+        "forge_shell".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ])
+}
+
+fn append_shell_lineage_args(
+    command: &mut Vec<String>,
+    last_plan_event: Option<&BrainSessionEventSummary>,
+    include_run: bool,
+) {
+    if let Some(event) = last_plan_event {
+        if let Some(workflow_id) = &event.workflow_id {
+            command.extend(["--workflow".to_string(), workflow_id.clone()]);
+        }
+        if let Some(task_id) = &event.task_id {
+            command.extend(["--task".to_string(), task_id.clone()]);
+        }
+        if include_run {
+            if let Some(run_id) = &event.run_id {
+                command.extend(["--run".to_string(), run_id.clone()]);
+            }
+        } else if let Some(run_id) = &event.run_id {
+            command.extend(["--run".to_string(), run_id.clone()]);
+        }
+    }
 }
 
 fn shell_next_actions(session: &BrainShellSessionSpec) -> Vec<String> {

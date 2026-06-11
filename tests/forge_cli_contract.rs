@@ -17389,6 +17389,82 @@ fn brain_sessions_report_aggregates_providers_shell_specs_and_planned_events() {
     assert_eq!(codex_session["last_workflow_id"], "wf_session_management");
     assert_eq!(codex_session["last_task_id"], "task-session");
     assert_eq!(codex_session["last_run_id"], "run-session");
+    assert_eq!(
+        codex_session["operation_plan"]["schema_version"],
+        "forge.brain_session_operation_plan.v1"
+    );
+    assert_eq!(
+        codex_session["operation_plan"]["status"],
+        "session_operation_ready"
+    );
+    assert_eq!(
+        codex_session["operation_plan"]["recommended_action"],
+        "attach_session_before_handoff"
+    );
+    assert_eq!(codex_session["operation_plan"]["lineage_complete"], true);
+    assert_eq!(codex_session["operation_plan"]["requires_context"], true);
+    assert_eq!(codex_session["operation_plan"]["requires_handoff"], true);
+    assert_eq!(codex_session["operation_plan"]["requires_heartbeat"], true);
+    assert!(codex_session["operation_plan"]["commands"]["attach"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("attached")));
+    assert_eq!(
+        codex_session["operation_plan"]["commands"]["context"],
+        serde_json::json!([
+            "forge",
+            "context",
+            "--workflow",
+            "wf_session_management",
+            "--task",
+            "task-session",
+            "--budget",
+            "1200",
+            "--strict",
+            "--output",
+            "json"
+        ])
+    );
+    assert_eq!(
+        codex_session["operation_plan"]["commands"]["handoff"],
+        serde_json::json!([
+            "forge",
+            "task",
+            "handoff",
+            "--workflow",
+            "wf_session_management",
+            "--task",
+            "task-session",
+            "--executor",
+            "codex",
+            "--budget",
+            "1200",
+            "--ttl-seconds",
+            "900",
+            "--output",
+            "json"
+        ])
+    );
+    assert_eq!(
+        codex_session["operation_plan"]["commands"]["heartbeat"],
+        serde_json::json!([
+            "forge",
+            "request",
+            "heartbeat",
+            "--run",
+            "run-session",
+            "--executor",
+            "codex",
+            "--summary",
+            "shell session active",
+            "--ttl-seconds",
+            "900",
+            "--origin",
+            "forge_shell",
+            "--output",
+            "json"
+        ])
+    );
     assert!(json["recent_events"]
         .as_array()
         .unwrap()
@@ -17410,6 +17486,10 @@ fn brain_sessions_report_aggregates_providers_shell_specs_and_planned_events() {
     let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
     let tool = find_mcp_tool(&manifest_json, "forge.sessions");
     assert_eq!(tool["output_schema"], "forge.brain_sessions.v1");
+    assert!(tool["description"]
+        .as_str()
+        .unwrap()
+        .contains("operation plans"));
     assert_eq!(tool["async_safe"], true);
     assert_eq!(tool["mutates_workflow"], false);
 
@@ -37391,6 +37471,10 @@ fn interactive_sessions_command_and_mcp_surface_are_dedicated() {
             session["session_id"] == "codex-shell"
                 && session["provider_id"] == "codex"
                 && session["lifecycle_state"] == "opened"
+                && session["operation_plan"]["schema_version"]
+                    == "forge.brain_session_operation_plan.v1"
+                && session["operation_plan"]["recommended_action"]
+                    == "attach_session_before_handoff"
                 && session["commands"]["history"]
                     .as_array()
                     .unwrap()
@@ -37468,6 +37552,10 @@ fn interactive_sessions_command_and_mcp_surface_are_dedicated() {
     let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
     let tool = find_mcp_tool(&manifest_json, "forge.interactive.sessions");
     assert_eq!(tool["output_schema"], "forge.interactive.sessions.v1");
+    assert!(tool["description"]
+        .as_str()
+        .unwrap()
+        .contains("operation plans"));
     assert_eq!(tool["async_safe"], true);
     assert_eq!(tool["mutates_workflow"], false);
 

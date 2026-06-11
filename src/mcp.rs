@@ -2857,7 +2857,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.interactive.sessions",
                 "Inspect Interactive Session Center",
-                "Return the Forge interactive session center with provider/session readiness, lifecycle state, shell history commands and next lifecycle controls without opening or attaching shells.",
+                "Return the Forge interactive session center with provider/session readiness, lifecycle state, operation plans, shell history commands and next lifecycle controls without opening or attaching shells.",
                 object_schema(&[
                     ("provider_id", "string", "optional provider filter such as codex, opencode, gemini or claude"),
                     ("lifecycle_state", "string", "optional lifecycle filter such as opened, attached, closed, failed or abandoned"),
@@ -2946,7 +2946,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.sessions",
                 "Inspect Brain Sessions",
-                "Return Forge-owned provider/session management state for execution brains, shell specs and recorded shell launch events without starting child processes, optionally filtered by provider, lifecycle state or readiness.",
+                "Return Forge-owned provider/session management state for execution brains, shell specs, operation plans and recorded shell launch events without starting child processes, optionally filtered by provider, lifecycle state or readiness.",
                 object_schema(
                     &[
                         ("provider_id", "string", "optional provider id such as codex, opencode, gemini, claude or forge"),
