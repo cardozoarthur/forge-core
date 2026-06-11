@@ -59,7 +59,10 @@ pub struct CliWrapperPlanReport {
     pub run_id: Option<String>,
     pub wrapper_strategy: String,
     pub context_budget: usize,
+    pub context_budget_source: String,
     pub token_headroom_enabled: bool,
+    pub token_headroom_source: String,
+    pub require_token_headroom_for_forge_first: bool,
     pub env: Vec<CliWrapperEnvVar>,
     pub launch_command: Vec<String>,
     pub harness_checks: Vec<String>,
@@ -75,7 +78,10 @@ pub struct CliWrapperPlanOptions<'a> {
     pub task_id: Option<&'a str>,
     pub run_id: Option<&'a str>,
     pub context_budget: usize,
+    pub context_budget_source: &'a str,
     pub token_headroom: bool,
+    pub token_headroom_source: &'a str,
+    pub require_token_headroom_for_forge_first: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -95,6 +101,11 @@ pub struct HarnessModeReport {
     pub project_exec_policy_path: String,
     pub project_exec_policy_status: String,
     pub require_lineage_for_exec: bool,
+    pub default_context_budget: usize,
+    pub context_budget_source: String,
+    pub default_token_headroom: bool,
+    pub token_headroom_source: String,
+    pub require_token_headroom_for_forge_first: bool,
     pub precedence: Vec<String>,
     pub safety_checks: Vec<String>,
     pub notes: Vec<String>,
@@ -137,7 +148,10 @@ pub struct HarnessDoctorOptions<'a> {
     pub task_id: Option<&'a str>,
     pub run_id: Option<&'a str>,
     pub context_budget: usize,
+    pub context_budget_source: &'a str,
     pub token_headroom: bool,
+    pub token_headroom_source: &'a str,
+    pub require_token_headroom_for_forge_first: bool,
 }
 
 struct HarnessForgeFirstMode {
@@ -149,6 +163,26 @@ struct HarnessProjectDefaultMode {
     path: PathBuf,
     status: &'static str,
     forge_first: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HarnessRuntimePolicy {
+    pub context_budget: usize,
+    pub context_budget_source: String,
+    pub token_headroom: bool,
+    pub token_headroom_source: String,
+    pub require_token_headroom_for_forge_first: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HarnessRuntimePolicyOptions<'a> {
+    pub project_root: Option<&'a Path>,
+    pub context_budget: Option<usize>,
+    pub context_budget_source: &'a str,
+    pub token_headroom: Option<bool>,
+    pub token_headroom_source: &'a str,
+    pub forge_first: bool,
+    pub default_context_budget: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -295,7 +329,10 @@ pub struct CliHarnessExecOptions<'a> {
     pub task_id: Option<&'a str>,
     pub run_id: Option<&'a str>,
     pub context_budget: usize,
+    pub context_budget_source: &'a str,
     pub token_headroom: bool,
+    pub token_headroom_source: &'a str,
+    pub require_token_headroom_for_forge_first: bool,
     pub dry_run: bool,
     pub allow_exec: bool,
     pub project_root: Option<&'a Path>,
@@ -490,12 +527,24 @@ pub fn build_harness_mode_report(options: HarnessModeOptions<'_>) -> HarnessMode
     let project_exec_policy = read_harness_project_exec_policy(&project_root);
     let project_exec_policy_status =
         harness_project_exec_policy_status(&project_exec_policy, false, None, None, None);
+    let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+        project_root: Some(&project_root),
+        context_budget: None,
+        context_budget_source: "default",
+        token_headroom: None,
+        token_headroom_source: "default",
+        forge_first: mode.forge_first,
+        default_context_budget: 1200,
+    });
     let mut safety_checks = vec![
         "mode report is read-only and never launches child processes".to_string(),
         "exec policy should be inspected before running external brain CLIs".to_string(),
     ];
     if project_exec_policy.require_lineage_for_exec {
         safety_checks.push("project_require_lineage_for_exec".to_string());
+    }
+    if runtime_policy.require_token_headroom_for_forge_first {
+        safety_checks.push("project_require_token_headroom_for_forge_first".to_string());
     }
     HarnessModeReport {
         schema_version: CLI_HARNESS_MODE_SCHEMA_VERSION.to_string(),
@@ -514,6 +563,12 @@ pub fn build_harness_mode_report(options: HarnessModeOptions<'_>) -> HarnessMode
         project_exec_policy_path: project_exec_policy.path.display().to_string(),
         project_exec_policy_status: project_exec_policy_status.to_string(),
         require_lineage_for_exec: project_exec_policy.require_lineage_for_exec,
+        default_context_budget: runtime_policy.context_budget,
+        context_budget_source: runtime_policy.context_budget_source,
+        default_token_headroom: runtime_policy.token_headroom,
+        token_headroom_source: runtime_policy.token_headroom_source,
+        require_token_headroom_for_forge_first: runtime_policy
+            .require_token_headroom_for_forge_first,
         precedence: vec![
             "observe_only_flag".to_string(),
             "explicit_flag".to_string(),
@@ -543,7 +598,10 @@ pub fn build_harness_doctor_report(
         task_id,
         run_id,
         context_budget,
+        context_budget_source,
         token_headroom,
+        token_headroom_source,
+        require_token_headroom_for_forge_first,
     } = options;
     let executor = normalize_executor(executor);
     let project_root_path = project_root
@@ -567,7 +625,10 @@ pub fn build_harness_doctor_report(
         task_id,
         run_id,
         context_budget,
+        context_budget_source,
         token_headroom,
+        token_headroom_source,
+        require_token_headroom_for_forge_first,
     });
     let forge_first_ready = mode.forge_first;
     let token_headroom_ready = token_headroom && wrapper_plan.token_headroom_enabled;
@@ -669,6 +730,49 @@ pub fn resolve_harness_forge_first_source_for_project(
     (mode.forge_first, mode.source)
 }
 
+pub fn resolve_harness_runtime_policy(
+    options: HarnessRuntimePolicyOptions<'_>,
+) -> HarnessRuntimePolicy {
+    let project_policy = options
+        .project_root
+        .map(read_harness_project_runtime_policy);
+    let (context_budget, context_budget_source) = options
+        .context_budget
+        .filter(|budget| *budget > 0)
+        .map(|budget| (budget, options.context_budget_source.to_string()))
+        .or_else(|| {
+            project_policy
+                .as_ref()
+                .and_then(|policy| policy.context_budget)
+                .map(|budget| (budget, "project_config".to_string()))
+        })
+        .unwrap_or_else(|| (options.default_context_budget, "default".to_string()));
+    let (mut token_headroom, mut token_headroom_source) = options
+        .token_headroom
+        .map(|enabled| (enabled, options.token_headroom_source.to_string()))
+        .or_else(|| {
+            project_policy
+                .as_ref()
+                .and_then(|policy| policy.token_headroom)
+                .map(|enabled| (enabled, "project_config".to_string()))
+        })
+        .unwrap_or_else(|| (true, "default_enabled".to_string()));
+    let require_token_headroom_for_forge_first = project_policy
+        .as_ref()
+        .is_some_and(|policy| policy.require_token_headroom_for_forge_first);
+    if options.forge_first && require_token_headroom_for_forge_first && !token_headroom {
+        token_headroom = true;
+        token_headroom_source = "project_policy_required_for_forge_first".to_string();
+    }
+    HarnessRuntimePolicy {
+        context_budget,
+        context_budget_source,
+        token_headroom,
+        token_headroom_source,
+        require_token_headroom_for_forge_first,
+    }
+}
+
 pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperPlanReport {
     let CliWrapperPlanOptions {
         executor,
@@ -679,7 +783,10 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         task_id,
         run_id,
         context_budget,
+        context_budget_source,
         token_headroom,
+        token_headroom_source,
+        require_token_headroom_for_forge_first,
     } = options;
     let executor = normalize_executor(executor);
     let forge_first_source = normalize_harness_mode_source(forge_first_source, forge_first);
@@ -772,6 +879,19 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
     launch_command.push("--".to_string());
     launch_command.extend(command.clone());
 
+    let mut harness_checks = vec![
+        "resolve real CLI before PATH shim precedence".to_string(),
+        "prepend Forge shim directory only for the child process".to_string(),
+        "record argv, cwd, workflow/task/run lineage, token-headroom metrics and timeline event evidence".to_string(),
+        "persist reversible headroom blobs in the Forge store when compression is applied".to_string(),
+        "fall back to observe_only when Forge context is unavailable".to_string(),
+    ];
+    if require_token_headroom_for_forge_first {
+        harness_checks.push(
+            "project policy requires token headroom for Forge-first CLI execution".to_string(),
+        );
+    }
+
     CliWrapperPlanReport {
         schema_version: CLI_WRAPPER_PLAN_SCHEMA_VERSION.to_string(),
         status: "cli_wrapper_plan_ready".to_string(),
@@ -784,16 +904,13 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         run_id: normalize_optional_text(run_id),
         wrapper_strategy: "env_overlay_with_forge_context_and_token_headroom".to_string(),
         context_budget,
+        context_budget_source: context_budget_source.to_string(),
         token_headroom_enabled: token_headroom,
+        token_headroom_source: token_headroom_source.to_string(),
+        require_token_headroom_for_forge_first,
         env,
         launch_command,
-        harness_checks: vec![
-            "resolve real CLI before PATH shim precedence".to_string(),
-            "prepend Forge shim directory only for the child process".to_string(),
-            "record argv, cwd, workflow/task/run lineage, token-headroom metrics and timeline event evidence".to_string(),
-            "persist reversible headroom blobs in the Forge store when compression is applied".to_string(),
-            "fall back to observe_only when Forge context is unavailable".to_string(),
-        ],
+        harness_checks,
         notes: vec![
             "Headroom-inspired ideas absorbed: local-first compression, reversible retrieval refs, CLI wrapper env shaping, tool-search preservation and shim-based harness tests".to_string(),
             "This plan is non-destructive; actual exec remains a separate guarded harness action".to_string(),
@@ -1067,7 +1184,10 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         task_id,
         run_id,
         context_budget,
+        context_budget_source,
         token_headroom,
+        token_headroom_source,
+        require_token_headroom_for_forge_first,
         dry_run,
         allow_exec,
         project_root,
@@ -1082,7 +1202,10 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         task_id,
         run_id,
         context_budget,
+        context_budget_source,
         token_headroom,
+        token_headroom_source,
+        require_token_headroom_for_forge_first,
     });
     let command = wrapper_plan.command.clone();
     let cwd_path = cwd
@@ -1492,6 +1615,13 @@ struct HarnessProjectExecPolicy {
     require_lineage_for_exec: bool,
 }
 
+#[derive(Debug, Clone)]
+struct HarnessProjectRuntimePolicy {
+    context_budget: Option<usize>,
+    token_headroom: Option<bool>,
+    require_token_headroom_for_forge_first: bool,
+}
+
 fn read_harness_project_exec_policy(project_root: &Path) -> HarnessProjectExecPolicy {
     let path = project_root.join(".forge/harness.json");
     let Ok(content) = fs::read_to_string(&path) else {
@@ -1520,6 +1650,43 @@ fn read_harness_project_exec_policy(project_root: &Path) -> HarnessProjectExecPo
             "missing_require_lineage_for_exec"
         },
         require_lineage_for_exec,
+    }
+}
+
+fn read_harness_project_runtime_policy(project_root: &Path) -> HarnessProjectRuntimePolicy {
+    let path = project_root.join(".forge/harness.json");
+    let Ok(content) = fs::read_to_string(&path) else {
+        return HarnessProjectRuntimePolicy {
+            context_budget: None,
+            token_headroom: None,
+            require_token_headroom_for_forge_first: false,
+        };
+    };
+    let Ok(config) = serde_json::from_str::<Value>(&content) else {
+        return HarnessProjectRuntimePolicy {
+            context_budget: None,
+            token_headroom: None,
+            require_token_headroom_for_forge_first: false,
+        };
+    };
+    let context_budget = config
+        .get("context_budget")
+        .or_else(|| config.get("default_context_budget"))
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0);
+    let token_headroom = config
+        .get("default_token_headroom")
+        .or_else(|| config.get("token_headroom"))
+        .and_then(Value::as_bool);
+    let require_token_headroom_for_forge_first = config
+        .get("require_token_headroom_for_forge_first")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    HarnessProjectRuntimePolicy {
+        context_budget,
+        token_headroom,
+        require_token_headroom_for_forge_first,
     }
 }
 

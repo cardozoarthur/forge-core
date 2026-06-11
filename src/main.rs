@@ -69,8 +69,9 @@ use forge_core::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, build_harness_doctor_report,
     build_harness_mode_report, inspect_cli_harness_shim_status, install_cli_harness_shim,
     persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
-    retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
-    CliShimStatusOptions, CliWrapperPlanOptions, HarnessDoctorOptions, HarnessModeOptions,
+    resolve_harness_runtime_policy, retrieve_headroom_blob, run_cli_harness_exec,
+    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
+    HarnessDoctorOptions, HarnessModeOptions, HarnessRuntimePolicyOptions,
 };
 use forge_core::identity::{
     audit_tenant_index, ensure_operating_context_policy, ensure_workflow_policy,
@@ -676,10 +677,12 @@ enum HarnessCommands {
         task_id: Option<String>,
         #[arg(long = "run")]
         run_id: Option<String>,
-        #[arg(long = "context-budget", default_value_t = 1200)]
-        context_budget: usize,
-        #[arg(long = "token-headroom", default_value_t = true)]
+        #[arg(long = "context-budget")]
+        context_budget: Option<usize>,
+        #[arg(long = "token-headroom")]
         token_headroom: bool,
+        #[arg(long = "no-token-headroom", conflicts_with = "token_headroom")]
+        no_token_headroom: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -698,10 +701,12 @@ enum HarnessCommands {
         task_id: Option<String>,
         #[arg(long = "run")]
         run_id: Option<String>,
-        #[arg(long = "context-budget", default_value_t = 1200)]
-        context_budget: usize,
-        #[arg(long = "token-headroom", default_value_t = true)]
+        #[arg(long = "context-budget")]
+        context_budget: Option<usize>,
+        #[arg(long = "token-headroom")]
         token_headroom: bool,
+        #[arg(long = "no-token-headroom", conflicts_with = "token_headroom")]
+        no_token_headroom: bool,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -724,10 +729,12 @@ enum HarnessCommands {
         task_id: Option<String>,
         #[arg(long = "run")]
         run_id: Option<String>,
-        #[arg(long = "context-budget", default_value_t = 1200)]
-        context_budget: usize,
-        #[arg(long = "token-headroom", default_value_t = true)]
+        #[arg(long = "context-budget")]
+        context_budget: Option<usize>,
+        #[arg(long = "token-headroom")]
         token_headroom: bool,
+        #[arg(long = "no-token-headroom", conflicts_with = "token_headroom")]
+        no_token_headroom: bool,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
@@ -756,10 +763,12 @@ enum HarnessCommands {
         task_id: Option<String>,
         #[arg(long = "run")]
         run_id: Option<String>,
-        #[arg(long = "context-budget", default_value_t = 1200)]
-        context_budget: usize,
-        #[arg(long = "token-headroom", default_value_t = true)]
+        #[arg(long = "context-budget")]
+        context_budget: Option<usize>,
+        #[arg(long = "token-headroom")]
         token_headroom: bool,
+        #[arg(long = "no-token-headroom", conflicts_with = "token_headroom")]
+        no_token_headroom: bool,
         #[arg(long = "execute", default_value_t = false)]
         execute: bool,
         #[arg(long = "allow-exec", default_value_t = false)]
@@ -5379,8 +5388,25 @@ fn run() -> Result<i32> {
                 run_id,
                 context_budget,
                 token_headroom,
+                no_token_headroom,
                 output,
             } => {
+                let (effective_forge_first, _) = resolve_harness_forge_first_source_for_project(
+                    forge_first,
+                    observe_only,
+                    project_root.as_deref(),
+                );
+                let (token_headroom_input, token_headroom_source) =
+                    harness_cli_token_headroom_input(token_headroom, no_token_headroom);
+                let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+                    project_root: project_root.as_deref(),
+                    context_budget,
+                    context_budget_source: "explicit_flag",
+                    token_headroom: token_headroom_input,
+                    token_headroom_source,
+                    forge_first: effective_forge_first,
+                    default_context_budget: DEFAULT_CONTEXT_BUDGET,
+                });
                 let report = build_harness_doctor_report(HarnessDoctorOptions {
                     shim_dir: &shim_dir,
                     executor: &executor,
@@ -5390,8 +5416,12 @@ fn run() -> Result<i32> {
                     workflow_id: workflow_id.as_deref(),
                     task_id: task_id.as_deref(),
                     run_id: run_id.as_deref(),
-                    context_budget,
-                    token_headroom,
+                    context_budget: runtime_policy.context_budget,
+                    context_budget_source: &runtime_policy.context_budget_source,
+                    token_headroom: runtime_policy.token_headroom,
+                    token_headroom_source: &runtime_policy.token_headroom_source,
+                    require_token_headroom_for_forge_first: runtime_policy
+                        .require_token_headroom_for_forge_first,
                 })?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -5406,6 +5436,7 @@ fn run() -> Result<i32> {
                 run_id,
                 context_budget,
                 token_headroom,
+                no_token_headroom,
                 project_root,
                 output,
             } => {
@@ -5415,6 +5446,17 @@ fn run() -> Result<i32> {
                         observe_only,
                         project_root.as_deref(),
                     );
+                let (token_headroom_input, token_headroom_source) =
+                    harness_cli_token_headroom_input(token_headroom, no_token_headroom);
+                let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+                    project_root: project_root.as_deref(),
+                    context_budget,
+                    context_budget_source: "explicit_flag",
+                    token_headroom: token_headroom_input,
+                    token_headroom_source,
+                    forge_first,
+                    default_context_budget: DEFAULT_CONTEXT_BUDGET,
+                });
                 let report = build_cli_wrapper_plan(CliWrapperPlanOptions {
                     executor: &executor,
                     command: &command,
@@ -5423,8 +5465,12 @@ fn run() -> Result<i32> {
                     workflow_id: workflow_id.as_deref(),
                     task_id: task_id.as_deref(),
                     run_id: run_id.as_deref(),
-                    context_budget,
-                    token_headroom,
+                    context_budget: runtime_policy.context_budget,
+                    context_budget_source: &runtime_policy.context_budget_source,
+                    token_headroom: runtime_policy.token_headroom,
+                    token_headroom_source: &runtime_policy.token_headroom_source,
+                    require_token_headroom_for_forge_first: runtime_policy
+                        .require_token_headroom_for_forge_first,
                 });
                 print_response(output, &report)?;
                 Ok(0)
@@ -5440,6 +5486,7 @@ fn run() -> Result<i32> {
                 run_id,
                 context_budget,
                 token_headroom,
+                no_token_headroom,
                 project_root,
                 force,
                 output,
@@ -5450,6 +5497,17 @@ fn run() -> Result<i32> {
                         observe_only,
                         project_root.as_deref(),
                     );
+                let (token_headroom_input, token_headroom_source) =
+                    harness_cli_token_headroom_input(token_headroom, no_token_headroom);
+                let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+                    project_root: project_root.as_deref(),
+                    context_budget,
+                    context_budget_source: "explicit_flag",
+                    token_headroom: token_headroom_input,
+                    token_headroom_source,
+                    forge_first,
+                    default_context_budget: DEFAULT_CONTEXT_BUDGET,
+                });
                 let report = install_cli_harness_shim(CliShimInstallOptions {
                     shim_dir: &shim_dir,
                     executor: &executor,
@@ -5460,8 +5518,8 @@ fn run() -> Result<i32> {
                     workflow_id: workflow_id.as_deref(),
                     task_id: task_id.as_deref(),
                     run_id: run_id.as_deref(),
-                    context_budget,
-                    token_headroom,
+                    context_budget: runtime_policy.context_budget,
+                    token_headroom: runtime_policy.token_headroom,
                     force,
                 })?;
                 print_response(output, &report)?;
@@ -5488,6 +5546,7 @@ fn run() -> Result<i32> {
                 run_id,
                 context_budget,
                 token_headroom,
+                no_token_headroom,
                 execute,
                 allow_exec,
                 project_root,
@@ -5501,6 +5560,17 @@ fn run() -> Result<i32> {
                         observe_only,
                         project_root.as_deref(),
                     );
+                let (token_headroom_input, token_headroom_source) =
+                    harness_cli_token_headroom_input(token_headroom, no_token_headroom);
+                let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+                    project_root: project_root.as_deref(),
+                    context_budget,
+                    context_budget_source: "explicit_flag",
+                    token_headroom: token_headroom_input,
+                    token_headroom_source,
+                    forge_first,
+                    default_context_budget: DEFAULT_CONTEXT_BUDGET,
+                });
                 let store = ForgeStore::open(cli.store)?;
                 let report = run_cli_harness_exec(CliHarnessExecOptions {
                     store: Some(&store),
@@ -5511,8 +5581,12 @@ fn run() -> Result<i32> {
                     workflow_id: workflow_id.as_deref(),
                     task_id: task_id.as_deref(),
                     run_id: run_id.as_deref(),
-                    context_budget,
-                    token_headroom,
+                    context_budget: runtime_policy.context_budget,
+                    context_budget_source: &runtime_policy.context_budget_source,
+                    token_headroom: runtime_policy.token_headroom,
+                    token_headroom_source: &runtime_policy.token_headroom_source,
+                    require_token_headroom_for_forge_first: runtime_policy
+                        .require_token_headroom_for_forge_first,
                     dry_run: !execute,
                     allow_exec,
                     project_root: project_root.as_deref(),
@@ -7653,6 +7727,19 @@ fn print_response<T: Serialize>(format: OutputFormat, value: &T) -> Result<()> {
         OutputFormat::Human => println!("{}", serde_json::to_string_pretty(value)?),
     }
     Ok(())
+}
+
+fn harness_cli_token_headroom_input(
+    token_headroom: bool,
+    no_token_headroom: bool,
+) -> (Option<bool>, &'static str) {
+    if no_token_headroom {
+        (Some(false), "no_token_headroom_flag")
+    } else if token_headroom {
+        (Some(true), "explicit_flag")
+    } else {
+        (None, "default")
+    }
 }
 
 fn addon_dirs_or_default(addon_dirs: Vec<PathBuf>) -> Vec<PathBuf> {

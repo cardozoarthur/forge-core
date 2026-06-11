@@ -366,7 +366,10 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
         task_id: None,
         run_id: None,
         context_budget: 1200,
+        context_budget_source: "interactive_default",
         token_headroom: true,
+        token_headroom_source: "interactive_default",
+        require_token_headroom_for_forge_first: false,
     })?;
     let runtime_node_status = if runtimes.usable.is_empty() {
         "no allowed async run substrates".to_string()

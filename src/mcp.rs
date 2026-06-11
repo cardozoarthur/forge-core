@@ -58,8 +58,9 @@ use crate::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, build_harness_doctor_report,
     build_harness_mode_report, inspect_cli_harness_shim_status, install_cli_harness_shim,
     persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
-    retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
-    CliShimStatusOptions, CliWrapperPlanOptions, HarnessDoctorOptions, HarnessModeOptions,
+    resolve_harness_runtime_policy, retrieve_headroom_blob, run_cli_harness_exec,
+    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
+    HarnessDoctorOptions, HarnessModeOptions, HarnessRuntimePolicyOptions,
 };
 use crate::identity::{
     audit_tenant_index, ensure_workflow_policy, evaluate_tenant_policy_for_action,
@@ -7646,17 +7647,38 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let workflow_id = input.workflow_id.or(input.workflow);
             let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
+            let project_root = input.project_root.as_deref().map(std::path::Path::new);
+            let (effective_forge_first, _) = if let Some(forge_first) = input.forge_first {
+                (forge_first, "mcp_input")
+            } else if let Some(project_root) = project_root {
+                resolve_harness_forge_first_source_for_project(false, false, Some(project_root))
+            } else {
+                (true, "mcp_default")
+            };
+            let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+                project_root,
+                context_budget: input.context_budget,
+                context_budget_source: "mcp_input",
+                token_headroom: input.token_headroom,
+                token_headroom_source: "mcp_input",
+                forge_first: effective_forge_first,
+                default_context_budget: DEFAULT_CONTEXT_BUDGET,
+            });
             serde_json::to_value(build_harness_doctor_report(HarnessDoctorOptions {
                 shim_dir: std::path::Path::new(&input.shim_dir),
                 executor: &input.executor,
                 forge_first: input.forge_first.unwrap_or(false),
                 observe_only: input.observe_only.unwrap_or(false),
-                project_root: input.project_root.as_deref().map(std::path::Path::new),
+                project_root,
                 workflow_id: workflow_id.as_deref(),
                 task_id: task_id.as_deref(),
                 run_id: run_id.as_deref(),
-                context_budget: input.context_budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
-                token_headroom: input.token_headroom.unwrap_or(true),
+                context_budget: runtime_policy.context_budget,
+                context_budget_source: &runtime_policy.context_budget_source,
+                token_headroom: runtime_policy.token_headroom,
+                token_headroom_source: &runtime_policy.token_headroom_source,
+                require_token_headroom_for_forge_first: runtime_policy
+                    .require_token_headroom_for_forge_first,
             })?)?
         }
         "forge.harness.wrap_plan" => {
@@ -7665,17 +7687,23 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let workflow_id = input.workflow_id.or(input.workflow);
             let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
+            let project_root = input.project_root.as_deref().map(std::path::Path::new);
             let (forge_first, forge_first_source) = if let Some(forge_first) = input.forge_first {
                 (forge_first, "mcp_input")
-            } else if let Some(project_root) = input.project_root.as_deref() {
-                resolve_harness_forge_first_source_for_project(
-                    false,
-                    false,
-                    Some(std::path::Path::new(project_root)),
-                )
+            } else if let Some(project_root) = project_root {
+                resolve_harness_forge_first_source_for_project(false, false, Some(project_root))
             } else {
                 (true, "mcp_default")
             };
+            let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+                project_root,
+                context_budget: input.context_budget,
+                context_budget_source: "mcp_input",
+                token_headroom: input.token_headroom,
+                token_headroom_source: "mcp_input",
+                forge_first,
+                default_context_budget: DEFAULT_CONTEXT_BUDGET,
+            });
             serde_json::to_value(build_cli_wrapper_plan(CliWrapperPlanOptions {
                 executor: &input.executor,
                 command: &command,
@@ -7684,8 +7712,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 workflow_id: workflow_id.as_deref(),
                 task_id: task_id.as_deref(),
                 run_id: run_id.as_deref(),
-                context_budget: input.context_budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
-                token_headroom: input.token_headroom.unwrap_or(true),
+                context_budget: runtime_policy.context_budget,
+                context_budget_source: &runtime_policy.context_budget_source,
+                token_headroom: runtime_policy.token_headroom,
+                token_headroom_source: &runtime_policy.token_headroom_source,
+                require_token_headroom_for_forge_first: runtime_policy
+                    .require_token_headroom_for_forge_first,
             }))?
         }
         "forge.harness.install_shims" => {
@@ -7697,17 +7729,23 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let workflow_id = input.workflow_id.or(input.workflow);
             let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
+            let project_root = input.project_root.as_deref().map(std::path::Path::new);
             let (forge_first, forge_first_source) = if let Some(forge_first) = input.forge_first {
                 (forge_first, "mcp_input")
-            } else if let Some(project_root) = input.project_root.as_deref() {
-                resolve_harness_forge_first_source_for_project(
-                    false,
-                    false,
-                    Some(std::path::Path::new(project_root)),
-                )
+            } else if let Some(project_root) = project_root {
+                resolve_harness_forge_first_source_for_project(false, false, Some(project_root))
             } else {
                 (true, "mcp_default")
             };
+            let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+                project_root,
+                context_budget: input.context_budget,
+                context_budget_source: "mcp_input",
+                token_headroom: input.token_headroom,
+                token_headroom_source: "mcp_input",
+                forge_first,
+                default_context_budget: DEFAULT_CONTEXT_BUDGET,
+            });
             serde_json::to_value(install_cli_harness_shim(CliShimInstallOptions {
                 shim_dir: std::path::Path::new(&input.shim_dir),
                 executor: &input.executor,
@@ -7718,8 +7756,8 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 workflow_id: workflow_id.as_deref(),
                 task_id: task_id.as_deref(),
                 run_id: run_id.as_deref(),
-                context_budget: input.context_budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
-                token_headroom: input.token_headroom.unwrap_or(true),
+                context_budget: runtime_policy.context_budget,
+                token_headroom: runtime_policy.token_headroom,
                 force: input.force.unwrap_or(false),
             })?)?
         }
@@ -7745,6 +7783,15 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             } else {
                 (true, "mcp_default")
             };
+            let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+                project_root,
+                context_budget: input.context_budget,
+                context_budget_source: "mcp_input",
+                token_headroom: input.token_headroom,
+                token_headroom_source: "mcp_input",
+                forge_first,
+                default_context_budget: DEFAULT_CONTEXT_BUDGET,
+            });
             serde_json::to_value(run_cli_harness_exec(CliHarnessExecOptions {
                 store: Some(store),
                 executor: &input.executor,
@@ -7754,8 +7801,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 workflow_id: workflow_id.as_deref(),
                 task_id: task_id.as_deref(),
                 run_id: run_id.as_deref(),
-                context_budget: input.context_budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
-                token_headroom: input.token_headroom.unwrap_or(true),
+                context_budget: runtime_policy.context_budget,
+                context_budget_source: &runtime_policy.context_budget_source,
+                token_headroom: runtime_policy.token_headroom,
+                token_headroom_source: &runtime_policy.token_headroom_source,
+                require_token_headroom_for_forge_first: runtime_policy
+                    .require_token_headroom_for_forge_first,
                 dry_run: input.dry_run.unwrap_or(true),
                 allow_exec: input.allow_exec.unwrap_or(false),
                 project_root,

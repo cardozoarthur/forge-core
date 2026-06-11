@@ -789,6 +789,110 @@ fn harness_mode_reports_effective_default_source_and_project_config_precedence()
 }
 
 #[test]
+fn harness_project_policy_sets_context_budget_and_requires_headroom_for_forge_first_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("project");
+    fs::create_dir_all(project.join(".forge")).unwrap();
+    fs::write(
+        project.join(".forge/harness.json"),
+        r#"{"default_mode":"forge_first","context_budget":4096,"default_token_headroom":false,"require_token_headroom_for_forge_first":true}"#,
+    )
+    .unwrap();
+
+    let mode_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "harness",
+            "mode",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mode: Value = serde_json::from_slice(&mode_output).unwrap();
+    assert_eq!(mode["forge_first"], true);
+    assert_eq!(mode["default_context_budget"], 4096);
+    assert_eq!(mode["context_budget_source"], "project_config");
+    assert_eq!(mode["default_token_headroom"], true);
+    assert_eq!(
+        mode["token_headroom_source"],
+        "project_policy_required_for_forge_first"
+    );
+    assert_eq!(mode["require_token_headroom_for_forge_first"], true);
+
+    let plan_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "harness",
+            "wrap-plan",
+            "--executor",
+            "codex",
+            "--cmd",
+            "codex",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    assert_eq!(plan["forge_first"], true);
+    assert_eq!(plan["context_budget"], 4096);
+    assert_eq!(plan["context_budget_source"], "project_config");
+    assert_eq!(plan["token_headroom_enabled"], true);
+    assert_eq!(
+        plan["token_headroom_source"],
+        "project_policy_required_for_forge_first"
+    );
+    assert!(plan["harness_checks"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "project policy requires token headroom for Forge-first CLI execution"
+        )));
+
+    let mcp_input = serde_json::json!({
+        "executor": "codex",
+        "command": ["codex"],
+        "project_root": project.display().to_string()
+    });
+    let mcp_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.wrap_plan",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_plan: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp_plan["result"]["context_budget"], 4096);
+    assert_eq!(
+        mcp_plan["result"]["token_headroom_source"],
+        "project_policy_required_for_forge_first"
+    );
+}
+
+#[test]
 fn harness_doctor_audits_forge_first_headroom_and_shim_readiness_for_cli_and_mcp() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
