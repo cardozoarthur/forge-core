@@ -4918,7 +4918,7 @@ pub fn emit_event_egress(
             workflow_artifact: None,
         });
     }
-    ensure_event_egress_workflow_policy(store, &request)?;
+    ensure_event_egress_tenant_policy(store, &request, operating_context)?;
     let delivery = deliver_event_egress(&matched_adapter, &request)?;
     let status = if delivery.success {
         "event_egress_delivered"
@@ -4957,14 +4957,15 @@ pub fn emit_event_egress(
     })
 }
 
-fn ensure_event_egress_workflow_policy(
+fn ensure_event_egress_tenant_policy(
     store: &ForgeStore,
     request: &EventEgressRequestEnvelope,
+    operating_context: &OperatingContextSpec,
 ) -> Result<()> {
-    let Some(workflow_id) = extract_string(&request.payload, &["workflow_id"]) else {
-        return Ok(());
-    };
-    ensure_workflow_policy(store, &workflow_id, "event egress delivery")
+    if let Some(workflow_id) = extract_string(&request.payload, &["workflow_id"]) {
+        return ensure_workflow_policy(store, &workflow_id, "event egress delivery");
+    }
+    ensure_operating_context_policy(store, operating_context, "event egress delivery")
 }
 
 fn normalize_event_egress_input(mut input: EventEgressEmitInput) -> Result<EventEgressEmitInput> {

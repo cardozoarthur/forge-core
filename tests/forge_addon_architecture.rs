@@ -7433,6 +7433,203 @@ event_adapters:
 }
 
 #[test]
+fn event_egress_enforces_project_tenant_policy_without_workflow_target() {
+    let temp = tempdir().unwrap();
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: global-egress-org
+  label: Global Egress Org
+brand:
+  scope: brand
+  id: global-egress-brand
+  label: Global Egress Brand
+product:
+  scope: product
+  id: global-egress-product
+  label: Global Egress Product
+user:
+  scope: user
+  id: global-egress-user
+  label: Global Egress User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+
+    let store = temp.path().join("forge.sqlite");
+    let addon_dir = temp.path().join("addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    let (endpoint, handle) = start_event_egress_server(1);
+    fs::write(
+        addon_dir.join("global-tenant-egress.yaml"),
+        format!(
+            r#"
+id: forge.addon.partner
+name: Global Tenant Egress Addon
+version: 0.1.0
+permissions:
+  - id: partner.notify
+    risk: medium
+    tools: [http-client]
+    resources: [partner.notification]
+    integrations: [partner.webhook]
+    actions: [notify_partner]
+capabilities:
+  - id: partner_notifications
+    title: Global tenant notifications
+    domains: [operations]
+    keywords: [tenant, notification]
+event_types:
+  - id: partner.notification
+    title: Global tenant notification
+    transport: webhook
+event_adapters:
+  - id: partner.webhook_egress
+    title: Global Tenant Webhook Egress
+    transport: webhook
+    direction: egress
+    origins: [codex]
+    actions: [notify_partner]
+    event_types: [partner.notification]
+    schema: partner.notification.v1
+    auth: none
+    permissions: [partner.notify]
+    endpoint: "{endpoint}"
+    allowed_hosts: [127.0.0.1]
+    timeout_seconds: 5
+    max_response_bytes: 65536
+"#
+        ),
+    )
+    .unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let connection = Connection::open(&store).unwrap();
+    connection
+        .execute(
+            "UPDATE identity_memberships SET role = 'viewer' WHERE subject_id = ?1",
+            ["global-egress-user"],
+        )
+        .unwrap();
+
+    let blocked_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "emit",
+            "--addon-dir",
+            addon_dir.to_str().unwrap(),
+            "--addon",
+            "forge.addon.partner",
+            "--adapter",
+            "partner.webhook_egress",
+            "--event-type",
+            "partner.notification",
+            "--action",
+            "notify_partner",
+            "--origin",
+            "codex",
+            "--payload",
+            r#"{"message":"must be governed even without workflow_id"}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let blocked_stderr = String::from_utf8(blocked_output).unwrap();
+    assert!(blocked_stderr.contains("multi-tenant enforcement blocked event egress delivery"));
+    assert!(blocked_stderr.contains("workflow:deliver"));
+    assert!(!blocked_stderr.contains("failed to connect to event egress endpoint"));
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "membership-update",
+            "--subject",
+            "global-egress-user",
+            "--organization",
+            "global-egress-org",
+            "--brand",
+            "global-egress-brand",
+            "--product",
+            "global-egress-product",
+            "--grant",
+            "workflow:deliver",
+            "--source",
+            "test-cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let delivered_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "emit",
+            "--addon-dir",
+            addon_dir.to_str().unwrap(),
+            "--addon",
+            "forge.addon.partner",
+            "--adapter",
+            "partner.webhook_egress",
+            "--event-type",
+            "partner.notification",
+            "--action",
+            "notify_partner",
+            "--origin",
+            "codex",
+            "--payload",
+            r#"{"message":"allowed after workflow deliver grant"}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let delivered_json: Value = serde_json::from_slice(&delivered_output).unwrap();
+    assert_eq!(delivered_json["status"], "event_egress_delivered");
+    assert_eq!(delivered_json["delivery"]["status_code"], 202);
+    assert!(delivered_json["request"]["payload"]["workflow_id"].is_null());
+
+    handle.join().unwrap();
+}
+
+#[test]
 fn event_egress_respects_workflow_tenant_policy_before_external_delivery() {
     let temp = tempdir().unwrap();
     let forge_dir = temp.path().join(".forge");
