@@ -20760,6 +20760,218 @@ tenant_policy_mode: enforce
 }
 
 #[test]
+fn cost_materialize_enforces_project_tenant_policy_for_global_index_writes() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let visible_root = temp.path().join("visible");
+    let hidden_root = temp.path().join("hidden");
+    fs::create_dir_all(visible_root.join(".forge")).unwrap();
+    fs::create_dir_all(hidden_root.join(".forge")).unwrap();
+    fs::write(
+        visible_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: cost-materialize-org
+  label: Cost Materialize Org
+brand:
+  scope: brand
+  id: cost-materialize-brand
+  label: Cost Materialize Brand
+product:
+  scope: product
+  id: cost-materialize-product
+  label: Cost Materialize Product
+user:
+  scope: user
+  id: cost-materialize-user
+  label: Cost Materialize User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+    fs::write(
+        hidden_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: other-cost-materialize-org
+  label: Other Cost Materialize Org
+brand:
+  scope: brand
+  id: other-cost-materialize-brand
+  label: Other Cost Materialize Brand
+product:
+  scope: product
+  id: other-cost-materialize-product
+  label: Other Cost Materialize Product
+user:
+  scope: user
+  id: other-cost-materialize-user
+  label: Other Cost Materialize User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+
+    for project_root in [&visible_root, &hidden_root] {
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "identity",
+                "sync",
+                "--project-root",
+                project_root.to_str().unwrap(),
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Visible tenant cost materialize workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    forge()
+        .current_dir(&hidden_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Hidden tenant cost materialize workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let materialize_output = forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "materialize",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let materialize_json: Value = serde_json::from_slice(&materialize_output).unwrap();
+    assert_eq!(
+        materialize_json["filters"]["organization_id"],
+        "cost-materialize-org"
+    );
+    assert_eq!(materialize_json["summary"]["workflow_count"], 1);
+    assert!(materialize_json["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| {
+            row["organization_id"] == "cost-materialize-org"
+                && row["brand_id"] == "cost-materialize-brand"
+                && row["product_id"] == "cost-materialize-product"
+        }));
+
+    let mcp_materialize_input = serde_json::json!({
+        "project_root": visible_root.display().to_string()
+    });
+    let mcp_materialize_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.cost.materialize",
+            "--input",
+            &mcp_materialize_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_materialize_json: Value = serde_json::from_slice(&mcp_materialize_output).unwrap();
+    assert_eq!(
+        mcp_materialize_json["result"]["filters"]["organization_id"],
+        "cost-materialize-org"
+    );
+    assert_eq!(
+        mcp_materialize_json["result"]["summary"]["workflow_count"],
+        1
+    );
+
+    forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "membership-update",
+            "--subject",
+            "cost-materialize-user",
+            "--organization",
+            "cost-materialize-org",
+            "--brand",
+            "cost-materialize-brand",
+            "--product",
+            "cost-materialize-product",
+            "--deny",
+            "context:read",
+            "--source",
+            "test-cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let denied_output = forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "materialize",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let denied_stderr = String::from_utf8(denied_output).unwrap();
+    assert!(denied_stderr.contains("multi-tenant enforcement blocked cost ledger materialize"));
+    assert!(denied_stderr.contains("context:read"));
+}
+
+#[test]
 fn cost_history_enforces_project_tenant_policy_for_global_rollups() {
     let temp = tempdir().unwrap();
     let forge_dir = temp.path().join(".forge");
