@@ -35905,6 +35905,147 @@ fn interactive_task_board_command_and_mcp_surface_are_dedicated() {
 }
 
 #[test]
+fn interactive_structured_logs_command_and_mcp_surface_are_dedicated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Operate dedicated structured logs for timeline drill-down",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let checkpoint_task = find_task(planned_json["tasks"].as_array().unwrap(), "Validate build");
+    let checkpoint_task_id = checkpoint_task["id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "checkpoint",
+            "--workflow",
+            workflow_id,
+            "--task",
+            checkpoint_task_id,
+            "--executor",
+            "codex",
+            "--state",
+            "paused",
+            "--summary",
+            "Structured log drill-down can resume from this checkpoint",
+            "--context-sha256",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "--context-routing-cache-key",
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "--workflow-revision",
+            "0",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let logs_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "structured-logs",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let logs: Value = serde_json::from_slice(&logs_output).unwrap();
+    assert_eq!(
+        logs["schema_version"],
+        "forge.interactive.structured_logs.v1"
+    );
+    assert_eq!(logs["status"], "structured_logs_ready");
+    assert!(logs["log_count"].as_u64().unwrap() >= 1);
+    let checkpoint_log = logs["logs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "task_checkpoint_recorded")
+        .expect("structured logs command should expose checkpoint events directly");
+    assert_eq!(checkpoint_log["workflow_id"], workflow_id);
+    assert_eq!(checkpoint_log["correlation"]["task_id"], checkpoint_task_id);
+    assert!(checkpoint_log["observability"].is_object());
+    assert!(checkpoint_log["payload_preview"].is_string());
+
+    let logs_text = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "structured-logs",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(logs_text).unwrap();
+    assert!(text.contains("Structured logs"));
+    assert!(text.contains("task_checkpoint_recorded"));
+    assert!(text.contains(workflow_id));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.structured_logs");
+    assert_eq!(
+        tool["output_schema"],
+        "forge.interactive.structured_logs.v1"
+    );
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.structured_logs"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.structured_logs.v1"
+    );
+    assert!(mcp_json["result"]["logs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["kind"] == "task_checkpoint_recorded"
+            && entry["correlation"]["task_id"] == checkpoint_task_id));
+}
+
+#[test]
 fn interactive_task_board_lanes_include_operable_task_cards() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -36739,6 +36880,14 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.task_board"),
         "the packaged Forge skill should expose the dedicated interactive task board through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.structured_logs"),
+        "the packaged Forge skill should expose the dedicated structured logs surface through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge interactive structured-logs"),
+        "the packaged Forge skill should include the structured logs CLI command"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("ui_composition_panel"),

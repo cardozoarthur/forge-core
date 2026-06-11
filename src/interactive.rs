@@ -813,6 +813,13 @@ pub fn build_interactive_task_board(store: &ForgeStore) -> Result<InteractiveTas
     build_task_board_panel(store, &workflows.workflows)
 }
 
+pub fn build_interactive_structured_logs(
+    store: &ForgeStore,
+) -> Result<InteractiveStructuredLogsPanel> {
+    let timeline = build_global_event_timeline(store, None, None, None, None, Some(20), None)?;
+    Ok(build_structured_logs_panel(&timeline))
+}
+
 fn default_interactive_harness_shim_dir() -> PathBuf {
     env::var_os("HOME")
         .map(PathBuf::from)
@@ -1195,6 +1202,22 @@ pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> Strin
         checkpoints = panel.checkpoint_resume_candidates,
         artifacts = panel.artifact_count,
         lanes = render_task_board_lane_summary(panel),
+    )
+}
+
+pub fn render_interactive_structured_logs(panel: &InteractiveStructuredLogsPanel) -> String {
+    let next_cursor = panel
+        .next_cursor
+        .map(|cursor| cursor.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "Structured logs: {status}; logs {log_count}/{total_event_count}, next cursor {next_cursor}, has more {has_more}\nLogs: {logs}\n",
+        status = panel.status,
+        log_count = panel.log_count,
+        total_event_count = panel.total_event_count,
+        next_cursor = next_cursor,
+        has_more = panel.has_more,
+        logs = render_structured_log_summary(panel),
     )
 }
 

@@ -80,8 +80,8 @@ use crate::interaction::{
     expire_human_interaction, list_human_interactions, CreateChoiceInteractionRequest,
 };
 use crate::interactive::{
-    build_interactive_home, build_interactive_task_board, route_interactive_input,
-    slash_command_catalog,
+    build_interactive_home, build_interactive_structured_logs, build_interactive_task_board,
+    route_interactive_input, slash_command_catalog,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -2764,6 +2764,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.task_board.v1",
                 &["forge", "interactive", "task-board", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.structured_logs",
+                "Inspect Interactive Structured Logs",
+                "Return recent Forge structured event logs with sequence, workflow, category, severity, origin, correlation, observability and payload preview without launching a TTY.",
+                object_schema(&[], &[]),
+                "forge.interactive.structured_logs.v1",
+                &["forge", "interactive", "structured-logs", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -6405,6 +6414,9 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         "forge.interactive.home" => serde_json::to_value(build_interactive_home(store)?)?,
         "forge.interactive.task_board" => {
             serde_json::to_value(build_interactive_task_board(store)?)?
+        }
+        "forge.interactive.structured_logs" => {
+            serde_json::to_value(build_interactive_structured_logs(store)?)?
         }
         "forge.brain_router" => serde_json::to_value(load_executors(store)?.brain_router)?,
         "forge.sessions" => {
