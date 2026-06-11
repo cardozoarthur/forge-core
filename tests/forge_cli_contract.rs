@@ -35313,6 +35313,7 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     assert!(text.contains("Cost panel"));
     assert!(text.contains("Context/memory panel"));
     assert!(text.contains("Addon UI renderers"));
+    assert!(text.contains("UI composition"));
     assert!(text.contains("dashboard_renderer"));
     assert!(text.contains("Repository context"));
     assert!(text.contains("Estimated costs"));
@@ -35589,6 +35590,40 @@ fn interactive_home_exposes_task_board_handoffs_checkpoints_and_artifacts() {
         .unwrap()
         .iter()
         .any(|binding| binding["key"] == "j" && binding["action"] == "focus_next"));
+    let ui_composition = &home["dashboard"]["ui_composition_panel"];
+    assert_eq!(
+        ui_composition["schema_version"],
+        "forge.interactive.ui_composition.v1"
+    );
+    assert_eq!(ui_composition["status"], "ui_composition_ready");
+    assert!(ui_composition["region_count"].as_u64().unwrap() >= 4);
+    assert!(ui_composition["widget_count"].as_u64().unwrap() >= 8);
+    assert!(ui_composition["core_widget_count"].as_u64().unwrap() >= 8);
+    assert!(ui_composition["addon_widget_count"].as_u64().unwrap() >= 1);
+    assert!(ui_composition["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|region| region["region_id"] == "operations"
+            && region["widgets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|widget| widget["widget_id"] == "task_board_panel")));
+    assert!(ui_composition["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|region| region["region_id"] == "addons"
+            && region["widgets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|widget| widget["source"] == "addon")));
+    assert!(ui_composition["commands"]["refresh"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("home")));
     assert_eq!(task_board["status"], "task_board_ready");
     assert!(task_board["workflow_count"].as_u64().unwrap() >= 1);
     assert!(task_board["task_count"].as_u64().unwrap() >= 1);
@@ -36517,6 +36552,14 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         .contains(&serde_json::json!("/harness doctor")));
     assert!(home_json["result"]["dashboard"]["workflow_focus"].is_array());
     assert_eq!(
+        home_json["result"]["dashboard"]["ui_composition_panel"]["schema_version"],
+        "forge.interactive.ui_composition.v1"
+    );
+    assert!(
+        home_json["result"]["dashboard"]["ui_composition_panel"]["regions"].is_array(),
+        "interactive home should expose UI composition regions for TUI/web dashboards"
+    );
+    assert_eq!(
         home_json["result"]["dashboard"]["harness_mode_panel"]["schema_version"],
         "forge.harness.mode.v1"
     );
@@ -36651,6 +36694,10 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.task_board"),
         "the packaged Forge skill should expose the dedicated interactive task board through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("ui_composition_panel"),
+        "the packaged Forge skill should teach agents to read the UI composition panel"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.route"),

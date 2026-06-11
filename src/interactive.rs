@@ -11,7 +11,7 @@ use crate::harness::{
 use crate::memory::memory_policy_report;
 use crate::ops::{
     build_addon_view_renderer_report, build_operational_digital_twin, load_modifier_lane,
-    OpsOperationalDigitalTwin,
+    OpsAddonViewRendererReport, OpsOperationalDigitalTwin,
 };
 use crate::registry::{
     list_workflows_with_filters, RegistryContextActionRef, WorkflowLifecycleFilter,
@@ -34,6 +34,7 @@ const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
 const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_board.v1";
 const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
 const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
+const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
 const SLASH_COMMANDS_SCHEMA_VERSION: &str = "forge.interactive.slash_commands.v1";
 const INTERACTIVE_ROUTE_SCHEMA_VERSION: &str = "forge.interactive.route.v1";
 
@@ -76,6 +77,7 @@ pub struct InteractiveDashboard {
     pub scheduler_worker_status: String,
     pub workflow_focus: Vec<InteractiveWorkflowCard>,
     pub navigation_panel: InteractiveNavigationPanel,
+    pub ui_composition_panel: InteractiveUiCompositionPanel,
     pub dag_panel: InteractiveWorkflowDagPanel,
     pub task_board_panel: InteractiveTaskBoardPanel,
     pub schedule_panel: InteractiveSchedulePanel,
@@ -118,6 +120,50 @@ pub struct InteractiveKeyBinding {
     pub action: String,
     pub target: String,
     pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveUiCompositionPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub layout_kind: String,
+    pub region_count: usize,
+    pub widget_count: usize,
+    pub core_widget_count: usize,
+    pub addon_widget_count: usize,
+    pub addon_renderer_families: Vec<String>,
+    pub regions: Vec<InteractiveUiRegion>,
+    pub commands: InteractiveUiCompositionCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveUiRegion {
+    pub region_id: String,
+    pub title: String,
+    pub role: String,
+    pub order: i64,
+    pub widget_count: usize,
+    pub widgets: Vec<InteractiveUiWidget>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveUiWidget {
+    pub widget_id: String,
+    pub title: String,
+    pub source: String,
+    pub panel: String,
+    pub renderer_family: String,
+    pub safe_renderer: bool,
+    pub layout_density: String,
+    pub layout_width: String,
+    pub commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveUiCompositionCommands {
+    pub refresh: Vec<String>,
+    pub inspect_addons: Vec<String>,
+    pub open_task_board: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -626,27 +672,24 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
         memory_level_count: memory_policy.memory_levels.len(),
         temporary_memory_rule,
     };
-    let addon_renderer_panel = load_addon_catalog_from_store(store, &default_addon_dirs())
+    let addon_renderer_report = load_addon_catalog_from_store(store, &default_addon_dirs())
         .ok()
         .map(|catalog| {
             let addon_views =
                 list_addon_views(&catalog, None, Some("ops_console"), Some("enabled"));
-            let renderers = build_addon_view_renderer_report(&addon_views);
-            InteractiveAddonRendererPanel {
-                status: renderers.status,
-                renderer_count: renderers.renderer_count,
-                safe_renderer_count: renderers.safe_renderer_count,
-                family_count: renderers.family_count,
-                families: renderers.families,
-            }
+            build_addon_view_renderer_report(&addon_views)
         })
-        .unwrap_or_else(|| InteractiveAddonRendererPanel {
+        .unwrap_or_else(|| OpsAddonViewRendererReport {
+            schema_version: "forge.ops.addon_view_renderers.v1".to_string(),
             status: "addon_renderers_unavailable".to_string(),
             renderer_count: 0,
             safe_renderer_count: 0,
             family_count: 0,
             families: Vec::new(),
+            renderers: Vec::new(),
         });
+    let addon_renderer_panel = build_interactive_addon_renderer_panel(&addon_renderer_report);
+    let ui_composition_panel = build_ui_composition_panel(&addon_renderer_report);
 
     Ok(InteractiveHomeReport {
         status: "interactive_home_ready".to_string(),
@@ -679,6 +722,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             scheduler_worker_status,
             workflow_focus,
             navigation_panel: build_navigation_panel(),
+            ui_composition_panel,
             dag_panel,
             task_board_panel,
             schedule_panel,
@@ -920,6 +964,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
             .join(" | ")
     };
     let navigation_keys = render_navigation_keybindings(&d.navigation_panel);
+    let ui_composition_regions = render_ui_composition_region_summary(&d.ui_composition_panel);
     let task_board_lanes = render_task_board_lane_summary(&d.task_board_panel);
     let dag_workflows = render_workflow_dag_summary(&d.dag_panel);
     let digital_twin_workflows = if d.digital_twin_panel.workflows.is_empty() {
@@ -979,6 +1024,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Scheduler worker status: {scheduler_worker_status}\n\
          Workflow focus: {workflow_focus}\n\
          Navigation panel: {navigation_status}; default {navigation_default_mode}, theme {navigation_theme}, modes {navigation_modes}, keys {navigation_keys}\n\
+         UI composition: {ui_composition_status}; layout {ui_composition_layout}, regions {ui_composition_regions_count}, widgets {ui_composition_widgets} ({ui_composition_core_widgets} core, {ui_composition_addon_widgets} addon); {ui_composition_regions}\n\
          Operational digital twin: {digital_twin_status}; workflows {digital_twin_workflows_count}, happening {digital_twin_happening}, done {digital_twin_done}, remaining {digital_twin_remaining}, validated {digital_twin_validated}, rejected {digital_twin_rejected}, approvals {digital_twin_approvals}; {digital_twin_workflows}\n\
          DAG panel: {dag_status}; workflows {dag_workflows_count}, nodes {dag_nodes}, edges {dag_edges}, running {dag_running}, blocked {dag_blocked}, waits {dag_waits}, human waits {dag_human_waits}; {dag_workflows}\n\
          Task board: {task_board_status}; workflows {task_board_workflows}, tasks {task_board_tasks}, ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, checkpoints {task_board_checkpoints}, artifacts {task_board_artifacts}; lanes {task_board_lanes}\n\
@@ -1025,6 +1071,13 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         navigation_theme = d.navigation_panel.active_theme,
         navigation_modes = d.navigation_panel.display_modes.join(", "),
         navigation_keys = navigation_keys,
+        ui_composition_status = d.ui_composition_panel.status,
+        ui_composition_layout = d.ui_composition_panel.layout_kind,
+        ui_composition_regions_count = d.ui_composition_panel.region_count,
+        ui_composition_widgets = d.ui_composition_panel.widget_count,
+        ui_composition_core_widgets = d.ui_composition_panel.core_widget_count,
+        ui_composition_addon_widgets = d.ui_composition_panel.addon_widget_count,
+        ui_composition_regions = ui_composition_regions,
         digital_twin_status = d.digital_twin_panel.schema_version,
         digital_twin_workflows_count = d.digital_twin_panel.workflow_count,
         digital_twin_happening = d.digital_twin_panel.global_counts.happening_now_count,
@@ -1157,6 +1210,274 @@ fn navigation_key(
     }
 }
 
+fn build_interactive_addon_renderer_panel(
+    report: &OpsAddonViewRendererReport,
+) -> InteractiveAddonRendererPanel {
+    InteractiveAddonRendererPanel {
+        status: report.status.clone(),
+        renderer_count: report.renderer_count,
+        safe_renderer_count: report.safe_renderer_count,
+        family_count: report.family_count,
+        families: report.families.clone(),
+    }
+}
+
+fn build_ui_composition_panel(
+    addon_renderer_report: &OpsAddonViewRendererReport,
+) -> InteractiveUiCompositionPanel {
+    let mut addon_widgets = addon_renderer_report
+        .renderers
+        .iter()
+        .take(24)
+        .map(addon_ui_widget)
+        .collect::<Vec<_>>();
+
+    let mut addon_region_widgets = vec![core_ui_widget(
+        "addon_renderer_panel",
+        "Addon UI renderers",
+        "addon_renderer_panel",
+        "data_list_renderer",
+        "standard",
+        "full",
+        vec!["forge addons views --surface ops_console --output json".to_string()],
+    )];
+    addon_region_widgets.append(&mut addon_widgets);
+
+    let regions = vec![
+        ui_region(
+            "top_bar",
+            "Navigation and shell readiness",
+            "navigation",
+            10,
+            vec![
+                core_ui_widget(
+                    "navigation_panel",
+                    "Navigation panel",
+                    "navigation_panel",
+                    "navigation_renderer",
+                    "compact",
+                    "full",
+                    vec!["forge interactive home --output json".to_string()],
+                ),
+                core_ui_widget(
+                    "harness_mode_panel",
+                    "Harness mode",
+                    "harness_mode_panel",
+                    "status_renderer",
+                    "compact",
+                    "half",
+                    vec!["forge harness mode --output json".to_string()],
+                ),
+                core_ui_widget(
+                    "harness_doctor_panel",
+                    "Harness doctor",
+                    "harness_doctor_panel",
+                    "status_renderer",
+                    "compact",
+                    "half",
+                    vec![
+                        "forge harness doctor --executor codex --shim-dir $HOME/.forge/bin --project-root . --output json"
+                            .to_string(),
+                    ],
+                ),
+            ],
+        ),
+        ui_region(
+            "operations",
+            "Workflow operations",
+            "primary_work_area",
+            20,
+            vec![
+                core_ui_widget(
+                    "digital_twin_panel",
+                    "Operational digital twin",
+                    "digital_twin_panel",
+                    "dashboard_renderer",
+                    "detailed",
+                    "full",
+                    vec!["forge ops snapshot --output json".to_string()],
+                ),
+                core_ui_widget(
+                    "dag_panel",
+                    "Workflow DAG",
+                    "dag_panel",
+                    "graph_renderer",
+                    "detailed",
+                    "full",
+                    vec!["forge interactive home --output json".to_string()],
+                ),
+                core_ui_widget(
+                    "task_board_panel",
+                    "Task board",
+                    "task_board_panel",
+                    "task_board_renderer",
+                    "detailed",
+                    "full",
+                    vec!["forge interactive task-board --output json".to_string()],
+                ),
+            ],
+        ),
+        ui_region(
+            "observability",
+            "Observability and governance",
+            "side_panel",
+            30,
+            vec![
+                core_ui_widget(
+                    "schedule_panel",
+                    "Schedule panel",
+                    "schedule_panel",
+                    "timeline_renderer",
+                    "standard",
+                    "half",
+                    vec!["forge schedule worker-status --output json".to_string()],
+                ),
+                core_ui_widget(
+                    "event_panel",
+                    "Event timeline",
+                    "event_panel",
+                    "timeline_renderer",
+                    "standard",
+                    "half",
+                    vec!["forge events timeline --output json".to_string()],
+                ),
+                core_ui_widget(
+                    "cost_panel",
+                    "Cost panel",
+                    "cost_panel",
+                    "metric_renderer",
+                    "standard",
+                    "half",
+                    vec!["forge cost ledger --output json".to_string()],
+                ),
+                core_ui_widget(
+                    "context_memory_panel",
+                    "Context/memory panel",
+                    "context_memory_panel",
+                    "policy_renderer",
+                    "standard",
+                    "half",
+                    vec!["forge memory policy --output json".to_string()],
+                ),
+            ],
+        ),
+        ui_region(
+            "addons",
+            "Addon workspace",
+            "addon_region",
+            40,
+            addon_region_widgets,
+        ),
+    ];
+
+    let widget_count = regions.iter().map(|region| region.widget_count).sum();
+    let core_widget_count = regions
+        .iter()
+        .flat_map(|region| region.widgets.iter())
+        .filter(|widget| widget.source == "core")
+        .count();
+    let addon_widget_count = regions
+        .iter()
+        .flat_map(|region| region.widgets.iter())
+        .filter(|widget| widget.source == "addon")
+        .count();
+
+    InteractiveUiCompositionPanel {
+        schema_version: INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION.to_string(),
+        status: "ui_composition_ready".to_string(),
+        layout_kind: "operator_workspace".to_string(),
+        region_count: regions.len(),
+        widget_count,
+        core_widget_count,
+        addon_widget_count,
+        addon_renderer_families: addon_renderer_report.families.clone(),
+        regions,
+        commands: InteractiveUiCompositionCommands {
+            refresh: vec![
+                "interactive".to_string(),
+                "home".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            inspect_addons: vec![
+                "addons".to_string(),
+                "views".to_string(),
+                "--surface".to_string(),
+                "ops_console".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            open_task_board: vec![
+                "interactive".to_string(),
+                "task-board".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        },
+    }
+}
+
+fn ui_region(
+    region_id: &str,
+    title: &str,
+    role: &str,
+    order: i64,
+    widgets: Vec<InteractiveUiWidget>,
+) -> InteractiveUiRegion {
+    InteractiveUiRegion {
+        region_id: region_id.to_string(),
+        title: title.to_string(),
+        role: role.to_string(),
+        order,
+        widget_count: widgets.len(),
+        widgets,
+    }
+}
+
+fn core_ui_widget(
+    widget_id: &str,
+    title: &str,
+    panel: &str,
+    renderer_family: &str,
+    layout_density: &str,
+    layout_width: &str,
+    commands: Vec<String>,
+) -> InteractiveUiWidget {
+    InteractiveUiWidget {
+        widget_id: widget_id.to_string(),
+        title: title.to_string(),
+        source: "core".to_string(),
+        panel: panel.to_string(),
+        renderer_family: renderer_family.to_string(),
+        safe_renderer: true,
+        layout_density: layout_density.to_string(),
+        layout_width: layout_width.to_string(),
+        commands,
+    }
+}
+
+fn addon_ui_widget(renderer: &crate::ops::OpsAddonViewRenderer) -> InteractiveUiWidget {
+    InteractiveUiWidget {
+        widget_id: format!("addon:{}:{}", renderer.addon_id, renderer.view_id),
+        title: defaulted_ui(&renderer.title, &renderer.view_id),
+        source: "addon".to_string(),
+        panel: renderer.view_id.clone(),
+        renderer_family: renderer.renderer_family.clone(),
+        safe_renderer: renderer.safe_renderer,
+        layout_density: defaulted_ui(&renderer.layout_density, "standard"),
+        layout_width: defaulted_ui(&renderer.layout_width, "auto"),
+        commands: vec![renderer.tui_affordance.clone()],
+    }
+}
+
+fn defaulted_ui(value: &str, fallback: &str) -> String {
+    if value.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 fn render_navigation_keybindings(panel: &InteractiveNavigationPanel) -> String {
     if panel.keybindings.is_empty() {
         return "none".to_string();
@@ -1168,6 +1489,29 @@ fn render_navigation_keybindings(panel: &InteractiveNavigationPanel) -> String {
         .map(|binding| format!("{}={}", binding.key, binding.action))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn render_ui_composition_region_summary(panel: &InteractiveUiCompositionPanel) -> String {
+    if panel.regions.is_empty() {
+        return "none".to_string();
+    }
+
+    panel
+        .regions
+        .iter()
+        .map(|region| {
+            let addon_widgets = region
+                .widgets
+                .iter()
+                .filter(|widget| widget.source == "addon")
+                .count();
+            format!(
+                "{} [{}] widgets {}, addon {}",
+                region.region_id, region.role, region.widget_count, addon_widgets
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 fn render_task_board_lane_summary(panel: &InteractiveTaskBoardPanel) -> String {
