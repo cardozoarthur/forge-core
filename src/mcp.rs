@@ -81,9 +81,10 @@ use crate::interaction::{
 };
 use crate::interactive::{
     build_interactive_harness, build_interactive_home, build_interactive_patch_workbench,
-    build_interactive_permissions, build_interactive_readiness, build_interactive_structured_logs,
-    build_interactive_task_board, build_interactive_workflow_dag, route_interactive_input,
-    slash_command_catalog, InteractiveHarnessOptions,
+    build_interactive_permissions, build_interactive_readiness, build_interactive_sessions,
+    build_interactive_structured_logs, build_interactive_task_board,
+    build_interactive_workflow_dag, route_interactive_input, slash_command_catalog,
+    InteractiveHarnessOptions, InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -2803,6 +2804,19 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &[]),
                 "forge.interactive.harness.v1",
                 &["forge", "interactive", "harness", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.sessions",
+                "Inspect Interactive Session Center",
+                "Return the Forge interactive session center with provider/session readiness, lifecycle state, shell history commands and next lifecycle controls without opening or attaching shells.",
+                object_schema(&[
+                    ("provider_id", "string", "optional provider filter such as codex, opencode, gemini or claude"),
+                    ("lifecycle_state", "string", "optional lifecycle filter such as opened, attached, closed, failed or abandoned"),
+                    ("readiness", "string", "optional readiness filter such as ready, native_cli_available or needs_sync_or_authorization"),
+                ], &[]),
+                "forge.interactive.sessions.v1",
+                &["forge", "interactive", "sessions", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -6512,6 +6526,21 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             options.context_budget = input.context_budget;
             options.token_headroom = input.token_headroom;
             serde_json::to_value(build_interactive_harness(store, options)?)?
+        }
+        "forge.interactive.sessions" => {
+            let input: BrainSessionsInput = if input.is_null() {
+                BrainSessionsInput::default()
+            } else {
+                parse_input(input)?
+            };
+            serde_json::to_value(build_interactive_sessions(
+                store,
+                InteractiveSessionsOptions {
+                    provider_id: input.provider_id.or(input.provider),
+                    lifecycle_state: input.lifecycle_state.or(input.state),
+                    readiness: input.readiness,
+                },
+            )?)?
         }
         "forge.interactive.patch_workbench" => {
             serde_json::to_value(build_interactive_patch_workbench(store)?)?

@@ -5,7 +5,10 @@ use crate::addon::{
 use crate::checkpoint::TaskCheckpoint;
 use crate::cost::build_cost_ledger;
 use crate::event::{build_global_event_timeline, GlobalEventTimelineReport, WorkflowEventEnvelope};
-use crate::executor::load_executors;
+use crate::executor::{
+    build_brain_sessions_report_with_options, load_executors, BrainSessionState,
+    BrainSessionsReport, BrainSessionsReportOptions,
+};
 use crate::graph::{AtomicTask, ExecutorKind, TaskStatus};
 use crate::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, build_harness_doctor_report,
@@ -44,6 +47,7 @@ const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_boar
 const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
 const INTERACTIVE_READINESS_SCHEMA_VERSION: &str = "forge.interactive.readiness.v1";
 const INTERACTIVE_HARNESS_SCHEMA_VERSION: &str = "forge.interactive.harness.v1";
+const INTERACTIVE_SESSIONS_SCHEMA_VERSION: &str = "forge.interactive.sessions.v1";
 const INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION: &str = "forge.interactive.patch_workbench.v1";
 const INTERACTIVE_PERMISSIONS_SCHEMA_VERSION: &str = "forge.interactive.permissions.v1";
 const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
@@ -84,6 +88,7 @@ pub struct InteractiveDashboard {
     pub forge_controlled_surfaces: Vec<String>,
     pub shell_entrypoints: Vec<String>,
     pub harness_panel: InteractiveHarnessPanel,
+    pub sessions_panel: InteractiveSessionsPanel,
     pub harness_mode_panel: HarnessModeReport,
     pub harness_doctor_panel: HarnessDoctorReport,
     pub runtime_node_status: String,
@@ -282,6 +287,66 @@ pub struct InteractiveHarnessCommands {
     pub exec: Vec<String>,
     pub sessions: Vec<String>,
     pub sync: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InteractiveSessionsOptions {
+    pub provider_id: Option<String>,
+    pub lifecycle_state: Option<String>,
+    pub readiness: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveSessionsPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub controller: String,
+    pub selected_provider_id: Option<String>,
+    pub provider_count: usize,
+    pub session_count: usize,
+    pub ready_session_count: usize,
+    pub planned_event_count: usize,
+    pub lifecycle_event_count: usize,
+    pub session_report: BrainSessionsReport,
+    pub session_cards: Vec<InteractiveSessionCard>,
+    pub commands: InteractiveSessionsCommands,
+    pub next_actions: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveSessionCard {
+    pub session_id: String,
+    pub provider_id: String,
+    pub provider_kind: String,
+    pub readiness: String,
+    pub launch_mode: String,
+    pub forge_first_ready: bool,
+    pub lifecycle_state: String,
+    pub recorded_plan_count: usize,
+    pub lifecycle_event_count: usize,
+    pub last_origin: Option<String>,
+    pub last_workflow_id: Option<String>,
+    pub last_task_id: Option<String>,
+    pub last_run_id: Option<String>,
+    pub commands: InteractiveSessionCardCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveSessionCardCommands {
+    pub history: Vec<String>,
+    pub lifecycle: Vec<String>,
+    pub launch_plan: Vec<String>,
+    pub record_plan: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveSessionsCommands {
+    pub refresh: Vec<String>,
+    pub list: Vec<String>,
+    pub brains: Vec<String>,
+    pub shells: Vec<String>,
+    pub lifecycle: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -801,6 +866,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             token_headroom: None,
         },
     )?;
+    let sessions_panel = build_interactive_sessions(store, InteractiveSessionsOptions::default())?;
     let harness_mode_panel = harness_panel.mode.clone();
     let harness_doctor_panel = harness_panel.doctor.clone();
     let runtime_node_status = if runtimes.usable.is_empty() {
@@ -1003,6 +1069,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             forge_controlled_surfaces,
             shell_entrypoints,
             harness_panel,
+            sessions_panel,
             harness_mode_panel,
             harness_doctor_panel,
             runtime_node_status,
@@ -1032,6 +1099,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 "forge schedule list".to_string(),
                 "forge schedule worker-status".to_string(),
                 "forge interactive harness --output json".to_string(),
+                "forge interactive sessions --output json".to_string(),
                 "forge interactive patch-workbench --output json".to_string(),
                 "forge interactive permissions --output json".to_string(),
             ],
@@ -1175,6 +1243,53 @@ pub fn build_interactive_harness(
                 .to_string(),
         ],
         commands,
+    })
+}
+
+pub fn build_interactive_sessions(
+    store: &ForgeStore,
+    options: InteractiveSessionsOptions,
+) -> Result<InteractiveSessionsPanel> {
+    let executors = load_executors(store)?;
+    let session_report = build_brain_sessions_report_with_options(
+        store,
+        &executors.brain_router,
+        BrainSessionsReportOptions {
+            provider_id: options.provider_id,
+            lifecycle_state: options.lifecycle_state,
+            readiness: options.readiness,
+        },
+    )?;
+    let session_cards = session_report
+        .sessions
+        .iter()
+        .map(interactive_session_card)
+        .collect::<Vec<_>>();
+    let commands = interactive_sessions_commands(&session_report);
+    let mut next_actions = session_report.next_actions.clone();
+    next_actions.push("forge interactive readiness --output json".to_string());
+    next_actions.push("forge interactive home --output json".to_string());
+
+    Ok(InteractiveSessionsPanel {
+        schema_version: INTERACTIVE_SESSIONS_SCHEMA_VERSION.to_string(),
+        status: "interactive_sessions_ready".to_string(),
+        controller: session_report.controller.clone(),
+        selected_provider_id: session_report.selected_provider_id.clone(),
+        provider_count: session_report.provider_count,
+        session_count: session_report.session_count,
+        ready_session_count: session_report.ready_session_count,
+        planned_event_count: session_report.planned_event_count,
+        lifecycle_event_count: session_report.lifecycle_event_count,
+        session_report,
+        session_cards,
+        commands,
+        next_actions,
+        notes: vec![
+            "Session center is read-only: it does not open, attach or close shells by itself."
+                .to_string(),
+            "Use lifecycle commands to record human-visible shell state changes before handoff."
+                .to_string(),
+        ],
     })
 }
 
@@ -2084,6 +2199,112 @@ fn interactive_harness_commands(
     }
 }
 
+fn interactive_session_card(session: &BrainSessionState) -> InteractiveSessionCard {
+    InteractiveSessionCard {
+        session_id: session.session_id.clone(),
+        provider_id: session.provider_id.clone(),
+        provider_kind: session.provider_kind.clone(),
+        readiness: session.readiness.clone(),
+        launch_mode: session.launch_mode.clone(),
+        forge_first_ready: session.forge_first_ready,
+        lifecycle_state: session.lifecycle_state.clone(),
+        recorded_plan_count: session.recorded_plan_count,
+        lifecycle_event_count: session.lifecycle_event_count,
+        last_origin: session.last_origin.clone(),
+        last_workflow_id: session.last_workflow_id.clone(),
+        last_task_id: session.last_task_id.clone(),
+        last_run_id: session.last_run_id.clone(),
+        commands: InteractiveSessionCardCommands {
+            history: vec![
+                "sessions".to_string(),
+                "history".to_string(),
+                "--session".to_string(),
+                session.session_id.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            lifecycle: vec![
+                "sessions".to_string(),
+                "lifecycle".to_string(),
+                "--session".to_string(),
+                session.session_id.clone(),
+                "--state".to_string(),
+                "<opened|attached|detached|closed|failed|abandoned>".to_string(),
+                "--origin".to_string(),
+                "forge_cli".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            launch_plan: vec![
+                "shells".to_string(),
+                "--executor".to_string(),
+                session.provider_id.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            record_plan: vec![
+                "shells".to_string(),
+                "--executor".to_string(),
+                session.provider_id.clone(),
+                "--record-session".to_string(),
+                "--origin".to_string(),
+                "forge_cli".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        },
+    }
+}
+
+fn interactive_sessions_commands(report: &BrainSessionsReport) -> InteractiveSessionsCommands {
+    let mut refresh = vec![
+        "interactive".to_string(),
+        "sessions".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ];
+    if let Some(provider_id) = &report.filter.provider_id {
+        refresh.push("--provider".to_string());
+        refresh.push(provider_id.clone());
+    }
+    if let Some(lifecycle_state) = &report.filter.lifecycle_state {
+        refresh.push("--state".to_string());
+        refresh.push(lifecycle_state.clone());
+    }
+    if let Some(readiness) = &report.filter.readiness {
+        refresh.push("--readiness".to_string());
+        refresh.push(readiness.clone());
+    }
+    InteractiveSessionsCommands {
+        refresh,
+        list: vec![
+            "sessions".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        brains: vec![
+            "brains".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        shells: vec![
+            "shells".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        lifecycle: vec![
+            "sessions".to_string(),
+            "lifecycle".to_string(),
+            "--session".to_string(),
+            "<session-id>".to_string(),
+            "--state".to_string(),
+            "<opened|attached|detached|closed|failed|abandoned>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
 fn readiness_commands() -> InteractiveReadinessCommands {
     InteractiveReadinessCommands {
         sync: vec![
@@ -2317,6 +2538,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     };
     let navigation_keys = render_navigation_keybindings(&d.navigation_panel);
     let ui_composition_regions = render_ui_composition_region_summary(&d.ui_composition_panel);
+    let session_cards = render_session_card_summary(&d.sessions_panel);
     let patch_workbench_files = render_patch_workbench_file_summary(&d.patch_workbench_panel);
     let permission_memberships = render_permission_membership_summary(&d.permissions_panel);
     let permission_approvals = render_permission_approval_summary(&d.permissions_panel);
@@ -2375,6 +2597,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Forge-controlled surfaces: {forge_controlled_surfaces}\n\
          Shell entrypoints: {shell_entrypoints}\n\
          Harness center: {harness_center_status}; executor {harness_center_executor}; forge-first {harness_center_forge_first}; token headroom {harness_center_token_headroom}; shim {harness_center_shim}; action {harness_center_command}\n\
+         Session center: {sessions_status}; sessions {sessions_count}, ready {sessions_ready}, planned events {sessions_planned_events}, lifecycle events {sessions_lifecycle_events}; {session_cards}\n\
          Harness mode: {harness_effective_mode} from {harness_source}; project config {harness_project_status}; audit {harness_audit_command}\n\
          Harness doctor: {harness_doctor_status} for {harness_doctor_executor}; shim {harness_doctor_shim_dir}; checks {harness_doctor_checks}; audit {harness_doctor_command}\n\
          Runtime/node status: {runtime_node_status}\n\
@@ -2420,6 +2643,12 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         harness_center_token_headroom = d.harness_panel.token_headroom_ready,
         harness_center_shim = d.harness_panel.shim_status.status,
         harness_center_command = "forge interactive harness --output json",
+        sessions_status = d.sessions_panel.status,
+        sessions_count = d.sessions_panel.session_count,
+        sessions_ready = d.sessions_panel.ready_session_count,
+        sessions_planned_events = d.sessions_panel.planned_event_count,
+        sessions_lifecycle_events = d.sessions_panel.lifecycle_event_count,
+        session_cards = session_cards,
         harness_effective_mode = d.harness_mode_panel.effective_mode,
         harness_source = d.harness_mode_panel.forge_first_source,
         harness_project_status = d.harness_mode_panel.project_config_status,
@@ -2625,6 +2854,48 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         shim_dir = panel.shim_dir,
         next_actions = next_actions,
     )
+}
+
+pub fn render_interactive_sessions(panel: &InteractiveSessionsPanel) -> String {
+    let session_cards = render_session_card_summary(panel);
+    let next_actions = if panel.next_actions.is_empty() {
+        "none".to_string()
+    } else {
+        panel.next_actions.join(" | ")
+    };
+    format!(
+        "Session center: {status}; controller {controller}; sessions {session_count}, ready {ready_session_count}, planned events {planned_event_count}, lifecycle events {lifecycle_event_count}\nSessions: {session_cards}\nNext actions: {next_actions}\n",
+        status = panel.status,
+        controller = panel.controller,
+        session_count = panel.session_count,
+        ready_session_count = panel.ready_session_count,
+        planned_event_count = panel.planned_event_count,
+        lifecycle_event_count = panel.lifecycle_event_count,
+        session_cards = session_cards,
+        next_actions = next_actions,
+    )
+}
+
+fn render_session_card_summary(panel: &InteractiveSessionsPanel) -> String {
+    if panel.session_cards.is_empty() {
+        "none".to_string()
+    } else {
+        panel
+            .session_cards
+            .iter()
+            .take(8)
+            .map(|session| {
+                format!(
+                    "{} {} {} {}",
+                    session.session_id,
+                    session.provider_id,
+                    session.readiness,
+                    session.lifecycle_state
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
 }
 
 fn render_patch_workbench_file_summary(panel: &InteractivePatchWorkbenchPanel) -> String {
@@ -2976,6 +3247,15 @@ fn build_ui_composition_panel(
                     "standard",
                     "full",
                     vec!["forge interactive harness --output json".to_string()],
+                ),
+                core_ui_widget(
+                    "sessions_panel",
+                    "Session center",
+                    "sessions_panel",
+                    "session_lifecycle_renderer",
+                    "standard",
+                    "full",
+                    vec!["forge interactive sessions --output json".to_string()],
                 ),
                 core_ui_widget(
                     "harness_mode_panel",

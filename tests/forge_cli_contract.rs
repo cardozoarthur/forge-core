@@ -36483,6 +36483,262 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert_eq!(mcp_json["result"]["wrapper_plan"]["forge_first"], true);
 }
 
+#[cfg(unix)]
+#[test]
+fn interactive_sessions_command_and_mcp_surface_are_dedicated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let home = temp.path().join("home");
+    let real_bin = temp.path().join("real-bin");
+    let shim_dir = home.join(".forge/bin");
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(home.join(".codex/config.toml"), "model = \"test\"\n").unwrap();
+    write_fake_cli(&real_bin, "codex");
+    fs::create_dir_all(&shim_dir).unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "install-shims",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--real-cmd",
+            real_bin.join("codex").to_str().unwrap(),
+            "--forge-first",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    let path = format!(
+        "{}:{}:{}",
+        shim_dir.display(),
+        real_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "executors",
+            "--home",
+            home.to_str().unwrap(),
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--allow",
+            "codex",
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "shells",
+            "--executor",
+            "codex",
+            "--workflow",
+            "wf_interactive_sessions",
+            "--task",
+            "task-session",
+            "--run",
+            "run-session",
+            "--record-session",
+            "--origin",
+            "contract-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sessions",
+            "lifecycle",
+            "--session",
+            "codex-shell",
+            "--state",
+            "opened",
+            "--workflow",
+            "wf_interactive_sessions",
+            "--task",
+            "task-session",
+            "--run",
+            "run-session",
+            "--origin",
+            "contract-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "sessions",
+            "--provider",
+            "codex",
+            "--state",
+            "opened",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.interactive.sessions.v1");
+    assert_eq!(json["status"], "interactive_sessions_ready");
+    assert_eq!(
+        json["session_report"]["schema_version"],
+        "forge.brain_sessions.v1"
+    );
+    assert_eq!(json["session_report"]["filter"]["provider_id"], "codex");
+    assert_eq!(
+        json["session_report"]["filter"]["lifecycle_state"],
+        "opened"
+    );
+    assert_eq!(json["session_count"], 1);
+    assert_eq!(json["lifecycle_event_count"], 1);
+    assert!(json["session_cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|session| {
+            session["session_id"] == "codex-shell"
+                && session["provider_id"] == "codex"
+                && session["lifecycle_state"] == "opened"
+                && session["commands"]["history"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("history"))
+                && session["commands"]["lifecycle"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("lifecycle"))
+        }));
+
+    let text_output = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "sessions",
+            "--provider",
+            "codex",
+            "--state",
+            "opened",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Session center"));
+    assert!(text.contains("codex-shell"));
+
+    let home_output = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["sessions_panel"]["schema_version"],
+        "forge.interactive.sessions.v1"
+    );
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |region| region["widgets"].as_array().unwrap().iter().any(|widget| {
+                widget["widget_id"] == "sessions_panel"
+                    && widget["commands"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!(
+                            "forge interactive sessions --output json"
+                        ))
+            })
+        ));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.sessions");
+    assert_eq!(tool["output_schema"], "forge.interactive.sessions.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .env("PATH", &path)
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.sessions"])
+        .arg("--input")
+        .arg(
+            serde_json::json!({
+                "provider_id": "codex",
+                "lifecycle_state": "opened"
+            })
+            .to_string(),
+        )
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.sessions.v1"
+    );
+    assert_eq!(mcp_json["result"]["session_count"], 1);
+    assert_eq!(
+        mcp_json["result"]["session_cards"][0]["session_id"],
+        "codex-shell"
+    );
+}
+
 #[test]
 fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     let temp = tempdir().unwrap();
@@ -37753,6 +38009,14 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge interactive harness"),
         "the packaged Forge skill should include the harness center CLI command"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.sessions"),
+        "the packaged Forge skill should expose the dedicated session center through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge interactive sessions"),
+        "the packaged Forge skill should include the session center CLI command"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.patch_workbench"),
