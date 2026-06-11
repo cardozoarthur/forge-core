@@ -1220,6 +1220,48 @@ pub fn build_global_event_timeline(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn build_global_event_timeline_for_context(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    limit: Option<usize>,
+    after_sequence: Option<i64>,
+    operating_context: &OperatingContextSpec,
+) -> Result<GlobalEventTimelineReport> {
+    if operating_context.tenant_policy_mode != "enforce" {
+        return build_global_event_timeline(
+            store,
+            workflow_id,
+            organization_id,
+            brand_id,
+            product_id,
+            limit,
+            after_sequence,
+        );
+    }
+    ensure_operating_context_policy(store, operating_context, "events timeline list")?;
+    let organization_id = enforce_timeline_tenant_filter(
+        "organization",
+        organization_id,
+        &operating_context.organization.id,
+    )?;
+    let brand_id = enforce_timeline_tenant_filter("brand", brand_id, &operating_context.brand.id)?;
+    let product_id =
+        enforce_timeline_tenant_filter("product", product_id, &operating_context.product.id)?;
+    build_global_event_timeline(
+        store,
+        workflow_id,
+        Some(&organization_id),
+        Some(&brand_id),
+        Some(&product_id),
+        limit,
+        after_sequence,
+    )
+}
+
 pub fn build_event_observability_index(
     store: &ForgeStore,
     workflow_id: Option<&str>,
@@ -6425,6 +6467,21 @@ fn global_event_matches_filters(
         && filter_matches(organization_id, &event.organization_id)
         && filter_matches(brand_id, &event.brand_id)
         && filter_matches(product_id, &event.product_id)
+}
+
+fn enforce_timeline_tenant_filter(
+    label: &str,
+    requested: Option<&str>,
+    allowed: &str,
+) -> Result<String> {
+    if let Some(requested) = normalize_text(requested) {
+        if requested != allowed {
+            bail!(
+                "multi-tenant enforcement blocked events timeline list: requested {label} {requested} is outside operating context {allowed}"
+            );
+        }
+    }
+    Ok(allowed.to_string())
 }
 
 fn normalize_text(value: Option<&str>) -> Option<String> {

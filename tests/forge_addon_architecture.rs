@@ -2645,6 +2645,227 @@ fn event_envelopes_project_normalized_observability_metrics() {
 }
 
 #[test]
+fn event_timeline_enforces_project_tenant_policy_for_global_event_reads() {
+    let temp = tempdir().unwrap();
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: timeline-org
+  label: Timeline Org
+brand:
+  scope: brand
+  id: timeline-brand
+  label: Timeline Brand
+product:
+  scope: product
+  id: timeline-product
+  label: Timeline Product
+user:
+  scope: user
+  id: timeline-user
+  label: Timeline User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+
+    let store = temp.path().join("forge.sqlite");
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let tenant_context = serde_json::json!({
+        "organization": {"scope": "organization", "id": "timeline-org", "label": "Timeline Org"},
+        "brand": {"scope": "brand", "id": "timeline-brand", "label": "Timeline Brand"},
+        "product": {"scope": "product", "id": "timeline-product", "label": "Timeline Product"},
+        "user": {"scope": "user", "id": "timeline-user", "label": "Timeline User"},
+        "channel": {"scope": "channel", "id": "local_cli", "label": "Local CLI"},
+        "tenant_policy_mode": "enforce"
+    });
+    let other_tenant_context = serde_json::json!({
+        "organization": {"scope": "organization", "id": "other-org", "label": "Other Org"},
+        "brand": {"scope": "brand", "id": "other-brand", "label": "Other Brand"},
+        "product": {"scope": "product", "id": "other-product", "label": "Other Product"},
+        "user": {"scope": "user", "id": "other-user", "label": "Other User"},
+        "channel": {"scope": "channel", "id": "api", "label": "API"},
+        "tenant_policy_mode": "enforce"
+    });
+    let connection = Connection::open(&store).unwrap();
+    for (source_id, organization, brand, product, user, channel, context, data) in [
+        (
+            "tenant-visible",
+            "timeline-org",
+            "timeline-brand",
+            "timeline-product",
+            "timeline-user",
+            "local_cli",
+            tenant_context,
+            serde_json::json!({"message": "visible tenant event"}),
+        ),
+        (
+            "tenant-hidden",
+            "other-org",
+            "other-brand",
+            "other-product",
+            "other-user",
+            "api",
+            other_tenant_context,
+            serde_json::json!({"message": "must not leak"}),
+        ),
+    ] {
+        connection
+            .execute(
+                r#"
+                INSERT INTO global_events (
+                    source, source_id, workflow_id, kind, origin, status,
+                    organization_id, brand_id, product_id, user_id, channel_id,
+                    tenant_context_json, data_json, created_at
+                )
+                VALUES (
+                    'tenant_timeline_seed', ?1, NULL, 'tenant_timeline_event', 'codex', 'recorded',
+                    ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP
+                )
+                "#,
+                rusqlite::params![
+                    source_id,
+                    organization,
+                    brand,
+                    product,
+                    user,
+                    channel,
+                    context.to_string(),
+                    data.to_string()
+                ],
+            )
+            .unwrap();
+    }
+
+    let timeline_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "timeline",
+            "--limit",
+            "10",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let timeline_json: Value = serde_json::from_slice(&timeline_output).unwrap();
+    assert_eq!(timeline_json["filters"]["organization_id"], "timeline-org");
+    assert_eq!(timeline_json["event_count"], 1);
+    let event = &timeline_json["events"][0];
+    assert_eq!(
+        event["tenant_context"]["organization"]["id"],
+        "timeline-org"
+    );
+    assert_eq!(event["data"]["message"], "visible tenant event");
+    assert!(!timeline_json["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["data"]["message"] == "must not leak"));
+
+    let mcp_timeline_input = serde_json::json!({
+        "project_root": temp.path().display().to_string(),
+        "limit": 10
+    });
+    let mcp_timeline_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.events.timeline",
+            "--input",
+            &mcp_timeline_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_timeline_json: Value = serde_json::from_slice(&mcp_timeline_output).unwrap();
+    assert_eq!(
+        mcp_timeline_json["result"]["filters"]["organization_id"],
+        "timeline-org"
+    );
+    assert_eq!(mcp_timeline_json["result"]["event_count"], 1);
+
+    forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "membership-update",
+            "--subject",
+            "timeline-user",
+            "--organization",
+            "timeline-org",
+            "--brand",
+            "timeline-brand",
+            "--product",
+            "timeline-product",
+            "--deny",
+            "context:read",
+            "--source",
+            "test-cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let denied_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "timeline",
+            "--limit",
+            "10",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let denied_stderr = String::from_utf8(denied_output).unwrap();
+    assert!(denied_stderr.contains("multi-tenant enforcement blocked events timeline list"));
+    assert!(denied_stderr.contains("context:read"));
+}
+
+#[test]
 fn event_observability_index_backfills_existing_global_events_on_migration() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

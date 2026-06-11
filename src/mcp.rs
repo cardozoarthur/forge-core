@@ -33,12 +33,13 @@ use crate::credential_vault::{
 };
 use crate::event::{
     build_event_improvement_policy, build_event_observability_history,
-    build_event_observability_index, build_event_service_plan, build_global_event_timeline,
-    build_workflow_event_stream, emit_event_egress, ingest_inbound_event, list_event_services,
-    list_inbound_event_inbox, recover_stale_event_services, route_inbound_event,
-    run_event_runtime_daemon, run_event_runtime_reconcile, run_event_service_supervisor,
-    run_event_webhook_ingress_service, run_event_worker_service, run_inbound_event_worker_loop,
-    scan_inbound_event_inbox, EventEgressEmitInput, InboundEventIngestInput,
+    build_event_observability_index, build_event_service_plan,
+    build_global_event_timeline_for_context, build_workflow_event_stream, emit_event_egress,
+    ingest_inbound_event, list_event_services, list_inbound_event_inbox,
+    recover_stale_event_services, route_inbound_event, run_event_runtime_daemon,
+    run_event_runtime_reconcile, run_event_service_supervisor, run_event_webhook_ingress_service,
+    run_event_worker_service, run_inbound_event_worker_loop, scan_inbound_event_inbox,
+    EventEgressEmitInput, InboundEventIngestInput,
 };
 use crate::executor::load_executors;
 use crate::handoff::build_task_handoff;
@@ -676,6 +677,7 @@ struct EventTimelineInput {
     product_id: Option<String>,
     limit: Option<usize>,
     after_sequence: Option<i64>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1608,6 +1610,11 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         ("brand_id", "string", "optional brand filter"),
                         ("product_id", "string", "optional product filter"),
                         ("limit", "integer", "optional latest event limit"),
+                        (
+                            "project_root",
+                            "string",
+                            "optional project root used for tenant-policy enforcement",
+                        ),
                         (
                             "after_sequence",
                             "integer",
@@ -5075,7 +5082,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let organization_id = input.organization_id.or(input.organization);
             let brand_id = input.brand_id.or(input.brand);
             let product_id = input.product_id.or(input.product);
-            serde_json::to_value(build_global_event_timeline(
+            let project_root = input
+                .project_root
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let operating_context = load_project_operating_context(&project_root)?;
+            serde_json::to_value(build_global_event_timeline_for_context(
                 store,
                 workflow_id.as_deref(),
                 organization_id.as_deref(),
@@ -5083,6 +5095,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 product_id.as_deref(),
                 input.limit,
                 input.after_sequence,
+                &operating_context,
             )?)?
         }
         "forge.ops.addon_renderer_event" => {
