@@ -1559,6 +1559,22 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/sessions lifecycle",
+            "Session Lifecycle",
+            "Record an auditable lifecycle state for a Forge-controlled shell session.",
+            &[
+                "forge",
+                "sessions",
+                "lifecycle",
+                "--session",
+                "<session-id>",
+                "--state",
+                "opened",
+            ],
+            true,
+            "medium",
+        ),
+        slash(
             "/shells",
             "Shells",
             "List Forge-controlled TUI and external brain shell entrypoints.",
@@ -2781,6 +2797,32 @@ mod tests {
                 "sessions".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn slash_sessions_lifecycle_is_recognized_as_audited_mutation() {
+        let report = route_slash_command(
+            "/sessions lifecycle --session codex-shell --state opened --origin operator",
+        );
+        assert_eq!(report.input_kind, "slash_command");
+        assert_eq!(report.routing_decision, "slash_command");
+        let route = report.slash_command.unwrap();
+        assert_eq!(route.name, "/sessions lifecycle");
+        assert!(route.recognized);
+        assert!(route.mutates_workflow);
+        assert_eq!(route.risk_level, "medium");
+        assert_eq!(
+            route.equivalent_command,
+            vec![
+                "forge".to_string(),
+                "sessions".to_string(),
+                "lifecycle".to_string(),
+                "--session".to_string(),
+                "<session-id>".to_string(),
+                "--state".to_string(),
+                "opened".to_string(),
             ]
         );
     }

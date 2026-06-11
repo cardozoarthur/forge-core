@@ -15500,6 +15500,205 @@ fn brain_sessions_report_aggregates_providers_shell_specs_and_planned_events() {
         ));
 }
 
+#[cfg(unix)]
+#[test]
+fn brain_session_lifecycle_records_auditable_state_without_launching_child() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let home = temp.path().join("home");
+    let real_bin = temp.path().join("real-bin");
+    let shim_dir = home.join(".forge/bin");
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(home.join(".codex/config.toml"), "model = \"test\"\n").unwrap();
+    write_fake_cli(&real_bin, "codex");
+    fs::create_dir_all(&shim_dir).unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "install-shims",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--real-cmd",
+            real_bin.join("codex").to_str().unwrap(),
+            "--forge-first",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    let path = format!(
+        "{}:{}:{}",
+        shim_dir.display(),
+        real_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "executors",
+            "--home",
+            home.to_str().unwrap(),
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--allow",
+            "codex",
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "shells",
+            "--executor",
+            "codex",
+            "--workflow",
+            "wf_session_lifecycle",
+            "--task",
+            "task-session",
+            "--run",
+            "run-session",
+            "--record-session",
+            "--origin",
+            "contract-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let lifecycle = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sessions",
+            "lifecycle",
+            "--session",
+            "codex-shell",
+            "--state",
+            "opened",
+            "--workflow",
+            "wf_session_lifecycle",
+            "--task",
+            "task-session",
+            "--run",
+            "run-session",
+            "--origin",
+            "contract-test",
+            "--note",
+            "operator opened the shell",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let lifecycle_json: Value = serde_json::from_slice(&lifecycle).unwrap();
+    assert_eq!(
+        lifecycle_json["schema_version"],
+        "forge.brain_session_lifecycle.v1"
+    );
+    assert_eq!(lifecycle_json["session_id"], "codex-shell");
+    assert_eq!(lifecycle_json["state"], "opened");
+    assert_eq!(lifecycle_json["event_recorded"], true);
+    assert!(lifecycle_json["global_event_id"].as_i64().unwrap() > 0);
+
+    let sessions = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sessions",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let sessions_json: Value = serde_json::from_slice(&sessions).unwrap();
+    let session = sessions_json["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["session_id"] == "codex-shell")
+        .unwrap();
+    assert_eq!(session["lifecycle_state"], "opened");
+    assert_eq!(session["lifecycle_event_count"], 1);
+    assert_eq!(session["last_lifecycle_origin"], "contract-test");
+    assert_eq!(session["last_lifecycle_note"], "operator opened the shell");
+    assert!(sessions_json["recent_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["kind"] == "brain_session_lifecycle"
+            && event["session_ids"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("codex-shell"))));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.session.lifecycle");
+    assert_eq!(tool["output_schema"], "forge.brain_session_lifecycle.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], true);
+
+    let mcp_output = forge()
+        .env("PATH", &path)
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.session.lifecycle"])
+        .arg("--input")
+        .arg(
+            serde_json::json!({
+                "session_id": "codex-shell",
+                "state": "closed",
+                "workflow_id": "wf_session_lifecycle",
+                "task_id": "task-session",
+                "run_id": "run-session",
+                "origin": "mcp-contract-test",
+                "note": "operator closed the shell"
+            })
+            .to_string(),
+        )
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.brain_session_lifecycle.v1"
+    );
+    assert_eq!(mcp_json["result"]["state"], "closed");
+}
+
 #[test]
 fn brain_router_keeps_memory_skills_mcp_and_shells_under_forge_control() {
     let temp = tempdir().unwrap();

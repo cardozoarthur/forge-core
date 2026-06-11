@@ -191,6 +191,17 @@ pub struct ShellLaunchPlanOptions {
     pub ttl_seconds: Option<u64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct BrainSessionLifecycleOptions<'a> {
+    pub session_id: &'a str,
+    pub state: &'a str,
+    pub workflow_id: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+    pub run_id: Option<&'a str>,
+    pub origin: &'a str,
+    pub note: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ShellSessionReceipt {
     pub schema_version: String,
@@ -208,6 +219,26 @@ pub struct ShellSessionReceipt {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct BrainSessionLifecycleReceipt {
+    pub schema_version: String,
+    pub status: String,
+    pub source: String,
+    pub source_id: String,
+    pub global_event_id: i64,
+    pub kind: String,
+    pub origin: String,
+    pub session_id: String,
+    pub provider_id: String,
+    pub state: String,
+    pub workflow_id: Option<String>,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub note: Option<String>,
+    pub event_recorded: bool,
+    pub execution: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct BrainSessionsReport {
     pub schema_version: String,
     pub status: String,
@@ -217,6 +248,7 @@ pub struct BrainSessionsReport {
     pub session_count: usize,
     pub ready_session_count: usize,
     pub planned_event_count: usize,
+    pub lifecycle_event_count: usize,
     pub providers: Vec<BrainProviderSessionSummary>,
     pub sessions: Vec<BrainSessionState>,
     pub recent_events: Vec<BrainSessionEventSummary>,
@@ -255,11 +287,16 @@ pub struct BrainSessionState {
     pub forge_first_ready: bool,
     pub state_boundary: String,
     pub recorded_plan_count: usize,
+    pub lifecycle_state: String,
+    pub lifecycle_event_count: usize,
     pub last_planned_at: Option<String>,
     pub last_origin: Option<String>,
     pub last_workflow_id: Option<String>,
     pub last_task_id: Option<String>,
     pub last_run_id: Option<String>,
+    pub last_lifecycle_at: Option<String>,
+    pub last_lifecycle_origin: Option<String>,
+    pub last_lifecycle_note: Option<String>,
     pub next_actions: Vec<String>,
 }
 
@@ -274,6 +311,8 @@ pub struct BrainSessionEventSummary {
     pub run_id: Option<String>,
     pub executor_filter: Option<String>,
     pub session_ids: Vec<String>,
+    pub lifecycle_state: Option<String>,
+    pub note: Option<String>,
     pub created_at: String,
 }
 
@@ -1288,6 +1327,66 @@ pub fn record_shell_session_plan(
     })
 }
 
+pub fn record_brain_session_lifecycle(
+    store: &ForgeStore,
+    router: &BrainRouterReport,
+    options: BrainSessionLifecycleOptions<'_>,
+) -> Result<BrainSessionLifecycleReceipt> {
+    let normalized_state = normalize_brain_session_lifecycle_state(options.state)?;
+    let session = router
+        .shell_sessions
+        .iter()
+        .find(|session| session.id == options.session_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown Forge shell session: {}", options.session_id))?;
+    let data = serde_json::json!({
+        "schema_version": "forge.brain_session_lifecycle_event.v1",
+        "status": "brain_session_lifecycle_recorded",
+        "session_id": session.id,
+        "provider_id": session.brain_id,
+        "state": normalized_state,
+        "workflow_id": options.workflow_id,
+        "task_id": options.task_id,
+        "run_id": options.run_id,
+        "origin": options.origin,
+        "note": options.note,
+        "execution": "audit_only",
+    });
+    let source_id = format!(
+        "session_{}",
+        &hex_sha256(serde_json::to_string(&data)?.as_bytes())[..16]
+    );
+    let tenant_context = shell_session_tenant_context(store, options.workflow_id)?;
+    let global_event_id = store.record_global_event(
+        "forge_session",
+        &source_id,
+        options.workflow_id,
+        "brain_session_lifecycle",
+        options.origin,
+        normalized_state,
+        &data,
+        &tenant_context,
+    )?;
+
+    Ok(BrainSessionLifecycleReceipt {
+        schema_version: "forge.brain_session_lifecycle.v1".to_string(),
+        status: "brain_session_lifecycle_recorded".to_string(),
+        source: "forge_session".to_string(),
+        source_id,
+        global_event_id,
+        kind: "brain_session_lifecycle".to_string(),
+        origin: options.origin.to_string(),
+        session_id: session.id.clone(),
+        provider_id: session.brain_id.clone(),
+        state: normalized_state.to_string(),
+        workflow_id: options.workflow_id.map(str::to_string),
+        task_id: options.task_id.map(str::to_string),
+        run_id: options.run_id.map(str::to_string),
+        note: options.note.map(str::to_string),
+        event_recorded: true,
+        execution: "audit_only".to_string(),
+    })
+}
+
 pub fn build_brain_sessions_report(
     store: &ForgeStore,
     router: &BrainRouterReport,
@@ -1295,10 +1394,21 @@ pub fn build_brain_sessions_report(
     let mut events = store
         .load_global_events()?
         .into_iter()
-        .filter(|event| event.source == "forge_shell" && event.kind == "shell_launch_planned")
+        .filter(|event| {
+            (event.source == "forge_shell" && event.kind == "shell_launch_planned")
+                || (event.source == "forge_session" && event.kind == "brain_session_lifecycle")
+        })
         .map(brain_session_event_summary)
         .collect::<Vec<_>>();
     events.sort_by(|left, right| right.global_event_id.cmp(&left.global_event_id));
+    let planned_event_count = events
+        .iter()
+        .filter(|event| event.kind == "shell_launch_planned")
+        .count();
+    let lifecycle_event_count = events
+        .iter()
+        .filter(|event| event.kind == "brain_session_lifecycle")
+        .count();
 
     let sessions = router
         .shell_sessions
@@ -1330,13 +1440,16 @@ pub fn build_brain_sessions_report(
         provider_count: providers.len(),
         session_count: sessions.len(),
         ready_session_count,
-        planned_event_count: events.len(),
+        planned_event_count,
+        lifecycle_event_count,
         providers,
         sessions,
         recent_events: events.into_iter().take(20).collect(),
         safety_gates: router.safety_gates.clone(),
         next_actions: vec![
             "Use forge shells --record-session before handing a shell to a human or external brain."
+                .to_string(),
+            "Use forge sessions lifecycle --session <id> --state opened|attached|closed to keep shell lifecycle auditable."
                 .to_string(),
             "Use forge request switch-executor to hot-swap an active run provider without losing workflow lineage."
                 .to_string(),
@@ -1350,15 +1463,24 @@ fn brain_session_event_summary(
     event: crate::storage::StoredGlobalEventRecord,
 ) -> BrainSessionEventSummary {
     let launch_plan = &event.data["launch_plan"];
-    let session_ids = launch_plan["launch_plans"]
-        .as_array()
-        .map(|plans| {
-            plans
-                .iter()
-                .filter_map(|plan| plan["session_id"].as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let session_ids = if event.kind == "shell_launch_planned" {
+        launch_plan["launch_plans"]
+            .as_array()
+            .map(|plans| {
+                plans
+                    .iter()
+                    .filter_map(|plan| plan["session_id"].as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        event
+            .data
+            .get("session_id")
+            .and_then(|value| value.as_str())
+            .map(|value| vec![value.to_string()])
+            .unwrap_or_default()
+    };
 
     BrainSessionEventSummary {
         global_event_id: event.id,
@@ -1370,7 +1492,23 @@ fn brain_session_event_summary(
         run_id: event.data["run_id"].as_str().map(str::to_string),
         executor_filter: event.data["executor_filter"].as_str().map(str::to_string),
         session_ids,
+        lifecycle_state: event.data["state"].as_str().map(str::to_string),
+        note: event.data["note"].as_str().map(str::to_string),
         created_at: event.created_at,
+    }
+}
+
+fn normalize_brain_session_lifecycle_state(state: &str) -> Result<&'static str> {
+    match state.trim().to_ascii_lowercase().as_str() {
+        "opened" | "open" => Ok("opened"),
+        "attached" | "attach" => Ok("attached"),
+        "detached" | "detach" => Ok("detached"),
+        "closed" | "close" => Ok("closed"),
+        "failed" | "failure" => Ok("failed"),
+        "abandoned" | "abandon" => Ok("abandoned"),
+        other => Err(anyhow::anyhow!(
+            "unsupported brain session lifecycle state '{other}'; use opened, attached, detached, closed, failed or abandoned"
+        )),
     }
 }
 
@@ -1379,11 +1517,22 @@ fn brain_session_state(
     brain: Option<&BrainCandidate>,
     events: &[BrainSessionEventSummary],
 ) -> BrainSessionState {
-    let matching_events = events
+    let planned_events = events
         .iter()
-        .filter(|event| event.session_ids.iter().any(|id| id == &session.id))
+        .filter(|event| {
+            event.kind == "shell_launch_planned"
+                && event.session_ids.iter().any(|id| id == &session.id)
+        })
         .collect::<Vec<_>>();
-    let last_event = matching_events.first().copied();
+    let lifecycle_events = events
+        .iter()
+        .filter(|event| {
+            event.kind == "brain_session_lifecycle"
+                && event.session_ids.iter().any(|id| id == &session.id)
+        })
+        .collect::<Vec<_>>();
+    let last_event = planned_events.first().copied();
+    let last_lifecycle_event = lifecycle_events.first().copied();
     BrainSessionState {
         session_id: session.id.clone(),
         provider_id: session.brain_id.clone(),
@@ -1396,12 +1545,19 @@ fn brain_session_state(
         launch_mode: session.launch_mode.clone(),
         forge_first_ready: session.forge_first_ready,
         state_boundary: session.state_boundary.clone(),
-        recorded_plan_count: matching_events.len(),
+        recorded_plan_count: planned_events.len(),
+        lifecycle_state: last_lifecycle_event
+            .and_then(|event| event.lifecycle_state.clone())
+            .unwrap_or_else(|| "untracked".to_string()),
+        lifecycle_event_count: lifecycle_events.len(),
         last_planned_at: last_event.map(|event| event.created_at.clone()),
         last_origin: last_event.map(|event| event.origin.clone()),
         last_workflow_id: last_event.and_then(|event| event.workflow_id.clone()),
         last_task_id: last_event.and_then(|event| event.task_id.clone()),
         last_run_id: last_event.and_then(|event| event.run_id.clone()),
+        last_lifecycle_at: last_lifecycle_event.map(|event| event.created_at.clone()),
+        last_lifecycle_origin: last_lifecycle_event.map(|event| event.origin.clone()),
+        last_lifecycle_note: last_lifecycle_event.and_then(|event| event.note.clone()),
         next_actions: shell_next_actions(session),
     }
 }

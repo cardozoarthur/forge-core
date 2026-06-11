@@ -55,7 +55,8 @@ use forge_core::event::{
 use forge_core::execution::run_simulated;
 use forge_core::executor::{
     build_brain_sessions_report, build_shell_launch_plan, load_executors,
-    record_shell_session_plan, sync_executors, ExecutorQuotaObservation, ExecutorSyncOptions,
+    record_brain_session_lifecycle, record_shell_session_plan, sync_executors,
+    BrainSessionLifecycleOptions, ExecutorQuotaObservation, ExecutorSyncOptions,
     ShellLaunchPlanOptions,
 };
 use forge_core::graph::create_workflow;
@@ -280,6 +281,8 @@ enum Commands {
         output: OutputFormat,
     },
     Sessions {
+        #[command(subcommand)]
+        command: Option<SessionCommands>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -379,6 +382,28 @@ enum Commands {
     SelfRun {
         #[command(subcommand)]
         command: SelfCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionCommands {
+    Lifecycle {
+        #[arg(long = "session")]
+        session_id: String,
+        #[arg(long)]
+        state: String,
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
+        #[arg(long = "task")]
+        task_id: Option<String>,
+        #[arg(long = "run")]
+        run_id: Option<String>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
     },
 }
 
@@ -5726,11 +5751,40 @@ fn run() -> Result<i32> {
             print_response(output, &report.brain_router)?;
             Ok(0)
         }
-        Commands::Sessions { output } => {
+        Commands::Sessions { command, output } => {
             let store = ForgeStore::open(cli.store)?;
             let report = load_executors(&store)?;
-            let sessions = build_brain_sessions_report(&store, &report.brain_router)?;
-            print_response(output, &sessions)?;
+            match command {
+                Some(SessionCommands::Lifecycle {
+                    session_id,
+                    state,
+                    workflow_id,
+                    task_id,
+                    run_id,
+                    origin,
+                    note,
+                    output,
+                }) => {
+                    let receipt = record_brain_session_lifecycle(
+                        &store,
+                        &report.brain_router,
+                        BrainSessionLifecycleOptions {
+                            session_id: &session_id,
+                            state: &state,
+                            workflow_id: workflow_id.as_deref(),
+                            task_id: task_id.as_deref(),
+                            run_id: run_id.as_deref(),
+                            origin: &origin,
+                            note: note.as_deref(),
+                        },
+                    )?;
+                    print_response(output, &receipt)?;
+                }
+                None => {
+                    let sessions = build_brain_sessions_report(&store, &report.brain_router)?;
+                    print_response(output, &sessions)?;
+                }
+            }
             Ok(0)
         }
         Commands::Shells {

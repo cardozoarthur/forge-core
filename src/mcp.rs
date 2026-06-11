@@ -44,7 +44,8 @@ use crate::event::{
 };
 use crate::executor::{
     build_brain_sessions_report, build_shell_launch_plan, load_executors,
-    record_shell_session_plan, ShellLaunchPlanOptions,
+    record_brain_session_lifecycle, record_shell_session_plan, BrainSessionLifecycleOptions,
+    ShellLaunchPlanOptions,
 };
 use crate::handoff::build_task_handoff;
 use crate::harness::{
@@ -494,6 +495,21 @@ struct ShellLaunchPlanInput {
     context_budget: Option<usize>,
     ttl_seconds: Option<u64>,
     origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrainSessionLifecycleInput {
+    session: Option<String>,
+    session_id: Option<String>,
+    state: String,
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    task: Option<String>,
+    task_id: Option<String>,
+    run: Option<String>,
+    run_id: Option<String>,
+    origin: Option<String>,
+    note: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2654,6 +2670,26 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.brain_sessions.v1",
                 &["forge", "sessions", "--output", "json"],
                 ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.session.lifecycle",
+                "Record Brain Session Lifecycle",
+                "Record an auditable Forge-owned lifecycle state for a known brain shell session without starting child processes.",
+                object_schema(
+                    &[
+                        ("session_id", "string", "required shell session id such as codex-shell"),
+                        ("state", "string", "required lifecycle state: opened, attached, detached, closed, failed or abandoned"),
+                        ("workflow_id", "string", "optional workflow lineage"),
+                        ("task_id", "string", "optional task lineage"),
+                        ("run_id", "string", "optional run lineage"),
+                        ("origin", "string", "optional event origin"),
+                        ("note", "string", "optional operator note"),
+                    ],
+                    &["session_id", "state"],
+                ),
+                "forge.brain_session_lifecycle.v1",
+                &["forge", "sessions", "lifecycle", "--session", "<session-id>", "--state", "opened", "--output", "json"],
+                ToolFlags::new(true, true),
             ),
             tool(
                 "forge.shell.launch_plan",
@@ -6121,6 +6157,30 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         "forge.sessions" => {
             let report = load_executors(store)?;
             serde_json::to_value(build_brain_sessions_report(store, &report.brain_router)?)?
+        }
+        "forge.session.lifecycle" => {
+            let input: BrainSessionLifecycleInput = parse_input(input)?;
+            let session_id = input
+                .session_id
+                .or(input.session)
+                .ok_or_else(|| anyhow::anyhow!("forge.session.lifecycle requires session_id"))?;
+            let workflow_id = input.workflow_id.or(input.workflow);
+            let task_id = input.task_id.or(input.task);
+            let run_id = input.run_id.or(input.run);
+            let report = load_executors(store)?;
+            serde_json::to_value(record_brain_session_lifecycle(
+                store,
+                &report.brain_router,
+                BrainSessionLifecycleOptions {
+                    session_id: &session_id,
+                    state: &input.state,
+                    workflow_id: workflow_id.as_deref(),
+                    task_id: task_id.as_deref(),
+                    run_id: run_id.as_deref(),
+                    origin: input.origin.as_deref().unwrap_or("mcp"),
+                    note: input.note.as_deref(),
+                },
+            )?)?
         }
         "forge.shell.launch_plan" => {
             let input: ShellLaunchPlanInput = parse_input(input)?;
