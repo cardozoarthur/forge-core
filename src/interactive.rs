@@ -579,6 +579,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 "/sessions".to_string(),
                 "/shells".to_string(),
                 "/harness".to_string(),
+                "/harness doctor".to_string(),
                 "/validate".to_string(),
                 "/logs".to_string(),
                 "/workers".to_string(),
@@ -1603,6 +1604,26 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Harness",
             "Audit the effective Forge-first CLI harness mode before opening brain shells.",
             &["forge", "harness", "mode", "--output", "json"],
+            false,
+            "low",
+        ),
+        slash(
+            "/harness doctor",
+            "Harness Doctor",
+            "Audit full Forge-first CLI readiness for one brain before opening or handing off shells.",
+            &[
+                "forge",
+                "harness",
+                "doctor",
+                "--executor",
+                "<executor>",
+                "--shim-dir",
+                "<dir>",
+                "--project-root",
+                "<project-root>",
+                "--output",
+                "json",
+            ],
             false,
             "low",
         ),
@@ -2779,6 +2800,36 @@ mod tests {
                 "forge".to_string(),
                 "harness".to_string(),
                 "mode".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn route_slash_command_recognizes_harness_doctor_audit() {
+        let report = route_slash_command(
+            "/harness doctor --executor codex --shim-dir /tmp/forge-bin --project-root /repo",
+        );
+        assert_eq!(report.input_kind, "slash_command");
+        assert_eq!(report.routing_decision, "slash_command");
+        let route = report.slash_command.unwrap();
+        assert_eq!(route.name, "/harness doctor");
+        assert!(route.recognized);
+        assert!(!route.mutates_workflow);
+        assert_eq!(route.risk_level, "low");
+        assert_eq!(
+            route.equivalent_command,
+            vec![
+                "forge".to_string(),
+                "harness".to_string(),
+                "doctor".to_string(),
+                "--executor".to_string(),
+                "<executor>".to_string(),
+                "--shim-dir".to_string(),
+                "<dir>".to_string(),
+                "--project-root".to_string(),
+                "<project-root>".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ]

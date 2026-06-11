@@ -35244,6 +35244,7 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         "/sessions lifecycle",
         "/shells",
         "/harness",
+        "/harness doctor",
         "/runtimes",
         "/validate",
         "/approve",
@@ -35304,6 +35305,18 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         .as_array()
         .unwrap()
         .contains(&Value::String("handoff".to_string())));
+
+    let harness_doctor = find_slash_command(&json, "/harness doctor");
+    assert_eq!(harness_doctor["risk_level"], "low");
+    assert_eq!(harness_doctor["mutates_workflow"], false);
+    assert!(harness_doctor["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("doctor".to_string())));
+    assert!(harness_doctor["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("<executor>".to_string())));
 
     let pm = find_slash_command(&json, "/pm");
     assert_eq!(pm["risk_level"], "medium");
