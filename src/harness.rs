@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -11,6 +12,8 @@ pub const TOKEN_HEADROOM_SCHEMA_VERSION: &str = "forge.harness.token_headroom.v1
 pub const CLI_WRAPPER_PLAN_SCHEMA_VERSION: &str = "forge.harness.cli_wrapper_plan.v1";
 pub const HEADROOM_RETRIEVAL_SCHEMA_VERSION: &str = "forge.harness.headroom_retrieval.v1";
 pub const CLI_HARNESS_EXEC_SCHEMA_VERSION: &str = "forge.harness.exec_receipt.v1";
+pub const CLI_SHIM_INSTALL_SCHEMA_VERSION: &str = "forge.harness.shim_install.v1";
+const CLI_SHIM_MARKER: &str = "# forge-harness-shim:v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenHeadroomReport {
@@ -90,6 +93,70 @@ pub struct CliHarnessExecReceipt {
     pub stdout_headroom: Option<TokenHeadroomReport>,
     pub stderr_headroom: Option<TokenHeadroomReport>,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CliShimInstallReport {
+    pub schema_version: String,
+    pub status: String,
+    pub shim_dir: String,
+    pub store_path: Option<String>,
+    pub forge_binary: String,
+    pub forge_first: bool,
+    pub context_budget: usize,
+    pub token_headroom: bool,
+    pub force: bool,
+    pub installed_count: usize,
+    pub updated_count: usize,
+    pub blocked_count: usize,
+    pub shims: Vec<CliShimReport>,
+    pub instructions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CliShimReport {
+    pub executor: String,
+    pub shim_path: String,
+    pub real_command: String,
+    pub store_path: Option<String>,
+    pub forge_binary: String,
+    pub forge_first: bool,
+    pub context_budget: usize,
+    pub token_headroom: bool,
+    pub status: String,
+    pub script_sha256: Option<String>,
+    pub argv_policy: String,
+    pub safety_checks: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CliShimInstallOptions<'a> {
+    pub shim_dir: &'a Path,
+    pub executor: &'a str,
+    pub real_cmd: &'a str,
+    pub store_path: Option<&'a Path>,
+    pub forge_first: bool,
+    pub workflow_id: Option<&'a str>,
+    pub run_id: Option<&'a str>,
+    pub context_budget: usize,
+    pub token_headroom: bool,
+    pub force: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct CliHarnessExecOptions<'a> {
+    pub store: Option<&'a ForgeStore>,
+    pub executor: &'a str,
+    pub command: &'a [String],
+    pub forge_first: bool,
+    pub workflow_id: Option<&'a str>,
+    pub run_id: Option<&'a str>,
+    pub context_budget: usize,
+    pub token_headroom: bool,
+    pub dry_run: bool,
+    pub allow_exec: bool,
+    pub cwd: Option<&'a Path>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -373,19 +440,142 @@ pub fn build_cli_wrapper_plan(
     }
 }
 
-pub fn run_cli_harness_exec(
-    store: Option<&ForgeStore>,
-    executor: &str,
-    command: &[String],
-    forge_first: bool,
-    workflow_id: Option<&str>,
-    run_id: Option<&str>,
-    context_budget: usize,
-    token_headroom: bool,
-    dry_run: bool,
-    allow_exec: bool,
-    cwd: Option<&Path>,
-) -> Result<CliHarnessExecReceipt> {
+pub fn install_cli_harness_shim(
+    options: CliShimInstallOptions<'_>,
+) -> Result<CliShimInstallReport> {
+    let CliShimInstallOptions {
+        shim_dir,
+        executor,
+        real_cmd,
+        store_path,
+        forge_first,
+        workflow_id,
+        run_id,
+        context_budget,
+        token_headroom,
+        force,
+    } = options;
+    let executor = normalize_executor(executor);
+    let real_cmd = real_cmd.trim();
+    if real_cmd.is_empty() {
+        bail!("real CLI command cannot be empty");
+    }
+    fs::create_dir_all(shim_dir)
+        .with_context(|| format!("failed to create shim dir `{}`", shim_dir.display()))?;
+    let shim_dir = shim_dir
+        .canonicalize()
+        .unwrap_or_else(|_| shim_dir.to_path_buf());
+    let current_exe = env::current_exe().context("failed to resolve current forge binary")?;
+    let forge_binary = current_exe
+        .canonicalize()
+        .unwrap_or(current_exe)
+        .display()
+        .to_string();
+    let shim_path = shim_dir.join(shim_binary_name(&executor));
+    let script = build_cli_shim_script(CliShimScriptOptions {
+        forge_binary: &forge_binary,
+        executor: &executor,
+        real_cmd,
+        store_path,
+        forge_first,
+        workflow_id,
+        run_id,
+        context_budget,
+        token_headroom,
+    });
+    let script_sha256 = hex_sha256(script.as_bytes());
+    let mut installed_count = 0usize;
+    let mut updated_count = 0usize;
+    let mut blocked_count = 0usize;
+    let status = if shim_path.exists() {
+        let existing = fs::read_to_string(&shim_path).unwrap_or_default();
+        if force || existing.contains(CLI_SHIM_MARKER) {
+            fs::write(&shim_path, script.as_bytes())
+                .with_context(|| format!("failed to update shim `{}`", shim_path.display()))?;
+            make_executable(&shim_path)?;
+            updated_count += 1;
+            "updated"
+        } else {
+            blocked_count += 1;
+            "blocked_existing_file"
+        }
+    } else {
+        fs::write(&shim_path, script.as_bytes())
+            .with_context(|| format!("failed to write shim `{}`", shim_path.display()))?;
+        make_executable(&shim_path)?;
+        installed_count += 1;
+        "installed"
+    };
+    let overall_status = if blocked_count > 0 {
+        "shim_install_blocked"
+    } else {
+        "shim_install_ready"
+    };
+    let shim = CliShimReport {
+        executor,
+        shim_path: shim_path.display().to_string(),
+        real_command: real_cmd.to_string(),
+        store_path: store_path.map(|path| path.display().to_string()),
+        forge_binary: forge_binary.clone(),
+        forge_first,
+        context_budget,
+        token_headroom,
+        status: status.to_string(),
+        script_sha256: (status != "blocked_existing_file").then_some(script_sha256),
+        argv_policy: "preserve_user_argv_after_resolved_real_cli".to_string(),
+        safety_checks: vec![
+            "shim directory is explicit and must be added to PATH by the caller".to_string(),
+            "existing non-Forge shim files are not overwritten unless --force is used".to_string(),
+            "real CLI command is captured before the shim can take PATH precedence".to_string(),
+            "shim delegates to forge harness exec with --execute and --allow-exec".to_string(),
+        ],
+        notes: vec![
+            "This installs a Forge-owned CLI shim, not a replacement for the native CLI binary."
+                .to_string(),
+            "Put the shim directory before the native CLI directory only in shells that should prefer Forge infrastructure.".to_string(),
+        ],
+    };
+
+    Ok(CliShimInstallReport {
+        schema_version: CLI_SHIM_INSTALL_SCHEMA_VERSION.to_string(),
+        status: overall_status.to_string(),
+        shim_dir: shim_dir.display().to_string(),
+        store_path: store_path.map(|path| path.display().to_string()),
+        forge_binary,
+        forge_first,
+        context_budget,
+        token_headroom,
+        force,
+        installed_count,
+        updated_count,
+        blocked_count,
+        shims: vec![shim],
+        instructions: vec![
+            format!(
+                "export PATH={}:$PATH",
+                shell_quote(&shim_dir.display().to_string())
+            ),
+            "verify the real CLI path before putting the shim directory first in PATH".to_string(),
+            "rerun with --force only when the existing file is disposable or Forge-owned"
+                .to_string(),
+        ],
+    })
+}
+
+pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHarnessExecReceipt> {
+    let CliHarnessExecOptions {
+        store,
+        executor,
+        command,
+        forge_first,
+        workflow_id,
+        run_id,
+        context_budget,
+        token_headroom,
+        dry_run,
+        allow_exec,
+        cwd,
+    } = options;
     let wrapper_plan = build_cli_wrapper_plan(
         executor,
         command,
@@ -411,88 +601,88 @@ pub fn run_cli_harness_exec(
     ];
 
     if dry_run {
-        return Ok(exec_receipt(
+        return Ok(exec_receipt(CliExecReceiptInput {
             wrapper_plan,
             command,
             command_sha256,
-            cwd_display,
+            cwd: cwd_display,
             forge_first,
             dry_run,
             allow_exec,
-            "dry_run",
+            execution_mode: "dry_run".to_string(),
             resolved_executable,
             resolution_status,
-            "harness_exec_dry_run",
+            status: "harness_exec_dry_run".to_string(),
             safety_checks,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            token_headroom,
-            None,
-            None,
-        ));
+            executed: false,
+            success: None,
+            exit_code: None,
+            stdout_bytes: None,
+            stderr_bytes: None,
+            stdout_sha256: None,
+            stderr_sha256: None,
+            stdout_excerpt: None,
+            stderr_excerpt: None,
+            output_headroom_enabled: token_headroom,
+            stdout_headroom: None,
+            stderr_headroom: None,
+        }));
     }
     if !allow_exec {
-        return Ok(exec_receipt(
+        return Ok(exec_receipt(CliExecReceiptInput {
             wrapper_plan,
             command,
             command_sha256,
-            cwd_display,
+            cwd: cwd_display,
             forge_first,
             dry_run,
             allow_exec,
-            "blocked",
+            execution_mode: "blocked".to_string(),
             resolved_executable,
             resolution_status,
-            "harness_exec_blocked_without_allow_exec",
+            status: "harness_exec_blocked_without_allow_exec".to_string(),
             safety_checks,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            token_headroom,
-            None,
-            None,
-        ));
+            executed: false,
+            success: None,
+            exit_code: None,
+            stdout_bytes: None,
+            stderr_bytes: None,
+            stdout_sha256: None,
+            stderr_sha256: None,
+            stdout_excerpt: None,
+            stderr_excerpt: None,
+            output_headroom_enabled: token_headroom,
+            stdout_headroom: None,
+            stderr_headroom: None,
+        }));
     }
     let Some(executable) = resolved_executable.clone() else {
-        return Ok(exec_receipt(
+        return Ok(exec_receipt(CliExecReceiptInput {
             wrapper_plan,
             command,
             command_sha256,
-            cwd_display,
+            cwd: cwd_display,
             forge_first,
             dry_run,
             allow_exec,
-            "blocked",
+            execution_mode: "blocked".to_string(),
             resolved_executable,
             resolution_status,
-            "harness_exec_blocked_missing_executable",
+            status: "harness_exec_blocked_missing_executable".to_string(),
             safety_checks,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            token_headroom,
-            None,
-            None,
-        ));
+            executed: false,
+            success: None,
+            exit_code: None,
+            stdout_bytes: None,
+            stderr_bytes: None,
+            stdout_sha256: None,
+            stderr_sha256: None,
+            stdout_excerpt: None,
+            stderr_excerpt: None,
+            output_headroom_enabled: token_headroom,
+            stdout_headroom: None,
+            stderr_headroom: None,
+        }));
     };
 
     let mut child = Command::new(&executable);
@@ -523,36 +713,125 @@ pub fn run_cli_harness_exec(
         context_budget,
         token_headroom,
     )?;
-    Ok(exec_receipt(
+    Ok(exec_receipt(CliExecReceiptInput {
         wrapper_plan,
         command,
         command_sha256,
-        cwd_display,
+        cwd: cwd_display,
         forge_first,
         dry_run,
         allow_exec,
-        "guarded_exec",
+        execution_mode: "guarded_exec".to_string(),
         resolved_executable,
         resolution_status,
-        if success {
+        status: if success {
             "harness_exec_completed"
         } else {
             "harness_exec_failed"
-        },
+        }
+        .to_string(),
         safety_checks,
-        true,
-        Some(success),
-        output.status.code(),
-        Some(output.stdout.len()),
-        Some(output.stderr.len()),
-        Some(hex_sha256(&output.stdout)),
-        Some(hex_sha256(&output.stderr)),
-        Some(bounded_excerpt(&stdout_excerpt, 4000)),
-        Some(bounded_excerpt(&stderr_excerpt, 4000)),
-        token_headroom,
+        executed: true,
+        success: Some(success),
+        exit_code: output.status.code(),
+        stdout_bytes: Some(output.stdout.len()),
+        stderr_bytes: Some(output.stderr.len()),
+        stdout_sha256: Some(hex_sha256(&output.stdout)),
+        stderr_sha256: Some(hex_sha256(&output.stderr)),
+        stdout_excerpt: Some(bounded_excerpt(&stdout_excerpt, 4000)),
+        stderr_excerpt: Some(bounded_excerpt(&stderr_excerpt, 4000)),
+        output_headroom_enabled: token_headroom,
         stdout_headroom,
         stderr_headroom,
-    ))
+    }))
+}
+
+struct CliShimScriptOptions<'a> {
+    forge_binary: &'a str,
+    executor: &'a str,
+    real_cmd: &'a str,
+    store_path: Option<&'a Path>,
+    forge_first: bool,
+    workflow_id: Option<&'a str>,
+    run_id: Option<&'a str>,
+    context_budget: usize,
+    token_headroom: bool,
+}
+
+fn build_cli_shim_script(options: CliShimScriptOptions<'_>) -> String {
+    let CliShimScriptOptions {
+        forge_binary,
+        executor,
+        real_cmd,
+        store_path,
+        forge_first,
+        workflow_id,
+        run_id,
+        context_budget,
+        token_headroom,
+    } = options;
+    let mut parts = vec!["exec".to_string(), shell_quote(forge_binary)];
+    if let Some(store_path) = store_path {
+        parts.push("--store".to_string());
+        parts.push(shell_quote(&store_path.display().to_string()));
+    }
+    parts.extend([
+        "harness".to_string(),
+        "exec".to_string(),
+        "--executor".to_string(),
+        shell_quote(executor),
+    ]);
+    if forge_first {
+        parts.push("--forge-first".to_string());
+    }
+    if let Some(workflow_id) = workflow_id.filter(|value| !value.trim().is_empty()) {
+        parts.push("--workflow".to_string());
+        parts.push(shell_quote(workflow_id));
+    }
+    if let Some(run_id) = run_id.filter(|value| !value.trim().is_empty()) {
+        parts.push("--run".to_string());
+        parts.push(shell_quote(run_id));
+    }
+    parts.push("--context-budget".to_string());
+    parts.push(context_budget.to_string());
+    if token_headroom {
+        parts.push("--token-headroom".to_string());
+    }
+    parts.push("--execute".to_string());
+    parts.push("--allow-exec".to_string());
+    parts.push("--".to_string());
+    parts.push(shell_quote(real_cmd));
+    parts.push("\"$@\"".to_string());
+    format!(
+        "#!/bin/sh\n{CLI_SHIM_MARKER}\n# Generated by Forge. Edit through `forge harness install-shims`.\n{}\n",
+        parts.join(" ")
+    )
+}
+
+fn shim_binary_name(executor: &str) -> String {
+    normalize_executor(executor)
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut perms = fs::metadata(path)
+        .with_context(|| format!("failed to read permissions for `{}`", path.display()))?
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms)
+        .with_context(|| format!("failed to mark shim executable `{}`", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn build_output_headroom_report(
@@ -621,7 +900,7 @@ fn parse_headroom_ref(value: &str) -> Result<String> {
     Ok(sha.to_string())
 }
 
-fn exec_receipt(
+struct CliExecReceiptInput {
     wrapper_plan: CliWrapperPlanReport,
     command: Vec<String>,
     command_sha256: String,
@@ -629,10 +908,10 @@ fn exec_receipt(
     forge_first: bool,
     dry_run: bool,
     allow_exec: bool,
-    execution_mode: &str,
+    execution_mode: String,
     resolved_executable: Option<String>,
     resolution_status: String,
-    status: &str,
+    status: String,
     safety_checks: Vec<String>,
     executed: bool,
     success: Option<bool>,
@@ -646,35 +925,37 @@ fn exec_receipt(
     output_headroom_enabled: bool,
     stdout_headroom: Option<TokenHeadroomReport>,
     stderr_headroom: Option<TokenHeadroomReport>,
-) -> CliHarnessExecReceipt {
-    let executor = wrapper_plan.executor.clone();
+}
+
+fn exec_receipt(input: CliExecReceiptInput) -> CliHarnessExecReceipt {
+    let executor = input.wrapper_plan.executor.clone();
     CliHarnessExecReceipt {
         schema_version: CLI_HARNESS_EXEC_SCHEMA_VERSION.to_string(),
-        status: status.to_string(),
+        status: input.status,
         executor,
-        command,
-        command_sha256,
-        cwd,
-        forge_first,
-        dry_run,
-        allow_exec,
-        execution_mode: execution_mode.to_string(),
-        resolved_executable,
-        resolution_status,
-        wrapper_plan,
-        safety_checks,
-        executed,
-        success,
-        exit_code,
-        stdout_bytes,
-        stderr_bytes,
-        stdout_sha256,
-        stderr_sha256,
-        stdout_excerpt,
-        stderr_excerpt,
-        output_headroom_enabled,
-        stdout_headroom,
-        stderr_headroom,
+        command: input.command,
+        command_sha256: input.command_sha256,
+        cwd: input.cwd,
+        forge_first: input.forge_first,
+        dry_run: input.dry_run,
+        allow_exec: input.allow_exec,
+        execution_mode: input.execution_mode,
+        resolved_executable: input.resolved_executable,
+        resolution_status: input.resolution_status,
+        wrapper_plan: input.wrapper_plan,
+        safety_checks: input.safety_checks,
+        executed: input.executed,
+        success: input.success,
+        exit_code: input.exit_code,
+        stdout_bytes: input.stdout_bytes,
+        stderr_bytes: input.stderr_bytes,
+        stdout_sha256: input.stdout_sha256,
+        stderr_sha256: input.stderr_sha256,
+        stdout_excerpt: input.stdout_excerpt,
+        stderr_excerpt: input.stderr_excerpt,
+        output_headroom_enabled: input.output_headroom_enabled,
+        stdout_headroom: input.stdout_headroom,
+        stderr_headroom: input.stderr_headroom,
         notes: vec![
             "Harness exec is a Forge-owned receipt for brain CLI invocation, not process interception.".to_string(),
             "Use dry-run receipts to validate wrapper shape before opting into guarded execution.".to_string(),

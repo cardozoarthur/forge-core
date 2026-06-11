@@ -59,8 +59,9 @@ use forge_core::executor::{
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff;
 use forge_core::harness::{
-    analyze_token_headroom, build_cli_wrapper_plan, persist_token_headroom_report,
-    retrieve_headroom_blob, run_cli_harness_exec,
+    analyze_token_headroom, build_cli_wrapper_plan, install_cli_harness_shim,
+    persist_token_headroom_report, retrieve_headroom_blob, run_cli_harness_exec,
+    CliHarnessExecOptions, CliShimInstallOptions,
 };
 use forge_core::identity::{
     audit_tenant_index, ensure_operating_context_policy, ensure_workflow_policy,
@@ -587,6 +588,28 @@ enum HarnessCommands {
         context_budget: usize,
         #[arg(long = "token-headroom", default_value_t = true)]
         token_headroom: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    InstallShims {
+        #[arg(long = "shim-dir")]
+        shim_dir: PathBuf,
+        #[arg(long)]
+        executor: String,
+        #[arg(long = "real-cmd")]
+        real_cmd: String,
+        #[arg(long = "forge-first")]
+        forge_first: bool,
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
+        #[arg(long = "run")]
+        run_id: Option<String>,
+        #[arg(long = "context-budget", default_value_t = 1200)]
+        context_budget: usize,
+        #[arg(long = "token-headroom", default_value_t = true)]
+        token_headroom: bool,
+        #[arg(long, default_value_t = false)]
+        force: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -5123,6 +5146,33 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(0)
             }
+            HarnessCommands::InstallShims {
+                shim_dir,
+                executor,
+                real_cmd,
+                forge_first,
+                workflow_id,
+                run_id,
+                context_budget,
+                token_headroom,
+                force,
+                output,
+            } => {
+                let report = install_cli_harness_shim(CliShimInstallOptions {
+                    shim_dir: &shim_dir,
+                    executor: &executor,
+                    real_cmd: &real_cmd,
+                    store_path: Some(cli.store.as_path()),
+                    forge_first,
+                    workflow_id: workflow_id.as_deref(),
+                    run_id: run_id.as_deref(),
+                    context_budget,
+                    token_headroom,
+                    force,
+                })?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
             HarnessCommands::Exec {
                 executor,
                 forge_first,
@@ -5137,19 +5187,19 @@ fn run() -> Result<i32> {
                 output,
             } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = run_cli_harness_exec(
-                    Some(&store),
-                    &executor,
-                    &command,
+                let report = run_cli_harness_exec(CliHarnessExecOptions {
+                    store: Some(&store),
+                    executor: &executor,
+                    command: &command,
                     forge_first,
-                    workflow_id.as_deref(),
-                    run_id.as_deref(),
+                    workflow_id: workflow_id.as_deref(),
+                    run_id: run_id.as_deref(),
                     context_budget,
                     token_headroom,
-                    !execute,
+                    dry_run: !execute,
                     allow_exec,
-                    cwd.as_deref(),
-                )?;
+                    cwd: cwd.as_deref(),
+                })?;
                 print_response(output, &report)?;
                 Ok(0)
             }

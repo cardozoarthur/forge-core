@@ -45,8 +45,9 @@ use crate::event::{
 use crate::executor::load_executors;
 use crate::handoff::build_task_handoff;
 use crate::harness::{
-    analyze_token_headroom, build_cli_wrapper_plan, persist_token_headroom_report,
-    retrieve_headroom_blob, run_cli_harness_exec,
+    analyze_token_headroom, build_cli_wrapper_plan, install_cli_harness_shim,
+    persist_token_headroom_report, retrieve_headroom_blob, run_cli_harness_exec,
+    CliHarnessExecOptions, CliShimInstallOptions,
 };
 use crate::identity::{
     audit_tenant_index, ensure_workflow_policy, evaluate_tenant_policy_for_action,
@@ -420,6 +421,22 @@ struct HarnessWrapPlanInput {
     run_id: Option<String>,
     context_budget: Option<usize>,
     token_headroom: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HarnessInstallShimsInput {
+    shim_dir: String,
+    executor: String,
+    real_cmd: Option<String>,
+    real_command: Option<String>,
+    forge_first: Option<bool>,
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    run: Option<String>,
+    run_id: Option<String>,
+    context_budget: Option<usize>,
+    token_headroom: Option<bool>,
+    force: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4715,6 +4732,25 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.harness.install_shims",
+                "Install Forge-First CLI Shims",
+                "Install a Forge-owned PATH shim for a brain CLI without overwriting an existing non-Forge file unless explicitly forced.",
+                object_schema(&[
+                    ("shim_dir", "string", "directory where Forge-owned shims will be written"),
+                    ("executor", "string", "codex|claude|gemini|opencode"),
+                    ("real_cmd", "string", "resolved native CLI command/path captured before shim PATH precedence"),
+                    ("forge_first", "boolean", "prefer Forge context routing before native CLI defaults"),
+                    ("workflow_id", "string", "optional workflow lineage"),
+                    ("run_id", "string", "optional async run lineage"),
+                    ("context_budget", "integer", "context byte budget"),
+                    ("token_headroom", "boolean", "enable token-headroom env"),
+                    ("force", "boolean", "allow replacing an existing file"),
+                ], &["shim_dir", "executor", "real_cmd"]),
+                "forge.harness.shim_install.v1",
+                &["forge", "harness", "install-shims", "--shim-dir", "<dir>", "--executor", "<executor>", "--real-cmd", "<path>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
                 "forge.harness.exec",
                 "Execute Forge Harness Receipt",
                 "Return a dry-run or explicitly guarded execution receipt for a Forge-first brain CLI invocation, including executable resolution, env overlay and bounded output hashes.",
@@ -7124,25 +7160,47 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.token_headroom.unwrap_or(true),
             ))?
         }
+        "forge.harness.install_shims" => {
+            let input: HarnessInstallShimsInput = parse_input(input)?;
+            let real_cmd = input
+                .real_cmd
+                .or(input.real_command)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("real_cmd is required"))?;
+            let workflow_id = input.workflow_id.or(input.workflow);
+            let run_id = input.run_id.or(input.run);
+            serde_json::to_value(install_cli_harness_shim(CliShimInstallOptions {
+                shim_dir: std::path::Path::new(&input.shim_dir),
+                executor: &input.executor,
+                real_cmd: &real_cmd,
+                store_path: Some(store.path()),
+                forge_first: input.forge_first.unwrap_or(true),
+                workflow_id: workflow_id.as_deref(),
+                run_id: run_id.as_deref(),
+                context_budget: input.context_budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
+                token_headroom: input.token_headroom.unwrap_or(true),
+                force: input.force.unwrap_or(false),
+            })?)?
+        }
         "forge.harness.exec" => {
             let input: HarnessExecInput = parse_input(input)?;
             let command = input.command.or(input.cmd).unwrap_or_default();
             let workflow_id = input.workflow_id.or(input.workflow);
             let run_id = input.run_id.or(input.run);
             let cwd = input.cwd.as_deref().map(std::path::Path::new);
-            serde_json::to_value(run_cli_harness_exec(
-                Some(store),
-                &input.executor,
-                &command,
-                input.forge_first.unwrap_or(true),
-                workflow_id.as_deref(),
-                run_id.as_deref(),
-                input.context_budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
-                input.token_headroom.unwrap_or(true),
-                input.dry_run.unwrap_or(true),
-                input.allow_exec.unwrap_or(false),
+            serde_json::to_value(run_cli_harness_exec(CliHarnessExecOptions {
+                store: Some(store),
+                executor: &input.executor,
+                command: &command,
+                forge_first: input.forge_first.unwrap_or(true),
+                workflow_id: workflow_id.as_deref(),
+                run_id: run_id.as_deref(),
+                context_budget: input.context_budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
+                token_headroom: input.token_headroom.unwrap_or(true),
+                dry_run: input.dry_run.unwrap_or(true),
+                allow_exec: input.allow_exec.unwrap_or(false),
                 cwd,
-            )?)?
+            })?)?
         }
         "forge.task.handoff" => {
             let input: TaskHandoffInput = parse_input(input)?;
