@@ -23513,6 +23513,13 @@ views:
         .unwrap()
         .iter()
         .any(|action| action["id"] == "visual_patch_token" && action["mutates_workflow"] == true));
+    assert!(snapshot_json["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["id"] == "addon_renderer_event"
+            && action["path"] == "/api/addon-renderer/event"
+            && action["mutates_workflow"] == true));
     assert_eq!(
         snapshot_json["registry"]["summary"]["outcome"]["schema_version"],
         "forge.outcome_registry_summary.v1"
@@ -23760,7 +23767,8 @@ views:
     assert!(html.contains("Registrar colaboração"));
     assert!(html.contains("Atualizar token"));
     let custom_snapshot =
-        forge_core::ops::build_ops_snapshot_with_addon_dirs(&store_handle, &[addon_dir]).unwrap();
+        forge_core::ops::build_ops_snapshot_with_addon_dirs(&store_handle, &[addon_dir.clone()])
+            .unwrap();
     let custom_html = forge_core::ops::render_ops_html(&custom_snapshot);
     assert!(custom_html.contains("Estado interativo"));
     assert!(custom_html.contains("Hover reativo"));
@@ -23768,6 +23776,59 @@ views:
     assert!(custom_html.contains("Editor seguro"));
     assert!(custom_html.contains("renderer.metrics_chart"));
     assert!(custom_html.contains("renderer.settings_form"));
+    let renderer_event_request = format!(
+        "POST /api/addon-renderer/event HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nworkflow_id={workflow_id}&view_id=renderer.metrics_chart&event_kind=hover_changed&actor=human%3Aarthur&payload=%7B%22point%22%3A%22cost_series%22%7D"
+    );
+    let renderer_event_response = forge_core::ops::handle_ops_http_request_with_addon_dirs(
+        &store_handle,
+        &renderer_event_request,
+        &[addon_dir.clone()],
+    );
+    assert_eq!(renderer_event_response.status_code, 200);
+    let renderer_event_json: Value = serde_json::from_slice(&renderer_event_response.body).unwrap();
+    assert_eq!(renderer_event_json["action"], "addon_renderer_event");
+    assert_eq!(
+        renderer_event_json["result"]["schema_version"],
+        "forge.ops.addon_renderer_client_event.v1"
+    );
+    assert_eq!(
+        renderer_event_json["result"]["status"],
+        "addon_renderer_client_event_recorded"
+    );
+    assert_eq!(
+        renderer_event_json["result"]["renderer_family"],
+        "visualization_renderer"
+    );
+    assert_eq!(
+        renderer_event_json["result"]["state_key"],
+        "addon:forge.addon.interactive_renderers:view:renderer.metrics_chart"
+    );
+
+    let timeline_after_renderer_event = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "timeline",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let timeline_after_renderer_event_json: Value =
+        serde_json::from_slice(&timeline_after_renderer_event).unwrap();
+    assert!(timeline_after_renderer_event_json["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["kind"] == "addon_renderer_client_event"
+            && event["data"]["view_id"] == "renderer.metrics_chart"
+            && event["data"]["event_kind"] == "hover_changed"));
 
     let proposed_goal = "Objetivo proposto pela lane modificadora";
     let propose_goal_request = format!(

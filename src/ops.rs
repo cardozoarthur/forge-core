@@ -42,6 +42,8 @@ const OPS_MODIFIER_PROPOSAL_SCHEMA_VERSION: &str = "forge.ops.modifier_proposal.
 const OPS_ADDON_VIEW_RENDERERS_SCHEMA_VERSION: &str = "forge.ops.addon_view_renderers.v1";
 const OPS_ADDON_VIEW_INTERACTION_STATE_SCHEMA_VERSION: &str =
     "forge.ops.addon_view_interaction_state.v1";
+const OPS_ADDON_RENDERER_CLIENT_EVENT_SCHEMA_VERSION: &str =
+    "forge.ops.addon_renderer_client_event.v1";
 const OPS_MODIFIER_PROPOSAL_CREATED_EVENT: &str = "ops_modifier_proposal_created";
 const OPS_MODIFIER_PROPOSAL_APPLIED_EVENT: &str = "ops_modifier_proposal_applied";
 const MAX_HTTP_REQUEST_BYTES: usize = 1024 * 1024;
@@ -376,6 +378,22 @@ pub struct OpsActionReport {
     pub schema_version: String,
     pub action: String,
     pub result: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsAddonRendererClientEventReport {
+    pub schema_version: String,
+    pub status: String,
+    pub workflow_id: String,
+    pub addon_id: String,
+    pub view_id: String,
+    pub renderer_family: String,
+    pub event_kind: String,
+    pub actor: String,
+    pub state_key: String,
+    pub payload: Value,
+    pub allowed_client_events: Vec<String>,
+    pub recorded_event_kind: String,
 }
 
 #[derive(Debug)]
@@ -773,6 +791,74 @@ fn infer_form_field_type(field: &str) -> String {
         "boolean".to_string()
     } else {
         "text".to_string()
+    }
+}
+
+fn record_addon_renderer_client_event(
+    store: &ForgeStore,
+    addon_dirs: &[PathBuf],
+    workflow_id: &str,
+    view_id: &str,
+    event_kind: &str,
+    actor: &str,
+    payload: Option<&str>,
+) -> Result<OpsAddonRendererClientEventReport> {
+    ensure_workflow_policy(store, workflow_id, "addon renderer client event")?;
+    let snapshot = build_ops_snapshot_with_addon_dirs(store, addon_dirs)?;
+    let renderer = snapshot
+        .addon_view_renderers
+        .renderers
+        .iter()
+        .find(|renderer| renderer.view_id == view_id)
+        .with_context(|| format!("addon renderer view not found: {view_id}"))?;
+    if !renderer.safe_renderer {
+        bail!("addon renderer view is not safe to receive client events: {view_id}");
+    }
+    if !renderer
+        .interaction_state
+        .allowed_client_events
+        .iter()
+        .any(|allowed| allowed == event_kind)
+    {
+        bail!("client event {event_kind} is not allowed for addon renderer view {view_id}");
+    }
+    let payload = parse_renderer_event_payload(payload)?;
+    let data = serde_json::json!({
+        "schema_version": OPS_ADDON_RENDERER_CLIENT_EVENT_SCHEMA_VERSION,
+        "workflow_id": workflow_id,
+        "addon_id": &renderer.addon_id,
+        "view_id": &renderer.view_id,
+        "renderer_family": &renderer.renderer_family,
+        "event_kind": event_kind,
+        "actor": actor,
+        "state_key": &renderer.interaction_state.state_key,
+        "external_code_execution": renderer.interaction_state.external_code_execution,
+        "payload": &payload,
+    });
+    store.record_event(workflow_id, "addon_renderer_client_event", &data)?;
+    Ok(OpsAddonRendererClientEventReport {
+        schema_version: OPS_ADDON_RENDERER_CLIENT_EVENT_SCHEMA_VERSION.to_string(),
+        status: "addon_renderer_client_event_recorded".to_string(),
+        workflow_id: workflow_id.to_string(),
+        addon_id: renderer.addon_id.clone(),
+        view_id: renderer.view_id.clone(),
+        renderer_family: renderer.renderer_family.clone(),
+        event_kind: event_kind.to_string(),
+        actor: actor.to_string(),
+        state_key: renderer.interaction_state.state_key.clone(),
+        payload,
+        allowed_client_events: renderer.interaction_state.allowed_client_events.clone(),
+        recorded_event_kind: "addon_renderer_client_event".to_string(),
+    })
+}
+
+fn parse_renderer_event_payload(payload: Option<&str>) -> Result<Value> {
+    let Some(payload) = payload.map(str::trim).filter(|payload| !payload.is_empty()) else {
+        return Ok(serde_json::json!({}));
+    };
+    match serde_json::from_str::<Value>(payload) {
+        Ok(value) => Ok(value),
+        Err(_) => Ok(serde_json::json!({ "raw": payload })),
     }
 }
 
@@ -1689,6 +1775,27 @@ fn route_ops_http_request(
                 },
             )?;
             action_response("visual_collaboration_event", &report)
+        }
+        ("POST", "/api/addon-renderer/event") => {
+            let workflow_id = parsed.required("workflow_id")?;
+            let view_id = parsed.required("view_id")?;
+            let event_kind = parsed.required("event_kind")?;
+            let actor = parsed
+                .params
+                .get("actor")
+                .map(String::as_str)
+                .unwrap_or("ops-web");
+            let payload = parsed.params.get("payload").map(String::as_str);
+            let report = record_addon_renderer_client_event(
+                store,
+                addon_dirs,
+                workflow_id,
+                view_id,
+                event_kind,
+                actor,
+                payload,
+            )?;
+            action_response("addon_renderer_event", &report)
         }
         ("POST", "/api/modifier/propose-goal") => {
             let workflow_id = parsed.required("workflow_id")?;
@@ -2614,6 +2721,13 @@ fn ops_actions() -> Vec<OpsActionSpec> {
             "POST",
             "/api/visual/collaboration-event",
             "Record human or AI presence, comments, patches, conflicts or rollbacks on a visual artifact.",
+            true,
+        ),
+        action(
+            "addon_renderer_event",
+            "POST",
+            "/api/addon-renderer/event",
+            "Record a safe client-side interaction event from an Addon renderer, after validating the view interaction contract.",
             true,
         ),
         action(
