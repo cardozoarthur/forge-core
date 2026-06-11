@@ -413,11 +413,14 @@ contract that binds the context schema, routing policy, executor profile, person
 mode/profile, instruction sources, validation gates, a compact versioned
 `organization_context` with organization/brand/product/user/channel, memory/personality
 scope, tenant policy, brand voice/tone/values, terminology, design token/component
-sources, design guidelines and operating policy, plus context checksum and lineage
-checksum into a stable adapter-facing hash. The prompt packet also carries
-`organization_context_sha256` and the `organization_context_required` validation gate,
-so adapters cannot silently ignore organizational context while still using a bounded
-task-local packet. Packets also include a versioned
+sources, design guidelines and operating policy, plus a compact versioned
+`personality_decision` with the Forge-owned routing owner, organization/brand/product/user/channel,
+selected persona mode/profile, selected voice/tone, brand voice/tone/values, style sources,
+fallback mode and audit flag. The prompt packet also carries `organization_context_sha256`,
+`personality_decision_sha256`, `organization_context_required` and
+`personality_decision_required`, so adapters cannot silently ignore organizational context or
+personality routing while still using a bounded task-local packet. These inputs, plus context
+checksum and lineage checksum, are folded into a stable adapter-facing hash. Packets also include a versioned
 `replay_manifest` that records the replay command, selector version, budget,
 context checksum and content-addressed shard refs; prompt packets bind its checksum
 so async executors can pause and resume against the exact route. Packets also
@@ -516,6 +519,9 @@ This capability must remain operationally bounded:
 - the project operating context is also a shard, hashed into lineage and projected into persona profiles/contracts;
 - executor handoff packets project the selected persona as a versioned contract so
   adapters can enforce the node mode without parsing unrelated context;
+- prompt packets also project the Forge-owned `personality_decision`, which combines node persona,
+  brand identity, organization/product/channel/user scope, fallback mode, style sources, audit status
+  and `personality_decision_required` into a hashable executor decision;
 - Codex-style developer/personality instructions and Paperclip-style soul, voice,
   tone or persona models are summarized as explicit inputs to the profile contract;
 - the persona switch is included in lineage so results are replayable;

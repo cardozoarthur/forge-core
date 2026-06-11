@@ -25,6 +25,7 @@ const PROMPT_PACKET_SCHEMA_VERSION: &str = "forge.context.prompt_packet.v2";
 const EXECUTOR_PROMPT_PACKET_VERSION: &str = "forge.executor.prompt_packet.v2";
 const ORGANIZATION_PROMPT_CONTEXT_SCHEMA_VERSION: &str =
     "forge.context.organization_prompt_context.v1";
+const PERSONALITY_DECISION_SCHEMA_VERSION: &str = "forge.context.personality_decision.v1";
 const CONTEXT_REPLAY_MANIFEST_SCHEMA_VERSION: &str = "forge.context.replay_manifest.v1";
 const CONTEXT_SELECTION_RECEIPT_SCHEMA_VERSION: &str = "forge.context.selection_receipt.v1";
 const EXECUTION_POLICY_DECISION_SCHEMA_VERSION: &str = "forge.context.execution_policy_decision.v1";
@@ -266,6 +267,8 @@ pub struct ContextPromptPacket {
     pub validation_gates: Vec<String>,
     pub organization_context: ContextOrganizationPromptContext,
     pub organization_context_sha256: String,
+    pub personality_decision: ContextPersonalityDecision,
+    pub personality_decision_sha256: String,
     pub context_sha256: String,
     pub lineage_sha256: String,
     pub replay_manifest_sha256: String,
@@ -301,6 +304,30 @@ pub struct ContextOrganizationPromptContext {
     pub memory_visibility: String,
     pub sharing_policy: String,
     pub approval_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextPersonalityDecision {
+    pub schema_version: String,
+    pub decision_owner: String,
+    pub routing_scope: String,
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    pub user_id: String,
+    pub channel_id: String,
+    pub selected_mode: String,
+    pub selected_profile_id: String,
+    pub selected_voice: String,
+    pub selected_tone: String,
+    pub brand_voice: String,
+    pub brand_tone: String,
+    pub brand_values: Vec<String>,
+    pub style_sources: Vec<String>,
+    pub selection_reason: String,
+    pub fallback_mode: String,
+    pub validation_gate: String,
+    pub auditable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -884,6 +911,8 @@ struct ContextPromptPacketSeed {
     validation_gates: Vec<String>,
     organization_context: ContextOrganizationPromptContext,
     organization_context_sha256: String,
+    personality_decision: ContextPersonalityDecision,
+    personality_decision_sha256: String,
     context_sha256: String,
     lineage_sha256: String,
     replay_manifest_sha256: String,
@@ -1997,6 +2026,10 @@ fn build_prompt_packet(input: PromptPacketInput<'_>) -> Result<ContextPromptPack
     let organization_context = build_organization_prompt_context(input.operating_context);
     let organization_context_sha256 =
         hex_sha256(serde_json::to_string(&organization_context)?.as_bytes());
+    let personality_decision =
+        build_personality_decision(input.operating_context, persona, input.persona_profile);
+    let personality_decision_sha256 =
+        hex_sha256(serde_json::to_string(&personality_decision)?.as_bytes());
     let seed = ContextPromptPacketSeed {
         schema_version: PROMPT_PACKET_SCHEMA_VERSION,
         packet_version: EXECUTOR_PROMPT_PACKET_VERSION,
@@ -2017,6 +2050,8 @@ fn build_prompt_packet(input: PromptPacketInput<'_>) -> Result<ContextPromptPack
         validation_gates: prompt_packet_validation_gates(input.task, persona),
         organization_context: organization_context.clone(),
         organization_context_sha256: organization_context_sha256.clone(),
+        personality_decision: personality_decision.clone(),
+        personality_decision_sha256: personality_decision_sha256.clone(),
         context_sha256: input.context_sha256.to_string(),
         lineage_sha256: input.lineage.lineage_sha256.clone(),
         replay_manifest_sha256: input.replay_manifest_sha256.to_string(),
@@ -2044,6 +2079,8 @@ fn build_prompt_packet(input: PromptPacketInput<'_>) -> Result<ContextPromptPack
         validation_gates: seed.validation_gates,
         organization_context: seed.organization_context,
         organization_context_sha256: seed.organization_context_sha256,
+        personality_decision: seed.personality_decision,
+        personality_decision_sha256: seed.personality_decision_sha256,
         context_sha256: seed.context_sha256,
         lineage_sha256: seed.lineage_sha256,
         replay_manifest_sha256: seed.replay_manifest_sha256,
@@ -2082,6 +2119,69 @@ fn build_organization_prompt_context(
         memory_visibility: context.operating_policy.memory_visibility.clone(),
         sharing_policy: context.operating_policy.sharing_policy.clone(),
         approval_policy: context.operating_policy.approval_policy.clone(),
+    }
+}
+
+fn build_personality_decision(
+    context: &OperatingContextSpec,
+    persona: Option<&PersonaRoutingSpec>,
+    persona_profile: Option<&ContextPersonaProfile>,
+) -> ContextPersonalityDecision {
+    let fallback_mode = "brand_default_personality".to_string();
+    let selected_mode = persona
+        .map(|persona| persona.mode.clone())
+        .unwrap_or_else(|| fallback_mode.clone());
+    let selected_profile_id = persona_profile
+        .map(|profile| profile.profile_id.clone())
+        .unwrap_or_else(|| persona_profile_id(&selected_mode));
+    let selected_voice = persona
+        .map(|persona| persona.voice.clone())
+        .unwrap_or_else(|| context.brand_identity.voice.clone());
+    let selected_tone = persona
+        .map(|persona| persona.tone.clone())
+        .unwrap_or_else(|| context.brand_identity.tone.clone());
+    let selection_reason = if persona.is_some() {
+        "node persona overrides brand defaults while preserving organization brand identity"
+    } else {
+        "brand defaults selected because the node has no explicit persona"
+    };
+    let mut style_sources = BTreeSet::from([
+        "forge_operating_context".to_string(),
+        "organization_brand_identity".to_string(),
+    ]);
+    if let Some(persona) = persona {
+        style_sources.insert("node_persona_contract".to_string());
+        if !persona.instruction_source.trim().is_empty() {
+            style_sources.insert(persona.instruction_source.clone());
+        }
+        for model in &persona.source_models {
+            if !model.trim().is_empty() {
+                style_sources.insert(model.clone());
+            }
+        }
+    }
+
+    ContextPersonalityDecision {
+        schema_version: PERSONALITY_DECISION_SCHEMA_VERSION.to_string(),
+        decision_owner: "forge_personality_router".to_string(),
+        routing_scope: context.personality_scope.clone(),
+        organization_id: context.organization.id.clone(),
+        brand_id: context.brand.id.clone(),
+        product_id: context.product.id.clone(),
+        user_id: context.user.id.clone(),
+        channel_id: context.channel.id.clone(),
+        selected_mode,
+        selected_profile_id,
+        selected_voice,
+        selected_tone,
+        brand_voice: context.brand_identity.voice.clone(),
+        brand_tone: context.brand_identity.tone.clone(),
+        brand_values: context.brand_identity.values.clone(),
+        style_sources: style_sources.into_iter().collect(),
+        selection_reason: selection_reason.to_string(),
+        fallback_mode,
+        validation_gate: "personality_decision_required".to_string(),
+        auditable: persona.map(|persona| persona.auditable).unwrap_or(true),
     }
 }
 
@@ -2356,6 +2456,7 @@ fn prompt_packet_instruction_sources(persona: Option<&PersonaRoutingSpec>) -> Ve
         "forge_brand_identity".to_string(),
         "forge_design_system".to_string(),
         "forge_operating_policy".to_string(),
+        "forge_personality_router".to_string(),
     ]);
 
     if let Some(persona) = persona {
@@ -2378,6 +2479,7 @@ fn prompt_packet_validation_gates(
 ) -> Vec<String> {
     let mut gates = BTreeSet::new();
     gates.insert("organization_context_required".to_string());
+    gates.insert("personality_decision_required".to_string());
     if !task.execution_policy.validation_gate.trim().is_empty() {
         gates.insert(task.execution_policy.validation_gate.clone());
     }

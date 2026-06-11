@@ -6044,6 +6044,73 @@ capabilities:
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("organization_context_required")));
+    let personality_decision = &context_json["prompt_packet"]["personality_decision"];
+    assert_eq!(
+        personality_decision["schema_version"],
+        "forge.context.personality_decision.v1"
+    );
+    assert_eq!(
+        personality_decision["decision_owner"],
+        "forge_personality_router"
+    );
+    assert_eq!(
+        personality_decision["routing_scope"],
+        "organization_workflow_node"
+    );
+    assert_eq!(personality_decision["organization_id"], "digital-directive");
+    assert_eq!(personality_decision["brand_id"], "forge");
+    assert_eq!(personality_decision["product_id"], "forge-core");
+    assert_eq!(personality_decision["user_id"], "arthur");
+    assert_eq!(personality_decision["channel_id"], "local_cli");
+    assert_eq!(personality_decision["selected_mode"], "operator_report");
+    assert_eq!(
+        personality_decision["selected_profile_id"],
+        "persona.operator_report.v1"
+    );
+    assert_eq!(
+        personality_decision["selected_voice"],
+        "operational reporter"
+    );
+    assert_eq!(
+        personality_decision["selected_tone"],
+        "direct, auditable and evidence-bound"
+    );
+    assert_eq!(personality_decision["brand_voice"], "consultivo");
+    assert_eq!(personality_decision["brand_tone"], "direto");
+    assert_eq!(
+        personality_decision["selection_reason"],
+        "node persona overrides brand defaults while preserving organization brand identity"
+    );
+    assert_eq!(
+        personality_decision["fallback_mode"],
+        "brand_default_personality"
+    );
+    assert!(personality_decision["style_sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source == "node_persona_contract"));
+    assert!(personality_decision["style_sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source == "organization_brand_identity"));
+    assert_eq!(
+        personality_decision["validation_gate"],
+        "personality_decision_required"
+    );
+    assert_eq!(personality_decision["auditable"], true);
+    assert_eq!(
+        context_json["prompt_packet"]["personality_decision_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert!(context_json["prompt_packet"]["validation_gates"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("personality_decision_required")));
     assert_eq!(
         context_json["lineage"]["operating_context_sha256"]
             .as_str()
