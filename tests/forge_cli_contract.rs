@@ -20558,6 +20558,208 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
 }
 
 #[test]
+fn cost_ledger_enforces_project_tenant_policy_for_global_reads() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let visible_root = temp.path().join("visible");
+    let hidden_root = temp.path().join("hidden");
+    fs::create_dir_all(visible_root.join(".forge")).unwrap();
+    fs::create_dir_all(hidden_root.join(".forge")).unwrap();
+    fs::write(
+        visible_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: cost-org
+  label: Cost Org
+brand:
+  scope: brand
+  id: cost-brand
+  label: Cost Brand
+product:
+  scope: product
+  id: cost-product
+  label: Cost Product
+user:
+  scope: user
+  id: cost-user
+  label: Cost User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+    fs::write(
+        hidden_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: other-cost-org
+  label: Other Cost Org
+brand:
+  scope: brand
+  id: other-cost-brand
+  label: Other Cost Brand
+product:
+  scope: product
+  id: other-cost-product
+  label: Other Cost Product
+user:
+  scope: user
+  id: other-cost-user
+  label: Other Cost User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+
+    for project_root in [&visible_root, &hidden_root] {
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "identity",
+                "sync",
+                "--project-root",
+                project_root.to_str().unwrap(),
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Visible tenant cost workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    forge()
+        .current_dir(&hidden_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Hidden tenant cost workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let ledger_output = forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "ledger",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ledger_json: Value = serde_json::from_slice(&ledger_output).unwrap();
+    assert_eq!(ledger_json["filters"]["organization_id"], "cost-org");
+    assert_eq!(ledger_json["summary"]["workflow_count"], 1);
+    assert!(ledger_json["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|workflow| workflow["organization_id"] == "cost-org"));
+
+    let mcp_ledger_input = serde_json::json!({
+        "project_root": visible_root.display().to_string()
+    });
+    let mcp_ledger_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.cost.ledger",
+            "--input",
+            &mcp_ledger_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_ledger_json: Value = serde_json::from_slice(&mcp_ledger_output).unwrap();
+    assert_eq!(
+        mcp_ledger_json["result"]["filters"]["organization_id"],
+        "cost-org"
+    );
+    assert_eq!(mcp_ledger_json["result"]["summary"]["workflow_count"], 1);
+
+    forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "membership-update",
+            "--subject",
+            "cost-user",
+            "--organization",
+            "cost-org",
+            "--brand",
+            "cost-brand",
+            "--product",
+            "cost-product",
+            "--deny",
+            "context:read",
+            "--source",
+            "test-cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let denied_output = forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "ledger",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let denied_stderr = String::from_utf8(denied_output).unwrap();
+    assert!(denied_stderr.contains("multi-tenant enforcement blocked cost ledger list"));
+    assert!(denied_stderr.contains("context:read"));
+}
+
+#[test]
 fn task_validate_response_rejects_completed_executor_response_without_passing_evidence() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

@@ -1,4 +1,6 @@
 use crate::graph::{AtomicTask, ExecutorKind, Workflow};
+use crate::identity::ensure_operating_context_policy;
+use crate::intent::OperatingContextSpec;
 use crate::storage::{CostLedgerIndexWrite, ForgeStore, StoreEvent, StoredCostLedgerIndexRecord};
 use anyhow::{bail, Context, Result};
 use chrono::{
@@ -431,6 +433,45 @@ pub fn build_cost_ledger(
         addons,
         workflows: ledger_workflows,
     })
+}
+
+pub fn build_cost_ledger_for_context(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    operating_context: &OperatingContextSpec,
+) -> Result<CostLedgerReport> {
+    if operating_context.tenant_policy_mode != "enforce" {
+        return build_cost_ledger(store, workflow_id, organization_id, brand_id, product_id);
+    }
+    ensure_operating_context_policy(store, operating_context, "cost ledger list")?;
+    let organization_id = enforce_cost_tenant_filter(
+        "cost ledger list",
+        "organization",
+        organization_id,
+        &operating_context.organization.id,
+    )?;
+    let brand_id = enforce_cost_tenant_filter(
+        "cost ledger list",
+        "brand",
+        brand_id,
+        &operating_context.brand.id,
+    )?;
+    let product_id = enforce_cost_tenant_filter(
+        "cost ledger list",
+        "product",
+        product_id,
+        &operating_context.product.id,
+    )?;
+    build_cost_ledger(
+        store,
+        workflow_id,
+        Some(&organization_id),
+        Some(&brand_id),
+        Some(&product_id),
+    )
 }
 
 pub fn materialize_cost_ledger_index(
@@ -1473,6 +1514,23 @@ fn tenant_filter_matches(
     filter_eq(organization_id, &context.organization.id)
         && filter_eq(brand_id, &context.brand.id)
         && filter_eq(product_id, &context.product.id)
+}
+
+fn enforce_cost_tenant_filter(
+    action: &str,
+    dimension: &str,
+    requested: Option<&str>,
+    context_value: &str,
+) -> Result<String> {
+    let requested = normalize_filter(requested);
+    if let Some(requested) = requested.as_deref() {
+        if requested != context_value {
+            bail!(
+                "multi-tenant enforcement blocked {action}: requested {dimension} `{requested}` is outside operating context `{context_value}`"
+            );
+        }
+    }
+    Ok(requested.unwrap_or_else(|| context_value.to_string()))
 }
 
 fn source_addon_from_task(task: &AtomicTask) -> Option<String> {
