@@ -24,16 +24,17 @@ use crate::storage::{ForgeStore, StoreEvent};
 use crate::workflow::{record_product_decision, ProductDecisionInput};
 use anyhow::Result;
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
 const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_board.v1";
 const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
 const INTERACTIVE_READINESS_SCHEMA_VERSION: &str = "forge.interactive.readiness.v1";
+const INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION: &str = "forge.interactive.patch_workbench.v1";
 const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
 const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
 const INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION: &str = "forge.interactive.structured_logs.v1";
@@ -80,6 +81,7 @@ pub struct InteractiveDashboard {
     pub workflow_focus: Vec<InteractiveWorkflowCard>,
     pub navigation_panel: InteractiveNavigationPanel,
     pub ui_composition_panel: InteractiveUiCompositionPanel,
+    pub patch_workbench_panel: InteractivePatchWorkbenchPanel,
     pub dag_panel: InteractiveWorkflowDagPanel,
     pub task_board_panel: InteractiveTaskBoardPanel,
     pub schedule_panel: InteractiveSchedulePanel,
@@ -202,6 +204,54 @@ pub struct InteractiveReadinessCommands {
     pub shells: Vec<String>,
     pub harness_mode: Vec<String>,
     pub harness_doctor: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchWorkbenchPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub repository_path: String,
+    pub clean: bool,
+    pub changed_path_count: usize,
+    pub staged_path_count: usize,
+    pub unstaged_path_count: usize,
+    pub untracked_path_count: usize,
+    pub diff_present: bool,
+    pub diff_check_status: String,
+    pub diff_stat: String,
+    pub files: Vec<InteractivePatchWorkbenchFile>,
+    pub commands: InteractivePatchWorkbenchCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchWorkbenchFile {
+    pub path: String,
+    pub index_status: String,
+    pub worktree_status: String,
+    pub status_label: String,
+    pub staged: bool,
+    pub unstaged: bool,
+    pub untracked: bool,
+    pub commands: InteractivePatchWorkbenchFileCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchWorkbenchFileCommands {
+    pub plan: Vec<String>,
+    pub review: Vec<String>,
+    pub diff: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchWorkbenchCommands {
+    pub refresh: Vec<String>,
+    pub status: Vec<String>,
+    pub plan: Vec<String>,
+    pub review: Vec<String>,
+    pub diff: Vec<String>,
+    pub apply: Vec<String>,
+    pub revert: Vec<String>,
+    pub restore: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -756,6 +806,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             renderers: Vec::new(),
         });
     let addon_renderer_panel = build_interactive_addon_renderer_panel(&addon_renderer_report);
+    let patch_workbench_panel = build_interactive_patch_workbench(store)?;
     let ui_composition_panel = build_ui_composition_panel(&addon_renderer_report);
 
     Ok(InteractiveHomeReport {
@@ -790,6 +841,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             workflow_focus,
             navigation_panel: build_navigation_panel(),
             ui_composition_panel,
+            patch_workbench_panel,
             dag_panel,
             task_board_panel,
             schedule_panel,
@@ -806,6 +858,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 "forge request list".to_string(),
                 "forge schedule list".to_string(),
                 "forge schedule worker-status".to_string(),
+                "forge interactive patch-workbench --output json".to_string(),
             ],
             quick_actions: vec![
                 "/status".to_string(),
@@ -922,6 +975,350 @@ pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveRead
         next_actions,
         commands: readiness_commands(),
     })
+}
+
+pub fn build_interactive_patch_workbench(
+    store: &ForgeStore,
+) -> Result<InteractivePatchWorkbenchPanel> {
+    let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let repository_path = git_command(&["rev-parse", "--show-toplevel"])
+        .stdout
+        .lines()
+        .next()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.trim().to_string())
+        .unwrap_or_else(|| current_dir.display().to_string());
+
+    let status_output = git_command(&["status", "--porcelain=v1"]);
+    if !status_output.success {
+        return Ok(InteractivePatchWorkbenchPanel {
+            schema_version: INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION.to_string(),
+            status: "patch_workbench_unavailable".to_string(),
+            repository_path,
+            clean: true,
+            changed_path_count: 0,
+            staged_path_count: 0,
+            unstaged_path_count: 0,
+            untracked_path_count: 0,
+            diff_present: false,
+            diff_check_status: "not_run".to_string(),
+            diff_stat: status_output.stderr,
+            files: Vec::new(),
+            commands: patch_workbench_commands(),
+        });
+    }
+
+    let ignored_paths = patch_workbench_ignored_paths(store, &repository_path);
+    let files = parse_patch_workbench_files(&status_output.stdout, &ignored_paths);
+    let staged_path_count = files.iter().filter(|file| file.staged).count();
+    let unstaged_path_count = files.iter().filter(|file| file.unstaged).count();
+    let untracked_path_count = files.iter().filter(|file| file.untracked).count();
+    let diff_stat = combined_diff_stat();
+    let diff_present = !diff_stat.trim().is_empty();
+    let diff_check_status = patch_workbench_diff_check_status();
+    let clean = files.is_empty();
+    let status = if clean {
+        "patch_workbench_clean"
+    } else {
+        "patch_workbench_ready"
+    };
+
+    Ok(InteractivePatchWorkbenchPanel {
+        schema_version: INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        repository_path,
+        clean,
+        changed_path_count: files.len(),
+        staged_path_count,
+        unstaged_path_count,
+        untracked_path_count,
+        diff_present,
+        diff_check_status,
+        diff_stat,
+        files,
+        commands: patch_workbench_commands(),
+    })
+}
+
+struct GitCommandOutput {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+fn git_command(args: &[&str]) -> GitCommandOutput {
+    match Command::new("git").args(args).output() {
+        Ok(output) => GitCommandOutput {
+            success: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout)
+                .trim_end()
+                .to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr)
+                .trim_end()
+                .to_string(),
+        },
+        Err(error) => GitCommandOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: error.to_string(),
+        },
+    }
+}
+
+fn patch_workbench_ignored_paths(store: &ForgeStore, repository_path: &str) -> BTreeSet<String> {
+    let root = PathBuf::from(repository_path);
+    let mut ignored = BTreeSet::new();
+    let store_path = store.path().to_path_buf();
+    for path in [
+        store_path.clone(),
+        PathBuf::from(format!("{}-wal", store_path.display())),
+        PathBuf::from(format!("{}-shm", store_path.display())),
+        PathBuf::from(format!("{}-journal", store_path.display())),
+    ] {
+        if let Some(relative) = repo_relative_display_path(&path, &root) {
+            ignored.insert(relative);
+        }
+    }
+    ignored
+}
+
+fn repo_relative_display_path(path: &Path, root: &Path) -> Option<String> {
+    path.strip_prefix(root)
+        .ok()
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .filter(|relative| !relative.is_empty())
+}
+
+fn parse_patch_workbench_files(
+    status: &str,
+    ignored_paths: &BTreeSet<String>,
+) -> Vec<InteractivePatchWorkbenchFile> {
+    status
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| {
+            let index_status = line.chars().next().unwrap_or(' ');
+            let worktree_status = line.chars().nth(1).unwrap_or(' ');
+            let path = line.get(3..).unwrap_or("").trim().to_string();
+            if ignored_paths.contains(&path) {
+                return None;
+            }
+            let untracked = index_status == '?' && worktree_status == '?';
+            let staged = index_status != ' ' && index_status != '?' && index_status != '!';
+            let unstaged =
+                worktree_status != ' ' && worktree_status != '?' && worktree_status != '!';
+            let status_label = patch_workbench_status_label(staged, unstaged, untracked);
+
+            Some(InteractivePatchWorkbenchFile {
+                commands: patch_workbench_file_commands(&path),
+                path,
+                index_status: index_status.to_string(),
+                worktree_status: worktree_status.to_string(),
+                status_label,
+                staged,
+                unstaged,
+                untracked,
+            })
+        })
+        .collect()
+}
+
+fn patch_workbench_status_label(staged: bool, unstaged: bool, untracked: bool) -> String {
+    if untracked {
+        "untracked".to_string()
+    } else if staged && unstaged {
+        "staged_and_modified".to_string()
+    } else if staged {
+        "staged".to_string()
+    } else if unstaged {
+        "modified".to_string()
+    } else {
+        "changed".to_string()
+    }
+}
+
+fn combined_diff_stat() -> String {
+    let unstaged = git_command(&["diff", "--stat"]);
+    let staged = git_command(&["diff", "--cached", "--stat"]);
+    let mut stat_parts = Vec::new();
+    if !unstaged.stdout.trim().is_empty() {
+        stat_parts.push(unstaged.stdout);
+    }
+    if !staged.stdout.trim().is_empty() {
+        stat_parts.push(format!("cached:\n{}", staged.stdout));
+    }
+    stat_parts.join("\n")
+}
+
+fn patch_workbench_diff_check_status() -> String {
+    let unstaged = git_command(&["diff", "--check"]);
+    let staged = git_command(&["diff", "--cached", "--check"]);
+    if unstaged.success && staged.success {
+        "passed".to_string()
+    } else {
+        "failed".to_string()
+    }
+}
+
+fn patch_workbench_commands() -> InteractivePatchWorkbenchCommands {
+    InteractivePatchWorkbenchCommands {
+        refresh: vec![
+            "interactive".to_string(),
+            "patch-workbench".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        status: vec![
+            "interactive".to_string(),
+            "patch-workbench".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        plan: vec![
+            "patch".to_string(),
+            "plan".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--task".to_string(),
+            "<task-id>".to_string(),
+            "--intent".to_string(),
+            "<intent>".to_string(),
+            "--path".to_string(),
+            "<path>".to_string(),
+            "--origin".to_string(),
+            "forge_cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        review: vec![
+            "patch".to_string(),
+            "review".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--task".to_string(),
+            "<task-id>".to_string(),
+            "--path".to_string(),
+            "<path>".to_string(),
+            "--origin".to_string(),
+            "forge_cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        diff: vec![
+            "patch".to_string(),
+            "diff".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--task".to_string(),
+            "<task-id>".to_string(),
+            "--path".to_string(),
+            "<path>".to_string(),
+            "--file-index".to_string(),
+            "0".to_string(),
+            "--hunk-index".to_string(),
+            "0".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        apply: vec![
+            "patch".to_string(),
+            "apply".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--task".to_string(),
+            "<task-id>".to_string(),
+            "--path".to_string(),
+            "<path>".to_string(),
+            "--plan-artifact".to_string(),
+            "<plan-artifact>".to_string(),
+            "--origin".to_string(),
+            "forge_cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        revert: vec![
+            "patch".to_string(),
+            "revert".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--task".to_string(),
+            "<task-id>".to_string(),
+            "--apply-artifact".to_string(),
+            "<apply-artifact>".to_string(),
+            "--origin".to_string(),
+            "forge_cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        restore: vec![
+            "patch".to_string(),
+            "restore".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--task".to_string(),
+            "<task-id>".to_string(),
+            "--revert-artifact".to_string(),
+            "<revert-artifact>".to_string(),
+            "--approved-by".to_string(),
+            "<operator>".to_string(),
+            "--confirm-restore".to_string(),
+            "--origin".to_string(),
+            "forge_cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
+fn patch_workbench_file_commands(path: &str) -> InteractivePatchWorkbenchFileCommands {
+    InteractivePatchWorkbenchFileCommands {
+        plan: vec![
+            "patch".to_string(),
+            "plan".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--task".to_string(),
+            "<task-id>".to_string(),
+            "--intent".to_string(),
+            "<intent>".to_string(),
+            "--path".to_string(),
+            path.to_string(),
+            "--origin".to_string(),
+            "forge_cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        review: vec![
+            "patch".to_string(),
+            "review".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--task".to_string(),
+            "<task-id>".to_string(),
+            "--path".to_string(),
+            path.to_string(),
+            "--origin".to_string(),
+            "forge_cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        diff: vec![
+            "patch".to_string(),
+            "diff".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--task".to_string(),
+            "<task-id>".to_string(),
+            "--path".to_string(),
+            path.to_string(),
+            "--file-index".to_string(),
+            "0".to_string(),
+            "--hunk-index".to_string(),
+            "0".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
 }
 
 pub fn build_interactive_task_board(store: &ForgeStore) -> Result<InteractiveTaskBoardPanel> {
@@ -1215,6 +1612,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     };
     let navigation_keys = render_navigation_keybindings(&d.navigation_panel);
     let ui_composition_regions = render_ui_composition_region_summary(&d.ui_composition_panel);
+    let patch_workbench_files = render_patch_workbench_file_summary(&d.patch_workbench_panel);
     let task_board_lanes = render_task_board_lane_summary(&d.task_board_panel);
     let dag_workflows = render_workflow_dag_summary(&d.dag_panel);
     let digital_twin_workflows = if d.digital_twin_panel.workflows.is_empty() {
@@ -1276,6 +1674,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Workflow focus: {workflow_focus}\n\
          Navigation panel: {navigation_status}; default {navigation_default_mode}, theme {navigation_theme}, modes {navigation_modes}, keys {navigation_keys}\n\
          UI composition: {ui_composition_status}; layout {ui_composition_layout}, regions {ui_composition_regions_count}, widgets {ui_composition_widgets} ({ui_composition_core_widgets} core, {ui_composition_addon_widgets} addon); {ui_composition_regions}\n\
+         Patch workbench: {patch_workbench_status}; clean {patch_workbench_clean}, files {patch_workbench_files_count}, staged {patch_workbench_staged}, unstaged {patch_workbench_unstaged}, untracked {patch_workbench_untracked}, diff {patch_workbench_diff_present}, check {patch_workbench_diff_check}; {patch_workbench_files}\n\
          Operational digital twin: {digital_twin_status}; workflows {digital_twin_workflows_count}, happening {digital_twin_happening}, done {digital_twin_done}, remaining {digital_twin_remaining}, validated {digital_twin_validated}, rejected {digital_twin_rejected}, approvals {digital_twin_approvals}; {digital_twin_workflows}\n\
          DAG panel: {dag_status}; workflows {dag_workflows_count}, nodes {dag_nodes}, edges {dag_edges}, running {dag_running}, blocked {dag_blocked}, waits {dag_waits}, human waits {dag_human_waits}; {dag_workflows}\n\
          Task board: {task_board_status}; workflows {task_board_workflows}, tasks {task_board_tasks}, ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, checkpoints {task_board_checkpoints}, artifacts {task_board_artifacts}; lanes {task_board_lanes}\n\
@@ -1330,6 +1729,15 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         ui_composition_core_widgets = d.ui_composition_panel.core_widget_count,
         ui_composition_addon_widgets = d.ui_composition_panel.addon_widget_count,
         ui_composition_regions = ui_composition_regions,
+        patch_workbench_status = d.patch_workbench_panel.status,
+        patch_workbench_clean = d.patch_workbench_panel.clean,
+        patch_workbench_files_count = d.patch_workbench_panel.changed_path_count,
+        patch_workbench_staged = d.patch_workbench_panel.staged_path_count,
+        patch_workbench_unstaged = d.patch_workbench_panel.unstaged_path_count,
+        patch_workbench_untracked = d.patch_workbench_panel.untracked_path_count,
+        patch_workbench_diff_present = d.patch_workbench_panel.diff_present,
+        patch_workbench_diff_check = d.patch_workbench_panel.diff_check_status,
+        patch_workbench_files = patch_workbench_files,
         digital_twin_status = d.digital_twin_panel.schema_version,
         digital_twin_workflows_count = d.digital_twin_panel.workflow_count,
         digital_twin_happening = d.digital_twin_panel.global_counts.happening_now_count,
@@ -1416,6 +1824,22 @@ pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> Strin
     )
 }
 
+pub fn render_interactive_patch_workbench(panel: &InteractivePatchWorkbenchPanel) -> String {
+    format!(
+        "Patch workbench: {status}; clean {clean}, files {changed_path_count}, staged {staged_path_count}, unstaged {unstaged_path_count}, untracked {untracked_path_count}, diff {diff_present}, check {diff_check_status}\nRepository: {repository_path}\nFiles: {files}\n",
+        status = panel.status,
+        clean = panel.clean,
+        changed_path_count = panel.changed_path_count,
+        staged_path_count = panel.staged_path_count,
+        unstaged_path_count = panel.unstaged_path_count,
+        untracked_path_count = panel.untracked_path_count,
+        diff_present = panel.diff_present,
+        diff_check_status = panel.diff_check_status,
+        repository_path = panel.repository_path,
+        files = render_patch_workbench_file_summary(panel),
+    )
+}
+
 pub fn render_interactive_readiness(panel: &InteractiveReadinessPanel) -> String {
     let usable_executors = if panel.usable_executors.is_empty() {
         "none".to_string()
@@ -1441,6 +1865,20 @@ pub fn render_interactive_readiness(panel: &InteractiveReadinessPanel) -> String
         usable_executors = usable_executors,
         next_actions = next_actions,
     )
+}
+
+fn render_patch_workbench_file_summary(panel: &InteractivePatchWorkbenchPanel) -> String {
+    if panel.files.is_empty() {
+        "none".to_string()
+    } else {
+        panel
+            .files
+            .iter()
+            .take(12)
+            .map(|file| format!("{} ({})", file.path, file.status_label))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
 }
 
 pub fn render_interactive_workflow_dag(panel: &InteractiveWorkflowDagPanel) -> String {
@@ -1761,6 +2199,15 @@ fn build_ui_composition_panel(
                     "detailed",
                     "full",
                     vec!["forge interactive task-board --output json".to_string()],
+                ),
+                core_ui_widget(
+                    "patch_workbench_panel",
+                    "Patch workbench",
+                    "patch_workbench_panel",
+                    "diff_review_renderer",
+                    "detailed",
+                    "full",
+                    vec!["forge interactive patch-workbench --output json".to_string()],
                 ),
             ],
         ),

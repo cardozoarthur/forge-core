@@ -80,9 +80,9 @@ use crate::interaction::{
     expire_human_interaction, list_human_interactions, CreateChoiceInteractionRequest,
 };
 use crate::interactive::{
-    build_interactive_home, build_interactive_readiness, build_interactive_structured_logs,
-    build_interactive_task_board, build_interactive_workflow_dag, route_interactive_input,
-    slash_command_catalog,
+    build_interactive_home, build_interactive_patch_workbench, build_interactive_readiness,
+    build_interactive_structured_logs, build_interactive_task_board,
+    build_interactive_workflow_dag, route_interactive_input, slash_command_catalog,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -2765,6 +2765,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.readiness.v1",
                 &["forge", "interactive", "readiness", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.patch_workbench",
+                "Inspect Interactive Patch Workbench",
+                "Return the Forge interactive file-editing and diff-review workbench with Git status, diff checks and permission-gated patch lifecycle commands without mutating files.",
+                object_schema(&[], &[]),
+                "forge.interactive.patch_workbench.v1",
+                &["forge", "interactive", "patch-workbench", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -6432,6 +6441,9 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.interactive.home" => serde_json::to_value(build_interactive_home(store)?)?,
         "forge.interactive.readiness" => serde_json::to_value(build_interactive_readiness(store)?)?,
+        "forge.interactive.patch_workbench" => {
+            serde_json::to_value(build_interactive_patch_workbench(store)?)?
+        }
         "forge.interactive.task_board" => {
             serde_json::to_value(build_interactive_task_board(store)?)?
         }

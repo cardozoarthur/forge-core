@@ -36302,6 +36302,147 @@ fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
 }
 
 #[test]
+fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let sample = temp.path().join("sample.txt");
+    let notes = temp.path().join("notes.txt");
+    fs::write(&sample, "alpha\n").unwrap();
+    assert!(std::process::Command::new("git")
+        .arg("init")
+        .current_dir(temp.path())
+        .status()
+        .expect("git init should run")
+        .success());
+    assert!(std::process::Command::new("git")
+        .args(["add", "sample.txt"])
+        .current_dir(temp.path())
+        .status()
+        .expect("git add should run")
+        .success());
+    assert!(std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Forge Test",
+            "commit",
+            "-m",
+            "initial",
+        ])
+        .current_dir(temp.path())
+        .status()
+        .expect("git commit should run")
+        .success());
+
+    fs::write(&sample, "alpha\nbeta\n").unwrap();
+    fs::write(&notes, "one\ntwo\n").unwrap();
+
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "patch-workbench",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.interactive.patch_workbench.v1"
+    );
+    assert_eq!(json["status"], "patch_workbench_ready");
+    assert_eq!(json["clean"], false);
+    assert_eq!(json["changed_path_count"], 2);
+    assert_eq!(json["unstaged_path_count"], 1);
+    assert_eq!(json["untracked_path_count"], 1);
+    assert_eq!(json["diff_present"], true);
+    assert_eq!(json["diff_check_status"], "passed");
+    assert!(json["diff_stat"].as_str().unwrap().contains("sample.txt"));
+    assert!(json["files"].as_array().unwrap().iter().any(|file| {
+        file["path"] == "sample.txt"
+            && file["status_label"] == "modified"
+            && file["unstaged"] == true
+            && file["commands"]["review"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("review"))
+    }));
+    assert!(json["files"].as_array().unwrap().iter().any(|file| {
+        file["path"] == "notes.txt"
+            && file["status_label"] == "untracked"
+            && file["untracked"] == true
+    }));
+    assert!(json["commands"]["plan"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("plan")));
+    assert!(json["commands"]["diff"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("diff")));
+
+    let text_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "patch-workbench",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Patch workbench"));
+    assert!(text.contains("sample.txt"));
+    assert!(text.contains("notes.txt"));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.patch_workbench");
+    assert_eq!(
+        tool["output_schema"],
+        "forge.interactive.patch_workbench.v1"
+    );
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .current_dir(temp.path())
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.patch_workbench"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.patch_workbench.v1"
+    );
+    assert_eq!(mcp_json["result"]["changed_path_count"], 2);
+}
+
+#[test]
 fn interactive_task_board_lanes_include_operable_task_cards() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -37160,6 +37301,14 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge interactive readiness"),
         "the packaged Forge skill should include the readiness CLI command"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.patch_workbench"),
+        "the packaged Forge skill should expose the dedicated patch workbench through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge interactive patch-workbench"),
+        "the packaged Forge skill should include the patch workbench CLI command"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("ui_composition_panel"),
