@@ -144,7 +144,7 @@ forge sessions --output json
 forge mcp call forge.sessions --output json
 forge sessions lifecycle --session codex-shell --state opened --workflow <workflow-id> --task <task-id> --run <run-id> --origin forge_cli --output json
 forge mcp call forge.session.lifecycle --input '{"session_id":"codex-shell","state":"closed","workflow_id":"<workflow-id>","task_id":"<task-id>","run_id":"<run-id>","origin":"mcp"}' --output json
-forge harness mode --output json
+forge harness mode --project-root <project-root> --output json
 forge harness exec --executor codex --workflow <workflow-id> --task <task-id> --run <run-id> --execute --allow-exec -- <cmd>
 forge shells --executor codex --workflow <workflow-id> --task <task-id> --run <run-id> --context-budget 1200 --ttl-seconds 900 --output json
 forge mcp call forge.shell.launch_plan --input '{"executor":"codex","workflow_id":"<workflow-id>","task_id":"<task-id>","run_id":"<run-id>","context_budget":1200,"ttl_seconds":900}' --output json

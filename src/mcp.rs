@@ -423,6 +423,7 @@ struct HarnessRetrieveHeadroomInput {
 struct HarnessModeInput {
     forge_first: Option<bool>,
     observe_only: Option<bool>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4892,13 +4893,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.harness.mode",
                 "Inspect Harness Mode",
-                "Report the effective Forge-first harness mode, source, project config status and precedence before wrapper, shim or exec use.",
+                "Report the effective Forge-first harness mode, source, project config, exec policy status and precedence before wrapper, shim or exec use.",
                 object_schema(&[
                     ("forge_first", "boolean", "simulate an explicit Forge-first CLI flag"),
                     ("observe_only", "boolean", "simulate an observe-only CLI override"),
+                    ("project_root", "string", "optional project root containing .forge/harness.json"),
                 ], &[]),
                 "forge.harness.mode.v1",
-                &["forge", "harness", "mode", "--output", "json"],
+                &["forge", "harness", "mode", "--project-root", "<project-root>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7506,7 +7508,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(build_harness_mode_report(HarnessModeOptions {
                 forge_first: input.forge_first.unwrap_or(false),
                 observe_only: input.observe_only.unwrap_or(false),
-                project_root: None,
+                project_root: input.project_root.as_deref().map(std::path::Path::new),
             }))?
         }
         "forge.harness.wrap_plan" => {

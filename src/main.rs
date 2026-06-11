@@ -638,6 +638,8 @@ enum HarnessCommands {
         forge_first: bool,
         #[arg(long = "observe-only", conflicts_with = "forge_first")]
         observe_only: bool,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -5293,12 +5295,13 @@ fn run() -> Result<i32> {
             HarnessCommands::Mode {
                 forge_first,
                 observe_only,
+                project_root,
                 output,
             } => {
                 let report = build_harness_mode_report(HarnessModeOptions {
                     forge_first,
                     observe_only,
-                    project_root: None,
+                    project_root: project_root.as_deref(),
                 });
                 print_response(output, &report)?;
                 Ok(0)

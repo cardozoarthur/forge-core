@@ -1001,6 +1001,93 @@ printf 'policy-exec-ok:%s\n' "$FORGE_WORKFLOW_ID"
     );
 }
 
+#[test]
+fn harness_mode_can_audit_explicit_project_root_from_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("remote-project");
+    let forge_dir = project.join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("harness.json"),
+        r#"{"default_mode":"forge_first","require_lineage_for_exec":true}"#,
+    )
+    .unwrap();
+
+    let cli_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "harness",
+            "mode",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cli_mode: Value = serde_json::from_slice(&cli_output).unwrap();
+    assert_eq!(cli_mode["forge_first"], true);
+    assert_eq!(cli_mode["forge_first_source"], "project_config");
+    assert_eq!(cli_mode["project_config_status"], "loaded");
+    assert_eq!(cli_mode["require_lineage_for_exec"], true);
+    assert!(cli_mode["project_config_path"]
+        .as_str()
+        .unwrap()
+        .starts_with(project.to_str().unwrap()));
+
+    let mcp_tools_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_tools: Value = serde_json::from_slice(&mcp_tools_output).unwrap();
+    let mcp_mode_tool = find_mcp_tool(&mcp_tools, "forge.harness.mode");
+    assert_eq!(
+        mcp_mode_tool["input_schema"]["properties"]["project_root"]["type"],
+        "string"
+    );
+
+    let input = serde_json::json!({
+        "project_root": project.display().to_string()
+    });
+    let mcp_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.mode",
+            "--input",
+            &input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_mode: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp_mode["result"]["forge_first"], true);
+    assert_eq!(mcp_mode["result"]["forge_first_source"], "project_config");
+    assert_eq!(mcp_mode["result"]["project_config_status"], "loaded");
+    assert_eq!(mcp_mode["result"]["require_lineage_for_exec"], true);
+}
+
 #[cfg(unix)]
 #[test]
 fn harness_install_shims_writes_forge_first_cli_wrapper_without_overwriting_real_cli() {
@@ -1987,6 +2074,10 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .as_str()
         .unwrap()
         .contains("require_lineage_for_exec"));
+    assert!(replacement_cli["evidence"]
+        .as_str()
+        .unwrap()
+        .contains("--project-root"));
     assert!(replacement_cli["gap_before_promotion"]
         .as_str()
         .unwrap()
