@@ -688,6 +688,8 @@ enum HarnessCommands {
         context_budget: usize,
         #[arg(long = "token-headroom", default_value_t = true)]
         token_headroom: bool,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         force: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -5352,11 +5354,16 @@ fn run() -> Result<i32> {
                 run_id,
                 context_budget,
                 token_headroom,
+                project_root,
                 force,
                 output,
             } => {
                 let (forge_first, forge_first_source) =
-                    resolve_harness_forge_first_source(forge_first, observe_only);
+                    resolve_harness_forge_first_source_for_project(
+                        forge_first,
+                        observe_only,
+                        project_root.as_deref(),
+                    );
                 let report = install_cli_harness_shim(CliShimInstallOptions {
                     shim_dir: &shim_dir,
                     executor: &executor,

@@ -1354,6 +1354,152 @@ printf 'argc:%s env:%s args:%s\n' "$#" "$FORGE_HARNESS" "$*"
 
 #[cfg(unix)]
 #[test]
+fn harness_install_shims_can_use_explicit_project_root_default_mode_for_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let real_dir = temp.path().join("real");
+    let cli_shim_dir = temp.path().join("cli-shims");
+    let mcp_shim_dir = temp.path().join("mcp-shims");
+    let fallback_shim_dir = temp.path().join("fallback-shims");
+    let project = temp.path().join("remote-project");
+    fs::create_dir_all(&real_dir).unwrap();
+    fs::create_dir_all(&cli_shim_dir).unwrap();
+    fs::create_dir_all(&mcp_shim_dir).unwrap();
+    fs::create_dir_all(&fallback_shim_dir).unwrap();
+    fs::create_dir_all(project.join(".forge")).unwrap();
+    fs::write(
+        project.join(".forge").join("harness.json"),
+        r#"{"default_mode":"forge_first"}"#,
+    )
+    .unwrap();
+    write_fake_executor(
+        &real_dir,
+        "codex-real",
+        r#"#!/bin/sh
+printf 'native:%s\n' "$*"
+"#,
+    );
+    let real_cmd = real_dir.join("codex-real");
+
+    let cli_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "install-shims",
+            "--shim-dir",
+            cli_shim_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--real-cmd",
+            real_cmd.to_str().unwrap(),
+            "--project-root",
+            project.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cli_report: Value = serde_json::from_slice(&cli_output).unwrap();
+    assert_eq!(cli_report["forge_first"], true);
+    assert_eq!(cli_report["forge_first_source"], "project_config");
+    assert_eq!(
+        cli_report["shims"][0]["forge_first_source"],
+        "project_config"
+    );
+    let cli_script = fs::read_to_string(cli_shim_dir.join("codex")).unwrap();
+    assert!(cli_script.contains("--forge-first"));
+
+    let mcp_tools_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_tools: Value = serde_json::from_slice(&mcp_tools_output).unwrap();
+    let mcp_install_tool = find_mcp_tool(&mcp_tools, "forge.harness.install_shims");
+    assert_eq!(
+        mcp_install_tool["input_schema"]["properties"]["project_root"]["type"],
+        "string"
+    );
+
+    let mcp_input = serde_json::json!({
+        "shim_dir": mcp_shim_dir.display().to_string(),
+        "executor": "opencode",
+        "real_cmd": real_cmd.display().to_string(),
+        "project_root": project.display().to_string()
+    });
+    let mcp_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.install_shims",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_report: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp_report["result"]["forge_first"], true);
+    assert_eq!(mcp_report["result"]["forge_first_source"], "project_config");
+    assert_eq!(
+        mcp_report["result"]["shims"][0]["forge_first_source"],
+        "project_config"
+    );
+
+    let fallback_input = serde_json::json!({
+        "shim_dir": fallback_shim_dir.display().to_string(),
+        "executor": "gemini",
+        "real_cmd": real_cmd.display().to_string()
+    });
+    let fallback_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.install_shims",
+            "--input",
+            &fallback_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let fallback_report: Value = serde_json::from_slice(&fallback_output).unwrap();
+    assert_eq!(fallback_report["result"]["forge_first"], true);
+    assert_eq!(
+        fallback_report["result"]["forge_first_source"],
+        "mcp_default"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn harness_install_shims_resolves_native_cli_from_path_without_recursing_through_shim() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -2171,6 +2317,10 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .as_str()
         .unwrap()
         .contains("wrap-plan --project-root"));
+    assert!(replacement_cli["evidence"]
+        .as_str()
+        .unwrap()
+        .contains("install-shims --project-root"));
     assert!(replacement_cli["gap_before_promotion"]
         .as_str()
         .unwrap()
