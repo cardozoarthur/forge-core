@@ -20,7 +20,7 @@ use crate::registry::{
 use crate::request::start_async_request;
 use crate::runtime::load_runtimes;
 use crate::schedule::build_schedule_worker_status;
-use crate::storage::ForgeStore;
+use crate::storage::{ForgeStore, StoreEvent};
 use crate::workflow::{record_product_decision, ProductDecisionInput};
 use anyhow::Result;
 use serde::Serialize;
@@ -197,6 +197,15 @@ pub struct InteractiveTaskBoardTaskCard {
     pub title: String,
     pub status: String,
     pub executor: String,
+    pub dependency_count: usize,
+    pub dependent_count: usize,
+    pub context_requirement_count: usize,
+    pub validation_rule_count: usize,
+    pub estimated_cost_usd: f64,
+    pub cost_model: String,
+    pub workflow_artifact_count: usize,
+    pub history_event_count: usize,
+    pub latest_history_event: Option<InteractiveTaskHistoryEvent>,
     pub human_required: bool,
     pub human_interaction_state: String,
     pub ready_for_handoff: bool,
@@ -205,6 +214,13 @@ pub struct InteractiveTaskBoardTaskCard {
     pub checkpoint_state: Option<String>,
     pub next_action: String,
     pub commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveTaskHistoryEvent {
+    pub event_id: i64,
+    pub kind: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1374,10 +1390,12 @@ fn build_task_board_task_cards(
     checkpoints: &[TaskCheckpoint],
 ) -> Result<Vec<InteractiveTaskBoardTaskCard>> {
     let workflow = store.load_workflow(&row.workflow_id)?;
+    let events = store.load_workflow_events(&row.workflow_id)?;
+    let dependent_counts = task_dependent_counts(&workflow.tasks);
     Ok(workflow
         .tasks
         .iter()
-        .map(|task| build_task_board_task_card(row, task, checkpoints))
+        .map(|task| build_task_board_task_card(row, task, checkpoints, &events, &dependent_counts))
         .collect())
 }
 
@@ -1385,6 +1403,8 @@ fn build_task_board_task_card(
     row: &WorkflowRegistryRow,
     task: &AtomicTask,
     checkpoints: &[TaskCheckpoint],
+    events: &[StoreEvent],
+    dependent_counts: &BTreeMap<String, usize>,
 ) -> InteractiveTaskBoardTaskCard {
     let action_ref = row
         .context_action_refs
@@ -1415,12 +1435,29 @@ fn build_task_board_task_card(
         checkpoint_id.as_deref(),
         action_ref,
     );
+    let history_events = task_history_events(events, &task.id);
+    let latest_history_event = history_events
+        .last()
+        .map(|event| InteractiveTaskHistoryEvent {
+            event_id: event.id,
+            kind: event.kind.clone(),
+            created_at: event.created_at.clone(),
+        });
 
     InteractiveTaskBoardTaskCard {
         task_id: task.id.clone(),
         title: task.title.clone(),
         status: task_status_label(&task.status).to_string(),
         executor: executor_kind_label(&task.executor).to_string(),
+        dependency_count: task.dependencies.len(),
+        dependent_count: dependent_counts.get(&task.id).copied().unwrap_or(0),
+        context_requirement_count: task.context_requirements.len(),
+        validation_rule_count: task.validation_rules.len(),
+        estimated_cost_usd: task.cost.estimated_cost_usd,
+        cost_model: task.cost.cost_model.clone(),
+        workflow_artifact_count: row.artifact_count,
+        history_event_count: history_events.len(),
+        latest_history_event,
         human_required,
         human_interaction_state,
         ready_for_handoff,
@@ -1430,6 +1467,42 @@ fn build_task_board_task_card(
         next_action,
         commands: task_board_task_commands(row, task, action_ref, checkpoint),
     }
+}
+
+fn task_dependent_counts(tasks: &[AtomicTask]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for task in tasks {
+        for dependency in &task.dependencies {
+            *counts.entry(dependency.clone()).or_default() += 1;
+        }
+    }
+    counts
+}
+
+fn task_history_events<'a>(events: &'a [StoreEvent], task_id: &str) -> Vec<&'a StoreEvent> {
+    events
+        .iter()
+        .filter(|event| event_refs_task(event, task_id))
+        .collect()
+}
+
+fn event_refs_task(event: &StoreEvent, task_id: &str) -> bool {
+    json_string_matches(&event.data, &["task_id", "task"], task_id)
+        || event.data.get("checkpoint").is_some_and(|checkpoint| {
+            json_string_matches(checkpoint, &["task_id", "task"], task_id)
+        })
+        || event.data.get("interaction").is_some_and(|interaction| {
+            json_string_matches(interaction, &["task_id", "task"], task_id)
+        })
+        || event
+            .data
+            .get("task")
+            .is_some_and(|task| json_string_matches(task, &["id", "task_id"], task_id))
+}
+
+fn json_string_matches(value: &serde_json::Value, keys: &[&str], expected: &str) -> bool {
+    keys.iter()
+        .any(|key| value.get(*key).and_then(|value| value.as_str()) == Some(expected))
 }
 
 fn latest_task_checkpoint<'a>(

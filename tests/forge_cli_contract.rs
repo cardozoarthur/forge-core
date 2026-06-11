@@ -35640,6 +35640,26 @@ fn interactive_home_exposes_task_board_handoffs_checkpoints_and_artifacts() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!(format!("forge inspect {workflow_id}"))));
+    let checkpoint_card = lane["task_cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["task_id"] == checkpoint_task_id)
+        .unwrap();
+    assert!(checkpoint_card["dependency_count"].as_u64().unwrap() >= 1);
+    assert!(
+        checkpoint_card["context_requirement_count"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(checkpoint_card["validation_rule_count"].as_u64().unwrap() >= 1);
+    assert!(checkpoint_card["estimated_cost_usd"].is_number());
+    assert!(checkpoint_card["history_event_count"].as_u64().unwrap() >= 1);
+    assert_eq!(
+        checkpoint_card["latest_history_event"]["kind"],
+        "task_checkpoint_recorded"
+    );
 
     let text_home = forge()
         .args(["--store", store.to_str().unwrap(), "interactive", "home"])
