@@ -16396,6 +16396,31 @@ fn brain_sessions_report_aggregates_providers_shell_specs_and_planned_events() {
         .assert()
         .success();
 
+    forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sessions",
+            "lifecycle",
+            "--session",
+            "codex-shell",
+            "--state",
+            "opened",
+            "--workflow",
+            "wf_session_management",
+            "--task",
+            "task-session",
+            "--run",
+            "run-session",
+            "--origin",
+            "contract-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
     let output = forge()
         .env("PATH", &path)
         .args([
@@ -16490,6 +16515,71 @@ fn brain_sessions_report_aggregates_providers_shell_specs_and_planned_events() {
         .any(
             |session| session["session_id"] == "codex-shell" && session["recorded_plan_count"] == 1
         ));
+
+    let filtered = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sessions",
+            "--provider",
+            "codex",
+            "--state",
+            "opened",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let filtered_json: Value = serde_json::from_slice(&filtered).unwrap();
+    assert_eq!(filtered_json["filter"]["provider_id"], "codex");
+    assert_eq!(filtered_json["filter"]["lifecycle_state"], "opened");
+    assert_eq!(filtered_json["filter"]["matched_session_count"], 1);
+    assert_eq!(filtered_json["session_count"], 1);
+    assert_eq!(filtered_json["sessions"][0]["session_id"], "codex-shell");
+    assert_eq!(filtered_json["sessions"][0]["provider_id"], "codex");
+    assert_eq!(filtered_json["sessions"][0]["lifecycle_state"], "opened");
+    assert!(filtered_json["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|provider| provider["provider_id"] == "codex"));
+
+    let mcp_filtered = forge()
+        .env("PATH", &path)
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.sessions"])
+        .arg("--input")
+        .arg(
+            serde_json::json!({
+                "provider_id": "codex",
+                "lifecycle_state": "opened"
+            })
+            .to_string(),
+        )
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_filtered_json: Value = serde_json::from_slice(&mcp_filtered).unwrap();
+    assert_eq!(
+        mcp_filtered_json["result"]["filter"]["provider_id"],
+        "codex"
+    );
+    assert_eq!(
+        mcp_filtered_json["result"]["filter"]["lifecycle_state"],
+        "opened"
+    );
+    assert_eq!(
+        mcp_filtered_json["result"]["sessions"][0]["session_id"],
+        "codex-shell"
+    );
 }
 
 #[cfg(unix)]

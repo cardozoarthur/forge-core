@@ -43,9 +43,9 @@ use crate::event::{
     EventEgressEmitInput, InboundEventIngestInput,
 };
 use crate::executor::{
-    build_brain_sessions_report, build_shell_launch_plan, load_executors,
+    build_brain_sessions_report_with_options, build_shell_launch_plan, load_executors,
     record_brain_session_lifecycle, record_shell_session_plan, BrainSessionLifecycleOptions,
-    ShellLaunchPlanOptions,
+    BrainSessionsReportOptions, ShellLaunchPlanOptions,
 };
 use crate::handoff::build_task_handoff;
 use crate::harness::{
@@ -502,6 +502,16 @@ struct ShellLaunchPlanInput {
     context_budget: Option<usize>,
     ttl_seconds: Option<u64>,
     origin: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct BrainSessionsInput {
+    provider: Option<String>,
+    provider_id: Option<String>,
+    state: Option<String>,
+    lifecycle_state: Option<String>,
+    readiness: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2689,8 +2699,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.sessions",
                 "Inspect Brain Sessions",
-                "Return Forge-owned provider/session management state for execution brains, shell specs and recorded shell launch events without starting child processes.",
-                object_schema(&[], &[]),
+                "Return Forge-owned provider/session management state for execution brains, shell specs and recorded shell launch events without starting child processes, optionally filtered by provider, lifecycle state or readiness.",
+                object_schema(
+                    &[
+                        ("provider_id", "string", "optional provider id such as codex, opencode, gemini, claude or forge"),
+                        ("lifecycle_state", "string", "optional lifecycle state filter such as untracked, opened, attached, detached, closed, failed or abandoned"),
+                        ("readiness", "string", "optional readiness filter such as ready, native_cli_available or needs_sync_or_authorization"),
+                    ],
+                    &[],
+                ),
                 "forge.brain_sessions.v1",
                 &["forge", "sessions", "--output", "json"],
                 ToolFlags::new(true, false),
@@ -6220,8 +6237,21 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.brain_router" => serde_json::to_value(load_executors(store)?.brain_router)?,
         "forge.sessions" => {
+            let input: BrainSessionsInput = if input.is_null() {
+                BrainSessionsInput::default()
+            } else {
+                parse_input(input)?
+            };
             let report = load_executors(store)?;
-            serde_json::to_value(build_brain_sessions_report(store, &report.brain_router)?)?
+            serde_json::to_value(build_brain_sessions_report_with_options(
+                store,
+                &report.brain_router,
+                BrainSessionsReportOptions {
+                    provider_id: input.provider_id.or(input.provider),
+                    lifecycle_state: input.lifecycle_state.or(input.state),
+                    readiness: input.readiness,
+                },
+            )?)?
         }
         "forge.session.lifecycle" => {
             let input: BrainSessionLifecycleInput = parse_input(input)?;

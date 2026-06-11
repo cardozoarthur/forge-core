@@ -247,6 +247,7 @@ pub struct BrainSessionsReport {
     pub status: String,
     pub controller: String,
     pub selected_provider_id: Option<String>,
+    pub filter: BrainSessionsFilterReport,
     pub provider_count: usize,
     pub session_count: usize,
     pub ready_session_count: usize,
@@ -257,6 +258,22 @@ pub struct BrainSessionsReport {
     pub recent_events: Vec<BrainSessionEventSummary>,
     pub safety_gates: Vec<String>,
     pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BrainSessionsReportOptions {
+    pub provider_id: Option<String>,
+    pub lifecycle_state: Option<String>,
+    pub readiness: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainSessionsFilterReport {
+    pub provider_id: Option<String>,
+    pub lifecycle_state: Option<String>,
+    pub readiness: Option<String>,
+    pub matched_provider_count: usize,
+    pub matched_session_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1442,6 +1459,17 @@ pub fn build_brain_sessions_report(
     store: &ForgeStore,
     router: &BrainRouterReport,
 ) -> Result<BrainSessionsReport> {
+    build_brain_sessions_report_with_options(store, router, BrainSessionsReportOptions::default())
+}
+
+pub fn build_brain_sessions_report_with_options(
+    store: &ForgeStore,
+    router: &BrainRouterReport,
+    options: BrainSessionsReportOptions,
+) -> Result<BrainSessionsReport> {
+    let filter_provider_id = normalize_optional_filter(options.provider_id.as_deref());
+    let filter_lifecycle_state = normalize_brain_session_filter_state(options.lifecycle_state)?;
+    let filter_readiness = normalize_optional_filter(options.readiness.as_deref());
     let mut events = store
         .load_global_events()?
         .into_iter()
@@ -1452,16 +1480,8 @@ pub fn build_brain_sessions_report(
         .map(brain_session_event_summary)
         .collect::<Vec<_>>();
     events.sort_by(|left, right| right.global_event_id.cmp(&left.global_event_id));
-    let planned_event_count = events
-        .iter()
-        .filter(|event| event.kind == "shell_launch_planned")
-        .count();
-    let lifecycle_event_count = events
-        .iter()
-        .filter(|event| event.kind == "brain_session_lifecycle")
-        .count();
 
-    let sessions = router
+    let mut sessions = router
         .shell_sessions
         .iter()
         .map(|session| {
@@ -1472,7 +1492,45 @@ pub fn build_brain_sessions_report(
             brain_session_state(session, brain, &events)
         })
         .collect::<Vec<_>>();
-    let providers = brain_provider_session_summaries(router, &sessions);
+    sessions.retain(|session| {
+        filter_provider_id
+            .as_deref()
+            .is_none_or(|provider_id| session.provider_id == provider_id)
+            && filter_lifecycle_state
+                .as_deref()
+                .is_none_or(|state| session.lifecycle_state == state)
+            && filter_readiness
+                .as_deref()
+                .is_none_or(|readiness| session.readiness == readiness)
+    });
+    let visible_session_ids = sessions
+        .iter()
+        .map(|session| session.session_id.clone())
+        .collect::<BTreeSet<_>>();
+    let visible_events = events
+        .into_iter()
+        .filter(|event| {
+            event
+                .session_ids
+                .iter()
+                .any(|session_id| visible_session_ids.contains(session_id))
+        })
+        .collect::<Vec<_>>();
+    let planned_event_count = visible_events
+        .iter()
+        .filter(|event| event.kind == "shell_launch_planned")
+        .count();
+    let lifecycle_event_count = visible_events
+        .iter()
+        .filter(|event| event.kind == "brain_session_lifecycle")
+        .count();
+    let filter_active = filter_provider_id.is_some()
+        || filter_lifecycle_state.is_some()
+        || filter_readiness.is_some();
+    let mut providers = brain_provider_session_summaries(router, &sessions);
+    if filter_active {
+        providers.retain(|provider| provider.session_count > 0);
+    }
     let ready_session_count = sessions
         .iter()
         .filter(|session| session.readiness == "ready")
@@ -1488,6 +1546,13 @@ pub fn build_brain_sessions_report(
         status: status.to_string(),
         controller: router.controller.clone(),
         selected_provider_id: router.selected_brain.clone(),
+        filter: BrainSessionsFilterReport {
+            provider_id: filter_provider_id,
+            lifecycle_state: filter_lifecycle_state,
+            readiness: filter_readiness,
+            matched_provider_count: providers.len(),
+            matched_session_count: sessions.len(),
+        },
         provider_count: providers.len(),
         session_count: sessions.len(),
         ready_session_count,
@@ -1495,7 +1560,7 @@ pub fn build_brain_sessions_report(
         lifecycle_event_count,
         providers,
         sessions,
-        recent_events: events.into_iter().take(20).collect(),
+        recent_events: visible_events.into_iter().take(20).collect(),
         safety_gates: router.safety_gates.clone(),
         next_actions: vec![
             "Use forge shells --record-session before handing a shell to a human or external brain."
@@ -1561,6 +1626,26 @@ fn normalize_brain_session_lifecycle_state(state: &str) -> Result<&'static str> 
             "unsupported brain session lifecycle state '{other}'; use opened, attached, detached, closed, failed or abandoned"
         )),
     }
+}
+
+fn normalize_optional_filter(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("all"))
+        .map(|value| value.to_ascii_lowercase())
+}
+
+fn normalize_brain_session_filter_state(value: Option<String>) -> Result<Option<String>> {
+    let Some(value) = normalize_optional_filter(value.as_deref()) else {
+        return Ok(None);
+    };
+    let normalized = value.replace('_', "-");
+    if normalized == "untracked" {
+        return Ok(Some(normalized));
+    }
+    Ok(Some(
+        normalize_brain_session_lifecycle_state(&normalized)?.to_string(),
+    ))
 }
 
 fn brain_session_lifecycle_events(

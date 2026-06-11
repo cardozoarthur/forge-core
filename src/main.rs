@@ -54,10 +54,10 @@ use forge_core::event::{
 };
 use forge_core::execution::run_simulated;
 use forge_core::executor::{
-    build_brain_sessions_report, build_shell_launch_plan, load_executors,
+    build_brain_sessions_report_with_options, build_shell_launch_plan, load_executors,
     record_brain_session_lifecycle, record_shell_session_plan, sync_executors,
-    BrainSessionLifecycleOptions, ExecutorQuotaObservation, ExecutorSyncOptions,
-    ShellLaunchPlanOptions,
+    BrainSessionLifecycleOptions, BrainSessionsReportOptions, ExecutorQuotaObservation,
+    ExecutorSyncOptions, ShellLaunchPlanOptions,
 };
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff;
@@ -285,6 +285,12 @@ enum Commands {
     Sessions {
         #[command(subcommand)]
         command: Option<SessionCommands>,
+        #[arg(long = "provider")]
+        provider_id: Option<String>,
+        #[arg(long = "state")]
+        lifecycle_state: Option<String>,
+        #[arg(long)]
+        readiness: Option<String>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -5804,7 +5810,13 @@ fn run() -> Result<i32> {
             print_response(output, &report.brain_router)?;
             Ok(0)
         }
-        Commands::Sessions { command, output } => {
+        Commands::Sessions {
+            command,
+            provider_id,
+            lifecycle_state,
+            readiness,
+            output,
+        } => {
             let store = ForgeStore::open(cli.store)?;
             let report = load_executors(&store)?;
             match command {
@@ -5834,7 +5846,15 @@ fn run() -> Result<i32> {
                     print_response(output, &receipt)?;
                 }
                 None => {
-                    let sessions = build_brain_sessions_report(&store, &report.brain_router)?;
+                    let sessions = build_brain_sessions_report_with_options(
+                        &store,
+                        &report.brain_router,
+                        BrainSessionsReportOptions {
+                            provider_id,
+                            lifecycle_state,
+                            readiness,
+                        },
+                    )?;
                     print_response(output, &sessions)?;
                 }
             }
