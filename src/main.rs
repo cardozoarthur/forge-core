@@ -604,6 +604,8 @@ enum HarnessCommands {
         command: Vec<String>,
         #[arg(long = "forge-first")]
         forge_first: bool,
+        #[arg(long = "observe-only", conflicts_with = "forge_first")]
+        observe_only: bool,
         #[arg(long = "workflow")]
         workflow_id: Option<String>,
         #[arg(long = "task")]
@@ -626,6 +628,8 @@ enum HarnessCommands {
         real_cmd: Option<String>,
         #[arg(long = "forge-first")]
         forge_first: bool,
+        #[arg(long = "observe-only", conflicts_with = "forge_first")]
+        observe_only: bool,
         #[arg(long = "workflow")]
         workflow_id: Option<String>,
         #[arg(long = "task")]
@@ -654,6 +658,8 @@ enum HarnessCommands {
         executor: String,
         #[arg(long = "forge-first")]
         forge_first: bool,
+        #[arg(long = "observe-only", conflicts_with = "forge_first")]
+        observe_only: bool,
         #[arg(long = "workflow")]
         workflow_id: Option<String>,
         #[arg(long = "task")]
@@ -5170,6 +5176,7 @@ fn run() -> Result<i32> {
                 executor,
                 command,
                 forge_first,
+                observe_only,
                 workflow_id,
                 task_id,
                 run_id,
@@ -5177,6 +5184,7 @@ fn run() -> Result<i32> {
                 token_headroom,
                 output,
             } => {
+                let forge_first = resolve_harness_forge_first(forge_first, observe_only);
                 let report = build_cli_wrapper_plan(CliWrapperPlanOptions {
                     executor: &executor,
                     command: &command,
@@ -5195,6 +5203,7 @@ fn run() -> Result<i32> {
                 executor,
                 real_cmd,
                 forge_first,
+                observe_only,
                 workflow_id,
                 task_id,
                 run_id,
@@ -5203,6 +5212,7 @@ fn run() -> Result<i32> {
                 force,
                 output,
             } => {
+                let forge_first = resolve_harness_forge_first(forge_first, observe_only);
                 let report = install_cli_harness_shim(CliShimInstallOptions {
                     shim_dir: &shim_dir,
                     executor: &executor,
@@ -5234,6 +5244,7 @@ fn run() -> Result<i32> {
             HarnessCommands::Exec {
                 executor,
                 forge_first,
+                observe_only,
                 workflow_id,
                 task_id,
                 run_id,
@@ -5245,6 +5256,7 @@ fn run() -> Result<i32> {
                 command,
                 output,
             } => {
+                let forge_first = resolve_harness_forge_first(forge_first, observe_only);
                 let store = ForgeStore::open(cli.store)?;
                 let report = run_cli_harness_exec(CliHarnessExecOptions {
                     store: Some(&store),
@@ -7230,6 +7242,25 @@ fn print_response<T: Serialize>(format: OutputFormat, value: &T) -> Result<()> {
         OutputFormat::Human => println!("{}", serde_json::to_string_pretty(value)?),
     }
     Ok(())
+}
+
+fn resolve_harness_forge_first(flag_forge_first: bool, flag_observe_only: bool) -> bool {
+    if flag_observe_only {
+        return false;
+    }
+    flag_forge_first || harness_default_mode_prefers_forge_first()
+}
+
+fn harness_default_mode_prefers_forge_first() -> bool {
+    std::env::var("FORGE_HARNESS_DEFAULT_MODE")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "forge_first" | "forge-first" | "forgefirst" | "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn addon_dirs_or_default(addon_dirs: Vec<PathBuf>) -> Vec<PathBuf> {

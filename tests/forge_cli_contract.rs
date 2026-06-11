@@ -341,6 +341,101 @@ fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environme
     assert!(mcp_exec["result"]["global_event_id"].as_i64().unwrap() > 0);
 }
 
+#[test]
+fn harness_cli_honors_forge_first_default_mode_with_explicit_observe_only_override() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .env("FORGE_HARNESS_DEFAULT_MODE", "forge_first")
+        .args([
+            "harness",
+            "wrap-plan",
+            "--executor",
+            "codex",
+            "--cmd",
+            "codex",
+            "--workflow",
+            "wf_default_harness",
+            "--task",
+            "task-default-harness",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.harness.cli_wrapper_plan.v1");
+    assert_eq!(json["forge_first"], true);
+    assert!(json["launch_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("--forge-first".to_string())));
+    let env = json["env"].as_array().unwrap();
+    assert!(env
+        .iter()
+        .any(|item| item["name"] == "FORGE_HARNESS_MODE" && item["value"] == "forge_first"));
+
+    let observe_only_output = forge()
+        .env("FORGE_HARNESS_DEFAULT_MODE", "forge_first")
+        .args([
+            "harness",
+            "wrap-plan",
+            "--executor",
+            "codex",
+            "--cmd",
+            "codex",
+            "--observe-only",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let observe_only: Value = serde_json::from_slice(&observe_only_output).unwrap();
+    assert_eq!(observe_only["forge_first"], false);
+    assert!(!observe_only["launch_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("--forge-first".to_string())));
+
+    let exec_output = forge()
+        .env("FORGE_HARNESS_DEFAULT_MODE", "forge_first")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "exec",
+            "--executor",
+            "opencode",
+            "--workflow",
+            "wf_default_harness",
+            "--task",
+            "task-default-harness",
+            "--",
+            "definitely-not-a-real-forge-test-cli",
+            "--version",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let exec_json: Value = serde_json::from_slice(&exec_output).unwrap();
+    assert_eq!(exec_json["schema_version"], "forge.harness.exec_receipt.v1");
+    assert_eq!(exec_json["forge_first"], true);
+    assert_eq!(exec_json["wrapper_plan"]["forge_first"], true);
+    assert!(exec_json["wrapper_plan"]["launch_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("--forge-first".to_string())));
+}
+
 #[cfg(unix)]
 #[test]
 fn harness_exec_applies_headroom_to_child_output_and_persists_retrieval_refs() {
