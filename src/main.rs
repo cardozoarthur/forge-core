@@ -63,11 +63,11 @@ use forge_core::executor::{
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff;
 use forge_core::harness::{
-    analyze_token_headroom, build_cli_wrapper_plan, build_harness_mode_report,
-    inspect_cli_harness_shim_status, install_cli_harness_shim, persist_token_headroom_report,
-    resolve_harness_forge_first_source_for_project, retrieve_headroom_blob, run_cli_harness_exec,
-    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
-    HarnessModeOptions,
+    analyze_token_headroom, build_cli_wrapper_plan, build_harness_doctor_report,
+    build_harness_mode_report, inspect_cli_harness_shim_status, install_cli_harness_shim,
+    persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
+    retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
+    CliShimStatusOptions, CliWrapperPlanOptions, HarnessDoctorOptions, HarnessModeOptions,
 };
 use forge_core::identity::{
     audit_tenant_index, ensure_operating_context_policy, ensure_workflow_policy,
@@ -653,6 +653,30 @@ enum HarnessCommands {
         observe_only: bool,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Doctor {
+        #[arg(long)]
+        executor: String,
+        #[arg(long = "shim-dir")]
+        shim_dir: PathBuf,
+        #[arg(long = "forge-first")]
+        forge_first: bool,
+        #[arg(long = "observe-only", conflicts_with = "forge_first")]
+        observe_only: bool,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
+        #[arg(long = "task")]
+        task_id: Option<String>,
+        #[arg(long = "run")]
+        run_id: Option<String>,
+        #[arg(long = "context-budget", default_value_t = 1200)]
+        context_budget: usize,
+        #[arg(long = "token-headroom", default_value_t = true)]
+        token_headroom: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -5322,6 +5346,34 @@ fn run() -> Result<i32> {
                     observe_only,
                     project_root: project_root.as_deref(),
                 });
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            HarnessCommands::Doctor {
+                executor,
+                shim_dir,
+                forge_first,
+                observe_only,
+                project_root,
+                workflow_id,
+                task_id,
+                run_id,
+                context_budget,
+                token_headroom,
+                output,
+            } => {
+                let report = build_harness_doctor_report(HarnessDoctorOptions {
+                    shim_dir: &shim_dir,
+                    executor: &executor,
+                    forge_first,
+                    observe_only,
+                    project_root: project_root.as_deref(),
+                    workflow_id: workflow_id.as_deref(),
+                    task_id: task_id.as_deref(),
+                    run_id: run_id.as_deref(),
+                    context_budget,
+                    token_headroom,
+                })?;
                 print_response(output, &report)?;
                 Ok(0)
             }

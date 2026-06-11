@@ -15,6 +15,7 @@ pub const HEADROOM_RETRIEVAL_SCHEMA_VERSION: &str = "forge.harness.headroom_retr
 pub const CLI_HARNESS_EXEC_SCHEMA_VERSION: &str = "forge.harness.exec_receipt.v1";
 pub const CLI_HARNESS_EXEC_EVENT_SCHEMA_VERSION: &str = "forge.harness.exec_event.v1";
 pub const CLI_HARNESS_MODE_SCHEMA_VERSION: &str = "forge.harness.mode.v1";
+pub const CLI_HARNESS_DOCTOR_SCHEMA_VERSION: &str = "forge.harness.doctor.v1";
 pub const CLI_SHIM_INSTALL_SCHEMA_VERSION: &str = "forge.harness.shim_install.v1";
 pub const CLI_SHIM_STATUS_SCHEMA_VERSION: &str = "forge.harness.shim_status.v1";
 const CLI_SHIM_MARKER: &str = "# forge-harness-shim:v1";
@@ -99,11 +100,44 @@ pub struct HarnessModeReport {
     pub notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessDoctorReport {
+    pub schema_version: String,
+    pub status: String,
+    pub executor: String,
+    pub project_root: String,
+    pub shim_dir: String,
+    pub forge_first_ready: bool,
+    pub token_headroom_ready: bool,
+    pub shim_ready: bool,
+    pub lineage_policy_ready: bool,
+    pub mode: HarnessModeReport,
+    pub shim_status: CliShimStatusReport,
+    pub wrapper_plan: CliWrapperPlanReport,
+    pub readiness_checks: Vec<String>,
+    pub next_actions: Vec<String>,
+    pub notes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct HarnessModeOptions<'a> {
     pub forge_first: bool,
     pub observe_only: bool,
     pub project_root: Option<&'a Path>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HarnessDoctorOptions<'a> {
+    pub shim_dir: &'a Path,
+    pub executor: &'a str,
+    pub forge_first: bool,
+    pub observe_only: bool,
+    pub project_root: Option<&'a Path>,
+    pub workflow_id: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+    pub run_id: Option<&'a str>,
+    pub context_budget: usize,
+    pub token_headroom: bool,
 }
 
 struct HarnessForgeFirstMode {
@@ -494,6 +528,129 @@ pub fn build_harness_mode_report(options: HarnessModeOptions<'_>) -> HarnessMode
             "Use it before wrap-plan, install-shims or exec when the active Forge-first policy is unclear.".to_string(),
         ],
     }
+}
+
+pub fn build_harness_doctor_report(
+    options: HarnessDoctorOptions<'_>,
+) -> Result<HarnessDoctorReport> {
+    let HarnessDoctorOptions {
+        shim_dir,
+        executor,
+        forge_first,
+        observe_only,
+        project_root,
+        workflow_id,
+        task_id,
+        run_id,
+        context_budget,
+        token_headroom,
+    } = options;
+    let executor = normalize_executor(executor);
+    let project_root_path = project_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let mode = build_harness_mode_report(HarnessModeOptions {
+        forge_first,
+        observe_only,
+        project_root: Some(&project_root_path),
+    });
+    let shim_status = inspect_cli_harness_shim_status(CliShimStatusOptions {
+        shim_dir,
+        executor: &executor,
+    })?;
+    let wrapper_plan = build_cli_wrapper_plan(CliWrapperPlanOptions {
+        executor: &executor,
+        command: &[],
+        forge_first: mode.forge_first,
+        forge_first_source: &mode.forge_first_source,
+        workflow_id,
+        task_id,
+        run_id,
+        context_budget,
+        token_headroom,
+    });
+    let forge_first_ready = mode.forge_first;
+    let token_headroom_ready = token_headroom && wrapper_plan.token_headroom_enabled;
+    let shim_ready = shim_status.status == "shim_status_ready";
+    let lineage_policy_ready = !mode.require_lineage_for_exec
+        || harness_exec_has_required_lineage(workflow_id, task_id, run_id);
+    let mut readiness_checks = vec!["read_only_no_child_process".to_string()];
+    readiness_checks.push(if forge_first_ready {
+        "forge_first_enabled".to_string()
+    } else {
+        "forge_first_not_enabled".to_string()
+    });
+    readiness_checks.push(if token_headroom_ready {
+        "token_headroom_enabled".to_string()
+    } else {
+        "token_headroom_disabled".to_string()
+    });
+    readiness_checks.push(if shim_ready {
+        "shim_ready".to_string()
+    } else if !shim_status.shim_exists {
+        "shim_missing".to_string()
+    } else {
+        shim_status.status.clone()
+    });
+    if mode.require_lineage_for_exec && !lineage_policy_ready {
+        readiness_checks.push("lineage_required_for_real_exec".to_string());
+    } else if mode.require_lineage_for_exec {
+        readiness_checks.push("lineage_required_satisfied".to_string());
+    } else {
+        readiness_checks.push("lineage_not_required".to_string());
+    }
+
+    let mut next_actions = vec![format!(
+        "forge harness mode --project-root {} --output json",
+        shell_quote(&project_root_path.display().to_string())
+    )];
+    if !shim_ready {
+        next_actions.push(format!(
+            "forge harness install-shims --shim-dir {} --executor {} --project-root {} --output json",
+            shell_quote(&shim_dir.display().to_string()),
+            shell_quote(&executor),
+            shell_quote(&project_root_path.display().to_string())
+        ));
+    }
+    if mode.require_lineage_for_exec && !lineage_policy_ready {
+        next_actions.push(
+            "pass --workflow <workflow-id> --task <task-id> --run <run-id> before real harness exec"
+                .to_string(),
+        );
+    }
+    next_actions.push(format!(
+        "forge sync executors --shim-dir {} --output json",
+        shell_quote(&shim_dir.display().to_string())
+    ));
+
+    let status = if forge_first_ready && token_headroom_ready && shim_ready && lineage_policy_ready
+    {
+        "harness_doctor_ready"
+    } else {
+        "harness_doctor_degraded"
+    };
+    Ok(HarnessDoctorReport {
+        schema_version: CLI_HARNESS_DOCTOR_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        executor,
+        project_root: project_root_path.display().to_string(),
+        shim_dir: shim_dir.display().to_string(),
+        forge_first_ready,
+        token_headroom_ready,
+        shim_ready,
+        lineage_policy_ready,
+        mode,
+        shim_status,
+        wrapper_plan,
+        readiness_checks,
+        next_actions,
+        notes: vec![
+            "Harness doctor is read-only: it never installs shims or launches child processes."
+                .to_string(),
+            "Use it before handing Codex, Claude, Gemini or OpenCode to Forge-first execution."
+                .to_string(),
+        ],
+    })
 }
 
 pub fn resolve_harness_forge_first_source(

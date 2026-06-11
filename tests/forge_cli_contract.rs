@@ -788,6 +788,123 @@ fn harness_mode_reports_effective_default_source_and_project_config_precedence()
     assert_eq!(observe_mode["forge_first_source"], "observe_only_flag");
 }
 
+#[test]
+fn harness_doctor_audits_forge_first_headroom_and_shim_readiness_for_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let shim_dir = temp.path().join("shim-bin");
+    fs::create_dir_all(&shim_dir).unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir_all(project.join(".forge")).unwrap();
+    fs::write(
+        project.join(".forge/harness.json"),
+        r#"{"default_mode":"forge_first","require_lineage_for_exec":true}"#,
+    )
+    .unwrap();
+
+    let doctor_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "doctor",
+            "--executor",
+            "codex",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--project-root",
+            project.to_str().unwrap(),
+            "--context-budget",
+            "1600",
+            "--token-headroom",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let doctor: Value = serde_json::from_slice(&doctor_output).unwrap();
+    assert_eq!(doctor["schema_version"], "forge.harness.doctor.v1");
+    assert_eq!(doctor["status"], "harness_doctor_degraded");
+    assert_eq!(doctor["executor"], "codex");
+    assert_eq!(doctor["forge_first_ready"], true);
+    assert_eq!(doctor["token_headroom_ready"], true);
+    assert_eq!(doctor["shim_ready"], false);
+    assert_eq!(doctor["lineage_policy_ready"], false);
+    assert_eq!(doctor["mode"]["forge_first"], true);
+    assert_eq!(doctor["mode"]["forge_first_source"], "project_config");
+    assert_eq!(doctor["shim_status"]["status"], "shim_status_missing");
+    assert_eq!(doctor["wrapper_plan"]["context_budget"], 1600);
+    assert_eq!(doctor["wrapper_plan"]["token_headroom_enabled"], true);
+    assert!(doctor["readiness_checks"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("shim_missing")));
+    assert!(doctor["readiness_checks"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("lineage_required_for_real_exec")));
+    assert!(doctor["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action
+            .as_str()
+            .unwrap()
+            .contains("forge harness install-shims")));
+
+    let tools_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tools_json: Value = serde_json::from_slice(&tools_output).unwrap();
+    let tool = find_mcp_tool(&tools_json, "forge.harness.doctor");
+    assert_eq!(tool["output_schema"], "forge.harness.doctor.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .args(["--store", store.to_str().unwrap(), "mcp", "call"])
+        .arg("forge.harness.doctor")
+        .arg("--input")
+        .arg(
+            serde_json::json!({
+                "executor": "codex",
+                "shim_dir": shim_dir,
+                "project_root": project,
+                "context_budget": 1600,
+                "token_headroom": true
+            })
+            .to_string(),
+        )
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.harness.doctor.v1"
+    );
+    assert_eq!(mcp_json["result"]["status"], doctor["status"]);
+    assert_eq!(mcp_json["result"]["shim_ready"], false);
+}
+
 #[cfg(unix)]
 #[test]
 fn harness_exec_applies_headroom_to_child_output_and_persists_retrieval_refs() {

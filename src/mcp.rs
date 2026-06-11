@@ -50,11 +50,11 @@ use crate::executor::{
 };
 use crate::handoff::build_task_handoff;
 use crate::harness::{
-    analyze_token_headroom, build_cli_wrapper_plan, build_harness_mode_report,
-    inspect_cli_harness_shim_status, install_cli_harness_shim, persist_token_headroom_report,
-    resolve_harness_forge_first_source_for_project, retrieve_headroom_blob, run_cli_harness_exec,
-    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
-    HarnessModeOptions,
+    analyze_token_headroom, build_cli_wrapper_plan, build_harness_doctor_report,
+    build_harness_mode_report, inspect_cli_harness_shim_status, install_cli_harness_shim,
+    persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
+    retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
+    CliShimStatusOptions, CliWrapperPlanOptions, HarnessDoctorOptions, HarnessModeOptions,
 };
 use crate::identity::{
     audit_tenant_index, ensure_workflow_policy, evaluate_tenant_policy_for_action,
@@ -426,6 +426,23 @@ struct HarnessModeInput {
     forge_first: Option<bool>,
     observe_only: Option<bool>,
     project_root: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HarnessDoctorInput {
+    shim_dir: String,
+    executor: String,
+    forge_first: Option<bool>,
+    observe_only: Option<bool>,
+    project_root: Option<String>,
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    task: Option<String>,
+    task_id: Option<String>,
+    run: Option<String>,
+    run_id: Option<String>,
+    context_budget: Option<usize>,
+    token_headroom: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4944,6 +4961,26 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.harness.doctor",
+                "Audit Forge Harness Readiness",
+                "Return a read-only consolidated harness readiness report for one brain CLI, combining Forge-first mode, project policy, shim status, wrapper plan and token-headroom readiness without installing shims or launching child processes.",
+                object_schema(&[
+                    ("executor", "string", "codex|claude|gemini|opencode"),
+                    ("shim_dir", "string", "directory where Forge-owned shims should live"),
+                    ("forge_first", "boolean", "simulate an explicit Forge-first CLI flag"),
+                    ("observe_only", "boolean", "simulate an observe-only CLI override"),
+                    ("project_root", "string", "optional project root containing .forge/harness.json"),
+                    ("workflow_id", "string", "optional workflow lineage for readiness"),
+                    ("task_id", "string", "optional task/node lineage for readiness"),
+                    ("run_id", "string", "optional async run lineage for readiness"),
+                    ("context_budget", "integer", "context byte budget"),
+                    ("token_headroom", "boolean", "enable token-headroom readiness"),
+                ], &["executor", "shim_dir"]),
+                "forge.harness.doctor.v1",
+                &["forge", "harness", "doctor", "--executor", "<executor>", "--shim-dir", "<dir>", "--project-root", "<project-root>", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.harness.wrap_plan",
                 "Plan Forge-First CLI Wrapper",
                 "Return a non-destructive Forge-first wrapper plan for Codex, Claude, Gemini or OpenCode with context budget and token-headroom environment shaping.",
@@ -7579,6 +7616,24 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 observe_only: input.observe_only.unwrap_or(false),
                 project_root: input.project_root.as_deref().map(std::path::Path::new),
             }))?
+        }
+        "forge.harness.doctor" => {
+            let input: HarnessDoctorInput = parse_input(input)?;
+            let workflow_id = input.workflow_id.or(input.workflow);
+            let task_id = input.task_id.or(input.task);
+            let run_id = input.run_id.or(input.run);
+            serde_json::to_value(build_harness_doctor_report(HarnessDoctorOptions {
+                shim_dir: std::path::Path::new(&input.shim_dir),
+                executor: &input.executor,
+                forge_first: input.forge_first.unwrap_or(false),
+                observe_only: input.observe_only.unwrap_or(false),
+                project_root: input.project_root.as_deref().map(std::path::Path::new),
+                workflow_id: workflow_id.as_deref(),
+                task_id: task_id.as_deref(),
+                run_id: run_id.as_deref(),
+                context_budget: input.context_budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
+                token_headroom: input.token_headroom.unwrap_or(true),
+            })?)?
         }
         "forge.harness.wrap_plan" => {
             let input: HarnessWrapPlanInput = parse_input(input)?;
