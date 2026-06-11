@@ -42,7 +42,7 @@ use crate::event::{
     run_event_worker_service, run_inbound_event_worker_loop, scan_inbound_event_inbox,
     EventEgressEmitInput, InboundEventIngestInput,
 };
-use crate::executor::{build_shell_launch_plan, load_executors};
+use crate::executor::{build_shell_launch_plan, load_executors, ShellLaunchPlanOptions};
 use crate::handoff::build_task_handoff;
 use crate::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, inspect_cli_harness_shim_status,
@@ -466,6 +466,14 @@ struct HarnessExecInput {
 struct ShellLaunchPlanInput {
     executor: Option<String>,
     brain: Option<String>,
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    task: Option<String>,
+    task_id: Option<String>,
+    run: Option<String>,
+    run_id: Option<String>,
+    context_budget: Option<usize>,
+    ttl_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2596,6 +2604,11 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     &[
                         ("executor", "string", "optional execution brain id such as codex|opencode|gemini|claude"),
                         ("brain", "string", "optional alias for executor"),
+                        ("workflow_id", "string", "optional workflow id used to build concrete context and handoff commands"),
+                        ("task_id", "string", "optional task id used with workflow_id for context and handoff commands"),
+                        ("run_id", "string", "optional run id used to build a heartbeat command"),
+                        ("context_budget", "integer", "optional context budget for context and handoff commands"),
+                        ("ttl_seconds", "integer", "optional handoff lease and heartbeat TTL"),
                     ],
                     &[],
                 ),
@@ -5965,10 +5978,20 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         "forge.shell.launch_plan" => {
             let input: ShellLaunchPlanInput = parse_input(input)?;
             let executor = input.executor.or(input.brain);
+            let workflow_id = input.workflow_id.or(input.workflow);
+            let task_id = input.task_id.or(input.task);
+            let run_id = input.run_id.or(input.run);
             let report = load_executors(store)?;
             serde_json::to_value(build_shell_launch_plan(
                 &report.brain_router,
-                executor.as_deref(),
+                ShellLaunchPlanOptions {
+                    executor_filter: executor,
+                    workflow_id,
+                    task_id,
+                    run_id,
+                    context_budget: input.context_budget,
+                    ttl_seconds: input.ttl_seconds,
+                },
             ))?
         }
         "forge.addons.installed" => serde_json::to_value(list_installed_addons(store)?)?,

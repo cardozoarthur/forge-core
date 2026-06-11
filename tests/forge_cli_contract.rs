@@ -14118,6 +14118,100 @@ fn shells_launch_plan_selects_forge_first_entrypoint_without_running_brain() {
             "Run the entry_command only after Forge has prepared a workflow/task context packet and recorded the handoff lease."
         )));
 
+    let contextual_output = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "shells",
+            "--executor",
+            "codex",
+            "--workflow",
+            "wf_shell_plan",
+            "--task",
+            "task-shell",
+            "--run",
+            "run_shell_plan",
+            "--context-budget",
+            "900",
+            "--ttl-seconds",
+            "600",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let contextual_json: Value = serde_json::from_slice(&contextual_output).unwrap();
+    assert_eq!(contextual_json["workflow_id"], "wf_shell_plan");
+    assert_eq!(contextual_json["task_id"], "task-shell");
+    assert_eq!(contextual_json["run_id"], "run_shell_plan");
+    assert_eq!(contextual_json["context_budget"], 900);
+    assert_eq!(contextual_json["ttl_seconds"], 600);
+    let contextual_plan = contextual_json["launch_plans"]
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap();
+    assert_eq!(
+        contextual_plan["context_command"],
+        serde_json::json!([
+            "forge",
+            "context",
+            "--workflow",
+            "wf_shell_plan",
+            "--task",
+            "task-shell",
+            "--budget",
+            "900",
+            "--strict",
+            "--output",
+            "json"
+        ])
+    );
+    assert_eq!(
+        contextual_plan["handoff_command"],
+        serde_json::json!([
+            "forge",
+            "task",
+            "handoff",
+            "--workflow",
+            "wf_shell_plan",
+            "--task",
+            "task-shell",
+            "--executor",
+            "codex",
+            "--budget",
+            "900",
+            "--ttl-seconds",
+            "600",
+            "--output",
+            "json"
+        ])
+    );
+    assert_eq!(
+        contextual_plan["heartbeat_command"],
+        serde_json::json!([
+            "forge",
+            "request",
+            "heartbeat",
+            "--run",
+            "run_shell_plan",
+            "--executor",
+            "codex",
+            "--summary",
+            "shell session active",
+            "--ttl-seconds",
+            "600",
+            "--origin",
+            "forge_shell",
+            "--output",
+            "json"
+        ])
+    );
+
     let mcp_manifest = forge()
         .args(["mcp", "tools", "--output", "json"])
         .assert()
@@ -14136,7 +14230,10 @@ fn shells_launch_plan_selects_forge_first_entrypoint_without_running_brain() {
         .arg("--store")
         .arg(store.to_str().unwrap())
         .args(["mcp", "call", "forge.shell.launch_plan"])
-        .args(["--input", r#"{"executor":"codex"}"#])
+        .args([
+            "--input",
+            r#"{"executor":"codex","workflow_id":"wf_shell_plan","task_id":"task-shell","run_id":"run_shell_plan","context_budget":900,"ttl_seconds":600}"#,
+        ])
         .args(["--output", "json"])
         .assert()
         .success()
@@ -14149,6 +14246,10 @@ fn shells_launch_plan_selects_forge_first_entrypoint_without_running_brain() {
         "forge.shell_launch_plan.v1"
     );
     assert_eq!(mcp_json["result"]["launch_plans"][0]["brain_id"], "codex");
+    assert_eq!(
+        mcp_json["result"]["launch_plans"][0]["handoff_command"],
+        contextual_plan["handoff_command"]
+    );
 }
 
 #[test]

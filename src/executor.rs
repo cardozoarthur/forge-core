@@ -146,6 +146,11 @@ pub struct ShellLaunchPlanReport {
     pub status: String,
     pub controller: String,
     pub executor_filter: Option<String>,
+    pub workflow_id: Option<String>,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub context_budget: usize,
+    pub ttl_seconds: u64,
     pub execution: String,
     pub launch_plans: Vec<ShellLaunchPlan>,
     pub safety_gates: Vec<String>,
@@ -165,10 +170,23 @@ pub struct ShellLaunchPlan {
     pub harness_status: Option<ExecutorHarnessStatus>,
     pub dry_run: bool,
     pub execution_boundary: String,
+    pub context_command: Option<Vec<String>>,
+    pub handoff_command: Option<Vec<String>>,
+    pub heartbeat_command: Option<Vec<String>>,
     pub preflight_commands: Vec<Vec<String>>,
     pub state_boundary: String,
     pub safety_note: String,
     pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ShellLaunchPlanOptions {
+    pub executor_filter: Option<String>,
+    pub workflow_id: Option<String>,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub context_budget: Option<usize>,
+    pub ttl_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1040,12 +1058,16 @@ fn brain_shell_sessions(brains: &[BrainCandidate]) -> Vec<BrainShellSessionSpec>
 
 pub fn build_shell_launch_plan(
     router: &BrainRouterReport,
-    executor_filter: Option<&str>,
+    options: ShellLaunchPlanOptions,
 ) -> ShellLaunchPlanReport {
-    let normalized_filter = executor_filter
+    let normalized_filter = options
+        .executor_filter
+        .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_lowercase());
+    let context_budget = options.context_budget.unwrap_or(1200);
+    let ttl_seconds = options.ttl_seconds.unwrap_or(900);
     let launch_plans = router
         .shell_sessions
         .iter()
@@ -1066,6 +1088,10 @@ pub fn build_shell_launch_plan(
                 .iter()
                 .find(|candidate| candidate.id == session.brain_id);
             let harness_status = brain.and_then(|candidate| candidate.harness_status.clone());
+            let context_command = shell_context_command(&options, context_budget);
+            let handoff_command =
+                shell_handoff_command(session, &options, context_budget, ttl_seconds);
+            let heartbeat_command = shell_heartbeat_command(session, &options, ttl_seconds);
             ShellLaunchPlan {
                 session_id: session.id.clone(),
                 brain_id: session.brain_id.clone(),
@@ -1078,7 +1104,15 @@ pub fn build_shell_launch_plan(
                 harness_status: harness_status.clone(),
                 dry_run: true,
                 execution_boundary: "plan_only_no_child_process_started".to_string(),
-                preflight_commands: shell_preflight_commands(session, harness_status.as_ref()),
+                context_command: context_command.clone(),
+                handoff_command: handoff_command.clone(),
+                heartbeat_command: heartbeat_command.clone(),
+                preflight_commands: shell_preflight_commands(
+                    session,
+                    harness_status.as_ref(),
+                    context_command.as_ref(),
+                    handoff_command.as_ref(),
+                ),
                 state_boundary: session.state_boundary.clone(),
                 safety_note: session.safety_note.clone(),
                 next_actions: shell_next_actions(session),
@@ -1098,6 +1132,11 @@ pub fn build_shell_launch_plan(
         status: status.to_string(),
         controller: router.controller.clone(),
         executor_filter: normalized_filter,
+        workflow_id: options.workflow_id,
+        task_id: options.task_id,
+        run_id: options.run_id,
+        context_budget,
+        ttl_seconds,
         execution: "plan_only".to_string(),
         launch_plans,
         safety_gates: router.safety_gates.clone(),
@@ -1136,6 +1175,8 @@ fn shell_session_readiness(
 fn shell_preflight_commands(
     session: &BrainShellSessionSpec,
     harness_status: Option<&ExecutorHarnessStatus>,
+    context_command: Option<&Vec<String>>,
+    handoff_command: Option<&Vec<String>>,
 ) -> Vec<Vec<String>> {
     let mut commands = Vec::new();
     if let Some(harness_status) = harness_status {
@@ -1157,7 +1198,12 @@ fn shell_preflight_commands(
         "--output".to_string(),
         "json".to_string(),
     ]);
-    if session.brain_id != "forge" {
+    if let Some(context_command) = context_command {
+        commands.push(context_command.clone());
+    }
+    if let Some(handoff_command) = handoff_command {
+        commands.push(handoff_command.clone());
+    } else if session.brain_id != "forge" {
         commands.push(vec![
             "forge".to_string(),
             "task".to_string(),
@@ -1173,6 +1219,85 @@ fn shell_preflight_commands(
         ]);
     }
     commands
+}
+
+fn shell_context_command(
+    options: &ShellLaunchPlanOptions,
+    context_budget: usize,
+) -> Option<Vec<String>> {
+    let workflow_id = options.workflow_id.as_ref()?;
+    let task_id = options.task_id.as_ref()?;
+    Some(vec![
+        "forge".to_string(),
+        "context".to_string(),
+        "--workflow".to_string(),
+        workflow_id.clone(),
+        "--task".to_string(),
+        task_id.clone(),
+        "--budget".to_string(),
+        context_budget.to_string(),
+        "--strict".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ])
+}
+
+fn shell_handoff_command(
+    session: &BrainShellSessionSpec,
+    options: &ShellLaunchPlanOptions,
+    context_budget: usize,
+    ttl_seconds: u64,
+) -> Option<Vec<String>> {
+    if session.brain_id == "forge" {
+        return None;
+    }
+    let workflow_id = options.workflow_id.as_ref()?;
+    let task_id = options.task_id.as_ref()?;
+    Some(vec![
+        "forge".to_string(),
+        "task".to_string(),
+        "handoff".to_string(),
+        "--workflow".to_string(),
+        workflow_id.clone(),
+        "--task".to_string(),
+        task_id.clone(),
+        "--executor".to_string(),
+        session.brain_id.clone(),
+        "--budget".to_string(),
+        context_budget.to_string(),
+        "--ttl-seconds".to_string(),
+        ttl_seconds.to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ])
+}
+
+fn shell_heartbeat_command(
+    session: &BrainShellSessionSpec,
+    options: &ShellLaunchPlanOptions,
+    ttl_seconds: u64,
+) -> Option<Vec<String>> {
+    if session.brain_id == "forge" {
+        return None;
+    }
+    let run_id = options.run_id.as_ref()?;
+    Some(vec![
+        "forge".to_string(),
+        "request".to_string(),
+        "heartbeat".to_string(),
+        "--run".to_string(),
+        run_id.clone(),
+        "--executor".to_string(),
+        session.brain_id.clone(),
+        "--summary".to_string(),
+        "shell session active".to_string(),
+        "--ttl-seconds".to_string(),
+        ttl_seconds.to_string(),
+        "--origin".to_string(),
+        "forge_shell".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ])
 }
 
 fn shell_next_actions(session: &BrainShellSessionSpec) -> Vec<String> {

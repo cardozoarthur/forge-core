@@ -30,7 +30,7 @@ use forge_core::cluster::{
     build_cluster_task_handoff, list_cluster_node_leases, list_cluster_nodes,
     place_task_on_cluster, register_cluster_node, ClusterNodeInput,
 };
-use forge_core::context::build_context_package_with_checkpoint;
+use forge_core::context::{build_context_package_with_checkpoint, DEFAULT_CONTEXT_BUDGET};
 use forge_core::cost::{
     apply_cost_ledger_retention_for_context, build_cost_ledger_for_context,
     build_cost_ledger_history_for_context, maintain_cost_ledger_for_context,
@@ -55,7 +55,7 @@ use forge_core::event::{
 use forge_core::execution::run_simulated;
 use forge_core::executor::{
     build_shell_launch_plan, load_executors, sync_executors, ExecutorQuotaObservation,
-    ExecutorSyncOptions,
+    ExecutorSyncOptions, ShellLaunchPlanOptions,
 };
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff;
@@ -276,6 +276,16 @@ enum Commands {
     Shells {
         #[arg(long)]
         executor: Option<String>,
+        #[arg(long)]
+        workflow: Option<String>,
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long = "run")]
+        run_id: Option<String>,
+        #[arg(long = "context-budget", default_value_t = DEFAULT_CONTEXT_BUDGET)]
+        context_budget: usize,
+        #[arg(long = "ttl-seconds", default_value_t = 900)]
+        ttl_seconds: u64,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -5603,10 +5613,28 @@ fn run() -> Result<i32> {
             print_response(output, &report.brain_router)?;
             Ok(0)
         }
-        Commands::Shells { executor, output } => {
+        Commands::Shells {
+            executor,
+            workflow,
+            task,
+            run_id,
+            context_budget,
+            ttl_seconds,
+            output,
+        } => {
             let store = ForgeStore::open(cli.store)?;
             let report = load_executors(&store)?;
-            let launch_plan = build_shell_launch_plan(&report.brain_router, executor.as_deref());
+            let launch_plan = build_shell_launch_plan(
+                &report.brain_router,
+                ShellLaunchPlanOptions {
+                    executor_filter: executor,
+                    workflow_id: workflow,
+                    task_id: task,
+                    run_id,
+                    context_budget: Some(context_budget),
+                    ttl_seconds: Some(ttl_seconds),
+                },
+            );
             print_response(output, &launch_plan)?;
             Ok(0)
         }
