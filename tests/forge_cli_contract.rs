@@ -2946,6 +2946,10 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
     assert!(replacement_cli["evidence"]
         .as_str()
         .unwrap()
+        .contains("patch_edit_intake"));
+    assert!(replacement_cli["evidence"]
+        .as_str()
+        .unwrap()
         .contains("exec --project-root"));
     assert!(replacement_cli["gap_before_promotion"]
         .as_str()
@@ -37705,6 +37709,61 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         .any(|file| file["path"] == "tracked.txt"
             && file["review_status"] == "pending_review"
             && file["addition_count"].as_u64().unwrap() > 0));
+    assert_eq!(
+        json["edit_intake"]["schema_version"],
+        "forge.interactive.patch_edit_intake.v1"
+    );
+    assert_eq!(json["edit_intake"]["status"], "patch_edit_intake_ready");
+    assert_eq!(json["edit_intake"]["default_action"], "create_patch_plan");
+    assert!(json["edit_intake"]["required_inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|input| input["input_id"] == "workflow_id"
+            && input["required"] == true
+            && input["missing"] == true
+            && input["command_flag"] == "--workflow"));
+    assert!(json["edit_intake"]["required_inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|input| input["input_id"] == "task_id"
+            && input["required"] == true
+            && input["missing"] == true
+            && input["command_flag"] == "--task"));
+    assert!(json["edit_intake"]["required_inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|input| input["input_id"] == "intent"
+            && input["required"] == true
+            && input["missing"] == true
+            && input["command_flag"] == "--intent"));
+    assert!(json["edit_intake"]["required_inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|input| input["input_id"] == "path"
+            && input["required"] == true
+            && input["missing"] == false
+            && input["source"] == "git_changed_files"));
+    assert!(json["edit_intake"]["forms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|form| form["action_id"] == "create_patch_plan"
+            && form["ready"] == false
+            && form["command_template"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("plan"))));
+    assert!(json["edit_intake"]["forms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|form| form["action_id"] == "apply_reviewed_patch"
+            && form["requires_human_approval"] == true
+            && form["ready"] == false));
     assert!(json["files"].as_array().unwrap().iter().any(|file| {
         file["path"] == "sample.txt"
             && file["status_label"] == "modified"
@@ -37782,6 +37841,8 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("Approval flow"));
     assert!(text.contains("Diff preview"));
     assert!(text.contains("Review queue"));
+    assert!(text.contains("Edit intake"));
+    assert!(text.contains("missing workflow_id, task_id, intent"));
     assert!(text.contains("+beta"));
     assert!(text.contains("sample.txt"));
     assert!(text.contains("tracked.txt"));
@@ -37808,6 +37869,14 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         .as_str()
         .unwrap()
         .contains("multi-file review queue"));
+    assert!(tool["description"]
+        .as_str()
+        .unwrap()
+        .contains("edit intake"));
+    assert!(tool["description"]
+        .as_str()
+        .unwrap()
+        .contains("required inputs"));
     assert_eq!(tool["async_safe"], true);
     assert_eq!(tool["mutates_workflow"], false);
 
@@ -37843,6 +37912,14 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     assert_eq!(
         mcp_json["result"]["diff_review_queue"]["pending_review_count"],
         2
+    );
+    assert_eq!(
+        mcp_json["result"]["edit_intake"]["schema_version"],
+        "forge.interactive.patch_edit_intake.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["edit_intake"]["status"],
+        "patch_edit_intake_ready"
     );
     assert_eq!(
         mcp_json["result"]["approval_flow"]["schema_version"],
@@ -38995,6 +39072,10 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge interactive patch-workbench"),
         "the packaged Forge skill should include the patch workbench CLI command"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("edit_intake"),
+        "the packaged Forge skill should teach agents to inspect patch edit intake before presenting file-editing actions"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.permissions"),

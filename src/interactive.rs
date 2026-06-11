@@ -51,6 +51,7 @@ const INTERACTIVE_SESSIONS_SCHEMA_VERSION: &str = "forge.interactive.sessions.v1
 const INTERACTIVE_COMMAND_PALETTE_SCHEMA_VERSION: &str = "forge.interactive.command_palette.v1";
 const INTERACTIVE_AUTOCOMPLETE_SCHEMA_VERSION: &str = "forge.interactive.autocomplete.v1";
 const INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION: &str = "forge.interactive.patch_workbench.v1";
+const INTERACTIVE_PATCH_EDIT_INTAKE_SCHEMA_VERSION: &str = "forge.interactive.patch_edit_intake.v1";
 const INTERACTIVE_PERMISSIONS_SCHEMA_VERSION: &str = "forge.interactive.permissions.v1";
 const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
 const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
@@ -432,6 +433,7 @@ pub struct InteractivePatchWorkbenchPanel {
     pub diff_stat: String,
     pub diff_preview: InteractivePatchDiffPreview,
     pub diff_review_queue: InteractivePatchDiffReviewQueue,
+    pub edit_intake: InteractivePatchEditIntake,
     pub files: Vec<InteractivePatchWorkbenchFile>,
     pub approval_flow: InteractivePatchApprovalFlow,
     pub commands: InteractivePatchWorkbenchCommands,
@@ -483,6 +485,43 @@ pub struct InteractivePatchDiffReviewQueueFile {
     pub deletion_count: usize,
     pub line_count: usize,
     pub commands: InteractivePatchWorkbenchFileCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchEditIntake {
+    pub schema_version: String,
+    pub status: String,
+    pub default_action: String,
+    pub required_input_count: usize,
+    pub missing_required_input_count: usize,
+    pub inferred_path_count: usize,
+    pub required_inputs: Vec<InteractivePatchEditInput>,
+    pub forms: Vec<InteractivePatchEditForm>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchEditInput {
+    pub input_id: String,
+    pub label: String,
+    pub input_kind: String,
+    pub required: bool,
+    pub missing: bool,
+    pub source: String,
+    pub example: String,
+    pub command_flag: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchEditForm {
+    pub action_id: String,
+    pub title: String,
+    pub ready: bool,
+    pub requires_human_approval: bool,
+    pub required_input_ids: Vec<String>,
+    pub missing_input_ids: Vec<String>,
+    pub command_template: Vec<String>,
+    pub rationale: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2156,6 +2195,7 @@ pub fn build_interactive_patch_workbench(
             diff_stat: status_output.stderr,
             diff_preview: build_patch_diff_preview(&[], false),
             diff_review_queue: build_patch_diff_review_queue(&[], false),
+            edit_intake: build_patch_edit_intake(&[], &commands),
             files: Vec::new(),
             approval_flow: build_patch_approval_flow(true, false, "not_run", &commands),
             commands,
@@ -2181,6 +2221,7 @@ pub fn build_interactive_patch_workbench(
         build_patch_approval_flow(clean, diff_present, &diff_check_status, &commands);
     let diff_preview = build_patch_diff_preview(&files, diff_present);
     let diff_review_queue = build_patch_diff_review_queue(&files, diff_present);
+    let edit_intake = build_patch_edit_intake(&files, &commands);
 
     Ok(InteractivePatchWorkbenchPanel {
         schema_version: INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION.to_string(),
@@ -2196,6 +2237,7 @@ pub fn build_interactive_patch_workbench(
         diff_stat,
         diff_preview,
         diff_review_queue,
+        edit_intake,
         files,
         approval_flow,
         commands,
@@ -2625,6 +2667,238 @@ fn build_patch_diff_review_queue(
             "Use each file's diff command for full hunk navigation and review evidence before apply approval."
                 .to_string(),
         ],
+    }
+}
+
+fn build_patch_edit_intake(
+    files: &[InteractivePatchWorkbenchFile],
+    commands: &InteractivePatchWorkbenchCommands,
+) -> InteractivePatchEditIntake {
+    let path_missing = files.is_empty();
+    let required_inputs = vec![
+        patch_edit_input(
+            "workflow_id",
+            "Workflow",
+            "workflow_id",
+            true,
+            "operator_or_workflow_focus",
+            "wf_01",
+            "--workflow",
+        ),
+        patch_edit_input(
+            "task_id",
+            "Task",
+            "task_id",
+            true,
+            "operator_or_task_focus",
+            "task-001",
+            "--task",
+        ),
+        patch_edit_input(
+            "intent",
+            "Edit intent",
+            "text",
+            true,
+            "operator_input",
+            "Describe the bounded edit before creating a patch plan.",
+            "--intent",
+        ),
+        patch_edit_input(
+            "path",
+            "Repository path",
+            "repo_relative_path_multi_select",
+            path_missing,
+            "git_changed_files",
+            "src/lib.rs",
+            "--path",
+        ),
+        patch_edit_input(
+            "plan_artifact",
+            "Patch plan artifact",
+            "artifact_id",
+            true,
+            "forge_patch_plan",
+            "artifact_patch_plan",
+            "--plan-artifact",
+        ),
+        patch_edit_input(
+            "apply_artifact",
+            "Patch apply artifact",
+            "artifact_id",
+            true,
+            "forge_patch_apply",
+            "artifact_patch_apply",
+            "--apply-artifact",
+        ),
+        patch_edit_input(
+            "revert_artifact",
+            "Patch revert artifact",
+            "artifact_id",
+            true,
+            "forge_patch_revert",
+            "artifact_patch_revert",
+            "--revert-artifact",
+        ),
+        patch_edit_input(
+            "approved_by",
+            "Approver",
+            "operator_id",
+            true,
+            "human_approval",
+            "arthur",
+            "--approved-by",
+        ),
+        patch_edit_input(
+            "confirm_restore",
+            "Confirm restore",
+            "boolean_confirmation",
+            true,
+            "human_approval",
+            "true",
+            "--confirm-restore",
+        ),
+    ];
+    let forms = vec![
+        patch_edit_form(
+            "create_patch_plan",
+            "Create patch plan",
+            &["workflow_id", "task_id", "intent", "path"],
+            false,
+            commands.plan.clone(),
+            &required_inputs,
+            "Collect workflow lineage, task lineage, edit intent and repo paths before creating plan-only patch evidence.",
+        ),
+        patch_edit_form(
+            "review_current_diff",
+            "Review current diff",
+            &["workflow_id", "task_id", "path"],
+            false,
+            commands.review.clone(),
+            &required_inputs,
+            "Persist diff/status/check evidence before any apply approval.",
+        ),
+        patch_edit_form(
+            "inspect_patch_diff",
+            "Inspect patch diff",
+            &["workflow_id", "task_id", "path"],
+            false,
+            commands.diff.clone(),
+            &required_inputs,
+            "Open read-only multi-file diff navigation for the selected path set.",
+        ),
+        patch_edit_form(
+            "apply_reviewed_patch",
+            "Apply reviewed patch",
+            &["workflow_id", "task_id", "path", "plan_artifact"],
+            true,
+            commands.apply.clone(),
+            &required_inputs,
+            "Apply only after review evidence, a patch plan artifact and explicit human approval are present.",
+        ),
+        patch_edit_form(
+            "propose_patch_rollback",
+            "Propose patch rollback",
+            &["workflow_id", "task_id", "apply_artifact"],
+            true,
+            commands.revert.clone(),
+            &required_inputs,
+            "Record rollback intent from an apply artifact without restoring files implicitly.",
+        ),
+        patch_edit_form(
+            "restore_approved_rollback",
+            "Restore approved rollback",
+            &["workflow_id", "task_id", "revert_artifact", "approved_by", "confirm_restore"],
+            true,
+            commands.restore.clone(),
+            &required_inputs,
+            "Restore repo-local files only after approved revert evidence and explicit confirmation.",
+        ),
+    ];
+    let required_input_count = required_inputs
+        .iter()
+        .filter(|input| input.required)
+        .count();
+    let missing_required_input_count = required_inputs
+        .iter()
+        .filter(|input| input.required && input.missing)
+        .count();
+    let status = if path_missing {
+        "patch_edit_intake_waiting_for_changes"
+    } else {
+        "patch_edit_intake_ready"
+    };
+
+    InteractivePatchEditIntake {
+        schema_version: INTERACTIVE_PATCH_EDIT_INTAKE_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        default_action: "create_patch_plan".to_string(),
+        required_input_count,
+        missing_required_input_count,
+        inferred_path_count: files.len(),
+        required_inputs,
+        forms,
+        notes: vec![
+            "This intake is read-only; it tells a TUI, web client or agent which fields must be collected before offering patch actions."
+                .to_string(),
+            "Commands stay permission-gated through the patch lifecycle and keep workflow/task lineage explicit."
+                .to_string(),
+        ],
+    }
+}
+
+fn patch_edit_input(
+    input_id: &str,
+    label: &str,
+    input_kind: &str,
+    missing: bool,
+    source: &str,
+    example: &str,
+    command_flag: &str,
+) -> InteractivePatchEditInput {
+    InteractivePatchEditInput {
+        input_id: input_id.to_string(),
+        label: label.to_string(),
+        input_kind: input_kind.to_string(),
+        required: true,
+        missing,
+        source: source.to_string(),
+        example: example.to_string(),
+        command_flag: command_flag.to_string(),
+    }
+}
+
+fn patch_edit_form(
+    action_id: &str,
+    title: &str,
+    required_input_ids: &[&str],
+    requires_human_approval: bool,
+    command_template: Vec<String>,
+    inputs: &[InteractivePatchEditInput],
+    rationale: &str,
+) -> InteractivePatchEditForm {
+    let missing_input_ids = required_input_ids
+        .iter()
+        .filter(|input_id| {
+            inputs
+                .iter()
+                .any(|input| input.input_id == **input_id && input.missing)
+        })
+        .map(|input_id| (*input_id).to_string())
+        .collect::<Vec<_>>();
+    let ready = missing_input_ids.is_empty() && !requires_human_approval;
+
+    InteractivePatchEditForm {
+        action_id: action_id.to_string(),
+        title: title.to_string(),
+        ready,
+        requires_human_approval,
+        required_input_ids: required_input_ids
+            .iter()
+            .map(|input_id| (*input_id).to_string())
+            .collect(),
+        missing_input_ids,
+        command_template,
+        rationale: rationale.to_string(),
     }
 }
 
@@ -3962,7 +4236,7 @@ pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> Strin
 
 pub fn render_interactive_patch_workbench(panel: &InteractivePatchWorkbenchPanel) -> String {
     format!(
-        "Patch workbench: {status}; clean {clean}, files {changed_path_count}, staged {staged_path_count}, unstaged {unstaged_path_count}, untracked {untracked_path_count}, diff {diff_present}, check {diff_check_status}\nRepository: {repository_path}\nFiles: {files}\nDiff preview: {diff_preview}\nReview queue: {review_queue}\nApproval flow: {approval_status}; gate {approval_gate}; approval {requires_human_approval}; apply ready {apply_ready}\n",
+        "Patch workbench: {status}; clean {clean}, files {changed_path_count}, staged {staged_path_count}, unstaged {unstaged_path_count}, untracked {untracked_path_count}, diff {diff_present}, check {diff_check_status}\nRepository: {repository_path}\nFiles: {files}\nDiff preview: {diff_preview}\nReview queue: {review_queue}\nEdit intake: {edit_intake}\nApproval flow: {approval_status}; gate {approval_gate}; approval {requires_human_approval}; apply ready {apply_ready}\n",
         status = panel.status,
         clean = panel.clean,
         changed_path_count = panel.changed_path_count,
@@ -3975,10 +4249,46 @@ pub fn render_interactive_patch_workbench(panel: &InteractivePatchWorkbenchPanel
         files = render_patch_workbench_file_summary(panel),
         diff_preview = render_patch_diff_preview(&panel.diff_preview),
         review_queue = render_patch_diff_review_queue(&panel.diff_review_queue),
+        edit_intake = render_patch_edit_intake(&panel.edit_intake),
         approval_status = panel.approval_flow.status,
         approval_gate = panel.approval_flow.current_gate,
         requires_human_approval = panel.approval_flow.requires_human_approval,
         apply_ready = panel.approval_flow.apply_ready,
+    )
+}
+
+fn render_patch_edit_intake(intake: &InteractivePatchEditIntake) -> String {
+    let missing_inputs = intake
+        .required_inputs
+        .iter()
+        .filter(|input| input.required && input.missing)
+        .map(|input| input.input_id.as_str())
+        .collect::<Vec<_>>();
+    let missing = if missing_inputs.is_empty() {
+        "none".to_string()
+    } else {
+        missing_inputs.join(", ")
+    };
+    let forms = if intake.forms.is_empty() {
+        "none".to_string()
+    } else {
+        intake
+            .forms
+            .iter()
+            .take(6)
+            .map(|form| {
+                format!(
+                    "{} ready {} approval {}",
+                    form.action_id, form.ready, form.requires_human_approval
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+
+    format!(
+        "{}; default {}; missing {}; inferred paths {}; forms {}",
+        intake.status, intake.default_action, missing, intake.inferred_path_count, forms
     )
 }
 
