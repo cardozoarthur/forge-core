@@ -54,7 +54,8 @@ use forge_core::event::{
 };
 use forge_core::execution::run_simulated;
 use forge_core::executor::{
-    load_executors, sync_executors, ExecutorQuotaObservation, ExecutorSyncOptions,
+    build_shell_launch_plan, load_executors, sync_executors, ExecutorQuotaObservation,
+    ExecutorSyncOptions,
 };
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff;
@@ -269,6 +270,12 @@ enum Commands {
         output: OutputFormat,
     },
     Brains {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Shells {
+        #[arg(long)]
+        executor: Option<String>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -5594,6 +5601,13 @@ fn run() -> Result<i32> {
             let store = ForgeStore::open(cli.store)?;
             let report = load_executors(&store)?;
             print_response(output, &report.brain_router)?;
+            Ok(0)
+        }
+        Commands::Shells { executor, output } => {
+            let store = ForgeStore::open(cli.store)?;
+            let report = load_executors(&store)?;
+            let launch_plan = build_shell_launch_plan(&report.brain_router, executor.as_deref());
+            print_response(output, &launch_plan)?;
             Ok(0)
         }
         Commands::ExecutorQuota { command } => match command {

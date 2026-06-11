@@ -42,7 +42,7 @@ use crate::event::{
     run_event_worker_service, run_inbound_event_worker_loop, scan_inbound_event_inbox,
     EventEgressEmitInput, InboundEventIngestInput,
 };
-use crate::executor::load_executors;
+use crate::executor::{build_shell_launch_plan, load_executors};
 use crate::handoff::build_task_handoff;
 use crate::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, inspect_cli_harness_shim_status,
@@ -460,6 +460,12 @@ struct HarnessExecInput {
     dry_run: Option<bool>,
     allow_exec: Option<bool>,
     cwd: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ShellLaunchPlanInput {
+    executor: Option<String>,
+    brain: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2580,6 +2586,21 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.brain_router.v1",
                 &["forge", "brains", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.shell.launch_plan",
+                "Plan Brain Shell Launch",
+                "Return a plan-only Forge-controlled shell launch report for one execution brain or all shell sessions, including preflight checks and handoff safety gates without starting a child process.",
+                object_schema(
+                    &[
+                        ("executor", "string", "optional execution brain id such as codex|opencode|gemini|claude"),
+                        ("brain", "string", "optional alias for executor"),
+                    ],
+                    &[],
+                ),
+                "forge.shell_launch_plan.v1",
+                &["forge", "shells", "--executor", "<executor>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -5941,6 +5962,15 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(build_interactive_task_board(store)?)?
         }
         "forge.brain_router" => serde_json::to_value(load_executors(store)?.brain_router)?,
+        "forge.shell.launch_plan" => {
+            let input: ShellLaunchPlanInput = parse_input(input)?;
+            let executor = input.executor.or(input.brain);
+            let report = load_executors(store)?;
+            serde_json::to_value(build_shell_launch_plan(
+                &report.brain_router,
+                executor.as_deref(),
+            ))?
+        }
         "forge.addons.installed" => serde_json::to_value(list_installed_addons(store)?)?,
         "forge.addons.capabilities" => {
             let input: AddonCapabilityIndexInput = parse_input(input)?;

@@ -141,6 +141,37 @@ pub struct BrainShellSessionSpec {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ShellLaunchPlanReport {
+    pub schema_version: String,
+    pub status: String,
+    pub controller: String,
+    pub executor_filter: Option<String>,
+    pub execution: String,
+    pub launch_plans: Vec<ShellLaunchPlan>,
+    pub safety_gates: Vec<String>,
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ShellLaunchPlan {
+    pub session_id: String,
+    pub brain_id: String,
+    pub readiness: String,
+    pub entry_command: Vec<String>,
+    pub attachable: bool,
+    pub launch_mode: String,
+    pub forge_first_ready: bool,
+    pub forge_first_entrypoint: Option<Vec<String>>,
+    pub harness_status: Option<ExecutorHarnessStatus>,
+    pub dry_run: bool,
+    pub execution_boundary: String,
+    pub preflight_commands: Vec<Vec<String>>,
+    pub state_boundary: String,
+    pub safety_note: String,
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ExecutorQuotaPolicyReport {
     pub schema_version: String,
     pub selection_principle: String,
@@ -1005,6 +1036,157 @@ fn brain_shell_sessions(brains: &[BrainCandidate]) -> Vec<BrainShellSessionSpec>
     }
 
     sessions
+}
+
+pub fn build_shell_launch_plan(
+    router: &BrainRouterReport,
+    executor_filter: Option<&str>,
+) -> ShellLaunchPlanReport {
+    let normalized_filter = executor_filter
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    let launch_plans = router
+        .shell_sessions
+        .iter()
+        .filter(|session| match normalized_filter.as_deref() {
+            Some(filter) => {
+                session.brain_id.eq_ignore_ascii_case(filter)
+                    || session.id.eq_ignore_ascii_case(filter)
+                    || session
+                        .id
+                        .strip_suffix("-shell")
+                        .is_some_and(|id| id.eq_ignore_ascii_case(filter))
+            }
+            None => true,
+        })
+        .map(|session| {
+            let brain = router
+                .brains
+                .iter()
+                .find(|candidate| candidate.id == session.brain_id);
+            let harness_status = brain.and_then(|candidate| candidate.harness_status.clone());
+            ShellLaunchPlan {
+                session_id: session.id.clone(),
+                brain_id: session.brain_id.clone(),
+                readiness: shell_session_readiness(session, brain).to_string(),
+                entry_command: session.entry_command.clone(),
+                attachable: session.attachable,
+                launch_mode: session.launch_mode.clone(),
+                forge_first_ready: session.forge_first_ready,
+                forge_first_entrypoint: session.forge_first_entrypoint.clone(),
+                harness_status: harness_status.clone(),
+                dry_run: true,
+                execution_boundary: "plan_only_no_child_process_started".to_string(),
+                preflight_commands: shell_preflight_commands(session, harness_status.as_ref()),
+                state_boundary: session.state_boundary.clone(),
+                safety_note: session.safety_note.clone(),
+                next_actions: shell_next_actions(session),
+            }
+        })
+        .collect::<Vec<ShellLaunchPlan>>();
+    let status = if launch_plans.is_empty() {
+        "not_found"
+    } else if launch_plans.iter().any(|plan| plan.readiness == "ready") {
+        "ready"
+    } else {
+        "needs_attention"
+    };
+
+    ShellLaunchPlanReport {
+        schema_version: "forge.shell_launch_plan.v1".to_string(),
+        status: status.to_string(),
+        controller: router.controller.clone(),
+        executor_filter: normalized_filter,
+        execution: "plan_only".to_string(),
+        launch_plans,
+        safety_gates: router.safety_gates.clone(),
+        next_actions: vec![
+            "Sync executors after PATH, credential or shim changes before trusting a shell plan."
+                .to_string(),
+            "Acquire a Forge task handoff before using an external brain for production work."
+                .to_string(),
+            "Record validation or final-audit evidence before claiming task completion."
+                .to_string(),
+        ],
+    }
+}
+
+fn shell_session_readiness(
+    session: &BrainShellSessionSpec,
+    brain: Option<&BrainCandidate>,
+) -> &'static str {
+    if session.brain_id == "forge" {
+        return "ready";
+    }
+    if !session.attachable {
+        return "not_installed";
+    }
+    if session.forge_first_ready {
+        return "ready";
+    }
+    if brain
+        .is_some_and(|candidate| candidate.allowed && candidate.installed && candidate.configured)
+    {
+        return "native_cli_available";
+    }
+    "needs_sync_or_authorization"
+}
+
+fn shell_preflight_commands(
+    session: &BrainShellSessionSpec,
+    harness_status: Option<&ExecutorHarnessStatus>,
+) -> Vec<Vec<String>> {
+    let mut commands = Vec::new();
+    if let Some(harness_status) = harness_status {
+        commands.push(vec![
+            "forge".to_string(),
+            "harness".to_string(),
+            "shim-status".to_string(),
+            "--shim-dir".to_string(),
+            harness_status.shim_dir.clone(),
+            "--executor".to_string(),
+            session.brain_id.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]);
+    }
+    commands.push(vec![
+        "forge".to_string(),
+        "brains".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]);
+    if session.brain_id != "forge" {
+        commands.push(vec![
+            "forge".to_string(),
+            "task".to_string(),
+            "handoff".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--task".to_string(),
+            "<task-id>".to_string(),
+            "--executor".to_string(),
+            session.brain_id.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]);
+    }
+    commands
+}
+
+fn shell_next_actions(session: &BrainShellSessionSpec) -> Vec<String> {
+    if session.brain_id == "forge" {
+        return vec![
+            "Start the Forge TUI when the operator needs the primary control surface.".to_string(),
+        ];
+    }
+    vec![
+        "Run the entry_command only after Forge has prepared a workflow/task context packet and recorded the handoff lease."
+            .to_string(),
+        "Prefer Forge harness execution receipts for non-interactive commands that need audit lineage."
+            .to_string(),
+    ]
 }
 
 fn build_quota_policy(

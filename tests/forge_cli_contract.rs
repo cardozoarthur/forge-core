@@ -13990,6 +13990,167 @@ fn sync_projects_forge_first_shims_into_executor_and_brain_readiness() {
         }));
 }
 
+#[cfg(unix)]
+#[test]
+fn shells_launch_plan_selects_forge_first_entrypoint_without_running_brain() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let home = temp.path().join("home");
+    let real_bin = temp.path().join("real-bin");
+    let shim_dir = home.join(".forge/bin");
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(home.join(".codex/config.toml"), "model = \"test\"\n").unwrap();
+    write_fake_cli(&real_bin, "codex");
+    fs::create_dir_all(&shim_dir).unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "install-shims",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--real-cmd",
+            real_bin.join("codex").to_str().unwrap(),
+            "--forge-first",
+            "--workflow",
+            "wf_shell_plan",
+            "--run",
+            "run_shell_plan",
+            "--context-budget",
+            "900",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    let path = format!(
+        "{}:{}:{}",
+        shim_dir.display(),
+        real_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "executors",
+            "--home",
+            home.to_str().unwrap(),
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--allow",
+            "codex",
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "shells",
+            "--executor",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.shell_launch_plan.v1");
+    assert_eq!(json["status"], "ready");
+    assert_eq!(json["executor_filter"], "codex");
+    assert_eq!(json["execution"], "plan_only");
+    assert!(json["safety_gates"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge_context_packet_required_before_ai_handoff"
+        )));
+    let plan = json["launch_plans"].as_array().unwrap().first().unwrap();
+    assert_eq!(plan["session_id"], "codex-shell");
+    assert_eq!(plan["brain_id"], "codex");
+    assert_eq!(plan["readiness"], "ready");
+    assert_eq!(plan["launch_mode"], "forge_first_harness");
+    assert_eq!(plan["forge_first_ready"], true);
+    assert_eq!(plan["dry_run"], true);
+    assert!(plan["entry_command"][0]
+        .as_str()
+        .unwrap()
+        .ends_with("/home/.forge/bin/codex"));
+    assert_eq!(
+        plan["harness_status"]["schema_version"],
+        "forge.executor_harness_status.v1"
+    );
+    assert_eq!(plan["harness_status"]["status"], "shim_status_ready");
+    assert_eq!(
+        plan["preflight_commands"][0],
+        serde_json::json!([
+            "forge",
+            "harness",
+            "shim-status",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--output",
+            "json"
+        ])
+    );
+    assert!(plan["next_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "Run the entry_command only after Forge has prepared a workflow/task context packet and recorded the handoff lease."
+        )));
+
+    let mcp_manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&mcp_manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.shell.launch_plan");
+    assert_eq!(tool["output_schema"], "forge.shell_launch_plan.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .env("PATH", &path)
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.shell.launch_plan"])
+        .args(["--input", r#"{"executor":"codex"}"#])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.shell_launch_plan.v1"
+    );
+    assert_eq!(mcp_json["result"]["launch_plans"][0]["brain_id"], "codex");
+}
+
 #[test]
 fn brain_router_keeps_memory_skills_mcp_and_shells_under_forge_control() {
     let temp = tempdir().unwrap();
