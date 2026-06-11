@@ -4238,7 +4238,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.memory.search",
                 "Search File Memory",
-                "Search Markdown memory snippets across global, organization, project and processing scopes with visibility/shareability filtering and line-range results.",
+                "Search Markdown memory snippets across global, organization, project and processing scopes with visibility/shareability filtering, project governance defaults and line-range results.",
                 object_schema(
                     &[
                         ("query", "string", "search query"),
@@ -7189,7 +7189,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     query: input.query,
                     workflow_id: input.workflow_id,
                     scopes: input.scopes,
-                    audience: input.audience.unwrap_or_else(|| "private".to_string()),
+                    audience: input.audience,
                     visibility: input.visibility,
                     memory_level: input.memory_level,
                     run_id: input.run_id,

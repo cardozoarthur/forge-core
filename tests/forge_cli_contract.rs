@@ -14481,6 +14481,69 @@ fn memory_governance_can_be_configured_per_project_through_cli_and_mcp() {
         "processing_auto_archive"
     );
 
+    let processing_root = temp.path().join("processing-memory");
+    fs::create_dir_all(&processing_root).unwrap();
+    fs::write(
+        project_root.join("manager-signal.md"),
+        r#"---
+visibility: private
+shareability: manager_shared
+---
+
+# Sinal operacional
+
+Cliente pediu para o gestor priorizar agenda pública de manicure e serviços recorrentes.
+"#,
+    )
+    .unwrap();
+    fs::write(
+        processing_root.join("raw-thread.md"),
+        r#"---
+visibility: private
+shareability: non_shareable
+---
+
+# Thread temporária
+
+Cliente enviou detalhes privados sobre agenda pública de manicure e serviços recorrentes.
+"#,
+    )
+    .unwrap();
+    let governed_search = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "search",
+            "--query",
+            "agenda pública manicure serviços recorrentes",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--processing-root",
+            processing_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let governed_search_json: Value = serde_json::from_slice(&governed_search).unwrap();
+    assert_eq!(governed_search_json["memory_level"], "MEMORY_SHORT_TERM");
+    assert_eq!(governed_search_json["audience"], "manager");
+    assert_eq!(
+        governed_search_json["requested_scopes"],
+        serde_json::json!(["project", "processing"])
+    );
+    assert_eq!(
+        governed_search_json["effective_scopes"],
+        serde_json::json!(["project", "processing"])
+    );
+    assert_eq!(governed_search_json["result_count"], 1);
+    assert_eq!(governed_search_json["results"][0]["scope"], "project");
+    assert_eq!(governed_search_json["governance"]["denied_result_count"], 1);
+
     let mcp_tools = forge()
         .args([
             "--store",

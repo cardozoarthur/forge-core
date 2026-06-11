@@ -2841,12 +2841,12 @@ enum MemoryCommands {
         workflow_id: Option<String>,
         #[arg(long = "scope")]
         scopes: Vec<String>,
-        #[arg(long, default_value = "private")]
-        audience: String,
+        #[arg(long)]
+        audience: Option<String>,
         #[arg(long)]
         visibility: Option<String>,
-        #[arg(long = "memory-level", default_value = "standard")]
-        memory_level: String,
+        #[arg(long = "memory-level")]
+        memory_level: Option<String>,
         #[arg(long = "run")]
         run_id: Option<String>,
         #[arg(long = "organization")]
@@ -7050,7 +7050,7 @@ fn run() -> Result<i32> {
                         scopes,
                         audience,
                         visibility,
-                        memory_level: Some(memory_level),
+                        memory_level,
                         run_id,
                         organization_id,
                         limit,

@@ -21,7 +21,7 @@ pub struct MemorySearchOptions {
     pub query: String,
     pub workflow_id: Option<String>,
     pub scopes: Vec<String>,
-    pub audience: String,
+    pub audience: Option<String>,
     pub visibility: Option<String>,
     pub memory_level: Option<String>,
     pub run_id: Option<String>,
@@ -982,14 +982,22 @@ pub fn search_memory(
     options: MemorySearchOptions,
 ) -> Result<MemorySearchReport> {
     let mut options = options;
+    let project_governance = load_project_memory_governance(options.project_root.as_deref());
+    let has_project_governance = project_governance.status == "configured";
     let explicit_scopes = !options.scopes.is_empty();
-    let normalized_input_scopes = normalize_scopes(&options.scopes);
+    let normalized_input_scopes = if explicit_scopes {
+        normalize_scopes(&options.scopes)
+    } else if has_project_governance {
+        project_governance.default_scopes.clone()
+    } else {
+        normalize_scopes(&options.scopes)
+    };
     let workflow_binding = bind_memory_to_workflow(
         store,
         options.workflow_id.as_deref(),
         "memory search",
         &mut options.organization_id,
-        if explicit_scopes {
+        if explicit_scopes || has_project_governance {
             normalized_input_scopes.as_slice()
         } else {
             &[]
@@ -1002,7 +1010,22 @@ pub fn search_memory(
     } else {
         normalized_input_scopes
     };
-    let memory_level = normalize_memory_level(options.memory_level.as_deref());
+    let memory_level = options
+        .memory_level
+        .as_deref()
+        .map(|value| normalize_memory_level(Some(value)))
+        .unwrap_or_else(|| {
+            if has_project_governance {
+                project_governance.memory_level.clone()
+            } else {
+                normalize_memory_level(None)
+            }
+        });
+    let audience = match options.audience.as_deref() {
+        Some(value) => normalize_default_audience(value)?,
+        None if has_project_governance => project_governance.default_audience.clone(),
+        None => "private".to_string(),
+    };
     let scopes = apply_memory_level(&requested_scopes, &memory_level);
     let roots = resolve_roots(store, &options, &scopes);
     let query_terms = tokenize(&options.query);
@@ -1047,7 +1070,7 @@ pub fn search_memory(
                         "persistent".to_string()
                     }
                 });
-                let allowed = audience_can_read(&options.audience, &visibility, &shareability);
+                let allowed = audience_can_read(&audience, &visibility, &shareability);
                 if !allowed {
                     denied_result_count += 1;
                     continue;
@@ -1093,7 +1116,7 @@ pub fn search_memory(
         schema_version: "forge.memory_search.v1".to_string(),
         status: "memory_search_complete".to_string(),
         query: options.query,
-        audience: options.audience,
+        audience,
         memory_level,
         requested_scopes,
         effective_scopes: scopes,
@@ -1426,7 +1449,7 @@ pub fn memory_retention_report(
         query: String::new(),
         workflow_id: None,
         scopes: requested_scopes.clone(),
-        audience: "private".to_string(),
+        audience: Some("private".to_string()),
         visibility: None,
         memory_level: Some("admin".to_string()),
         run_id: options.run_id,
