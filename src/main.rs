@@ -102,8 +102,9 @@ use forge_core::ir::{CreativeArtifact, TokenCollection};
 use forge_core::lease::{acquire_task_lease, release_task_lease};
 use forge_core::mcp::{call_mcp_tool, mcp_tools_manifest};
 use forge_core::memory::{
-    list_memory_promotions, memory_cleanup_report, memory_policy_report, memory_retention_report,
-    promote_memory, search_memory, MemoryCleanupOptions, MemoryPromotionOptions,
+    configure_memory_governance, list_memory_promotions, memory_cleanup_report,
+    memory_policy_report_for_project, memory_retention_report, promote_memory, search_memory,
+    MemoryCleanupOptions, MemoryGovernanceConfigOptions, MemoryPromotionOptions,
     MemoryRetentionOptions, MemorySearchOptions,
 };
 use forge_core::milestone::{
@@ -2808,6 +2809,28 @@ enum McpCommands {
 #[derive(Debug, Subcommand)]
 enum MemoryCommands {
     Policy {
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Configure {
+        #[arg(long = "project-root")]
+        project_root: PathBuf,
+        #[arg(long = "memory-level")]
+        memory_level: String,
+        #[arg(long = "default-scope")]
+        default_scopes: Vec<String>,
+        #[arg(long = "default-audience")]
+        default_audience: String,
+        #[arg(long = "privacy-mode")]
+        privacy_mode: String,
+        #[arg(long = "retention-mode")]
+        retention_mode: String,
+        #[arg(long = "approved-by")]
+        approved_by: String,
+        #[arg(long)]
+        reason: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -6969,9 +6992,36 @@ fn run() -> Result<i32> {
             }
         },
         Commands::Memory { command } => match command {
-            MemoryCommands::Policy { output } => {
+            MemoryCommands::Policy {
+                project_root,
+                output,
+            } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = memory_policy_report(&store);
+                let report = memory_policy_report_for_project(&store, project_root.as_deref());
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MemoryCommands::Configure {
+                project_root,
+                memory_level,
+                default_scopes,
+                default_audience,
+                privacy_mode,
+                retention_mode,
+                approved_by,
+                reason,
+                output,
+            } => {
+                let report = configure_memory_governance(MemoryGovernanceConfigOptions {
+                    project_root,
+                    memory_level,
+                    default_scopes,
+                    default_audience,
+                    privacy_mode,
+                    retention_mode,
+                    approved_by,
+                    reason,
+                })?;
                 print_response(output, &report)?;
                 Ok(0)
             }

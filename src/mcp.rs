@@ -85,8 +85,9 @@ use crate::interactive::{
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
-    list_memory_promotions, memory_cleanup_report, memory_policy_report, memory_retention_report,
-    promote_memory, search_memory, MemoryCleanupOptions, MemoryPromotionOptions,
+    configure_memory_governance, list_memory_promotions, memory_cleanup_report,
+    memory_policy_report_for_project, memory_retention_report, promote_memory, search_memory,
+    MemoryCleanupOptions, MemoryGovernanceConfigOptions, MemoryPromotionOptions,
     MemoryRetentionOptions, MemorySearchOptions,
 };
 use crate::milestone::{
@@ -256,6 +257,24 @@ struct MemorySearchInput {
     organization_root: Option<String>,
     project_root: Option<String>,
     processing_root: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryPolicyInput {
+    project_root: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryConfigureInput {
+    project_root: String,
+    memory_level: String,
+    #[serde(default)]
+    default_scopes: Vec<String>,
+    default_audience: String,
+    privacy_mode: String,
+    retention_mode: String,
+    approved_by: String,
+    reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4167,10 +4186,54 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.memory.policy",
                 "Inspect Memory Policy",
                 "Return Forge's file-first memory governance model: global, organization, project and processing scopes; public, internal and private visibility; manager-shared customer suggestions; and company-level request handling.",
-                object_schema(&[], &[]),
+                object_schema(
+                    &[(
+                        "project_root",
+                        "string",
+                        "optional project root used to resolve .forge/memory-governance.json",
+                    )],
+                    &[],
+                ),
                 "forge.memory_policy.v1",
                 &["forge", "memory", "policy", "--output", "json"],
                 ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.memory.configure",
+                "Configure Project Memory Governance",
+                "Write the project's .forge/memory-governance.json file with memory level, default scopes, default audience, privacy mode, retention mode and explicit approval.",
+                object_schema(
+                    &[
+                        ("project_root", "string", "project root containing the .forge directory"),
+                        ("memory_level", "string", "MEMORY_NONE|MEMORY_SESSION|MEMORY_SHORT_TERM|MEMORY_STANDARD|MEMORY_FULL|MEMORY_ADMIN"),
+                        ("default_scopes", "array", "default memory scopes allowed by the selected memory level"),
+                        ("default_audience", "string", "public|internal|manager|operator|private"),
+                        ("privacy_mode", "string", "privacy posture such as private_by_default"),
+                        ("retention_mode", "string", "retention posture such as processing_auto_archive"),
+                        ("approved_by", "string", "operator or human approving the governance update"),
+                        ("reason", "string", "why this memory governance policy is being applied"),
+                    ],
+                    &[
+                        "project_root",
+                        "memory_level",
+                        "default_audience",
+                        "privacy_mode",
+                        "retention_mode",
+                        "approved_by",
+                        "reason",
+                    ],
+                ),
+                "forge.memory_governance_config.v1",
+                &[
+                    "forge",
+                    "memory",
+                    "configure",
+                    "--project-root",
+                    "<project-root>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, true),
             ),
             tool(
                 "forge.memory.search",
@@ -7091,7 +7154,33 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 .unwrap_or_else(|| PathBuf::from("."));
             serde_json::to_value(sync_project_operating_context(store, &project_root)?)?
         }
-        "forge.memory.policy" => serde_json::to_value(memory_policy_report(store))?,
+        "forge.memory.policy" => {
+            let input = if input.is_null() {
+                MemoryPolicyInput { project_root: None }
+            } else {
+                parse_input(input)?
+            };
+            let project_root = input.project_root.map(PathBuf::from);
+            serde_json::to_value(memory_policy_report_for_project(
+                store,
+                project_root.as_deref(),
+            ))?
+        }
+        "forge.memory.configure" => {
+            let input: MemoryConfigureInput = parse_input(input)?;
+            serde_json::to_value(configure_memory_governance(
+                MemoryGovernanceConfigOptions {
+                    project_root: PathBuf::from(input.project_root),
+                    memory_level: input.memory_level,
+                    default_scopes: input.default_scopes,
+                    default_audience: input.default_audience,
+                    privacy_mode: input.privacy_mode,
+                    retention_mode: input.retention_mode,
+                    approved_by: input.approved_by,
+                    reason: input.reason,
+                },
+            )?)?
+        }
         "forge.memory.search" => {
             let input: MemorySearchInput = parse_input(input)?;
             serde_json::to_value(search_memory(

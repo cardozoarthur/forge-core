@@ -5,7 +5,7 @@ use crate::storage::{
 };
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,6 +14,7 @@ use uuid::Uuid;
 const DEFAULT_LIMIT: usize = 10;
 const MAX_CHUNK_WORDS: usize = 400;
 const CHUNK_OVERLAP_WORDS: usize = 48;
+const MEMORY_GOVERNANCE_SCHEMA_VERSION: &str = "forge.memory_governance_config.v1";
 
 #[derive(Debug, Clone)]
 pub struct MemorySearchOptions {
@@ -239,6 +240,8 @@ pub struct MemoryPolicyReport {
     pub status: String,
     pub file_first: bool,
     pub hidden_state_disallowed: bool,
+    pub project_governance: ProjectMemoryGovernanceReport,
+    pub effective_defaults: MemoryEffectiveDefaults,
     pub search_policy: MemorySearchPolicy,
     pub memory_levels: Vec<MemoryLevelPolicy>,
     pub scopes: Vec<MemoryScopePolicy>,
@@ -247,6 +250,64 @@ pub struct MemoryPolicyReport {
     pub interface_policy: Vec<MemoryInterfacePolicy>,
     pub business_operating_model: BusinessOperatingModel,
     pub source_influences: Vec<MemorySourceInfluence>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryGovernanceConfigOptions {
+    pub project_root: PathBuf,
+    pub memory_level: String,
+    pub default_scopes: Vec<String>,
+    pub default_audience: String,
+    pub privacy_mode: String,
+    pub retention_mode: String,
+    pub approved_by: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryGovernanceApproval {
+    pub approved_by: String,
+    pub approved_at: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryGovernanceConfigReport {
+    pub schema_version: String,
+    pub status: String,
+    pub project_root: String,
+    pub config_path: String,
+    pub memory_level: String,
+    pub default_scopes: Vec<String>,
+    pub default_audience: String,
+    pub privacy_mode: String,
+    pub retention_mode: String,
+    pub approval: MemoryGovernanceApproval,
+    pub governance_rule: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryEffectiveDefaults {
+    pub memory_level: String,
+    pub default_scopes: Vec<String>,
+    pub default_audience: String,
+    pub privacy_mode: String,
+    pub retention_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectMemoryGovernanceReport {
+    pub schema_version: String,
+    pub status: String,
+    pub project_root: String,
+    pub config_path: String,
+    pub memory_level: String,
+    pub default_scopes: Vec<String>,
+    pub default_audience: String,
+    pub privacy_mode: String,
+    pub retention_mode: String,
+    pub approval: Option<MemoryGovernanceApproval>,
+    pub issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -412,13 +473,84 @@ struct MemoryChunk {
     text: String,
 }
 
+pub fn configure_memory_governance(
+    options: MemoryGovernanceConfigOptions,
+) -> Result<MemoryGovernanceConfigReport> {
+    let project_root = options.project_root;
+    let config_path = memory_governance_config_path(&project_root);
+    let memory_level = normalize_memory_level(Some(&options.memory_level));
+    let default_scopes =
+        apply_memory_level(&normalize_scopes(&options.default_scopes), &memory_level);
+    let default_scopes = if default_scopes.is_empty() {
+        default_scopes_for_level(&memory_level)
+    } else {
+        default_scopes
+    };
+    let default_audience = normalize_default_audience(&options.default_audience)?;
+    let privacy_mode = normalize_governance_mode(&options.privacy_mode, "private_by_default");
+    let retention_mode = normalize_governance_mode(&options.retention_mode, "governed_retention");
+    let approved_by = options.approved_by.trim();
+    if approved_by.is_empty() {
+        bail!("memory governance approved_by is required");
+    }
+    let reason = options.reason.trim();
+    if reason.is_empty() {
+        bail!("memory governance reason is required");
+    }
+
+    let report = MemoryGovernanceConfigReport {
+        schema_version: MEMORY_GOVERNANCE_SCHEMA_VERSION.to_string(),
+        status: "memory_governance_configured".to_string(),
+        project_root: project_root.display().to_string(),
+        config_path: config_path.display().to_string(),
+        memory_level,
+        default_scopes,
+        default_audience,
+        privacy_mode,
+        retention_mode,
+        approval: MemoryGovernanceApproval {
+            approved_by: approved_by.to_string(),
+            approved_at: Utc::now().to_rfc3339(),
+            reason: reason.to_string(),
+        },
+        governance_rule: "project .forge/memory-governance.json controls the default memory level, scopes, audience, privacy and retention posture for Forge-owned project operations".to_string(),
+    };
+
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let bytes = serde_json::to_vec_pretty(&report)?;
+    fs::write(&config_path, bytes)
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+    Ok(report)
+}
+
 pub fn memory_policy_report(store: &ForgeStore) -> MemoryPolicyReport {
+    memory_policy_report_for_project(store, None)
+}
+
+pub fn memory_policy_report_for_project(
+    store: &ForgeStore,
+    project_root: Option<&Path>,
+) -> MemoryPolicyReport {
     let project_memory = store.base_dir().join("memory");
+    let project_governance = load_project_memory_governance(project_root);
+    let effective_defaults = MemoryEffectiveDefaults {
+        memory_level: project_governance.memory_level.clone(),
+        default_scopes: project_governance.default_scopes.clone(),
+        default_audience: project_governance.default_audience.clone(),
+        privacy_mode: project_governance.privacy_mode.clone(),
+        retention_mode: project_governance.retention_mode.clone(),
+    };
     MemoryPolicyReport {
         schema_version: "forge.memory_policy.v1".to_string(),
         status: "memory_policy_ready".to_string(),
         file_first: true,
         hidden_state_disallowed: true,
+        project_governance,
+        effective_defaults,
         search_policy: MemorySearchPolicy {
             schema_version: "forge.memory_search_policy.v1".to_string(),
             retrieval_tool: "forge memory search".to_string(),
@@ -598,6 +730,118 @@ pub fn memory_policy_report(store: &ForgeStore) -> MemoryPolicyReport {
                 adopted_pattern: "Requests are handled as company operations with product, technical, financial, administrative, marketing, communication and delivery concerns.".to_string(),
             },
         ],
+    }
+}
+
+fn memory_governance_config_path(project_root: &Path) -> PathBuf {
+    project_root.join(".forge").join("memory-governance.json")
+}
+
+fn load_project_memory_governance(project_root: Option<&Path>) -> ProjectMemoryGovernanceReport {
+    let Some(project_root) = project_root else {
+        let memory_level = "MEMORY_STANDARD".to_string();
+        return ProjectMemoryGovernanceReport {
+            schema_version: MEMORY_GOVERNANCE_SCHEMA_VERSION.to_string(),
+            status: "not_requested".to_string(),
+            project_root: String::new(),
+            config_path: String::new(),
+            default_scopes: default_scopes_for_level(&memory_level),
+            default_audience: default_audience_for_memory_level(&memory_level),
+            privacy_mode: "classified_visibility".to_string(),
+            retention_mode: "governed_retention".to_string(),
+            memory_level,
+            approval: None,
+            issues: Vec::new(),
+        };
+    };
+
+    let config_path = memory_governance_config_path(project_root);
+    let default_level = "MEMORY_STANDARD".to_string();
+    if !config_path.exists() {
+        return ProjectMemoryGovernanceReport {
+            schema_version: MEMORY_GOVERNANCE_SCHEMA_VERSION.to_string(),
+            status: "missing".to_string(),
+            project_root: project_root.display().to_string(),
+            config_path: config_path.display().to_string(),
+            default_scopes: default_scopes_for_level(&default_level),
+            default_audience: default_audience_for_memory_level(&default_level),
+            privacy_mode: "classified_visibility".to_string(),
+            retention_mode: "governed_retention".to_string(),
+            memory_level: default_level,
+            approval: None,
+            issues: Vec::new(),
+        };
+    }
+
+    match fs::read(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))
+        .and_then(|bytes| {
+            serde_json::from_slice::<MemoryGovernanceConfigReport>(&bytes)
+                .context("invalid memory governance JSON")
+        }) {
+        Ok(config) => ProjectMemoryGovernanceReport {
+            schema_version: config.schema_version,
+            status: "configured".to_string(),
+            project_root: project_root.display().to_string(),
+            config_path: config_path.display().to_string(),
+            memory_level: config.memory_level,
+            default_scopes: config.default_scopes,
+            default_audience: config.default_audience,
+            privacy_mode: config.privacy_mode,
+            retention_mode: config.retention_mode,
+            approval: Some(config.approval),
+            issues: Vec::new(),
+        },
+        Err(error) => ProjectMemoryGovernanceReport {
+            schema_version: MEMORY_GOVERNANCE_SCHEMA_VERSION.to_string(),
+            status: "invalid".to_string(),
+            project_root: project_root.display().to_string(),
+            config_path: config_path.display().to_string(),
+            default_scopes: default_scopes_for_level(&default_level),
+            default_audience: default_audience_for_memory_level(&default_level),
+            privacy_mode: "classified_visibility".to_string(),
+            retention_mode: "governed_retention".to_string(),
+            memory_level: default_level,
+            approval: None,
+            issues: vec![error.to_string()],
+        },
+    }
+}
+
+fn default_scopes_for_level(memory_level: &str) -> Vec<String> {
+    let all_scopes = vec![
+        "global".to_string(),
+        "organization".to_string(),
+        "project".to_string(),
+        "processing".to_string(),
+    ];
+    apply_memory_level(&all_scopes, memory_level)
+}
+
+fn default_audience_for_memory_level(memory_level: &str) -> String {
+    memory_level_policies()
+        .into_iter()
+        .find(|policy| policy.level == memory_level)
+        .map(|policy| policy.default_audience)
+        .unwrap_or_else(|| "internal".to_string())
+}
+
+fn normalize_default_audience(value: &str) -> Result<String> {
+    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        "public" | "external" | "customer" | "cliente" | "internal" | "manager" | "gestor"
+        | "operator" | "private" => Ok(normalized),
+        "" => bail!("memory governance default_audience is required"),
+        other => bail!("unsupported memory governance default_audience: {other}"),
+    }
+}
+
+fn normalize_governance_mode(value: &str, default_value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+    if normalized.is_empty() {
+        default_value.to_string()
+    } else {
+        normalized
     }
 }
 

@@ -14393,6 +14393,158 @@ Integrações públicas devem ter mensagem clara de entrega.
 }
 
 #[test]
+fn memory_governance_can_be_configured_per_project_through_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("project");
+    fs::create_dir_all(project_root.join(".forge")).unwrap();
+
+    let configured = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "configure",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--memory-level",
+            "MEMORY_SHORT_TERM",
+            "--default-scope",
+            "project",
+            "--default-scope",
+            "processing",
+            "--default-audience",
+            "manager",
+            "--privacy-mode",
+            "private_by_default",
+            "--retention-mode",
+            "processing_auto_archive",
+            "--approved-by",
+            "arthur",
+            "--reason",
+            "Projeto precisa limitar memória a projeto e processamento.",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let configured_json: Value = serde_json::from_slice(&configured).unwrap();
+    assert_eq!(
+        configured_json["schema_version"],
+        "forge.memory_governance_config.v1"
+    );
+    assert_eq!(configured_json["status"], "memory_governance_configured");
+    assert_eq!(configured_json["memory_level"], "MEMORY_SHORT_TERM");
+    assert_eq!(
+        configured_json["default_scopes"],
+        serde_json::json!(["project", "processing"])
+    );
+    assert_eq!(configured_json["default_audience"], "manager");
+    assert_eq!(configured_json["approval"]["approved_by"], "arthur");
+    assert!(project_root.join(".forge/memory-governance.json").is_file());
+
+    let policy = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "policy",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let policy_json: Value = serde_json::from_slice(&policy).unwrap();
+    assert_eq!(
+        policy_json["project_governance"]["schema_version"],
+        "forge.memory_governance_config.v1"
+    );
+    assert_eq!(policy_json["project_governance"]["status"], "configured");
+    assert_eq!(
+        policy_json["effective_defaults"]["memory_level"],
+        "MEMORY_SHORT_TERM"
+    );
+    assert_eq!(
+        policy_json["effective_defaults"]["default_scopes"],
+        serde_json::json!(["project", "processing"])
+    );
+    assert_eq!(
+        policy_json["effective_defaults"]["retention_mode"],
+        "processing_auto_archive"
+    );
+
+    let mcp_tools = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tools_json: Value = serde_json::from_slice(&mcp_tools).unwrap();
+    let configure_tool = find_mcp_tool(&tools_json, "forge.memory.configure");
+    assert_eq!(
+        configure_tool["output_schema"],
+        "forge.memory_governance_config.v1"
+    );
+    assert_eq!(configure_tool["mutates_workflow"], true);
+    assert_eq!(
+        configure_tool["input_schema"]["properties"]["default_scopes"]["type"],
+        "array"
+    );
+
+    let mcp_project_root = temp.path().join("mcp-project");
+    fs::create_dir_all(mcp_project_root.join(".forge")).unwrap();
+    let mcp_input = serde_json::json!({
+        "project_root": mcp_project_root,
+        "memory_level": "MEMORY_SESSION",
+        "default_scopes": ["processing"],
+        "default_audience": "private",
+        "privacy_mode": "private_by_default",
+        "retention_mode": "delete_processing_after_final_package",
+        "approved_by": "arthur",
+        "reason": "Fluxo temporário de atendimento."
+    });
+    let mcp_configured = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.memory.configure",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_configured).unwrap();
+    assert_eq!(mcp_json["result"]["memory_level"], "MEMORY_SESSION");
+    assert_eq!(
+        mcp_json["result"]["default_scopes"],
+        serde_json::json!(["processing"])
+    );
+}
+
+#[test]
 fn memory_promote_records_curated_summary_with_approval_and_lineage() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
