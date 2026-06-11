@@ -6984,6 +6984,38 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "medium",
         ),
         slash(
+            "/actions",
+            "Actions",
+            "List governed interactive actions from the stable registry. Use: /actions [query]",
+            &[
+                "forge",
+                "interactive",
+                "action-registry",
+                "--query",
+                "<query>",
+                "--output",
+                "json",
+            ],
+            false,
+            "low",
+        ),
+        slash(
+            "/action",
+            "Action",
+            "Resolve one selected interactive action into a safe invocation plan without executing it. Use: /action <action-id>",
+            &[
+                "forge",
+                "interactive",
+                "action-invocation",
+                "--action",
+                "<action-id>",
+                "--output",
+                "json",
+            ],
+            false,
+            "low",
+        ),
+        slash(
             "/shells",
             "Shells",
             "List Forge-controlled TUI and external brain shell entrypoints.",
@@ -7437,6 +7469,14 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
                 dispatch_decision_command(&store, trimmed, store_path)?;
                 continue;
             }
+            if trimmed == "/actions" || trimmed.starts_with("/actions ") {
+                dispatch_actions_command(&store, trimmed)?;
+                continue;
+            }
+            if trimmed == "/action" || trimmed.starts_with("/action ") {
+                dispatch_action_command(&store, trimmed)?;
+                continue;
+            }
 
             if route.recognized {
                 println!(
@@ -7479,6 +7519,40 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
     }
 
     Ok(0)
+}
+
+fn dispatch_actions_command(store: &ForgeStore, input: &str) -> Result<()> {
+    let rest = input.trim().strip_prefix("/actions").unwrap_or("").trim();
+    let query = rest
+        .strip_prefix("--query")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| (!rest.is_empty()).then_some(rest));
+    let report = build_interactive_action_registry(store, query)?;
+    println!("{}", render_interactive_action_registry(&report));
+    Ok(())
+}
+
+fn dispatch_action_command(store: &ForgeStore, input: &str) -> Result<()> {
+    let rest = input.trim().strip_prefix("/action").unwrap_or("").trim();
+    let mut tokens = rest.split_whitespace();
+    let action_id = match tokens.next() {
+        Some("--action") => tokens.next(),
+        Some(value) => Some(value),
+        None => None,
+    };
+
+    let Some(action_id) = action_id else {
+        println!("  Usage: /action <action-id>");
+        println!(
+            "  Discover actions with: /actions [query] or forge interactive action-registry --output json"
+        );
+        return Ok(());
+    };
+
+    let report = build_interactive_action_invocation(store, action_id)?;
+    println!("{}", render_interactive_action_invocation(&report));
+    Ok(())
 }
 
 fn dispatch_patch_command(

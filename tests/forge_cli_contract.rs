@@ -4559,6 +4559,10 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
         forge_core::skill::SKILL_MD.contains("forge.interactive.autocomplete"),
         "the packaged Forge skill should expose the MCP autocomplete tool"
     );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("/action <action-id>"),
+        "the packaged Forge skill should teach agents how to plan selected action invocation from the interactive REPL"
+    );
 
     let tools = forge()
         .args(["mcp", "tools", "--output", "json"])
@@ -39380,6 +39384,8 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         "/sessions",
         "/sessions history",
         "/sessions lifecycle",
+        "/actions",
+        "/action",
         "/shells",
         "/harness",
         "/harness doctor",
@@ -39471,6 +39477,78 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         .as_array()
         .unwrap()
         .contains(&Value::String("decision".to_string())));
+}
+
+#[test]
+fn interactive_action_slash_commands_route_to_registry_and_invocation() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let catalog_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "slash-commands",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let catalog: Value = serde_json::from_slice(&catalog_output).unwrap();
+
+    let actions = find_slash_command(&catalog, "/actions");
+    assert_eq!(actions["risk_level"], "low");
+    assert_eq!(actions["mutates_workflow"], false);
+    assert!(actions["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("action-registry".to_string())));
+
+    let action = find_slash_command(&catalog, "/action");
+    assert_eq!(action["risk_level"], "low");
+    assert_eq!(action["mutates_workflow"], false);
+    assert!(action["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("action-invocation".to_string())));
+    assert!(action["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("<action-id>".to_string())));
+
+    let route_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "route",
+            "--input",
+            "/action patch.diff",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let route: Value = serde_json::from_slice(&route_output).unwrap();
+    assert_eq!(route["input_kind"], "slash_command");
+    assert_eq!(route["routing_decision"], "slash_command");
+    assert_eq!(route["workflow_created"], false);
+    assert_eq!(route["slash_command"]["name"], "/action");
+    assert_eq!(route["slash_command"]["recognized"], true);
+    assert_eq!(route["slash_command"]["mutates_workflow"], false);
+    assert!(route["slash_command"]["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("action-invocation".to_string())));
 }
 
 #[test]
