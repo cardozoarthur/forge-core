@@ -188,6 +188,7 @@ pub const CAP_VISUAL_WORKSPACE: &str = "visual_workspace";
 pub const CAP_ASYNC_RUNTIME: &str = "async_runtime";
 pub const CAP_TELEGRAM_NOTIFICATION: &str = "telegram_notification";
 pub const CAP_SOURCE_CODE_PATCH_LIFECYCLE: &str = "source_code_patch_lifecycle";
+pub const CAP_MULTIMODAL_RUNTIME: &str = "multimodal_runtime";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddonCatalog {
@@ -1674,6 +1675,7 @@ pub fn builtin_addon_catalog() -> AddonCatalog {
             workflow_automation_addon(),
             visual_workspace_addon(),
             software_development_addon(),
+            multimodal_runtime_addon(),
             hackathon_factory_addon(),
             daily_goal_research_addon(),
             notification_addon(),
@@ -9207,6 +9209,277 @@ fn software_development_addon() -> AddonManifest {
         metadata: BTreeMap::from([(
             "core_boundary".to_string(),
             "software-specific Addon; Core runtime adapter remains builtin compatibility"
+                .to_string(),
+        )]),
+    }
+}
+
+fn multimodal_runtime_addon() -> AddonManifest {
+    let mut capability = capability(
+        CAP_MULTIMODAL_RUNTIME,
+        "Experimental multimodal runtime",
+        &[
+            "multimodal",
+            "benchmark multimodal",
+            "runtime multimodal",
+            "modelo local",
+            "modelo",
+            "model",
+            "imagem",
+            "image",
+            "áudio",
+            "audio",
+            "vídeo",
+            "video",
+            "ocr",
+            "blender",
+            "avatar",
+        ],
+        &["multimodal", "creative_runtime"],
+    );
+    capability.description =
+        "Execução experimental e guardada de benchmarks multimodais com fronteiras explícitas de modelo, dispositivo e evidência."
+            .to_string();
+    capability.workflow_extensions = vec!["multimodal_runtime_benchmark".to_string()];
+    capability.deliverables = vec![
+        "guarded multimodal runtime benchmark receipt".to_string(),
+        "model/runtime guard matrix".to_string(),
+        "promotion gate evidence for production model benchmarks".to_string(),
+    ];
+    capability.constraints = vec![
+        "multimodal behavior is owned by this Addon, not by the universal Core kernel"
+            .to_string(),
+        "Core builtin multimodal commands remain a compatibility executor while Addon runtime workers mature"
+            .to_string(),
+        "model execution requires explicit project opt-in and runtime guard approval".to_string(),
+        "installs, devices, filesystem and network access remain blocked by default".to_string(),
+    ];
+    capability.risks = vec![
+        "model execution can access sensitive media unless scoped through Forge guard policy"
+            .to_string(),
+        "production readiness requires real local model/runtime benchmark evidence before promotion"
+            .to_string(),
+    ];
+    capability.unknowns = vec![
+        "production image/audio/video/3D model adapters are selected by installed Addon runtime workers"
+            .to_string(),
+    ];
+    capability.artifact_types = vec![
+        "multimodal_runtime_benchmark".to_string(),
+        "multimodal_guard_receipt".to_string(),
+    ];
+    capability.view_ids = vec!["multimodal.benchmark_center".to_string()];
+
+    let mut runtime_benchmark = runtime_contract(
+        "multimodal_runtime_benchmark.executor",
+        "executor",
+        CAP_MULTIMODAL_RUNTIME,
+        "multimodal_runtime_benchmark",
+        "forge_core_builtin",
+        "forge.multimodal.runtime_benchmark",
+        &[
+            "project_root",
+            "capability_id",
+            "fixture_id",
+            "approved_by",
+            "runtime_guard_decision",
+        ],
+        &[
+            "runtime_benchmark_receipt",
+            "guard_matrix",
+            "promotion_gate",
+        ],
+        &["multimodal.runtime_benchmark"],
+    );
+    runtime_benchmark.constraints = vec![
+        "require approved .forge/multimodal.json or explicit experimental flag".to_string(),
+        "require model guard approval before benchmark execution".to_string(),
+        "record promotion_ready=false until production model/runtime evidence exists".to_string(),
+    ];
+
+    let mut props = BTreeMap::new();
+    props.insert(
+        "kernel_boundary".to_string(),
+        serde_json::json!(
+            "multimodal-specific runtime behavior is Addon-owned; Core only hosts guarded compatibility commands"
+        ),
+    );
+    props.insert(
+        "promotion_gate".to_string(),
+        serde_json::json!("production_model_runtime_benchmark_required"),
+    );
+
+    AddonManifest {
+        schema_version: addon_manifest_schema_version(),
+        id: "forge.addon.multimodal".to_string(),
+        name: "Multimodal Runtime Addon".to_string(),
+        version: "0.1.0".to_string(),
+        description:
+            "Capacidades experimentais de imagem, áudio, vídeo e 3D com execução guardada."
+                .to_string(),
+        lifecycle: "enabled".to_string(),
+        source: "builtin_compat".to_string(),
+        dependencies: Vec::new(),
+        permissions: vec![AddonPermission {
+            id: "multimodal.runtime_benchmark".to_string(),
+            description:
+                "Executar benchmarks multimodais guardados somente após opt-in e aprovação explícita do guard."
+                    .to_string(),
+            risk: "medium".to_string(),
+            requires_human_approval: false,
+            tools: vec![
+                "forge.multimodal.readiness".to_string(),
+                "forge.multimodal.runtime_benchmark".to_string(),
+                "forge.multimodal.guard".to_string(),
+            ],
+            resources: vec![
+                "project_multimodal_config".to_string(),
+                "model_runtime_manifest".to_string(),
+                "workflow_artifact".to_string(),
+                "guard_receipt".to_string(),
+            ],
+            integrations: Vec::new(),
+            actions: vec![
+                "multimodal:inspect_readiness".to_string(),
+                "multimodal:run_guarded_runtime_benchmark".to_string(),
+            ],
+            tenant_scopes: vec![
+                "organization".to_string(),
+                "project".to_string(),
+                "workflow".to_string(),
+            ],
+        }],
+        capabilities: vec![capability],
+        workflows: vec![workflow_extension("multimodal_runtime_benchmark", "runtime")],
+        runtime_contracts: vec![runtime_benchmark],
+        views: vec![AddonView {
+            id: "multimodal.benchmark_center".to_string(),
+            title: "Multimodal Benchmark Center".to_string(),
+            surface: "ops_console".to_string(),
+            view_type: "workbench".to_string(),
+            component: "forge.ops.multimodal_benchmark_center".to_string(),
+            route: "/ops/multimodal-benchmark".to_string(),
+            layout: AddonViewLayout {
+                zone: "main".to_string(),
+                order: 35,
+                width: "full".to_string(),
+                height: "auto".to_string(),
+                density: "dense".to_string(),
+            },
+            data_bindings: vec![
+                AddonViewDataBinding {
+                    id: "multimodal_readiness".to_string(),
+                    source: "forge.multimodal.readiness".to_string(),
+                    query: "runtime.model_readiness".to_string(),
+                    scope: "project".to_string(),
+                    refresh_seconds: 10,
+                    required_capability: CAP_MULTIMODAL_RUNTIME.to_string(),
+                },
+                AddonViewDataBinding {
+                    id: "multimodal_guard".to_string(),
+                    source: "forge.multimodal.guard".to_string(),
+                    query: "runtime.guard_matrix".to_string(),
+                    scope: "workflow".to_string(),
+                    refresh_seconds: 10,
+                    required_capability: CAP_MULTIMODAL_RUNTIME.to_string(),
+                },
+            ],
+            actions: vec![
+                AddonViewAction {
+                    id: "multimodal.readiness".to_string(),
+                    label: "Inspect readiness".to_string(),
+                    description:
+                        "Inspect local multimodal runtime/model readiness without executing models."
+                            .to_string(),
+                    palette_group: "multimodal".to_string(),
+                    source_panel: "multimodal_benchmark_center".to_string(),
+                    action_type: "command".to_string(),
+                    target: "forge multimodal readiness".to_string(),
+                    method: "CLI".to_string(),
+                    permission: "multimodal.runtime_benchmark".to_string(),
+                    risk_level: "low".to_string(),
+                    mutates_workflow: false,
+                    command_template: vec![
+                        "multimodal".to_string(),
+                        "readiness".to_string(),
+                        "--project-root".to_string(),
+                        "<project-root>".to_string(),
+                        "--output".to_string(),
+                        "json".to_string(),
+                    ],
+                    keywords: vec![
+                        "multimodal".to_string(),
+                        "readiness".to_string(),
+                        "model".to_string(),
+                    ],
+                    payload_schema: vec!["project_root".to_string()],
+                    ..AddonViewAction::default()
+                },
+                AddonViewAction {
+                    id: "multimodal.runtime_benchmark".to_string(),
+                    label: "Run guarded benchmark".to_string(),
+                    description:
+                        "Record guarded deterministic multimodal runtime evidence after opt-in and model guard approval."
+                            .to_string(),
+                    palette_group: "multimodal".to_string(),
+                    source_panel: "multimodal_benchmark_center".to_string(),
+                    action_type: "command".to_string(),
+                    target: "forge multimodal runtime-benchmark".to_string(),
+                    method: "CLI".to_string(),
+                    permission: "multimodal.runtime_benchmark".to_string(),
+                    requires_confirmation: true,
+                    risk_level: "medium".to_string(),
+                    mutates_workflow: false,
+                    command_template: vec![
+                        "multimodal".to_string(),
+                        "runtime-benchmark".to_string(),
+                        "--project-root".to_string(),
+                        "<project-root>".to_string(),
+                        "--capability".to_string(),
+                        "<capability-id>".to_string(),
+                        "--fixture".to_string(),
+                        "<fixture-id>".to_string(),
+                        "--approved-by".to_string(),
+                        "<operator>".to_string(),
+                        "--confirm-runtime-execution".to_string(),
+                        "--allow-model".to_string(),
+                        "--output".to_string(),
+                        "json".to_string(),
+                    ],
+                    keywords: vec![
+                        "multimodal".to_string(),
+                        "benchmark".to_string(),
+                        "runtime".to_string(),
+                        "guard".to_string(),
+                    ],
+                    payload_schema: vec![
+                        "project_root".to_string(),
+                        "capability_id".to_string(),
+                        "fixture_id".to_string(),
+                        "approved_by".to_string(),
+                    ],
+                },
+            ],
+            permissions: vec!["multimodal.runtime_benchmark".to_string()],
+            props,
+        }],
+        artifact_types: vec![
+            artifact_type("multimodal_runtime_benchmark"),
+            artifact_type("multimodal_guard_receipt"),
+            artifact_type("multimodal_readiness_report"),
+        ],
+        event_types: vec![
+            event_type("multimodal.runtime_benchmark_recorded", "local"),
+            event_type("multimodal.guard_evaluated", "local"),
+        ],
+        event_adapters: Vec::new(),
+        context_providers: Vec::new(),
+        memory_providers: Vec::new(),
+        integrations: Vec::new(),
+        compatibility: AddonCompatibility::default(),
+        metadata: BTreeMap::from([(
+            "core_boundary".to_string(),
+            "multimodal-specific Addon; Core runtime adapter remains guarded builtin compatibility"
                 .to_string(),
         )]),
     }

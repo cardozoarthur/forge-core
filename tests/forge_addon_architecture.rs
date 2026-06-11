@@ -812,6 +812,66 @@ fn addons_catalog_exposes_core_kernel_and_first_party_addons() {
                     .unwrap()
                     .contains(&serde_json::json!("source_code.patch"))
         ));
+    let multimodal = json["addons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|addon| addon["id"] == "forge.addon.multimodal")
+        .expect("multimodal runtime must be declared as an Addon, not hidden in Core");
+    assert!(multimodal["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability["id"] == "multimodal_runtime"
+            && capability["domains"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("multimodal"))
+            && capability["view_ids"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("multimodal.benchmark_center"))));
+    assert!(multimodal["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |permission| permission["id"] == "multimodal.runtime_benchmark"
+                && permission["risk"] == "medium"
+                && permission["actions"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!(
+                        "multimodal:run_guarded_runtime_benchmark"
+                    ))
+        ));
+    assert!(multimodal["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|view| view["id"] == "multimodal.benchmark_center"
+            && view["surface"] == "ops_console"
+            && view["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|action| action["id"] == "multimodal.runtime_benchmark"
+                    && action["permission"] == "multimodal.runtime_benchmark"
+                    && action["requires_confirmation"] == true)));
+    assert!(multimodal["runtime_contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |contract| contract["id"] == "multimodal_runtime_benchmark.executor"
+                && contract["capability_id"] == "multimodal_runtime"
+                && contract["runtime"] == "forge_core_builtin"
+                && contract["entrypoint"] == "forge.multimodal.runtime_benchmark"
+                && contract["permissions"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("multimodal.runtime_benchmark"))
+        ));
 }
 
 #[test]
@@ -1164,6 +1224,57 @@ fn software_patch_goals_resolve_through_first_party_addon_capability() {
             |contract| contract["id"] == "source_code_patch_lifecycle.executor"
                 && contract["source_addon"] == "forge.addon.software_development"
                 && contract["entrypoint"] == "forge.patch.lifecycle"
+        ));
+}
+
+#[test]
+fn multimodal_goals_resolve_through_first_party_addon_capability() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "resolve",
+            "--goal",
+            "Rodar benchmark multimodal de modelo local para imagem e áudio com guard runtime",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.capability_resolution.v1");
+    assert_eq!(json["status"], "resolved");
+    assert!(json["required_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability["id"] == "multimodal_runtime"
+            && capability["source_addon"] == "forge.addon.multimodal"
+            && capability["matched_keywords"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("benchmark multimodal"))));
+    assert!(json["active_addons"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("forge.addon.multimodal")));
+    assert!(json["runtime_contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |contract| contract["id"] == "multimodal_runtime_benchmark.executor"
+                && contract["source_addon"] == "forge.addon.multimodal"
+                && contract["entrypoint"] == "forge.multimodal.runtime_benchmark"
+                && contract["permission_gate"]["status"] == "allowed"
         ));
 }
 

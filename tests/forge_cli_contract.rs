@@ -3640,6 +3640,10 @@ fn milestone_boundary_document_matches_validated_export_demo_runtime_state() {
         "the visible 0.5 milestone boundary should point to explicit multimodal feature-flag config"
     );
     assert!(
+        docs.contains("forge.addon.multimodal"),
+        "the visible 0.5 milestone boundary should state that multimodal is Addon-owned"
+    );
+    assert!(
         docs.contains("forge milestone cli-demo"),
         "the visible 0.5 milestone boundary should point to replacement-grade CLI demo evidence"
     );
@@ -3683,6 +3687,14 @@ fn packaged_skill_mentions_export_demo_agent_surface() {
 
 #[test]
 fn packaged_skill_mentions_experimental_multimodal_agent_surface() {
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.addon.multimodal"),
+        "the packaged Forge skill should identify multimodal as an Addon-owned capability"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("multimodal_runtime"),
+        "the packaged Forge skill should teach agents to resolve multimodal through the Addon capability"
+    );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge multimodal status"),
         "the packaged Forge skill should teach agents how to inspect experimental multimodal status"
