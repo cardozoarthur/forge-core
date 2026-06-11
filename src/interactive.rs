@@ -1,7 +1,7 @@
 use crate::addon::{default_addon_dirs, list_addon_views, load_addon_catalog_from_store};
 use crate::checkpoint::TaskCheckpoint;
 use crate::cost::build_cost_ledger;
-use crate::event::build_global_event_timeline;
+use crate::event::{build_global_event_timeline, GlobalEventTimelineReport, WorkflowEventEnvelope};
 use crate::executor::load_executors;
 use crate::graph::{AtomicTask, ExecutorKind, TaskStatus};
 use crate::harness::{
@@ -35,6 +35,7 @@ const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_boar
 const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
 const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
 const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
+const INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION: &str = "forge.interactive.structured_logs.v1";
 const SLASH_COMMANDS_SCHEMA_VERSION: &str = "forge.interactive.slash_commands.v1";
 const INTERACTIVE_ROUTE_SCHEMA_VERSION: &str = "forge.interactive.route.v1";
 
@@ -82,6 +83,7 @@ pub struct InteractiveDashboard {
     pub task_board_panel: InteractiveTaskBoardPanel,
     pub schedule_panel: InteractiveSchedulePanel,
     pub event_panel: InteractiveEventPanel,
+    pub structured_logs_panel: InteractiveStructuredLogsPanel,
     pub cost_panel: InteractiveCostPanel,
     pub context_memory_panel: InteractiveContextMemoryPanel,
     pub digital_twin_panel: OpsOperationalDigitalTwin,
@@ -310,6 +312,33 @@ pub struct InteractiveEventPanel {
     pub total_event_count: usize,
     pub visible_event_count: usize,
     pub latest_events: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveStructuredLogsPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub total_event_count: usize,
+    pub log_count: usize,
+    pub next_cursor: Option<i64>,
+    pub has_more: bool,
+    pub logs: Vec<InteractiveStructuredLogEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveStructuredLogEntry {
+    pub event_id: String,
+    pub store_sequence: i64,
+    pub workflow_id: String,
+    pub kind: String,
+    pub category: String,
+    pub severity: String,
+    pub origin: String,
+    pub source: String,
+    pub occurred_at: String,
+    pub correlation: serde_json::Value,
+    pub observability: serde_json::Value,
+    pub payload_preview: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -611,25 +640,27 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
     let task_board_panel = build_task_board_panel(store, &workflows.workflows)?;
     let modifier_lane = load_modifier_lane(store)?;
     let digital_twin_panel = build_operational_digital_twin(store, &modifier_lane)?;
-    let event_panel = build_global_event_timeline(store, None, None, None, None, Some(5), None)
-        .ok()
-        .map(|timeline| InteractiveEventPanel {
-            status: timeline.status,
-            total_event_count: timeline.total_event_count,
-            visible_event_count: timeline.event_count,
-            latest_events: timeline
-                .events
-                .iter()
-                .rev()
-                .take(5)
-                .map(|event| format!("{} {} {}", event.occurred_at, event.workflow_id, event.kind))
-                .collect(),
-        })
+    let timeline = build_global_event_timeline(store, None, None, None, None, Some(20), None).ok();
+    let event_panel = timeline
+        .as_ref()
+        .map(build_interactive_event_panel)
         .unwrap_or_else(|| InteractiveEventPanel {
             status: "event_timeline_unavailable".to_string(),
             total_event_count: 0,
             visible_event_count: 0,
             latest_events: Vec::new(),
+        });
+    let structured_logs_panel = timeline
+        .as_ref()
+        .map(build_structured_logs_panel)
+        .unwrap_or_else(|| InteractiveStructuredLogsPanel {
+            schema_version: INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION.to_string(),
+            status: "structured_logs_unavailable".to_string(),
+            total_event_count: 0,
+            log_count: 0,
+            next_cursor: None,
+            has_more: false,
+            logs: Vec::new(),
         });
     let cost_panel = build_cost_ledger(store, None, None, None, None)
         .ok()
@@ -727,6 +758,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             task_board_panel,
             schedule_panel,
             event_panel,
+            structured_logs_panel,
             cost_panel,
             context_memory_panel,
             digital_twin_panel,
@@ -992,6 +1024,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     } else {
         d.event_panel.latest_events.join(" | ")
     };
+    let structured_logs = render_structured_log_summary(&d.structured_logs_panel);
     let addon_renderer_families = if d.addon_renderer_panel.families.is_empty() {
         "none".to_string()
     } else {
@@ -1030,6 +1063,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Task board: {task_board_status}; workflows {task_board_workflows}, tasks {task_board_tasks}, ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, checkpoints {task_board_checkpoints}, artifacts {task_board_artifacts}; lanes {task_board_lanes}\n\
          Schedule panel: {schedule_status}; due {schedule_due}, runnable {schedule_runnable}, cron {schedule_cron}, wait_until {schedule_wait_until}, next {schedule_next}\n\
          Event timeline: {event_status}; visible {event_visible}/{event_total}; latest {latest_events}\n\
+         Structured logs: {structured_logs_status}; logs {structured_logs_count}/{structured_logs_total}, next cursor {structured_logs_next_cursor}, has more {structured_logs_has_more}; {structured_logs}\n\
          Cost panel: {cost_status}; workflows {cost_workflows}, nodes {cost_nodes}, estimated ${cost_estimated:.4}, observed ${cost_observed:.4}\n\
          Context/memory panel: ready {context_ready}, blocked {context_blocked}, budget pressure {context_budget_pressure}, memory {memory_policy_status}\n\
          Addon UI renderers: {addon_renderer_status}; safe {addon_safe_renderers}/{addon_renderers}, families {addon_renderer_family_count} ({addon_renderer_families})\n\
@@ -1118,6 +1152,16 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         event_visible = d.event_panel.visible_event_count,
         event_total = d.event_panel.total_event_count,
         latest_events = latest_events,
+        structured_logs_status = d.structured_logs_panel.status,
+        structured_logs_count = d.structured_logs_panel.log_count,
+        structured_logs_total = d.structured_logs_panel.total_event_count,
+        structured_logs_next_cursor = d
+            .structured_logs_panel
+            .next_cursor
+            .map(|cursor| cursor.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        structured_logs_has_more = d.structured_logs_panel.has_more,
+        structured_logs = structured_logs,
         cost_status = d.cost_panel.status,
         cost_workflows = d.cost_panel.workflow_count,
         cost_nodes = d.cost_panel.node_count,
@@ -1152,6 +1196,133 @@ pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> Strin
         artifacts = panel.artifact_count,
         lanes = render_task_board_lane_summary(panel),
     )
+}
+
+fn build_interactive_event_panel(timeline: &GlobalEventTimelineReport) -> InteractiveEventPanel {
+    InteractiveEventPanel {
+        status: timeline.status.clone(),
+        total_event_count: timeline.total_event_count,
+        visible_event_count: timeline.event_count,
+        latest_events: timeline
+            .events
+            .iter()
+            .rev()
+            .take(5)
+            .map(|event| format!("{} {} {}", event.occurred_at, event.workflow_id, event.kind))
+            .collect(),
+    }
+}
+
+fn build_structured_logs_panel(
+    timeline: &GlobalEventTimelineReport,
+) -> InteractiveStructuredLogsPanel {
+    let logs = timeline
+        .events
+        .iter()
+        .rev()
+        .take(12)
+        .map(structured_log_entry)
+        .collect::<Vec<_>>();
+
+    InteractiveStructuredLogsPanel {
+        schema_version: INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION.to_string(),
+        status: "structured_logs_ready".to_string(),
+        total_event_count: timeline.total_event_count,
+        log_count: logs.len(),
+        next_cursor: timeline.page.next_cursor,
+        has_more: timeline.page.has_more,
+        logs,
+    }
+}
+
+fn structured_log_entry(event: &WorkflowEventEnvelope) -> InteractiveStructuredLogEntry {
+    InteractiveStructuredLogEntry {
+        event_id: event.event_id.clone(),
+        store_sequence: event.store_sequence,
+        workflow_id: event.workflow_id.clone(),
+        kind: event.kind.clone(),
+        category: event.category.clone(),
+        severity: event.severity.clone(),
+        origin: event.origin.clone(),
+        source: event.source.clone(),
+        occurred_at: event.occurred_at.clone(),
+        correlation: structured_log_correlation(event),
+        observability: serde_json::to_value(&event.observability).unwrap_or_default(),
+        payload_preview: truncate_display(&event.data.to_string(), 240),
+    }
+}
+
+fn structured_log_correlation(event: &WorkflowEventEnvelope) -> serde_json::Value {
+    let mut correlation = serde_json::to_value(&event.correlation).unwrap_or_default();
+    if let serde_json::Value::Object(map) = &mut correlation {
+        ensure_correlation_field(
+            map,
+            "task_id",
+            structured_log_nested_string(
+                &event.data,
+                &["task_id", "task"],
+                &[
+                    ("checkpoint", &["task_id", "task"]),
+                    ("interaction", &["task_id", "task"]),
+                    ("task", &["id", "task_id"]),
+                ],
+            ),
+        );
+        ensure_correlation_field(
+            map,
+            "artifact_id",
+            structured_log_nested_string(
+                &event.data,
+                &["artifact_id", "artifact"],
+                &[("artifact", &["id", "artifact_id"])],
+            ),
+        );
+        ensure_correlation_field(
+            map,
+            "interaction_id",
+            structured_log_nested_string(
+                &event.data,
+                &["interaction_id"],
+                &[("interaction", &["id", "interaction_id"])],
+            ),
+        );
+    }
+    correlation
+}
+
+fn ensure_correlation_field(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: Option<String>,
+) {
+    let has_value = map
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if !has_value {
+        if let Some(value) = value {
+            map.insert(key.to_string(), serde_json::Value::String(value));
+        }
+    }
+}
+
+fn structured_log_nested_string(
+    data: &serde_json::Value,
+    top_level_keys: &[&str],
+    nested_keys: &[(&str, &[&str])],
+) -> Option<String> {
+    structured_log_string(data, top_level_keys).or_else(|| {
+        nested_keys.iter().find_map(|(container, keys)| {
+            data.get(*container)
+                .and_then(|value| structured_log_string(value, keys))
+        })
+    })
+}
+
+fn structured_log_string(data: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| data.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::to_string)
 }
 
 fn build_navigation_panel() -> InteractiveNavigationPanel {
@@ -1342,6 +1513,15 @@ fn build_ui_composition_panel(
                     vec!["forge events timeline --output json".to_string()],
                 ),
                 core_ui_widget(
+                    "structured_logs_panel",
+                    "Structured logs",
+                    "structured_logs_panel",
+                    "log_renderer",
+                    "standard",
+                    "half",
+                    vec!["forge interactive home --output json".to_string()],
+                ),
+                core_ui_widget(
                     "cost_panel",
                     "Cost panel",
                     "cost_panel",
@@ -1489,6 +1669,25 @@ fn render_navigation_keybindings(panel: &InteractiveNavigationPanel) -> String {
         .map(|binding| format!("{}={}", binding.key, binding.action))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn render_structured_log_summary(panel: &InteractiveStructuredLogsPanel) -> String {
+    if panel.logs.is_empty() {
+        return "none".to_string();
+    }
+
+    panel
+        .logs
+        .iter()
+        .take(5)
+        .map(|entry| {
+            format!(
+                "#{} {} {} {} {}",
+                entry.store_sequence, entry.severity, entry.workflow_id, entry.kind, entry.origin
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 fn render_ui_composition_region_summary(panel: &InteractiveUiCompositionPanel) -> String {

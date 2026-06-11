@@ -35310,6 +35310,7 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     assert!(text.contains("Task board"));
     assert!(text.contains("Schedule panel"));
     assert!(text.contains("Event timeline"));
+    assert!(text.contains("Structured logs"));
     assert!(text.contains("Cost panel"));
     assert!(text.contains("Context/memory panel"));
     assert!(text.contains("Addon UI renderers"));
@@ -35614,6 +35615,16 @@ fn interactive_home_exposes_task_board_handoffs_checkpoints_and_artifacts() {
         .as_array()
         .unwrap()
         .iter()
+        .any(|region| region["region_id"] == "observability"
+            && region["widgets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|widget| widget["widget_id"] == "structured_logs_panel")));
+    assert!(ui_composition["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|region| region["region_id"] == "addons"
             && region["widgets"]
                 .as_array()
@@ -35624,6 +35635,32 @@ fn interactive_home_exposes_task_board_handoffs_checkpoints_and_artifacts() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("home")));
+    let structured_logs = &home["dashboard"]["structured_logs_panel"];
+    assert_eq!(
+        structured_logs["schema_version"],
+        "forge.interactive.structured_logs.v1"
+    );
+    assert_eq!(structured_logs["status"], "structured_logs_ready");
+    assert!(structured_logs["log_count"].as_u64().unwrap() >= 1);
+    assert!(structured_logs["total_event_count"].as_u64().unwrap() >= 1);
+    let checkpoint_log = structured_logs["logs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "task_checkpoint_recorded")
+        .expect("structured logs should expose checkpoint events without string parsing");
+    assert_eq!(checkpoint_log["workflow_id"], workflow_id);
+    assert!(checkpoint_log["store_sequence"].as_i64().unwrap() >= 1);
+    assert!(checkpoint_log["occurred_at"].is_string());
+    assert!(checkpoint_log["category"].is_string());
+    assert!(checkpoint_log["severity"].is_string());
+    assert!(checkpoint_log["origin"].is_string());
+    assert!(checkpoint_log["source"].is_string());
+    assert_eq!(
+        checkpoint_log["correlation"]["task_id"], checkpoint_task_id,
+        "structured logs should carry task correlation for TUI drill-down"
+    );
+    assert!(checkpoint_log["payload_preview"].is_string());
     assert_eq!(task_board["status"], "task_board_ready");
     assert!(task_board["workflow_count"].as_u64().unwrap() >= 1);
     assert!(task_board["task_count"].as_u64().unwrap() >= 1);
@@ -36592,6 +36629,14 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         home_json["result"]["dashboard"]["event_panel"]["status"].is_string(),
         "interactive home should expose global event timeline state for agent dashboards"
     );
+    assert_eq!(
+        home_json["result"]["dashboard"]["structured_logs_panel"]["schema_version"],
+        "forge.interactive.structured_logs.v1"
+    );
+    assert!(
+        home_json["result"]["dashboard"]["structured_logs_panel"]["logs"].is_array(),
+        "interactive home should expose structured log entries for TUI/web dashboards"
+    );
     assert!(
         home_json["result"]["dashboard"]["cost_panel"]["status"].is_string(),
         "interactive home should expose cost ledger state for agent dashboards"
@@ -36698,6 +36743,10 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("ui_composition_panel"),
         "the packaged Forge skill should teach agents to read the UI composition panel"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("structured_logs_panel"),
+        "the packaged Forge skill should teach agents to read structured logs"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.route"),
