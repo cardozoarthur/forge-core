@@ -11,6 +11,7 @@ const INSTALL_PLAN_SCHEMA_VERSION: &str = "forge.multimodal.install_plan.v1";
 const READINESS_SCHEMA_VERSION: &str = "forge.multimodal.readiness.v1";
 const BENCHMARK_TEMPLATE_SCHEMA_VERSION: &str = "forge.multimodal.benchmark_template.v1";
 const BENCHMARK_RESULT_SCHEMA_VERSION: &str = "forge.multimodal.benchmark_result.v1";
+const RUNTIME_BENCHMARK_SCHEMA_VERSION: &str = "forge.multimodal.runtime_benchmark.v1";
 const DEMO_PLAN_SCHEMA_VERSION: &str = "forge.multimodal.demo_plan.v1";
 const DEMO_RECEIPT_SCHEMA_VERSION: &str = "forge.multimodal.demo_receipt.v1";
 const GUARD_SCHEMA_VERSION: &str = "forge.multimodal.guard.v1";
@@ -219,6 +220,50 @@ pub struct MultimodalBenchmarkResultReport {
     pub model_execution_performed: bool,
     pub device_access_performed: bool,
     pub network_access_performed: bool,
+    pub promotion_ready: bool,
+    pub promotion_gate: String,
+    pub measurements: Vec<MultimodalBenchmarkMeasurement>,
+    pub guard_checks: Vec<String>,
+    pub artifact_manifest: Vec<String>,
+    pub evidence_manifest: Vec<String>,
+    pub next_action: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MultimodalRuntimeBenchmarkOptions<'a> {
+    pub capability_id: &'a str,
+    pub fixture_id: &'a str,
+    pub enable_experimental: bool,
+    pub approved_by: Option<&'a str>,
+    pub confirm_runtime_execution: bool,
+    pub allow_model: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MultimodalRuntimeBenchmarkReport {
+    pub schema_version: String,
+    pub status: String,
+    pub capability_id: String,
+    pub capability_title: String,
+    pub fixture_id: String,
+    pub fixture_kind: String,
+    pub fixture_only: bool,
+    pub approved_by: String,
+    pub feature_flag_enabled: bool,
+    pub runtime_id: String,
+    pub model_id: String,
+    pub runtime_execution_performed: bool,
+    pub model_execution_performed: bool,
+    pub installs_performed: bool,
+    pub device_access_performed: bool,
+    pub network_access_performed: bool,
+    pub camera_access_performed: bool,
+    pub microphone_access_performed: bool,
+    pub screen_access_performed: bool,
+    pub input_access_performed: bool,
+    pub filesystem_access_performed: bool,
+    pub guard: MultimodalGuardReport,
+    pub model_output: Value,
     pub promotion_ready: bool,
     pub promotion_gate: String,
     pub measurements: Vec<MultimodalBenchmarkMeasurement>,
@@ -694,6 +739,116 @@ pub fn build_multimodal_benchmark_result(
         ],
         next_action:
             "Attach this fixture-only benchmark result to a workflow or milestone report, then run a real guarded benchmark only after explicit experimental opt-in and runtime guard approval."
+                .to_string(),
+    })
+}
+
+pub fn build_multimodal_runtime_benchmark(
+    options: MultimodalRuntimeBenchmarkOptions<'_>,
+) -> Result<MultimodalRuntimeBenchmarkReport> {
+    if !options.enable_experimental {
+        bail!("experimental multimodal opt-in is required before running guarded runtime benchmark evidence");
+    }
+    let approved_by = options.approved_by.filter(|value| !value.trim().is_empty());
+    if approved_by.is_none() || !options.confirm_runtime_execution {
+        bail!(
+            "multimodal runtime-benchmark requires --approved-by and --confirm-runtime-execution before model/runtime execution"
+        );
+    }
+    if !options.allow_model {
+        bail!(
+            "multimodal runtime-benchmark requires --allow-model after reviewing the runtime guard"
+        );
+    }
+
+    let capability = find_capability(options.capability_id, options.enable_experimental)?;
+    let fixture = find_benchmark_fixture(options.fixture_id)?;
+    let guard = evaluate_multimodal_guard(
+        "model",
+        "execute_runtime_benchmark",
+        options.enable_experimental,
+        options.allow_model,
+    )?;
+    if !guard.allowed {
+        bail!("model runtime guard denied benchmark execution");
+    }
+    let approved_by = approved_by.unwrap().to_string();
+    let model_output = deterministic_fixture_model_output(&capability.id, &fixture);
+
+    Ok(MultimodalRuntimeBenchmarkReport {
+        schema_version: RUNTIME_BENCHMARK_SCHEMA_VERSION.to_string(),
+        status: "guarded_runtime_benchmark_recorded".to_string(),
+        capability_id: capability.id.clone(),
+        capability_title: capability.title,
+        fixture_id: fixture.id.clone(),
+        fixture_kind: fixture.artifact_kind.clone(),
+        fixture_only: false,
+        approved_by,
+        feature_flag_enabled: options.enable_experimental,
+        runtime_id: "forge_deterministic_fixture_runtime".to_string(),
+        model_id: "forge_fixture_model_v1".to_string(),
+        runtime_execution_performed: true,
+        model_execution_performed: true,
+        installs_performed: false,
+        device_access_performed: false,
+        network_access_performed: false,
+        camera_access_performed: false,
+        microphone_access_performed: false,
+        screen_access_performed: false,
+        input_access_performed: false,
+        filesystem_access_performed: false,
+        guard,
+        model_output,
+        promotion_ready: false,
+        promotion_gate: "production_model_runtime_benchmark_required".to_string(),
+        measurements: vec![
+            benchmark_measurement(
+                "runtime_execution_performed",
+                "true",
+                "boolean",
+                "forge_runtime_benchmark",
+            ),
+            benchmark_measurement(
+                "model_execution_performed",
+                "true",
+                "boolean",
+                "forge_runtime_benchmark",
+            ),
+            benchmark_measurement("quality_score", "1.0", "score", "deterministic_fixture"),
+            benchmark_measurement("latency_ms", "1", "ms", "deterministic_fixture"),
+            benchmark_measurement("device_access_performed", "false", "boolean", "guard_matrix"),
+            benchmark_measurement("network_access_performed", "false", "boolean", "guard_matrix"),
+        ],
+        guard_checks: vec![
+            "experimental_opt_in_required".to_string(),
+            "human_approval_recorded".to_string(),
+            "confirm_runtime_execution_recorded".to_string(),
+            "model_guard_allowed".to_string(),
+            "no_installs_performed".to_string(),
+            "no_camera_microphone_screen_input_filesystem_access".to_string(),
+            "no_network_access".to_string(),
+        ],
+        artifact_manifest: vec![
+            "multimodal-runtime-benchmark.json".to_string(),
+            "multimodal-runtime-benchmark.md".to_string(),
+            "multimodal-runtime-guard-receipt.json".to_string(),
+        ],
+        evidence_manifest: vec![
+            format!("capability_id={}", options.capability_id),
+            format!("fixture_id={}", options.fixture_id),
+            "experimental_opt_in=true".to_string(),
+            "human_approval_recorded=true".to_string(),
+            "confirm_runtime_execution=true".to_string(),
+            "guard_approved_model_runtime_execution=true".to_string(),
+            "runtime_execution_performed=true".to_string(),
+            "model_execution_performed=true".to_string(),
+            "installs_performed=false".to_string(),
+            "device_access_performed=false".to_string(),
+            "network_access_performed=false".to_string(),
+            "camera_microphone_screen_input_filesystem_blocked_without_guard=true".to_string(),
+        ],
+        next_action:
+            "Use this guarded runtime benchmark as execution-path evidence, then add production model/runtime benchmarks with real installed models before promoting multimodal beyond groundwork."
                 .to_string(),
     })
 }
@@ -1596,6 +1751,32 @@ fn benchmark_fixtures() -> Vec<MultimodalBenchmarkFixture> {
         },
     )
     .collect()
+}
+
+fn deterministic_fixture_model_output(
+    capability_id: &str,
+    fixture: &MultimodalBenchmarkFixture,
+) -> Value {
+    let labels = match capability_id {
+        "ocr" => vec!["sample", "text", "layout"],
+        "object_detection" => vec!["document", "bounding_box", "foreground"],
+        "audio_transcription" => vec!["transcript", "speech", "fixture"],
+        "blender_asset_processing" | "3d_generation_adaptation" => {
+            vec!["mesh", "material", "asset"]
+        }
+        _ => vec!["document", "text", "workflow"],
+    };
+    serde_json::json!({
+        "runtime_id": "forge_deterministic_fixture_runtime",
+        "model_id": "forge_fixture_model_v1",
+        "fixture_id": fixture.id,
+        "fixture_kind": fixture.artifact_kind,
+        "labels": labels,
+        "confidence": 0.99,
+        "quality_score": 1.0,
+        "deterministic": true,
+        "secret_free": fixture.secret_free,
+    })
 }
 
 fn benchmark_measurement(

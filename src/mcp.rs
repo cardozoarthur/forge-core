@@ -104,9 +104,10 @@ use crate::milestone::{
 use crate::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
     build_multimodal_demo_plan, build_multimodal_demo_receipt, build_multimodal_install_plan,
-    build_multimodal_readiness, build_multimodal_status_with_feature_flag,
-    evaluate_multimodal_guard, resolve_multimodal_feature_flag, MultimodalBenchmarkResultOptions,
-    MultimodalDemoReceiptOptions, MultimodalReadinessOptions,
+    build_multimodal_readiness, build_multimodal_runtime_benchmark,
+    build_multimodal_status_with_feature_flag, evaluate_multimodal_guard,
+    resolve_multimodal_feature_flag, MultimodalBenchmarkResultOptions,
+    MultimodalDemoReceiptOptions, MultimodalReadinessOptions, MultimodalRuntimeBenchmarkOptions,
 };
 use crate::ops::{
     build_ops_snapshot_with_addon_dirs_and_project, record_addon_renderer_client_event,
@@ -1684,6 +1685,19 @@ struct MultimodalBenchmarkResultInput {
     project_root: Option<String>,
     approved_by: Option<String>,
     confirm_fixture_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultimodalRuntimeBenchmarkInput {
+    capability: Option<String>,
+    capability_id: Option<String>,
+    fixture: Option<String>,
+    fixture_id: Option<String>,
+    enable_experimental: Option<bool>,
+    project_root: Option<String>,
+    approved_by: Option<String>,
+    confirm_runtime_execution: Option<bool>,
+    allow_model: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5799,6 +5813,46 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.multimodal.runtime_benchmark",
+                "Run Guarded Multimodal Runtime Benchmark",
+                "Run an approval-gated, guard-approved deterministic local fixture runtime benchmark after experimental opt-in. This performs no installs, device access, filesystem access or network access.",
+                object_schema(
+                    &[
+                        ("capability_id", "string", "capability id from forge.multimodal.status"),
+                        ("fixture_id", "string", "fixture id from forge.multimodal.benchmark_template"),
+                        ("approved_by", "string", "required human/operator approval identity"),
+                        ("confirm_runtime_execution", "boolean", "must be true to confirm runtime execution is approved"),
+                        ("allow_model", "boolean", "must be true after reviewing the model runtime guard"),
+                        ("enable_experimental", "boolean", "optional explicit experimental flag"),
+                        ("project_root", "string", "optional project root containing .forge/multimodal.json"),
+                    ],
+                    &[
+                        "capability_id",
+                        "fixture_id",
+                        "approved_by",
+                        "confirm_runtime_execution",
+                        "allow_model",
+                    ],
+                ),
+                "forge.multimodal.runtime_benchmark.v1",
+                &[
+                    "forge",
+                    "multimodal",
+                    "runtime-benchmark",
+                    "--capability",
+                    "<capability-id>",
+                    "--fixture",
+                    "<fixture-id>",
+                    "--approved-by",
+                    "<operator>",
+                    "--confirm-runtime-execution",
+                    "--allow-model",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.multimodal.demo_plan",
                 "Generate Multimodal Demo Plan",
                 "Generate a guarded demo plan for local image recognition, audio transcription/synthesis or Blender/avatar preparation. This tool performs no installs, model execution, device access or automation.",
@@ -8751,6 +8805,31 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     enable_experimental: feature_flag.enabled,
                     approved_by: input.approved_by.as_deref(),
                     confirm_fixture_only: input.confirm_fixture_only.unwrap_or(false),
+                },
+            )?)?
+        }
+        "forge.multimodal.runtime_benchmark" => {
+            let input: MultimodalRuntimeBenchmarkInput = parse_input(input)?;
+            let feature_flag = resolve_multimodal_feature_flag(
+                input.enable_experimental.unwrap_or(false),
+                input.project_root.as_deref().map(std::path::Path::new),
+            );
+            let capability = input
+                .capability_id
+                .or(input.capability)
+                .ok_or_else(|| anyhow::anyhow!("capability_id is required"))?;
+            let fixture = input
+                .fixture_id
+                .or(input.fixture)
+                .ok_or_else(|| anyhow::anyhow!("fixture_id is required"))?;
+            serde_json::to_value(build_multimodal_runtime_benchmark(
+                MultimodalRuntimeBenchmarkOptions {
+                    capability_id: &capability,
+                    fixture_id: &fixture,
+                    enable_experimental: feature_flag.enabled,
+                    approved_by: input.approved_by.as_deref(),
+                    confirm_runtime_execution: input.confirm_runtime_execution.unwrap_or(false),
+                    allow_model: input.allow_model.unwrap_or(false),
                 },
             )?)?
         }
