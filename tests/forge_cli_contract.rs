@@ -37003,15 +37003,23 @@ fn interactive_command_palette_surfaces_contextual_actions_for_replacement_cli()
         group["group_id"] == "patch"
             && group["entries"].as_array().unwrap().iter().any(|entry| {
                 entry["action_id"] == "patch.diff"
-                    && entry["source_panel"] == "patch_workbench_panel"
-                    && entry["mutates_workflow"] == false
-                    && entry["addon_contract"]["schema_version"]
-                        == "forge.interactive.patch_addon_contract.v1"
-                    && entry["addon_contract"]["source_addon"] == "forge.addon.software_development"
-                    && entry["addon_contract"]["capability_id"] == "source_code_patch_lifecycle"
-                    && entry["addon_contract"]["permission_id"] == "source_code.patch"
-                    && entry["addon_view_id"] == "software.patch_workbench"
-                    && entry["addon_view_action_id"] == "patch.diff"
+                && entry["title"] == "Inspect patch diff"
+                && entry["description"]
+                    == "Open read-only multi-file diff navigation from the Addon workbench action."
+                && entry["source_panel"] == "patch_workbench_panel"
+                && entry["mutates_workflow"] == false
+                && entry["risk_level"] == "low"
+                && entry["commands"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("diff"))
+                && entry["addon_contract"]["schema_version"]
+                    == "forge.interactive.patch_addon_contract.v1"
+                && entry["addon_contract"]["source_addon"] == "forge.addon.software_development"
+                && entry["addon_contract"]["capability_id"] == "source_code_patch_lifecycle"
+                && entry["addon_contract"]["permission_id"] == "source_code.patch"
+                && entry["addon_view_id"] == "software.patch_workbench"
+                && entry["addon_view_action_id"] == "patch.diff"
             })
     }));
     assert!(json["groups"].as_array().unwrap().iter().any(|group| {
@@ -37205,6 +37213,8 @@ fn interactive_autocomplete_suggests_slash_and_palette_actions_for_replacement_c
         .any(|suggestion| {
             suggestion["kind"] == "command_palette_action"
                 && suggestion["label"] == "patch.diff"
+                && suggestion["description"]
+                    == "Open read-only multi-file diff navigation from the Addon workbench action."
                 && suggestion["source_panel"] == "patch_workbench_panel"
                 && suggestion["addon_contract"]["source_addon"]
                     == "forge.addon.software_development"

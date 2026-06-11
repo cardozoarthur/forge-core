@@ -787,8 +787,17 @@ fn addons_catalog_exposes_core_kernel_and_first_party_addons() {
                 .unwrap()
                 .iter()
                 .any(|action| action["id"] == "patch.diff"
+                    && action["description"]
+                        == "Open read-only multi-file diff navigation from the Addon workbench action."
+                    && action["palette_group"] == "patch"
                     && action["permission"] == "source_code.patch"
-                    && action["requires_confirmation"] == false)));
+                    && action["risk_level"] == "low"
+                    && action["mutates_workflow"] == false
+                    && action["requires_confirmation"] == false
+                    && action["command_template"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!("diff")))));
     assert!(software_development["runtime_contracts"]
         .as_array()
         .unwrap()

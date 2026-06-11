@@ -1790,157 +1790,114 @@ fn addon_command_palette_entries(
 ) -> Result<Vec<InteractiveCommandPaletteEntry>> {
     let addon_dirs = default_addon_dirs();
     let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
-    Ok(patch_command_palette_entries(&catalog))
+    Ok(addon_view_command_palette_entries(&catalog))
 }
 
-fn patch_command_palette_entries(catalog: &AddonCatalog) -> Vec<InteractiveCommandPaletteEntry> {
-    let views = list_addon_views(
-        catalog,
-        Some("forge.addon.software_development"),
-        Some("tui"),
-        Some("enabled"),
-    );
+fn addon_view_command_palette_entries(
+    catalog: &AddonCatalog,
+) -> Vec<InteractiveCommandPaletteEntry> {
+    let views = list_addon_views(catalog, None, Some("tui"), Some("enabled"));
     views
         .views
         .iter()
-        .filter(|view| view.view.id == "software.patch_workbench")
         .flat_map(|view| {
             view.view
                 .actions
                 .iter()
-                .filter_map(|action| patch_command_palette_entry_for_action(view, action))
+                .filter_map(|action| addon_view_command_palette_entry(view, action))
         })
         .collect()
 }
 
-fn patch_command_palette_entry_for_action(
+fn addon_view_command_palette_entry(
     view: &AddonViewEntry,
     action: &AddonViewAction,
 ) -> Option<InteractiveCommandPaletteEntry> {
-    let template = patch_command_palette_template(&action.id)?;
-    let mut entry = command_palette_entry(
-        &action.id,
-        "patch",
-        template.title,
-        template.description,
-        "patch_workbench_panel",
-        None,
-        template.commands,
-        template.mutates_workflow,
-        action.requires_confirmation,
-        template.risk_level,
-        template.keywords,
-    );
-    entry.addon_contract = Some(patch_addon_contract());
-    entry.addon_view_id = Some(view.view.id.clone());
-    entry.addon_view_action_id = Some(action.id.clone());
-    Some(entry)
-}
-
-struct PatchCommandPaletteTemplate {
-    title: &'static str,
-    description: &'static str,
-    commands: &'static [&'static str],
-    mutates_workflow: bool,
-    risk_level: &'static str,
-    keywords: &'static [&'static str],
-}
-
-fn patch_command_palette_template(action_id: &str) -> Option<PatchCommandPaletteTemplate> {
-    match action_id {
-        "patch.plan" => Some(PatchCommandPaletteTemplate {
-            title: "Create patch plan",
-            description: "Create a bounded Forge patch plan artifact before file edits.",
-            commands: &[
-                "patch",
-                "plan",
-                "--workflow",
-                "<workflow-id>",
-                "--task",
-                "<task-id>",
-                "--intent",
-                "<intent>",
-                "--output",
-                "json",
-            ],
-            mutates_workflow: true,
-            risk_level: "medium",
-            keywords: &["patch", "plan", "artifact", "edit", "bounds"],
-        }),
-        "patch.diff" => Some(PatchCommandPaletteTemplate {
-            title: "Review patch diff",
-            description: "Open read-only multi-file diff navigation for the current bounded patch.",
-            commands: &[
-                "patch",
-                "diff",
-                "--workflow",
-                "<workflow-id>",
-                "--task",
-                "<task-id>",
-                "--output",
-                "json",
-            ],
-            mutates_workflow: false,
-            risk_level: "low",
-            keywords: &["patch", "diff", "review", "file", "hunk"],
-        }),
-        "patch.review" => Some(PatchCommandPaletteTemplate {
-            title: "Record patch review",
-            description: "Persist current diff/status/check evidence before an apply approval.",
-            commands: &[
-                "patch",
-                "review",
-                "--workflow",
-                "<workflow-id>",
-                "--task",
-                "<task-id>",
-                "--output",
-                "json",
-            ],
-            mutates_workflow: true,
-            risk_level: "medium",
-            keywords: &["patch", "review", "evidence", "status", "diff"],
-        }),
-        "patch.apply" => Some(PatchCommandPaletteTemplate {
-            title: "Record patch apply",
-            description:
-                "Record applied file snapshots and validation evidence after approved edits.",
-            commands: &[
-                "patch",
-                "apply",
-                "--workflow",
-                "<workflow-id>",
-                "--task",
-                "<task-id>",
-                "--output",
-                "json",
-            ],
-            mutates_workflow: true,
-            risk_level: "high",
-            keywords: &["patch", "apply", "approval", "validation", "snapshot"],
-        }),
-        "patch.restore" => Some(PatchCommandPaletteTemplate {
-            title: "Restore from approved patch rollback",
-            description: "Execute an explicitly approved patch restore path.",
-            commands: &[
-                "patch",
-                "restore",
-                "--workflow",
-                "<workflow-id>",
-                "--task",
-                "<task-id>",
-                "--confirm-restore",
-                "--approved-by",
-                "<operator>",
-                "--output",
-                "json",
-            ],
-            mutates_workflow: true,
-            risk_level: "high",
-            keywords: &["patch", "restore", "rollback", "approval", "file"],
-        }),
-        _ => None,
+    if action.action_type != "command" || action.method != "CLI" || action.palette_group.is_empty()
+    {
+        return None;
     }
+    let title = if action.label.is_empty() {
+        action.id.clone()
+    } else {
+        action.label.clone()
+    };
+    let description = if action.description.is_empty() {
+        format!("Run Addon action {} from {}.", action.id, view.view.id)
+    } else {
+        action.description.clone()
+    };
+    let source_panel = if action.source_panel.is_empty() {
+        format!("addon:{}", view.view.id)
+    } else {
+        action.source_panel.clone()
+    };
+    let risk_level = if action.risk_level.is_empty() {
+        if action.requires_confirmation {
+            "high".to_string()
+        } else if action.mutates_workflow {
+            "medium".to_string()
+        } else {
+            "low".to_string()
+        }
+    } else {
+        action.risk_level.clone()
+    };
+    let keywords = if action.keywords.is_empty() {
+        vec![
+            view.addon_id.clone(),
+            view.view.id.clone(),
+            action.id.clone(),
+            action.permission.clone(),
+        ]
+    } else {
+        action.keywords.clone()
+    };
+
+    Some(InteractiveCommandPaletteEntry {
+        action_id: action.id.clone(),
+        group_id: action.palette_group.clone(),
+        title,
+        description,
+        source_panel,
+        addon_contract: addon_action_contract(view, action),
+        addon_view_id: Some(view.view.id.clone()),
+        addon_view_action_id: Some(action.id.clone()),
+        workflow_id: None,
+        commands: addon_action_command_template(action),
+        mutates_workflow: action.mutates_workflow,
+        requires_approval: action.requires_confirmation,
+        risk_level,
+        keywords,
+    })
+}
+
+fn addon_action_contract(
+    view: &AddonViewEntry,
+    action: &AddonViewAction,
+) -> Option<InteractivePatchAddonContract> {
+    if view.addon_id == "forge.addon.software_development"
+        && action.permission == "source_code.patch"
+    {
+        Some(patch_addon_contract())
+    } else {
+        None
+    }
+}
+
+fn addon_action_command_template(action: &AddonViewAction) -> Vec<String> {
+    if !action.command_template.is_empty() {
+        return action.command_template.clone();
+    }
+    let mut parts = action
+        .target
+        .split_whitespace()
+        .map(|part| part.to_string())
+        .collect::<Vec<_>>();
+    if parts.first().map(|part| part == "forge").unwrap_or(false) {
+        parts.remove(0);
+    }
+    parts
 }
 
 fn workflow_command_palette_entries(

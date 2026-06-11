@@ -658,6 +658,12 @@ pub struct AddonViewAction {
     pub id: String,
     #[serde(default)]
     pub label: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub palette_group: String,
+    #[serde(default)]
+    pub source_panel: String,
     #[serde(
         default = "default_addon_view_action_type",
         rename = "type",
@@ -672,6 +678,14 @@ pub struct AddonViewAction {
     pub permission: String,
     #[serde(default)]
     pub requires_confirmation: bool,
+    #[serde(default)]
+    pub risk_level: String,
+    #[serde(default)]
+    pub mutates_workflow: bool,
+    #[serde(default)]
+    pub command_template: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
     #[serde(default)]
     pub payload_schema: Vec<String>,
 }
@@ -8882,6 +8896,7 @@ fn visual_workspace_addon() -> AddonManifest {
                 permission: "workflow:mutate".to_string(),
                 requires_confirmation: false,
                 payload_schema: vec!["workflow_id".to_string(), "kind".to_string()],
+                ..AddonViewAction::default()
             }],
             permissions: Vec::new(),
             props: BTreeMap::new(),
@@ -9056,68 +9071,116 @@ fn software_development_addon() -> AddonManifest {
                 required_capability: CAP_SOURCE_CODE_PATCH_LIFECYCLE.to_string(),
             }],
             actions: vec![
-                AddonViewAction {
-                    id: "patch.plan".to_string(),
-                    label: "Plan patch".to_string(),
-                    action_type: "command".to_string(),
-                    target: "forge patch plan".to_string(),
-                    method: "CLI".to_string(),
-                    permission: "source_code.patch".to_string(),
-                    requires_confirmation: false,
-                    payload_schema: vec![
-                        "workflow_id".to_string(),
-                        "task_id".to_string(),
-                        "target_paths".to_string(),
+                patch_workbench_action(
+                    "patch.plan",
+                    "Plan patch",
+                    "Create a bounded Forge patch plan artifact before file edits.",
+                    "forge patch plan",
+                    false,
+                    true,
+                    "medium",
+                    &[
+                        "patch",
+                        "plan",
+                        "--workflow",
+                        "<workflow-id>",
+                        "--task",
+                        "<task-id>",
+                        "--intent",
+                        "<intent>",
+                        "--output",
+                        "json",
                     ],
-                },
-                AddonViewAction {
-                    id: "patch.review".to_string(),
-                    label: "Review patch".to_string(),
-                    action_type: "command".to_string(),
-                    target: "forge patch review".to_string(),
-                    method: "CLI".to_string(),
-                    permission: "source_code.patch".to_string(),
-                    requires_confirmation: false,
-                    payload_schema: vec!["artifact_ref".to_string()],
-                },
-                AddonViewAction {
-                    id: "patch.diff".to_string(),
-                    label: "Inspect patch diff".to_string(),
-                    action_type: "command".to_string(),
-                    target: "forge patch diff".to_string(),
-                    method: "CLI".to_string(),
-                    permission: "source_code.patch".to_string(),
-                    requires_confirmation: false,
-                    payload_schema: vec!["workflow_id".to_string(), "task_id".to_string()],
-                },
-                AddonViewAction {
-                    id: "patch.apply".to_string(),
-                    label: "Apply patch".to_string(),
-                    action_type: "command".to_string(),
-                    target: "forge patch apply".to_string(),
-                    method: "CLI".to_string(),
-                    permission: "source_code.patch".to_string(),
-                    requires_confirmation: true,
-                    payload_schema: vec![
-                        "artifact_ref".to_string(),
-                        "approved_by".to_string(),
-                        "validation_commands".to_string(),
+                    &["patch", "plan", "artifact", "edit", "bounds"],
+                    &["workflow_id", "task_id", "target_paths"],
+                ),
+                patch_workbench_action(
+                    "patch.review",
+                    "Review patch",
+                    "Persist current diff/status/check evidence before an apply approval.",
+                    "forge patch review",
+                    false,
+                    true,
+                    "medium",
+                    &[
+                        "patch",
+                        "review",
+                        "--workflow",
+                        "<workflow-id>",
+                        "--task",
+                        "<task-id>",
+                        "--output",
+                        "json",
                     ],
-                },
-                AddonViewAction {
-                    id: "patch.restore".to_string(),
-                    label: "Restore files".to_string(),
-                    action_type: "command".to_string(),
-                    target: "forge patch restore".to_string(),
-                    method: "CLI".to_string(),
-                    permission: "source_code.patch".to_string(),
-                    requires_confirmation: true,
-                    payload_schema: vec![
-                        "revert_artifact_ref".to_string(),
-                        "approved_by".to_string(),
-                        "confirm_restore".to_string(),
+                    &["patch", "review", "evidence", "status", "diff"],
+                    &["artifact_ref"],
+                ),
+                patch_workbench_action(
+                    "patch.diff",
+                    "Inspect patch diff",
+                    "Open read-only multi-file diff navigation from the Addon workbench action.",
+                    "forge patch diff",
+                    false,
+                    false,
+                    "low",
+                    &[
+                        "patch",
+                        "diff",
+                        "--workflow",
+                        "<workflow-id>",
+                        "--task",
+                        "<task-id>",
+                        "--output",
+                        "json",
                     ],
-                },
+                    &["patch", "diff", "review", "file", "hunk"],
+                    &["workflow_id", "task_id"],
+                ),
+                patch_workbench_action(
+                    "patch.apply",
+                    "Apply patch",
+                    "Record applied file snapshots and validation evidence after approved edits.",
+                    "forge patch apply",
+                    true,
+                    true,
+                    "high",
+                    &[
+                        "patch",
+                        "apply",
+                        "--workflow",
+                        "<workflow-id>",
+                        "--task",
+                        "<task-id>",
+                        "--output",
+                        "json",
+                    ],
+                    &["patch", "apply", "approval", "validation", "snapshot"],
+                    &["artifact_ref", "approved_by", "validation_commands"],
+                ),
+                patch_workbench_action(
+                    "patch.restore",
+                    "Restore files",
+                    "Execute an explicitly approved patch restore path.",
+                    "forge patch restore",
+                    true,
+                    true,
+                    "high",
+                    &[
+                        "patch",
+                        "restore",
+                        "--workflow",
+                        "<workflow-id>",
+                        "--task",
+                        "<task-id>",
+                        "--confirm-restore",
+                        "--approved-by",
+                        "<operator>",
+                        "--output",
+                        "json",
+                    ],
+                    &["patch", "restore", "rollback", "approval", "file"],
+                    &["revert_artifact_ref", "approved_by", "confirm_restore"],
+                ),
             ],
             permissions: vec!["source_code.patch".to_string()],
             props,
@@ -9146,6 +9209,47 @@ fn software_development_addon() -> AddonManifest {
             "software-specific Addon; Core runtime adapter remains builtin compatibility"
                 .to_string(),
         )]),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn patch_workbench_action(
+    id: &str,
+    label: &str,
+    description: &str,
+    target: &str,
+    requires_confirmation: bool,
+    mutates_workflow: bool,
+    risk_level: &str,
+    command_template: &[&str],
+    keywords: &[&str],
+    payload_schema: &[&str],
+) -> AddonViewAction {
+    AddonViewAction {
+        id: id.to_string(),
+        label: label.to_string(),
+        description: description.to_string(),
+        palette_group: "patch".to_string(),
+        source_panel: "patch_workbench_panel".to_string(),
+        action_type: "command".to_string(),
+        target: target.to_string(),
+        method: "CLI".to_string(),
+        permission: "source_code.patch".to_string(),
+        requires_confirmation,
+        risk_level: risk_level.to_string(),
+        mutates_workflow,
+        command_template: command_template
+            .iter()
+            .map(|part| (*part).to_string())
+            .collect(),
+        keywords: keywords
+            .iter()
+            .map(|keyword| (*keyword).to_string())
+            .collect(),
+        payload_schema: payload_schema
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect(),
     }
 }
 
