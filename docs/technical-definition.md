@@ -172,6 +172,8 @@ Declared ingress routes also persist `inbound_event_routed` runtime metadata wit
 
 The current built-in Addons are compatibility Addons that keep existing planning behavior while the external Addon lifecycle matures. They are a transition path, not an excuse for domain logic to remain hidden in the Core.
 
+`forge.addon.software_development` declares the software-specific `source_code_patch_lifecycle` capability. It owns the `software.patch_workbench` TUI surface, the `source_code.patch` permission and the `source_code_patch_lifecycle.executor` runtime contract. The current executor delegates to `forge.patch.lifecycle` as a `forge_core_builtin` compatibility adapter, but the architectural boundary is explicit: source-code patch planning, review, apply, revert and restore are Addon capabilities, while Core only hosts the universal workflow, event, artifact, permission and runtime contracts.
+
 ## Executor Contract Direction
 
 Agent integrations can discover the local MCP surface with:

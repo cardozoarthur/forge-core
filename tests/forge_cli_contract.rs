@@ -39262,6 +39262,10 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
         "the packaged Forge skill should teach agents to inspect the ordered patch operation plan before presenting file-editing actions"
     );
     assert!(
+        forge_core::skill::SKILL_MD.contains("source_code_patch_lifecycle"),
+        "the packaged Forge skill should route source-code editing through the software development Addon capability"
+    );
+    assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.permissions"),
         "the packaged Forge skill should expose the dedicated permission center through MCP"
     );

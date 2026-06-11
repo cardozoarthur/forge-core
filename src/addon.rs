@@ -187,6 +187,7 @@ pub const CAP_DAILY_GOAL_RESEARCH: &str = "daily_goal_research";
 pub const CAP_VISUAL_WORKSPACE: &str = "visual_workspace";
 pub const CAP_ASYNC_RUNTIME: &str = "async_runtime";
 pub const CAP_TELEGRAM_NOTIFICATION: &str = "telegram_notification";
+pub const CAP_SOURCE_CODE_PATCH_LIFECYCLE: &str = "source_code_patch_lifecycle";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddonCatalog {
@@ -1658,6 +1659,7 @@ pub fn builtin_addon_catalog() -> AddonCatalog {
             core_kernel_addon(),
             workflow_automation_addon(),
             visual_workspace_addon(),
+            software_development_addon(),
             hackathon_factory_addon(),
             daily_goal_research_addon(),
             notification_addon(),
@@ -8896,6 +8898,244 @@ fn visual_workspace_addon() -> AddonManifest {
         integrations: Vec::new(),
         compatibility: AddonCompatibility::default(),
         metadata: BTreeMap::new(),
+    }
+}
+
+fn software_development_addon() -> AddonManifest {
+    let mut capability = capability(
+        CAP_SOURCE_CODE_PATCH_LIFECYCLE,
+        "Source code patch lifecycle",
+        &[
+            "código fonte",
+            "codigo fonte",
+            "source code",
+            "edição de código",
+            "edicao de codigo",
+            "file editing",
+            "patch review",
+            "patch",
+            "rollback",
+        ],
+        &["software_development"],
+    );
+    capability.description =
+        "Planejamento, revisão, aplicação e restauração auditável de patches em repositórios."
+            .to_string();
+    capability.workflow_extensions = vec!["source_code_patch_lifecycle".to_string()];
+    capability.deliverables = vec![
+        "bounded patch plan with repo-relative targets".to_string(),
+        "diff review artifact before apply approval".to_string(),
+        "apply artifact with validation evidence".to_string(),
+        "guarded revert and explicit restore receipts".to_string(),
+    ];
+    capability.constraints = vec![
+        "software-specific behavior stays in this Addon, not in the universal Core kernel"
+            .to_string(),
+        "current runtime delegates to Forge Core builtin patch commands for compatibility"
+            .to_string(),
+        "human approval gates are enforced at patch operation level".to_string(),
+    ];
+    capability.risks = vec![
+        "source edits can mutate repository state and require diff review before apply".to_string(),
+        "restore operations must remain explicit and approval-gated".to_string(),
+    ];
+    capability.view_ids = vec!["software.patch_workbench".to_string()];
+
+    let mut patch_executor = runtime_contract(
+        "source_code_patch_lifecycle.executor",
+        "executor",
+        CAP_SOURCE_CODE_PATCH_LIFECYCLE,
+        "source_code_patch_lifecycle",
+        "forge_core_builtin",
+        "forge.patch.lifecycle",
+        &[
+            "workflow_id",
+            "task_id",
+            "repository_path",
+            "target_paths",
+            "operator_intent",
+            "validation_commands",
+        ],
+        &[
+            "patch_plan_artifact",
+            "patch_review_artifact",
+            "patch_diff_artifact",
+            "patch_apply_artifact",
+            "patch_revert_artifact",
+            "patch_restore_artifact",
+        ],
+        &["source_code.patch"],
+    );
+    patch_executor.constraints = vec![
+        "run forge patch plan before bounded source edits".to_string(),
+        "run forge patch review and forge patch diff before apply approval".to_string(),
+        "record rollback proposal before explicit restore execution".to_string(),
+    ];
+
+    let mut props = BTreeMap::new();
+    props.insert(
+        "kernel_boundary".to_string(),
+        serde_json::json!(
+            "software-specific patch UX is owned by this Addon; Core only hosts the builtin compatibility executor"
+        ),
+    );
+    props.insert(
+        "operation_contract".to_string(),
+        serde_json::json!("forge.interactive.patch_operation_plan.v1"),
+    );
+
+    AddonManifest {
+        schema_version: addon_manifest_schema_version(),
+        id: "forge.addon.software_development".to_string(),
+        name: "Software Development Addon".to_string(),
+        version: "0.1.0".to_string(),
+        description:
+            "Capacidades específicas de desenvolvimento de software, incluindo ciclo auditável de patches."
+                .to_string(),
+        lifecycle: "enabled".to_string(),
+        source: "builtin_compat".to_string(),
+        dependencies: Vec::new(),
+        permissions: vec![AddonPermission {
+            id: "source_code.patch".to_string(),
+            description:
+                "Planejar, revisar, aplicar e restaurar alterações de código-fonte em repositórios sob workflow."
+                    .to_string(),
+            risk: "medium".to_string(),
+            requires_human_approval: false,
+            tools: vec![
+                "git".to_string(),
+                "forge.patch.plan".to_string(),
+                "forge.patch.review".to_string(),
+                "forge.patch.diff".to_string(),
+                "forge.patch.apply".to_string(),
+                "forge.patch.revert".to_string(),
+                "forge.patch.restore".to_string(),
+            ],
+            resources: vec![
+                "repository.source".to_string(),
+                "workflow_artifact".to_string(),
+                "diff_snapshot".to_string(),
+            ],
+            integrations: Vec::new(),
+            actions: vec![
+                "source_code:plan_patch".to_string(),
+                "source_code:review_diff".to_string(),
+                "source_code:apply_patch".to_string(),
+                "source_code:revert_patch".to_string(),
+                "source_code:restore_files".to_string(),
+            ],
+            tenant_scopes: vec![
+                "organization".to_string(),
+                "project".to_string(),
+                "workflow".to_string(),
+            ],
+        }],
+        capabilities: vec![capability],
+        workflows: vec![workflow_extension("source_code_patch_lifecycle", "software")],
+        runtime_contracts: vec![patch_executor],
+        views: vec![AddonView {
+            id: "software.patch_workbench".to_string(),
+            title: "Software Patch Workbench".to_string(),
+            surface: "tui".to_string(),
+            view_type: "workbench".to_string(),
+            component: "forge.interactive.patch_workbench".to_string(),
+            route: "/interactive/patch-workbench".to_string(),
+            layout: AddonViewLayout {
+                zone: "main".to_string(),
+                order: 30,
+                width: "full".to_string(),
+                height: "auto".to_string(),
+                density: "dense".to_string(),
+            },
+            data_bindings: vec![AddonViewDataBinding {
+                id: "patch_workbench".to_string(),
+                source: "forge.interactive.patch_workbench".to_string(),
+                query: "dashboard.patch_workbench_panel".to_string(),
+                scope: "repository".to_string(),
+                refresh_seconds: 2,
+                required_capability: CAP_SOURCE_CODE_PATCH_LIFECYCLE.to_string(),
+            }],
+            actions: vec![
+                AddonViewAction {
+                    id: "patch.plan".to_string(),
+                    label: "Plan patch".to_string(),
+                    action_type: "command".to_string(),
+                    target: "forge patch plan".to_string(),
+                    method: "CLI".to_string(),
+                    permission: "source_code.patch".to_string(),
+                    requires_confirmation: false,
+                    payload_schema: vec![
+                        "workflow_id".to_string(),
+                        "task_id".to_string(),
+                        "target_paths".to_string(),
+                    ],
+                },
+                AddonViewAction {
+                    id: "patch.review".to_string(),
+                    label: "Review patch".to_string(),
+                    action_type: "command".to_string(),
+                    target: "forge patch review".to_string(),
+                    method: "CLI".to_string(),
+                    permission: "source_code.patch".to_string(),
+                    requires_confirmation: false,
+                    payload_schema: vec!["artifact_ref".to_string()],
+                },
+                AddonViewAction {
+                    id: "patch.apply".to_string(),
+                    label: "Apply patch".to_string(),
+                    action_type: "command".to_string(),
+                    target: "forge patch apply".to_string(),
+                    method: "CLI".to_string(),
+                    permission: "source_code.patch".to_string(),
+                    requires_confirmation: true,
+                    payload_schema: vec![
+                        "artifact_ref".to_string(),
+                        "approved_by".to_string(),
+                        "validation_commands".to_string(),
+                    ],
+                },
+                AddonViewAction {
+                    id: "patch.restore".to_string(),
+                    label: "Restore files".to_string(),
+                    action_type: "command".to_string(),
+                    target: "forge patch restore".to_string(),
+                    method: "CLI".to_string(),
+                    permission: "source_code.patch".to_string(),
+                    requires_confirmation: true,
+                    payload_schema: vec![
+                        "revert_artifact_ref".to_string(),
+                        "approved_by".to_string(),
+                        "confirm_restore".to_string(),
+                    ],
+                },
+            ],
+            permissions: vec!["source_code.patch".to_string()],
+            props,
+        }],
+        artifact_types: vec![
+            artifact_type("patch_plan"),
+            artifact_type("patch_review"),
+            artifact_type("patch_diff"),
+            artifact_type("patch_apply"),
+            artifact_type("patch_revert"),
+            artifact_type("patch_restore"),
+        ],
+        event_types: vec![
+            event_type("source_code.patch_planned", "local"),
+            event_type("source_code.patch_reviewed", "local"),
+            event_type("source_code.patch_applied", "local"),
+            event_type("source_code.patch_restored", "local"),
+        ],
+        event_adapters: Vec::new(),
+        context_providers: Vec::new(),
+        memory_providers: Vec::new(),
+        integrations: Vec::new(),
+        compatibility: AddonCompatibility::default(),
+        metadata: BTreeMap::from([(
+            "core_boundary".to_string(),
+            "software-specific Addon; Core runtime adapter remains builtin compatibility"
+                .to_string(),
+        )]),
     }
 }
 

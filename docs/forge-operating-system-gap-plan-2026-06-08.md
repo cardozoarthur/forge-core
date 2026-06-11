@@ -182,6 +182,9 @@ Este corte iniciou a migração para Core + Addons:
 - Os builders first-party de workflow extension agora passam por um registry interno com extension id, capability id, fase, guard textual legado e função builder, reduzindo ifs espalhados em `build_tasks`.
 - O registry first-party agora prefere ativações vindas de `CapabilityResolutionReport`; guards textuais só acionam intents legados sem evidência de resolução de capacidades.
 - Workflow extensions externas declaradas em manifesto agora geram tarefas genéricas auditáveis no DAG quando não há builder first-party, preservando lineage de Addon, versão, capability e extension.
+- Adicionado `forge.addon.software_development` como Addon first-party de compatibilidade para a capacidade `source_code_patch_lifecycle`.
+- A bancada `software.patch_workbench`, a permissão `source_code.patch` e o contrato `source_code_patch_lifecycle.executor` agora pertencem ao Addon de desenvolvimento de software, deixando explícito que edição de código não é uma especialização do kernel universal.
+- O executor atual segue como `forge_core_builtin` por compatibilidade e delega ao ciclo `forge.patch.lifecycle`, enquanto a fronteira arquitetural prepara a troca futura por worker/Addon externo assinado.
 - Adicionado `src/identity.rs` e `forge identity context --project-root ...`, carregando `.forge/operating-context.yaml|yml|json`.
 - `OperatingContextSpec` agora inclui `brand_identity`, `design_system` e `operating_policy`, além de organização/marca/produto/usuário/canal/memória/personality.
 - Adicionada tabela `identity_registry` no SQLite.

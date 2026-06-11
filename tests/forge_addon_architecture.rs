@@ -753,6 +753,49 @@ fn addons_catalog_exposes_core_kernel_and_first_party_addons() {
         .unwrap()
         .iter()
         .any(|view| view["id"] == "visual.workspace" && view["surface"] == "ops_console"));
+    let software_development = json["addons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|addon| addon["id"] == "forge.addon.software_development")
+        .expect(
+            "software-specific patch lifecycle must be declared as an Addon, not hidden in Core",
+        );
+    assert!(software_development["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |capability| capability["id"] == "source_code_patch_lifecycle"
+                && capability["domains"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("software_development"))
+        ));
+    assert!(software_development["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|view| view["id"] == "software.patch_workbench"
+            && view["surface"] == "tui"
+            && view["permissions"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("source_code.patch"))));
+    assert!(software_development["runtime_contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |contract| contract["id"] == "source_code_patch_lifecycle.executor"
+                && contract["capability_id"] == "source_code_patch_lifecycle"
+                && contract["contract_type"] == "executor"
+                && contract["runtime"] == "forge_core_builtin"
+                && contract["permissions"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("source_code.patch"))
+        ));
 }
 
 #[test]
@@ -1054,6 +1097,58 @@ fn mcp_manifest_exposes_addon_capability_tools() {
             .unwrap()
             .starts_with("forge."));
     }
+}
+
+#[test]
+fn software_patch_goals_resolve_through_first_party_addon_capability() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "resolve",
+            "--goal",
+            "Editar código fonte com patch review e rollback seguro",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.capability_resolution.v1");
+    assert_eq!(json["status"], "resolved");
+    assert!(json["required_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |capability| capability["id"] == "source_code_patch_lifecycle"
+                && capability["source_addon"] == "forge.addon.software_development"
+                && capability["matched_keywords"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("patch review"))
+        ));
+    assert!(json["active_addons"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("forge.addon.software_development")));
+    assert!(json["runtime_contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |contract| contract["id"] == "source_code_patch_lifecycle.executor"
+                && contract["source_addon"] == "forge.addon.software_development"
+                && contract["entrypoint"] == "forge.patch.lifecycle"
+        ));
 }
 
 #[test]
