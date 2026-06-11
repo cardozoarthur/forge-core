@@ -17,6 +17,8 @@ pub const CLI_HARNESS_EXEC_EVENT_SCHEMA_VERSION: &str = "forge.harness.exec_even
 pub const CLI_HARNESS_MODE_SCHEMA_VERSION: &str = "forge.harness.mode.v1";
 pub const CLI_HARNESS_DOCTOR_SCHEMA_VERSION: &str = "forge.harness.doctor.v1";
 pub const CLI_HARNESS_HEADROOM_PLAN_SCHEMA_VERSION: &str = "forge.harness.headroom_plan.v1";
+pub const CLI_HARNESS_SESSION_LIFECYCLE_PLAN_SCHEMA_VERSION: &str =
+    "forge.harness.session_lifecycle_plan.v1";
 pub const CLI_SHIM_INSTALL_SCHEMA_VERSION: &str = "forge.harness.shim_install.v1";
 pub const CLI_SHIM_STATUS_SCHEMA_VERSION: &str = "forge.harness.shim_status.v1";
 const CLI_SHIM_MARKER: &str = "# forge-harness-shim:v1";
@@ -66,8 +68,36 @@ pub struct CliWrapperPlanReport {
     pub require_token_headroom_for_forge_first: bool,
     pub env: Vec<CliWrapperEnvVar>,
     pub launch_command: Vec<String>,
+    pub session_lifecycle_plan: HarnessSessionLifecyclePlan,
     pub harness_checks: Vec<String>,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessSessionLifecyclePlan {
+    pub schema_version: String,
+    pub status: String,
+    pub executor: String,
+    pub session_id: String,
+    pub workflow_id: Option<String>,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub lineage_complete: bool,
+    pub missing_lineage: Vec<String>,
+    pub gates: Vec<HarnessSessionLifecycleGate>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessSessionLifecycleGate {
+    pub gate_id: String,
+    pub title: String,
+    pub state: String,
+    pub status: String,
+    pub command: Vec<String>,
+    pub mutates_workflow: bool,
+    pub records_event: bool,
+    pub rationale: String,
 }
 
 pub struct CliWrapperPlanOptions<'a> {
@@ -149,6 +179,7 @@ pub struct HarnessHeadroomPlanReport {
     pub require_token_headroom_for_forge_first: bool,
     pub wrapper_env: Vec<CliWrapperEnvVar>,
     pub wrapper_plan: CliWrapperPlanReport,
+    pub session_lifecycle_plan: HarnessSessionLifecyclePlan,
     pub compression_pipeline: Vec<String>,
     pub reserve_strategy: Vec<String>,
     pub retrieval_policy: Vec<String>,
@@ -849,6 +880,7 @@ pub fn build_harness_headroom_plan(
         token_headroom_source: token_headroom_source.to_string(),
         require_token_headroom_for_forge_first,
         wrapper_env,
+        session_lifecycle_plan: wrapper_plan.session_lifecycle_plan.clone(),
         wrapper_plan,
         compression_pipeline: vec![
             "content_router".to_string(),
@@ -1053,6 +1085,7 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         "resolve real CLI before PATH shim precedence".to_string(),
         "prepend Forge shim directory only for the child process".to_string(),
         "record argv, cwd, workflow/task/run lineage, token-headroom metrics and timeline event evidence".to_string(),
+        "plan shell session lifecycle events before a brain CLI is opened, attached or closed".to_string(),
         "persist reversible headroom blobs in the Forge store when compression is applied".to_string(),
         "fall back to observe_only when Forge context is unavailable".to_string(),
     ];
@@ -1065,7 +1098,7 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
     CliWrapperPlanReport {
         schema_version: CLI_WRAPPER_PLAN_SCHEMA_VERSION.to_string(),
         status: "cli_wrapper_plan_ready".to_string(),
-        executor,
+        executor: executor.clone(),
         command,
         forge_first,
         forge_first_source,
@@ -1080,11 +1113,179 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         require_token_headroom_for_forge_first,
         env,
         launch_command,
+        session_lifecycle_plan: build_harness_session_lifecycle_plan(
+            &executor,
+            workflow_id,
+            task_id,
+            run_id,
+        ),
         harness_checks,
         notes: vec![
             "Headroom-inspired ideas absorbed: local-first compression, reversible retrieval refs, CLI wrapper env shaping, tool-search preservation and shim-based harness tests".to_string(),
             "This plan is non-destructive; actual exec remains a separate guarded harness action".to_string(),
+            "Session lifecycle commands are plan-only and must be recorded through Forge before relying on external brain shell state.".to_string(),
         ],
+    }
+}
+
+fn build_harness_session_lifecycle_plan(
+    executor: &str,
+    workflow_id: Option<&str>,
+    task_id: Option<&str>,
+    run_id: Option<&str>,
+) -> HarnessSessionLifecyclePlan {
+    let workflow_id = normalize_optional_text(workflow_id);
+    let task_id = normalize_optional_text(task_id);
+    let run_id = normalize_optional_text(run_id);
+    let lineage_complete = workflow_id.is_some() && task_id.is_some() && run_id.is_some();
+    let mut missing_lineage = Vec::new();
+    if workflow_id.is_none() {
+        missing_lineage.push("workflow_id".to_string());
+    }
+    if task_id.is_none() {
+        missing_lineage.push("task_id".to_string());
+    }
+    if run_id.is_none() {
+        missing_lineage.push("run_id".to_string());
+    }
+    let session_id = harness_session_id(executor);
+    let workflow_arg = workflow_id
+        .clone()
+        .unwrap_or_else(|| "<workflow-id>".to_string());
+    let task_arg = task_id.clone().unwrap_or_else(|| "<task-id>".to_string());
+    let run_arg = run_id.clone().unwrap_or_else(|| "<run-id>".to_string());
+    let lifecycle_status = if lineage_complete {
+        "available_with_lineage"
+    } else {
+        "blocked_until_lineage"
+    };
+    let lifecycle_context = HarnessSessionLifecycleCommandContext {
+        session_id: &session_id,
+        workflow_id: &workflow_arg,
+        task_id: &task_arg,
+        run_id: &run_arg,
+    };
+
+    HarnessSessionLifecyclePlan {
+        schema_version: CLI_HARNESS_SESSION_LIFECYCLE_PLAN_SCHEMA_VERSION.to_string(),
+        status: "session_lifecycle_plan_ready".to_string(),
+        executor: executor.to_string(),
+        session_id: session_id.clone(),
+        workflow_id,
+        task_id,
+        run_id,
+        lineage_complete,
+        missing_lineage,
+        gates: vec![
+            HarnessSessionLifecycleGate {
+                gate_id: "record_launch_plan".to_string(),
+                title: "Record shell launch intent".to_string(),
+                state: "planned".to_string(),
+                status: "available".to_string(),
+                command: vec![
+                    "forge".to_string(),
+                    "shells".to_string(),
+                    "--executor".to_string(),
+                    executor.to_string(),
+                    "--workflow".to_string(),
+                    workflow_arg.clone(),
+                    "--task".to_string(),
+                    task_arg.clone(),
+                    "--run".to_string(),
+                    run_arg.clone(),
+                    "--record-session".to_string(),
+                    "--origin".to_string(),
+                    "forge_harness".to_string(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ],
+                mutates_workflow: false,
+                records_event: true,
+                rationale: "External brain shells should have auditable launch intent before a human or workflow opens them."
+                    .to_string(),
+            },
+            harness_session_lifecycle_gate(
+                "record_opened",
+                "Record shell opened",
+                "opened",
+                lifecycle_status,
+                &lifecycle_context,
+            ),
+            harness_session_lifecycle_gate(
+                "record_attached",
+                "Record shell attached",
+                "attached",
+                lifecycle_status,
+                &lifecycle_context,
+            ),
+            harness_session_lifecycle_gate(
+                "record_closed",
+                "Record shell closed",
+                "closed",
+                lifecycle_status,
+                &lifecycle_context,
+            ),
+        ],
+        notes: vec![
+            "Lifecycle plan is read-only and does not open, attach or close child shells by itself."
+                .to_string(),
+            "Use concrete workflow/task/run lineage before recording lifecycle transitions for production handoff."
+                .to_string(),
+        ],
+    }
+}
+
+struct HarnessSessionLifecycleCommandContext<'a> {
+    session_id: &'a str,
+    workflow_id: &'a str,
+    task_id: &'a str,
+    run_id: &'a str,
+}
+
+fn harness_session_lifecycle_gate(
+    gate_id: &str,
+    title: &str,
+    state: &str,
+    status: &str,
+    lifecycle_context: &HarnessSessionLifecycleCommandContext<'_>,
+) -> HarnessSessionLifecycleGate {
+    HarnessSessionLifecycleGate {
+        gate_id: gate_id.to_string(),
+        title: title.to_string(),
+        state: state.to_string(),
+        status: status.to_string(),
+        command: vec![
+            "forge".to_string(),
+            "sessions".to_string(),
+            "lifecycle".to_string(),
+            "--session".to_string(),
+            lifecycle_context.session_id.to_string(),
+            "--state".to_string(),
+            state.to_string(),
+            "--workflow".to_string(),
+            lifecycle_context.workflow_id.to_string(),
+            "--task".to_string(),
+            lifecycle_context.task_id.to_string(),
+            "--run".to_string(),
+            lifecycle_context.run_id.to_string(),
+            "--origin".to_string(),
+            "forge_harness".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        mutates_workflow: false,
+        records_event: true,
+        rationale: format!(
+            "Record the `{state}` lifecycle transition in Forge-owned session history without starting child processes."
+        ),
+    }
+}
+
+fn harness_session_id(executor: &str) -> String {
+    if executor == "forge" {
+        "forge-tui".to_string()
+    } else {
+        format!("{executor}-shell")
     }
 }
 

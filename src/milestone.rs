@@ -797,7 +797,7 @@ fn required_evidence_for(capability_id: &str) -> &'static str {
             "Rendered or exported design/token/component and document/slide/whiteboard workflow demos."
         }
         "replacement_grade_cli" => {
-            "Forge-first CLI demo evidence plus native file editing, diff review, permissions, sessions and JSON-stable automation evidence."
+            "Forge-first CLI demo evidence plus native file editing, diff review, permissions, sessions, harness session lifecycle plans and JSON-stable automation evidence."
         }
         "experimental_multimodal_runtime" => {
             "Disabled-by-default multimodal inventory, approved feature-flag config, install-plan, runtime guard, benchmark template, approval-gated fixture-only benchmark-result, guarded local demo-receipt and safe local image/audio/3D demo-plan evidence."
@@ -824,7 +824,7 @@ fn next_action_for_gap(capability_id: &str) -> &'static str {
             "Produce rendered design/tokens/component demo evidence and one structured document/slide/whiteboard workflow demo before 0.5 promotion."
         }
         "replacement_grade_cli" => {
-            "Integrate context, handoff and patch slash commands deeper into the TUI with inline diff rendering, multi-file review, deeper provider/session lifecycle controls and end-to-end coding/research workflows."
+            "Continue from harness session lifecycle planning into inline diff rendering, multi-file review, deeper provider/session controls and end-to-end coding/research workflows."
         }
         "experimental_multimodal_runtime" => {
             "Promote the disabled-by-default multimodal surfaces into real guarded model/runtime benchmarks after demo receipts, without performing installs or device access by default."

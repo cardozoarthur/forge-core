@@ -2837,7 +2837,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.interactive.harness",
                 "Inspect Interactive Harness Center",
-                "Return the Forge interactive harness center for one brain CLI, combining mode, doctor, shim status, wrap-plan and token-headroom preview without installing shims or launching child processes.",
+                "Return the Forge interactive harness center for one brain CLI, combining mode, doctor, shim status, wrap-plan, session lifecycle plan and token-headroom preview without installing shims or launching child processes.",
                 object_schema(&[
                     ("executor", "string", "codex|claude|gemini|opencode"),
                     ("shim_dir", "string", "directory where Forge-owned shims should live"),
@@ -5231,7 +5231,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.harness.doctor",
                 "Audit Forge Harness Readiness",
-                "Return a read-only consolidated harness readiness report for one brain CLI, combining Forge-first mode, project policy, shim status, wrapper plan and token-headroom readiness without installing shims or launching child processes.",
+                "Return a read-only consolidated harness readiness report for one brain CLI, combining Forge-first mode, project policy, shim status, wrapper/session lifecycle plan and token-headroom readiness without installing shims or launching child processes.",
                 object_schema(&[
                     ("executor", "string", "codex|claude|gemini|opencode"),
                     ("shim_dir", "string", "directory where Forge-owned shims should live"),
@@ -5251,7 +5251,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.harness.headroom_plan",
                 "Plan Harness Headroom",
-                "Return a read-only Forge harness headroom plan for one brain CLI, including effective context budget, token-headroom source, wrapper env, compression pipeline, reserve strategy and next commands.",
+                "Return a read-only Forge harness headroom plan for one brain CLI, including effective context budget, token-headroom source, wrapper env, session lifecycle plan, compression pipeline, reserve strategy and next commands.",
                 object_schema(&[
                     ("executor", "string", "codex|claude|gemini|opencode"),
                     ("command", "array", "optional command argv to launch under the harness"),
@@ -5271,7 +5271,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.harness.wrap_plan",
                 "Plan Forge-First CLI Wrapper",
-                "Return a non-destructive Forge-first wrapper plan for Codex, Claude, Gemini or OpenCode with context budget and token-headroom environment shaping.",
+                "Return a non-destructive Forge-first wrapper plan for Codex, Claude, Gemini or OpenCode with context budget, token-headroom environment shaping and session lifecycle gates.",
                 object_schema(&[
                     ("executor", "string", "codex|claude|gemini|opencode"),
                     ("command", "array", "command argv to launch under the harness"),

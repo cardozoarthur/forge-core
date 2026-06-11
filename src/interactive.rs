@@ -3670,13 +3670,15 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         panel.next_actions.join(" | ")
     };
     format!(
-        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | install-shims | exec\nNext actions: {next_actions}\n",
+        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | install-shims | exec\nNext actions: {next_actions}\n",
         status = panel.status,
         executor = panel.executor,
         mode = panel.mode.effective_mode,
         doctor = panel.doctor.status,
         shim = panel.shim_status.status,
         headroom = panel.headroom_preview.status,
+        session_lifecycle_status = panel.wrapper_plan.session_lifecycle_plan.status,
+        session_id = panel.wrapper_plan.session_lifecycle_plan.session_id,
         project_root = panel.project_root,
         shim_dir = panel.shim_dir,
         next_actions = next_actions,

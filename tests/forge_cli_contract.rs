@@ -573,6 +573,61 @@ fn harness_wrap_plan_can_use_explicit_project_root_default_mode_for_cli_and_mcp(
     let cli_plan: Value = serde_json::from_slice(&cli_output).unwrap();
     assert_eq!(cli_plan["forge_first"], true);
     assert_eq!(cli_plan["forge_first_source"], "project_config");
+    assert_eq!(
+        cli_plan["session_lifecycle_plan"]["schema_version"],
+        "forge.harness.session_lifecycle_plan.v1"
+    );
+    assert_eq!(
+        cli_plan["session_lifecycle_plan"]["status"],
+        "session_lifecycle_plan_ready"
+    );
+    assert_eq!(cli_plan["session_lifecycle_plan"]["executor"], "codex");
+    assert_eq!(
+        cli_plan["session_lifecycle_plan"]["session_id"],
+        "codex-shell"
+    );
+    assert_eq!(
+        cli_plan["session_lifecycle_plan"]["workflow_id"],
+        Value::Null
+    );
+    assert_eq!(
+        cli_plan["session_lifecycle_plan"]["lineage_complete"],
+        false
+    );
+    assert!(cli_plan["session_lifecycle_plan"]["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gate| gate["gate_id"] == "record_launch_plan"
+            && gate["status"] == "available"
+            && gate["command"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::String("shells".to_string()))
+            && gate["command"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::String("--record-session".to_string()))));
+    assert!(cli_plan["session_lifecycle_plan"]["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gate| gate["gate_id"] == "record_opened"
+            && gate["state"] == "opened"
+            && gate["command"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::String("lifecycle".to_string()))));
+    assert!(cli_plan["session_lifecycle_plan"]["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gate| gate["gate_id"] == "record_attached" && gate["state"] == "attached"));
+    assert!(cli_plan["session_lifecycle_plan"]["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gate| gate["gate_id"] == "record_closed" && gate["state"] == "closed"));
     assert!(cli_plan["launch_command"]
         .as_array()
         .unwrap()
@@ -625,6 +680,10 @@ fn harness_wrap_plan_can_use_explicit_project_root_default_mode_for_cli_and_mcp(
     let mcp_plan: Value = serde_json::from_slice(&mcp_output).unwrap();
     assert_eq!(mcp_plan["result"]["forge_first"], true);
     assert_eq!(mcp_plan["result"]["forge_first_source"], "project_config");
+    assert_eq!(
+        mcp_plan["result"]["session_lifecycle_plan"]["schema_version"],
+        "forge.harness.session_lifecycle_plan.v1"
+    );
 }
 
 #[test]
@@ -1063,6 +1122,12 @@ fn harness_headroom_plan_exposes_wrapper_policy_for_cli_mcp_and_skill() {
         json["wrapper_plan"]["schema_version"],
         "forge.harness.cli_wrapper_plan.v1"
     );
+    assert_eq!(
+        json["session_lifecycle_plan"]["schema_version"],
+        "forge.harness.session_lifecycle_plan.v1"
+    );
+    assert_eq!(json["session_lifecycle_plan"]["session_id"], "codex-shell");
+    assert_eq!(json["session_lifecycle_plan"]["lineage_complete"], false);
     assert!(json["wrapper_env"]
         .as_array()
         .unwrap()
@@ -1150,6 +1215,10 @@ fn harness_headroom_plan_exposes_wrapper_policy_for_cli_mcp_and_skill() {
     assert_eq!(mcp_json["result"]["context_budget_source"], "mcp_input");
     assert_eq!(mcp_json["result"]["token_headroom_enabled"], false);
     assert_eq!(mcp_json["result"]["token_headroom_source"], "mcp_input");
+    assert_eq!(
+        mcp_json["result"]["session_lifecycle_plan"]["schema_version"],
+        "forge.harness.session_lifecycle_plan.v1"
+    );
 
     assert!(
         forge_core::skill::SKILL_MD.contains("forge harness headroom-plan"),
@@ -37098,6 +37167,7 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("Harness center"));
     assert!(text.contains("codex"));
     assert!(text.contains("wrap-plan"));
+    assert!(text.contains("session lifecycle"));
 
     let home_output = forge()
         .current_dir(&project_root)
