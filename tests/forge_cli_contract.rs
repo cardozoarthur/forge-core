@@ -3380,6 +3380,10 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
     assert!(replacement_cli["evidence"]
         .as_str()
         .unwrap()
+        .contains("brain_handoff_demo"));
+    assert!(replacement_cli["evidence"]
+        .as_str()
+        .unwrap()
         .contains("exec --project-root"));
     assert!(replacement_cli["gap_before_promotion"]
         .as_str()
