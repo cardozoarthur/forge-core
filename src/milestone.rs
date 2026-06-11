@@ -1,5 +1,12 @@
 use crate::artifact::hex_sha256;
-use crate::graph::create_workflow;
+use crate::executor::{
+    load_executors, record_brain_session_lifecycle, record_shell_session_plan, BrainCandidate,
+    BrainRouterReport, BrainSessionLifecycleOptions, BrainShellSessionSpec, ShellLaunchPlanOptions,
+};
+use crate::graph::{
+    create_workflow, task, ExecutorKind, NodeBrainAgentSlotSpec, NodeBrainRoutingSpec,
+};
+use crate::handoff::build_task_handoff_with_project;
 use crate::harness::{
     build_harness_bootstrap_report, run_cli_harness_exec, CliHarnessExecOptions,
     HarnessBootstrapOptions,
@@ -19,6 +26,7 @@ use crate::schedule::{create_daily_goal_research_workflow, run_daily_goal_resear
 use crate::storage::ForgeStore;
 use crate::workflow::{
     attach_creative_artifact, attach_workflow_artifact, set_workflow_token_collection,
+    update_workflow_node_brain_routing, WorkflowNodeBrainRoutingUpdateInput,
 };
 use anyhow::{bail, Result};
 use serde::Serialize;
@@ -364,6 +372,7 @@ pub struct MilestoneDemoArtifact {
 const CLI_DEMO_SCHEMA_VERSION: &str = "forge.milestone.cli_demo.v1";
 const PATCH_LIFECYCLE_DEMO_SCHEMA_VERSION: &str = "forge.milestone.patch_lifecycle_demo.v1";
 const EXECUTOR_PROJECT_DEMO_SCHEMA_VERSION: &str = "forge.milestone.executor_project_demo.v1";
+const BRAIN_HANDOFF_DEMO_SCHEMA_VERSION: &str = "forge.milestone.brain_handoff_demo.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MilestoneCliDemoReport {
@@ -394,6 +403,8 @@ pub struct ReplacementCliDemoFlow {
     pub patch_lifecycle: Option<MilestonePatchLifecycleDemo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub executor_project: Option<MilestoneExecutorProjectDemo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brain_handoff: Option<MilestoneBrainHandoffDemo>,
     pub activity: Option<RunActivity>,
     pub summary: String,
 }
@@ -446,6 +457,33 @@ pub struct MilestoneExecutorProjectDemo {
     pub stdout_retrieval_ref: Option<String>,
     pub external_resources_mutated: bool,
     pub lineage: Vec<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneBrainHandoffDemo {
+    pub schema_version: String,
+    pub status: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub run_id: String,
+    pub selected_brain: String,
+    pub orchestrator_brain: String,
+    pub handoff_status: String,
+    pub handoff_ready: bool,
+    pub context_schema_version: String,
+    pub context_bytes: usize,
+    pub shell_plan_status: String,
+    pub shell_plan_recorded: bool,
+    pub shell_plan_event_id: i64,
+    pub lifecycle_status: String,
+    pub lifecycle_state: String,
+    pub lifecycle_event_recorded: bool,
+    pub lifecycle_event_id: i64,
+    pub model_execution_performed: bool,
+    pub external_resources_mutated: bool,
+    pub node_brain_routing: NodeBrainRoutingSpec,
+    pub commands: Vec<String>,
     pub summary: String,
 }
 
@@ -650,6 +688,7 @@ pub fn build_replacement_cli_demo(
     harness_options.token_headroom = Some(true);
     let harness_panel = build_interactive_harness(store, harness_options)?;
     let executor_project_flow = build_replacement_cli_executor_project_demo(store, origin)?;
+    let brain_handoff_flow = build_replacement_cli_brain_handoff_demo(store, origin)?;
 
     let async_request = start_async_request(
         store,
@@ -703,6 +742,7 @@ pub fn build_replacement_cli_demo(
                 ],
                 patch_lifecycle: Some(patch_lifecycle),
                 executor_project: None,
+                brain_handoff: None,
                 activity: None,
                 summary: "The coding demo proves the Forge CLI has a native flow shape for context routing, executor handoff, edit intake, patch plan/review/diff/apply/revert/restore artifact lineage, validation and inspection. It remains groundwork because richer interactive terminal editing still needs broader UX evidence.".to_string(),
             },
@@ -730,6 +770,7 @@ pub fn build_replacement_cli_demo(
                 ],
                 patch_lifecycle: None,
                 executor_project: None,
+                brain_handoff: None,
                 activity: None,
                 summary: format!(
                     "The harness demo proves the replacement CLI can expose {} with {}, {} and a ready headroom-plan command without launching a child CLI.",
@@ -739,6 +780,7 @@ pub fn build_replacement_cli_demo(
                 ),
             },
             executor_project_flow,
+            brain_handoff_flow,
             ReplacementCliDemoFlow {
                 kind: "research_artifact".to_string(),
                 title: "Forge-first research/artifact delivery".to_string(),
@@ -761,6 +803,7 @@ pub fn build_replacement_cli_demo(
                 ],
                 patch_lifecycle: None,
                 executor_project: None,
+                brain_handoff: None,
                 activity: None,
                 summary: "The research demo uses the canonical daily Goal workflow to produce Markdown, PDF and Telegram delivery records through Forge-owned workflow semantics without live external delivery or secrets.".to_string(),
             },
@@ -787,12 +830,13 @@ pub fn build_replacement_cli_demo(
                 ],
                 patch_lifecycle: None,
                 executor_project: None,
+                brain_handoff: None,
                 activity: Some(heartbeat.activity),
                 summary: "The async demo proves Forge can start a durable run, mark it active through heartbeat, expose status/list/inspect visibility and keep orchestration authority during long-running executor work.".to_string(),
             },
         ],
         remaining_gaps: vec![
-            "Broader brain-driven real-project coding/research workflows and TUI apply/approval ergonomics remain required before replacement-grade promotion.".to_string(),
+            "Real external brain execution on broader project coding/research workflows and TUI apply/approval ergonomics remain required before replacement-grade promotion.".to_string(),
             "Deeper provider/session lifecycle controls and richer terminal UX remain required.".to_string(),
             "This demo is deterministic evidence and does not claim Forge 0.5 promotion readiness.".to_string(),
         ],
@@ -801,6 +845,307 @@ pub fn build_replacement_cli_demo(
             "No Docker, Kubernetes, Knative, model install, device access, Telegram send or external resource mutation is performed.".to_string(),
         ],
     })
+}
+
+fn build_replacement_cli_brain_handoff_demo(
+    store: &ForgeStore,
+    origin: &str,
+) -> Result<ReplacementCliDemoFlow> {
+    let request = start_async_request(
+        store,
+        "Demonstrate Forge-owned external brain handoff rehearsal with context, routing, shell plan and lifecycle audit",
+        origin,
+    )?;
+    let task_id = "task-brain-handoff".to_string();
+    let mut workflow = store.load_workflow(&request.workflow_id)?;
+    workflow.tasks = vec![task(
+        &task_id,
+        "Prepare a Forge-owned Codex handoff rehearsal",
+        &[],
+        &[
+            "workflow goal",
+            "project memory policy",
+            "node brain routing",
+            "validation gates",
+        ],
+        vec![],
+        "bounded Codex handoff packet with plan-only shell lifecycle evidence",
+        (ExecutorKind::Ai, 0.12),
+    )];
+    workflow.status = "running".to_string();
+    store.save_workflow(&workflow)?;
+
+    let routing_update = update_workflow_node_brain_routing(
+        store,
+        &workflow.id,
+        WorkflowNodeBrainRoutingUpdateInput {
+            task_id: task_id.clone(),
+            default_brain: Some("codex".to_string()),
+            allowed_brains: vec![
+                "codex".to_string(),
+                "opencode".to_string(),
+                "gemini".to_string(),
+                "claude".to_string(),
+            ],
+            agent_slots: vec![
+                NodeBrainAgentSlotSpec {
+                    slot_id: "agent-codex-primary".to_string(),
+                    brain_id: Some("codex".to_string()),
+                    role: "primary_node_agent".to_string(),
+                    parallel_group: "handoff-rehearsal".to_string(),
+                    state_owner: "forge".to_string(),
+                },
+                NodeBrainAgentSlotSpec {
+                    slot_id: "agent-codex-review".to_string(),
+                    brain_id: Some("codex".to_string()),
+                    role: "review_agent".to_string(),
+                    parallel_group: "handoff-rehearsal".to_string(),
+                    state_owner: "forge".to_string(),
+                },
+            ],
+            max_parallel_agents: Some(2),
+            origin: origin.to_string(),
+        },
+    )?;
+
+    let project_root = store
+        .base_dir()
+        .join("tmp")
+        .join(format!("{}-brain-handoff", workflow.id));
+    fs::create_dir_all(project_root.join(".forge"))?;
+
+    let handoff = build_task_handoff_with_project(
+        store,
+        &workflow.id,
+        &task_id,
+        "codex",
+        1200,
+        900,
+        Some(&project_root),
+    )?;
+    let router = load_or_build_rehearsal_brain_router(store)?;
+    let shell_receipt = record_shell_session_plan(
+        store,
+        &router,
+        ShellLaunchPlanOptions {
+            executor_filter: Some("codex".to_string()),
+            workflow_id: Some(workflow.id.clone()),
+            task_id: Some(task_id.clone()),
+            run_id: Some(request.run_id.clone()),
+            context_budget: Some(1200),
+            ttl_seconds: Some(900),
+        },
+        origin,
+    )?;
+    let lifecycle_receipt = record_brain_session_lifecycle(
+        store,
+        &router,
+        BrainSessionLifecycleOptions {
+            session_id: "codex-shell",
+            state: "opened",
+            workflow_id: Some(&workflow.id),
+            task_id: Some(&task_id),
+            run_id: Some(&request.run_id),
+            origin,
+            note: Some("milestone cli-demo plan-only rehearsal; no child CLI or model execution"),
+        },
+    )?;
+    let shell_plan_recorded = shell_receipt.status == "shell_session_plan_recorded";
+    let status = if handoff.allowed
+        && handoff.context.handoff_ready
+        && shell_plan_recorded
+        && lifecycle_receipt.event_recorded
+    {
+        "brain_handoff_rehearsal_ready"
+    } else {
+        "brain_handoff_rehearsal_incomplete"
+    }
+    .to_string();
+    let commands = vec![
+        "forge workflow update-node-brain --workflow <workflow-id> --task <task-id> --default-brain codex --agent-slot agent-codex-primary=codex:primary_node_agent:handoff-rehearsal --agent-slot agent-codex-review=codex:review_agent:handoff-rehearsal --max-parallel-agents 2 --origin forge_cli --output json".to_string(),
+        "forge context --workflow <workflow-id> --task <task-id> --project-root <project-root> --budget 1200 --strict --output json".to_string(),
+        "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --output json".to_string(),
+        "forge shells --executor codex --workflow <workflow-id> --task <task-id> --run <run-id> --record-session --origin forge_cli --output json".to_string(),
+        "forge sessions lifecycle --session codex-shell --state opened --workflow <workflow-id> --task <task-id> --run <run-id> --origin forge_cli --output json".to_string(),
+        "forge sessions history --session codex-shell --output json".to_string(),
+    ];
+    let brain_handoff = MilestoneBrainHandoffDemo {
+        schema_version: BRAIN_HANDOFF_DEMO_SCHEMA_VERSION.to_string(),
+        status: status.clone(),
+        workflow_id: workflow.id.clone(),
+        task_id: task_id.clone(),
+        run_id: request.run_id.clone(),
+        selected_brain: handoff.selected_brain.clone(),
+        orchestrator_brain: handoff.orchestrator_brain.clone(),
+        handoff_status: handoff.status.clone(),
+        handoff_ready: handoff.context.handoff_ready,
+        context_schema_version: handoff.context.schema_version.clone(),
+        context_bytes: handoff.context.context_bytes,
+        shell_plan_status: shell_receipt.launch_plan.status.clone(),
+        shell_plan_recorded,
+        shell_plan_event_id: shell_receipt.global_event_id,
+        lifecycle_status: lifecycle_receipt.status.clone(),
+        lifecycle_state: lifecycle_receipt.state.clone(),
+        lifecycle_event_recorded: lifecycle_receipt.event_recorded,
+        lifecycle_event_id: lifecycle_receipt.global_event_id,
+        model_execution_performed: false,
+        external_resources_mutated: false,
+        node_brain_routing: routing_update.new_routing,
+        commands: commands.clone(),
+        summary: "Forge assembled the context packet, node-brain routing, task handoff lease, plan-only shell launch receipt and ordered session lifecycle receipt for Codex without launching a child CLI or executing a model.".to_string(),
+    };
+
+    Ok(ReplacementCliDemoFlow {
+        kind: "brain_handoff_rehearsal".to_string(),
+        title: "Forge-owned external brain handoff rehearsal".to_string(),
+        workflow_id: workflow.id,
+        run_id: Some(request.run_id),
+        run_status: status,
+        completed_through_forge: true,
+        commands,
+        artifact_refs: vec![
+            format!("shell_plan_global_event_id:{}", shell_receipt.global_event_id),
+            format!(
+                "lifecycle_global_event_id:{}",
+                lifecycle_receipt.global_event_id
+            ),
+        ],
+        validation_evidence: vec![
+            "node_brain_routing_updated".to_string(),
+            "context_packet_ready".to_string(),
+            "task_handoff_lease_acquired".to_string(),
+            "shell_launch_plan_recorded_without_child_execution".to_string(),
+            "brain_session_lifecycle_recorded_audit_only".to_string(),
+            "model_execution_not_performed".to_string(),
+            "external_resources_untouched".to_string(),
+        ],
+        patch_lifecycle: None,
+        executor_project: None,
+        brain_handoff: Some(brain_handoff),
+        activity: None,
+        summary: "This flow proves Forge can prepare a Codex node handoff with Forge-owned context, memory policy, node-brain routing, shell launch plan and session lifecycle audit, while honestly leaving actual model execution outside this deterministic milestone demo.".to_string(),
+    })
+}
+
+fn load_or_build_rehearsal_brain_router(store: &ForgeStore) -> Result<BrainRouterReport> {
+    let report = load_executors(store)?;
+    if report
+        .brain_router
+        .shell_sessions
+        .iter()
+        .any(|session| session.id == "codex-shell")
+    {
+        return Ok(report.brain_router);
+    }
+
+    Ok(rehearsal_brain_router())
+}
+
+fn rehearsal_brain_router() -> BrainRouterReport {
+    BrainRouterReport {
+        schema_version: "forge.brain_router.v1".to_string(),
+        controller: "forge".to_string(),
+        controller_role: "orchestration_control_plane".to_string(),
+        orchestrator_brain: "forge".to_string(),
+        brain_role: "replaceable_execution_brain".to_string(),
+        node_brain_role: "per_node_agentic_execution_brain".to_string(),
+        routing_principle:
+            "Forge owns memory, skills, MCP routing, context, workflow state, shell/session lifecycle, permissions, cost policy and validation; external CLIs only execute bounded brain work."
+                .to_string(),
+        node_brain_routing_policy:
+            "Each AI or mixed workflow node may declare its own Forge-owned node_brain_routing contract with one or more agent slots, different brains per slot, and multiple agents on the same brain."
+                .to_string(),
+        parallel_agent_policy:
+            "Forge may lease and run independent AI node agent slots in parallel when dependencies, context budgets, quota and validation gates allow it."
+                .to_string(),
+        hot_swap_policy:
+            "A workflow run can switch the active execution brain through Forge-owned routing without losing workflow lineage."
+                .to_string(),
+        selected_brain: Some("codex".to_string()),
+        forge_controlled_surfaces: vec![
+            "workflow_graph".to_string(),
+            "memory".to_string(),
+            "skills".to_string(),
+            "mcp_servers_and_tools".to_string(),
+            "context_packets".to_string(),
+            "artifact_lineage".to_string(),
+            "shell_session_lifecycle".to_string(),
+            "permissions".to_string(),
+            "cost_and_quota_policy".to_string(),
+            "validation_gates".to_string(),
+        ],
+        brain_owned_surfaces: vec![
+            "reasoning_for_assigned_task".to_string(),
+            "bounded_code_or_text_proposals".to_string(),
+            "child_process_execution_when_authorized_by_forge".to_string(),
+        ],
+        brains: vec![BrainCandidate {
+            id: "codex".to_string(),
+            display_name: "Codex CLI".to_string(),
+            command: "codex".to_string(),
+            status: "rehearsal_not_synced".to_string(),
+            execution_mode: "external_cli_brain".to_string(),
+            session_role: "execution_brain_adapter".to_string(),
+            persistent_state_owner: "forge".to_string(),
+            context_source: "forge_context_packet".to_string(),
+            memory_source: "forge_memory_router".to_string(),
+            skills_source: "forge_skill_router".to_string(),
+            mcp_source: "forge_mcp_router".to_string(),
+            installed: false,
+            configured: false,
+            allowed: false,
+            non_interactive_ready: false,
+            forge_first_ready: false,
+            forge_first_entrypoint: None,
+            harness_status: None,
+            shell_entrypoints: vec![vec!["codex".to_string()]],
+            reason: "deterministic milestone rehearsal router; run forge sync all for real provider readiness".to_string(),
+        }],
+        shell_sessions: vec![
+            BrainShellSessionSpec {
+                id: "forge-tui".to_string(),
+                brain_id: "forge".to_string(),
+                entry_command: vec!["forge".to_string()],
+                attachable: true,
+                launch_mode: "forge_control_tui".to_string(),
+                forge_first_ready: true,
+                forge_first_entrypoint: Some(vec!["forge".to_string()]),
+                role: "primary_control_tui".to_string(),
+                state_boundary:
+                    "Forge owns workflow state, memory, skills, MCP routing and shell lifecycle."
+                        .to_string(),
+                safety_note:
+                    "Use this as the default human operation surface; external brains should be launched from Forge-controlled handoffs."
+                        .to_string(),
+            },
+            BrainShellSessionSpec {
+                id: "codex-shell".to_string(),
+                brain_id: "codex".to_string(),
+                entry_command: vec!["codex".to_string()],
+                attachable: false,
+                launch_mode: "native_cli".to_string(),
+                forge_first_ready: false,
+                forge_first_entrypoint: None,
+                role: "execution_brain_shell".to_string(),
+                state_boundary:
+                    "External CLI session is an execution surface only; Forge remains the source of truth for memory, skills, MCPs, context and workflow lineage."
+                        .to_string(),
+                safety_note:
+                    "This milestone rehearsal records only a plan; run executor sync and authorization before real Codex execution."
+                        .to_string(),
+            },
+        ],
+        safety_gates: vec![
+            "sync_executors_before_handoff".to_string(),
+            "human_authorization_for_external_cli_use".to_string(),
+            "forge_context_packet_required_before_ai_handoff".to_string(),
+            "organization_context_required".to_string(),
+            "personality_decision_required".to_string(),
+            "company_work_decision_required".to_string(),
+            "credential_vault_secrets_never_printed".to_string(),
+            "validation_or_final_audit_required_before_claiming_completion".to_string(),
+        ],
+    }
 }
 
 fn build_replacement_cli_patch_lifecycle_demo(
@@ -1076,6 +1421,7 @@ fn build_replacement_cli_executor_project_demo(
         ],
         patch_lifecycle: None,
         executor_project: Some(executor_project),
+        brain_handoff: None,
         activity: None,
         summary: "This flow closes part of the replacement-grade CLI gap by proving an executor can modify an isolated project through Forge-owned bootstrap, lineage policy, guarded execution, event recording and reversible stdout headroom.".to_string(),
     })

@@ -5066,11 +5066,12 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
     assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
 
     let flows = json["flows"].as_array().unwrap();
-    assert_eq!(flows.len(), 5);
+    assert_eq!(flows.len(), 6);
     for kind in [
         "coding_task",
         "harness_control",
         "executor_project",
+        "brain_handoff_rehearsal",
         "research_artifact",
         "long_running_async",
     ] {
@@ -5300,6 +5301,61 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
         .unwrap()
         .contains(&serde_json::json!(
             "forge harness exec --executor sh --project-root <project-root> --workflow <workflow-id> --task <task-id> --run <run-id> --forge-first --execute --allow-exec -- /bin/sh -c <project-edit-script>"
+        )));
+
+    let brain_rehearsal = flows
+        .iter()
+        .find(|flow| flow["kind"] == "brain_handoff_rehearsal")
+        .expect("replacement CLI demo should include a brain handoff rehearsal flow");
+    assert_eq!(
+        brain_rehearsal["brain_handoff"]["schema_version"],
+        "forge.milestone.brain_handoff_demo.v1"
+    );
+    assert_eq!(
+        brain_rehearsal["brain_handoff"]["status"],
+        "brain_handoff_rehearsal_ready"
+    );
+    assert_eq!(brain_rehearsal["brain_handoff"]["selected_brain"], "codex");
+    assert_eq!(
+        brain_rehearsal["brain_handoff"]["orchestrator_brain"],
+        "forge"
+    );
+    assert_eq!(brain_rehearsal["brain_handoff"]["handoff_ready"], true);
+    assert_eq!(
+        brain_rehearsal["brain_handoff"]["shell_plan_recorded"],
+        true
+    );
+    assert_eq!(
+        brain_rehearsal["brain_handoff"]["model_execution_performed"],
+        false
+    );
+    assert_eq!(
+        brain_rehearsal["brain_handoff"]["external_resources_mutated"],
+        false
+    );
+    assert_eq!(
+        brain_rehearsal["brain_handoff"]["node_brain_routing"]["default_brain"],
+        "codex"
+    );
+    assert_eq!(
+        brain_rehearsal["brain_handoff"]["node_brain_routing"]["supports_parallel_agent_brains"],
+        true
+    );
+    assert!(brain_rehearsal["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("context_packet_ready")));
+    assert!(brain_rehearsal["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "shell_launch_plan_recorded_without_child_execution"
+        )));
+    assert!(brain_rehearsal["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --output json"
         )));
 }
 
