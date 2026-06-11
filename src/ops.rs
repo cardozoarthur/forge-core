@@ -11,7 +11,7 @@ use crate::registry::{
 use crate::request::{
     complete_ready_task, drive_request, step_request, RequestTaskCompletionInput,
 };
-use crate::storage::ForgeStore;
+use crate::storage::{ForgeStore, StoreEvent};
 use crate::{
     graph::TaskStatus,
     ir::{
@@ -42,6 +42,7 @@ const OPS_MODIFIER_PROPOSAL_SCHEMA_VERSION: &str = "forge.ops.modifier_proposal.
 const OPS_ADDON_VIEW_RENDERERS_SCHEMA_VERSION: &str = "forge.ops.addon_view_renderers.v1";
 const OPS_ADDON_VIEW_INTERACTION_STATE_SCHEMA_VERSION: &str =
     "forge.ops.addon_view_interaction_state.v1";
+const OPS_ADDON_VIEW_RUNTIME_STATE_SCHEMA_VERSION: &str = "forge.ops.addon_view_runtime_state.v1";
 const OPS_ADDON_RENDERER_CLIENT_EVENT_SCHEMA_VERSION: &str =
     "forge.ops.addon_renderer_client_event.v1";
 const OPS_MODIFIER_PROPOSAL_CREATED_EVENT: &str = "ops_modifier_proposal_created";
@@ -287,6 +288,7 @@ pub struct OpsAddonViewInteractionState {
     pub filters: Vec<OpsAddonViewFilterControl>,
     pub allowed_client_events: Vec<String>,
     pub state_policy: Vec<String>,
+    pub runtime_states: Vec<OpsAddonViewRuntimeState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chart: Option<OpsAddonViewChartState>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -363,6 +365,30 @@ pub struct OpsAddonViewDocumentState {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct OpsAddonViewRuntimeState {
+    pub schema_version: String,
+    pub status: String,
+    pub workflow_id: String,
+    pub state_key: String,
+    pub event_count: usize,
+    pub last_event_kind: String,
+    pub last_actor: String,
+    pub last_event_at: String,
+    pub last_event_sequence: i64,
+    pub last_payload: Value,
+    pub filter_values: BTreeMap<String, Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hover: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_submit: Option<Value>,
+    pub refresh_requested: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct OpsServeReport {
     pub status: String,
     pub schema_version: String,
@@ -422,7 +448,7 @@ pub fn build_ops_snapshot_with_addon_dirs(
     let addon_catalog = load_addon_catalog_from_store(store, addon_dirs)?;
     let addon_observability = addon_observability_report(store, &addon_catalog, None, None, 1000)?;
     let addon_views = list_addon_views(&addon_catalog, None, Some("ops_console"), Some("enabled"));
-    let addon_view_renderers = build_addon_view_renderer_report(&addon_views);
+    let addon_view_renderers = build_addon_view_renderer_report_with_store(store, &addon_views)?;
     let visual_workflows = build_visual_workflows(store)?;
     Ok(OpsSnapshot {
         status: "ok".to_string(),
@@ -452,6 +478,21 @@ pub fn build_ops_snapshot_with_addon_dirs(
 }
 
 pub fn build_addon_view_renderer_report(
+    addon_views: &AddonViewReport,
+) -> OpsAddonViewRendererReport {
+    build_addon_view_renderer_report_base(addon_views)
+}
+
+pub fn build_addon_view_renderer_report_with_store(
+    store: &ForgeStore,
+    addon_views: &AddonViewReport,
+) -> Result<OpsAddonViewRendererReport> {
+    let mut report = build_addon_view_renderer_report_base(addon_views);
+    project_addon_view_runtime_states(store, &mut report.renderers)?;
+    Ok(report)
+}
+
+fn build_addon_view_renderer_report_base(
     addon_views: &AddonViewReport,
 ) -> OpsAddonViewRendererReport {
     let mut renderers = addon_views
@@ -594,6 +635,163 @@ pub fn build_addon_view_renderer_report(
     }
 }
 
+#[derive(Debug, Clone)]
+struct OpsAddonViewRuntimeStateAccumulator {
+    workflow_id: String,
+    state_key: String,
+    event_count: usize,
+    last_event_kind: String,
+    last_actor: String,
+    last_event_at: String,
+    last_event_sequence: i64,
+    last_payload: Value,
+    filter_values: BTreeMap<String, Value>,
+    hover: Option<Value>,
+    selection: Option<Value>,
+    draft: Option<Value>,
+    last_submit: Option<Value>,
+    refresh_requested: bool,
+}
+
+impl OpsAddonViewRuntimeStateAccumulator {
+    fn new(workflow_id: &str, state_key: &str) -> Self {
+        Self {
+            workflow_id: workflow_id.to_string(),
+            state_key: state_key.to_string(),
+            event_count: 0,
+            last_event_kind: String::new(),
+            last_actor: "forge".to_string(),
+            last_event_at: String::new(),
+            last_event_sequence: 0,
+            last_payload: serde_json::json!({}),
+            filter_values: BTreeMap::new(),
+            hover: None,
+            selection: None,
+            draft: None,
+            last_submit: None,
+            refresh_requested: false,
+        }
+    }
+
+    fn observe(&mut self, event: &StoreEvent, event_kind: &str, actor: &str, payload: Value) {
+        self.event_count += 1;
+        self.last_event_kind = event_kind.to_string();
+        self.last_actor = actor.to_string();
+        self.last_event_at = event.created_at.clone();
+        self.last_event_sequence = event.id;
+        self.last_payload = payload.clone();
+        match event_kind {
+            "filter_changed" => merge_renderer_filter_payload(&mut self.filter_values, &payload),
+            "hover_changed" => self.hover = Some(payload),
+            "selection_changed" => self.selection = Some(payload),
+            "draft_changed" => self.draft = Some(payload),
+            "submit_requested" => self.last_submit = Some(payload),
+            "refresh_requested" => self.refresh_requested = true,
+            _ => {}
+        }
+    }
+
+    fn into_runtime_state(self) -> OpsAddonViewRuntimeState {
+        OpsAddonViewRuntimeState {
+            schema_version: OPS_ADDON_VIEW_RUNTIME_STATE_SCHEMA_VERSION.to_string(),
+            status: "client_events_projected".to_string(),
+            workflow_id: self.workflow_id,
+            state_key: self.state_key,
+            event_count: self.event_count,
+            last_event_kind: self.last_event_kind,
+            last_actor: self.last_actor,
+            last_event_at: self.last_event_at,
+            last_event_sequence: self.last_event_sequence,
+            last_payload: self.last_payload,
+            filter_values: self.filter_values,
+            hover: self.hover,
+            selection: self.selection,
+            draft: self.draft,
+            last_submit: self.last_submit,
+            refresh_requested: self.refresh_requested,
+        }
+    }
+}
+
+fn project_addon_view_runtime_states(
+    store: &ForgeStore,
+    renderers: &mut [OpsAddonViewRenderer],
+) -> Result<()> {
+    if renderers.is_empty() {
+        return Ok(());
+    }
+    let known_state_keys = renderers
+        .iter()
+        .map(|renderer| renderer.interaction_state.state_key.clone())
+        .collect::<Vec<_>>();
+    let mut states: BTreeMap<(String, String), OpsAddonViewRuntimeStateAccumulator> =
+        BTreeMap::new();
+    for workflow in store.load_workflows()? {
+        for event in store.load_workflow_events(&workflow.id)? {
+            if event.kind != "addon_renderer_client_event" {
+                continue;
+            }
+            let Some(state_key) = string_value(&event.data, "state_key") else {
+                continue;
+            };
+            if !known_state_keys.iter().any(|known| known == &state_key) {
+                continue;
+            }
+            let event_kind = string_value(&event.data, "event_kind")
+                .unwrap_or_else(|| "unknown_client_event".to_string());
+            let actor = string_value(&event.data, "actor").unwrap_or_else(|| "forge".to_string());
+            let payload = event
+                .data
+                .get("payload")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            states
+                .entry((state_key.clone(), workflow.id.clone()))
+                .or_insert_with(|| {
+                    OpsAddonViewRuntimeStateAccumulator::new(&workflow.id, &state_key)
+                })
+                .observe(&event, &event_kind, &actor, payload);
+        }
+    }
+    for renderer in renderers {
+        let state_key = &renderer.interaction_state.state_key;
+        renderer.interaction_state.runtime_states = states
+            .values()
+            .filter(|state| &state.state_key == state_key)
+            .cloned()
+            .map(OpsAddonViewRuntimeStateAccumulator::into_runtime_state)
+            .collect::<Vec<_>>();
+    }
+    Ok(())
+}
+
+fn merge_renderer_filter_payload(filters: &mut BTreeMap<String, Value>, payload: &Value) {
+    if let Some(object) = payload.get("filters").and_then(Value::as_object) {
+        for (key, value) in object {
+            filters.insert(key.clone(), value.clone());
+        }
+        return;
+    }
+    if let Some(filter_id) = string_value(payload, "filter_id") {
+        let value = payload
+            .get("value")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!(true));
+        filters.insert(filter_id, value);
+        return;
+    }
+    filters.insert("last".to_string(), payload.clone());
+}
+
+fn string_value(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 fn build_addon_view_interaction_state(
     addon_id: &str,
     view_id: &str,
@@ -706,6 +904,7 @@ fn build_addon_view_interaction_state(
                 .to_string(),
             "no Addon JavaScript or arbitrary component code is executed".to_string(),
         ],
+        runtime_states: Vec::new(),
         chart,
         form,
         data_list,
@@ -1999,13 +2198,35 @@ fn render_addon_interaction_state_html(state: &OpsAddonViewInteractionState) -> 
     if family_state.is_empty() {
         family_state.push_str("<li>Estado de card genérico sem controles especializados.</li>");
     }
+    let runtime_state_summary = if state.runtime_states.is_empty() {
+        "<li>sem eventos de cliente projetados</li>".to_string()
+    } else {
+        state
+            .runtime_states
+            .iter()
+            .map(|runtime_state| {
+                let payload = serde_json::to_string(&runtime_state.last_payload)
+                    .unwrap_or_else(|_| "{}".to_string());
+                format!(
+                    "<li><code>{}</code> {} <small>{} eventos; ator: {}; payload: {}</small></li>",
+                    escape_html(&runtime_state.workflow_id),
+                    escape_html(&runtime_state.last_event_kind),
+                    runtime_state.event_count,
+                    escape_html(&runtime_state.last_actor),
+                    escape_html(&truncate(&payload, 120))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    };
     format!(
-        "<div class=\"visual-panels\"><div><h4>Estado interativo</h4><ul class=\"compact-list\"><li><code>{}</code> <span>externo: {}</span></li><li>eventos: {}</li>{}</ul></div><div><h4>Filtros seguros</h4><ul class=\"compact-list\">{}</ul></div></div>",
+        "<div class=\"visual-panels\"><div><h4>Estado interativo</h4><ul class=\"compact-list\"><li><code>{}</code> <span>externo: {}</span></li><li>eventos: {}</li>{}</ul></div><div><h4>Filtros seguros</h4><ul class=\"compact-list\">{}</ul></div></div><div class=\"visual-panels\"><div><h4>Estado persistido</h4><ul class=\"compact-list\">{}</ul></div></div>",
         escape_html(&state.state_key),
         state.external_code_execution,
         escape_html(&state.allowed_client_events.join(", ")),
         family_state,
-        filter_summary
+        filter_summary,
+        runtime_state_summary
     )
 }
 

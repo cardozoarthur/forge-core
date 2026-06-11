@@ -23829,6 +23829,36 @@ views:
         .any(|event| event["kind"] == "addon_renderer_client_event"
             && event["data"]["view_id"] == "renderer.metrics_chart"
             && event["data"]["event_kind"] == "hover_changed"));
+    let stateful_snapshot =
+        forge_core::ops::build_ops_snapshot_with_addon_dirs(&store_handle, &[addon_dir.clone()])
+            .unwrap();
+    let stateful_snapshot_json = serde_json::to_value(&stateful_snapshot).unwrap();
+    let stateful_chart_renderer = stateful_snapshot_json["addon_view_renderers"]["renderers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["view_id"] == "renderer.metrics_chart")
+        .unwrap();
+    let runtime_state = stateful_chart_renderer["interaction_state"]["runtime_states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["workflow_id"] == workflow_id)
+        .unwrap();
+    assert_eq!(
+        runtime_state["schema_version"],
+        "forge.ops.addon_view_runtime_state.v1"
+    );
+    assert_eq!(runtime_state["status"], "client_events_projected");
+    assert_eq!(runtime_state["event_count"], 1);
+    assert_eq!(runtime_state["last_event_kind"], "hover_changed");
+    assert_eq!(runtime_state["last_actor"], "human:arthur");
+    assert_eq!(runtime_state["hover"]["point"], "cost_series");
+    assert_eq!(runtime_state["last_payload"]["point"], "cost_series");
+    let stateful_html = forge_core::ops::render_ops_html(&stateful_snapshot);
+    assert!(stateful_html.contains("Estado persistido"));
+    assert!(stateful_html.contains("hover_changed"));
+    assert!(stateful_html.contains("cost_series"));
 
     let proposed_goal = "Objetivo proposto pela lane modificadora";
     let propose_goal_request = format!(
