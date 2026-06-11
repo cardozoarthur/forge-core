@@ -86,8 +86,9 @@ use crate::milestone::{
     build_milestone_status, build_replacement_cli_demo,
 };
 use crate::multimodal::{
-    build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
-    build_multimodal_status, evaluate_multimodal_guard,
+    build_multimodal_benchmark_result, build_multimodal_benchmark_template,
+    build_multimodal_demo_plan, build_multimodal_install_plan, build_multimodal_status,
+    evaluate_multimodal_guard, MultimodalBenchmarkResultOptions,
 };
 use crate::ops::record_addon_renderer_client_event;
 use crate::patch::{
@@ -1495,6 +1496,17 @@ struct MultimodalBenchmarkTemplateInput {
     capability: Option<String>,
     capability_id: Option<String>,
     enable_experimental: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultimodalBenchmarkResultInput {
+    capability: Option<String>,
+    capability_id: Option<String>,
+    fixture: Option<String>,
+    fixture_id: Option<String>,
+    enable_experimental: Option<bool>,
+    approved_by: Option<String>,
+    confirm_fixture_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5225,6 +5237,37 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.multimodal.benchmark_result",
+                "Record Multimodal Fixture Benchmark Result",
+                "Generate an approval-gated fixture-only benchmark result artifact for one multimodal capability without installs, model execution, device access, network access or automation.",
+                object_schema(
+                    &[
+                        ("capability_id", "string", "capability id from forge.multimodal.status"),
+                        ("fixture_id", "string", "fixture id from forge.multimodal.benchmark_template"),
+                        ("approved_by", "string", "required human/operator approval identity"),
+                        ("confirm_fixture_only", "boolean", "must be true to confirm no model/device/network execution"),
+                        ("enable_experimental", "boolean", "optional explicit experimental flag for evidence output only"),
+                    ],
+                    &["capability_id", "fixture_id", "approved_by", "confirm_fixture_only"],
+                ),
+                "forge.multimodal.benchmark_result.v1",
+                &[
+                    "forge",
+                    "multimodal",
+                    "benchmark-result",
+                    "--capability",
+                    "<capability-id>",
+                    "--fixture",
+                    "<fixture-id>",
+                    "--approved-by",
+                    "<operator>",
+                    "--confirm-fixture-only",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.multimodal.demo_plan",
                 "Generate Multimodal Demo Plan",
                 "Generate a guarded demo plan for local image recognition, audio transcription/synthesis or Blender/avatar preparation. This tool performs no installs, model execution, device access or automation.",
@@ -7697,6 +7740,26 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(build_multimodal_benchmark_template(
                 &capability,
                 input.enable_experimental.unwrap_or(false),
+            )?)?
+        }
+        "forge.multimodal.benchmark_result" => {
+            let input: MultimodalBenchmarkResultInput = parse_input(input)?;
+            let capability = input
+                .capability_id
+                .or(input.capability)
+                .ok_or_else(|| anyhow::anyhow!("capability_id is required"))?;
+            let fixture = input
+                .fixture_id
+                .or(input.fixture)
+                .ok_or_else(|| anyhow::anyhow!("fixture_id is required"))?;
+            serde_json::to_value(build_multimodal_benchmark_result(
+                MultimodalBenchmarkResultOptions {
+                    capability_id: &capability,
+                    fixture_id: &fixture,
+                    enable_experimental: input.enable_experimental.unwrap_or(false),
+                    approved_by: input.approved_by.as_deref(),
+                    confirm_fixture_only: input.confirm_fixture_only.unwrap_or(false),
+                },
             )?)?
         }
         "forge.multimodal.demo_plan" => {

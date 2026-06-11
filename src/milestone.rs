@@ -750,8 +750,8 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
             "experimental_multimodal_runtime",
             "Experimental multimodal runtime",
             "groundwork",
-            "0.4.140 adds disabled-by-default multimodal inventory, plan-only install manifests and runtime guards for camera, microphone, screen, input, peripherals, model and filesystem access. 0.4.142 adds plan-only benchmark/report templates and guarded demo plans for local image recognition, audio transcription/synthesis and Blender/avatar preparation through CLI and MCP without installing models or accessing devices. These surfaces prove the safety boundary, but they do not validate real image/audio/video/3D execution yet.",
-            "Add explicit feature-flag configuration, benchmark result artifacts from approved fixture-only runs and tests proving no camera/microphone/screen/input/filesystem access occurs without opt-in.",
+            "0.4.140 adds disabled-by-default multimodal inventory, plan-only install manifests and runtime guards for camera, microphone, screen, input, peripherals, model and filesystem access. 0.4.142 adds plan-only benchmark/report templates and guarded demo plans for local image recognition, audio transcription/synthesis and Blender/avatar preparation through CLI and MCP without installing models or accessing devices. The current line adds approval-gated `forge multimodal benchmark-result` and MCP `forge.multimodal.benchmark_result` fixture-only artifacts with explicit no-install, no-model-execution, no-device-access and no-network-access evidence. These surfaces prove the safety boundary, but they do not validate real image/audio/video/3D execution yet.",
+            "Add explicit feature-flag configuration and real guarded benchmark/demo evidence after opt-in, proving no camera/microphone/screen/input/filesystem access occurs without guard approval.",
         ),
     ]
 }
@@ -800,7 +800,7 @@ fn required_evidence_for(capability_id: &str) -> &'static str {
             "Forge-first CLI demo evidence plus native file editing, diff review, permissions, sessions and JSON-stable automation evidence."
         }
         "experimental_multimodal_runtime" => {
-            "Disabled-by-default multimodal inventory, install-plan, runtime guard, benchmark template and safe local image/audio/3D demo-plan evidence."
+            "Disabled-by-default multimodal inventory, install-plan, runtime guard, benchmark template, approval-gated fixture-only benchmark-result and safe local image/audio/3D demo-plan evidence."
         }
         _ => "Implementation, validation and demo evidence sufficient for 0.5 promotion.",
     }
@@ -827,7 +827,7 @@ fn next_action_for_gap(capability_id: &str) -> &'static str {
             "Integrate context, handoff and patch slash commands deeper into the TUI with inline diff rendering, multi-file review, deeper provider/session lifecycle controls and end-to-end coding/research workflows."
         }
         "experimental_multimodal_runtime" => {
-            "Promote the disabled-by-default multimodal surfaces into benchmarked, guarded demo plans without performing installs or device access by default."
+            "Promote the disabled-by-default multimodal surfaces into real guarded model/runtime benchmarks and demos without performing installs or device access by default."
         }
         _ => "Implement the missing capability with tests, artifacts and milestone evidence.",
     }

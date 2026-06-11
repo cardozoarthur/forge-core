@@ -106,8 +106,9 @@ use forge_core::milestone::{
     build_milestone_status, build_replacement_cli_demo,
 };
 use forge_core::multimodal::{
-    build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
-    build_multimodal_status, evaluate_multimodal_guard,
+    build_multimodal_benchmark_result, build_multimodal_benchmark_template,
+    build_multimodal_demo_plan, build_multimodal_install_plan, build_multimodal_status,
+    evaluate_multimodal_guard, MultimodalBenchmarkResultOptions,
 };
 use forge_core::ops::{
     build_ops_snapshot_with_addon_dirs, record_addon_renderer_client_event,
@@ -3101,6 +3102,20 @@ enum MultimodalCommands {
         capability: String,
         #[arg(long = "enable-experimental")]
         enable_experimental: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    BenchmarkResult {
+        #[arg(long)]
+        capability: String,
+        #[arg(long)]
+        fixture: String,
+        #[arg(long = "enable-experimental")]
+        enable_experimental: bool,
+        #[arg(long = "approved-by")]
+        approved_by: Option<String>,
+        #[arg(long = "confirm-fixture-only")]
+        confirm_fixture_only: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -7145,6 +7160,24 @@ fn run() -> Result<i32> {
                 output,
             } => {
                 let report = build_multimodal_benchmark_template(&capability, enable_experimental)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MultimodalCommands::BenchmarkResult {
+                capability,
+                fixture,
+                enable_experimental,
+                approved_by,
+                confirm_fixture_only,
+                output,
+            } => {
+                let report = build_multimodal_benchmark_result(MultimodalBenchmarkResultOptions {
+                    capability_id: &capability,
+                    fixture_id: &fixture,
+                    enable_experimental,
+                    approved_by: approved_by.as_deref(),
+                    confirm_fixture_only,
+                })?;
                 print_response(output, &report)?;
                 Ok(0)
             }

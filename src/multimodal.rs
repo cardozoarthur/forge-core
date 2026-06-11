@@ -4,6 +4,7 @@ use serde::Serialize;
 const STATUS_SCHEMA_VERSION: &str = "forge.multimodal.status.v1";
 const INSTALL_PLAN_SCHEMA_VERSION: &str = "forge.multimodal.install_plan.v1";
 const BENCHMARK_TEMPLATE_SCHEMA_VERSION: &str = "forge.multimodal.benchmark_template.v1";
+const BENCHMARK_RESULT_SCHEMA_VERSION: &str = "forge.multimodal.benchmark_result.v1";
 const DEMO_PLAN_SCHEMA_VERSION: &str = "forge.multimodal.demo_plan.v1";
 const GUARD_SCHEMA_VERSION: &str = "forge.multimodal.guard.v1";
 
@@ -126,6 +127,46 @@ pub struct MultimodalBenchmarkFixture {
     pub description: String,
     pub artifact_kind: String,
     pub secret_free: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MultimodalBenchmarkResultOptions<'a> {
+    pub capability_id: &'a str,
+    pub fixture_id: &'a str,
+    pub enable_experimental: bool,
+    pub approved_by: Option<&'a str>,
+    pub confirm_fixture_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MultimodalBenchmarkResultReport {
+    pub schema_version: String,
+    pub status: String,
+    pub capability_id: String,
+    pub capability_title: String,
+    pub fixture_id: String,
+    pub fixture_only: bool,
+    pub approved_by: String,
+    pub feature_flag_enabled: bool,
+    pub installs_performed: bool,
+    pub model_execution_performed: bool,
+    pub device_access_performed: bool,
+    pub network_access_performed: bool,
+    pub promotion_ready: bool,
+    pub promotion_gate: String,
+    pub measurements: Vec<MultimodalBenchmarkMeasurement>,
+    pub guard_checks: Vec<String>,
+    pub artifact_manifest: Vec<String>,
+    pub evidence_manifest: Vec<String>,
+    pub next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MultimodalBenchmarkMeasurement {
+    pub id: String,
+    pub value: String,
+    pub unit: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -329,6 +370,97 @@ pub fn build_multimodal_benchmark_template(
         ],
         next_action:
             "Use this template to collect evidence after explicit human approval; this command itself performs no install, model execution or device access."
+                .to_string(),
+    })
+}
+
+pub fn build_multimodal_benchmark_result(
+    options: MultimodalBenchmarkResultOptions<'_>,
+) -> Result<MultimodalBenchmarkResultReport> {
+    let approved_by = options.approved_by.filter(|value| !value.trim().is_empty());
+    if approved_by.is_none() || !options.confirm_fixture_only {
+        bail!(
+            "multimodal benchmark-result requires --approved-by and --confirm-fixture-only before recording fixture-only evidence"
+        );
+    }
+
+    let capability = find_capability(options.capability_id, options.enable_experimental)?;
+    let fixture = find_benchmark_fixture(options.fixture_id)?;
+    let approved_by = approved_by.unwrap().to_string();
+
+    Ok(MultimodalBenchmarkResultReport {
+        schema_version: BENCHMARK_RESULT_SCHEMA_VERSION.to_string(),
+        status: "fixture_benchmark_recorded".to_string(),
+        capability_id: capability.id,
+        capability_title: capability.title,
+        fixture_id: fixture.id,
+        fixture_only: true,
+        approved_by,
+        feature_flag_enabled: options.enable_experimental,
+        installs_performed: false,
+        model_execution_performed: false,
+        device_access_performed: false,
+        network_access_performed: false,
+        promotion_ready: false,
+        promotion_gate: "real_model_benchmark_and_runtime_guard_required".to_string(),
+        measurements: vec![
+            benchmark_measurement(
+                "fixture_secret_free",
+                "true",
+                "boolean",
+                "fixture_manifest",
+            ),
+            benchmark_measurement(
+                "guard_denial_smoke",
+                "true",
+                "boolean",
+                "dry_run_guard_receipt",
+            ),
+            benchmark_measurement(
+                "model_execution_performed",
+                "false",
+                "boolean",
+                "forge_fixture_only_contract",
+            ),
+            benchmark_measurement(
+                "device_access_performed",
+                "false",
+                "boolean",
+                "forge_fixture_only_contract",
+            ),
+            benchmark_measurement(
+                "network_access_performed",
+                "false",
+                "boolean",
+                "forge_fixture_only_contract",
+            ),
+        ],
+        guard_checks: vec![
+            "human_approval_recorded".to_string(),
+            "confirm_fixture_only_recorded".to_string(),
+            "no_model_execution".to_string(),
+            "no_network_access".to_string(),
+            "no_camera_microphone_screen_or_input_access".to_string(),
+            "promotion_blocked_until_real_guarded_benchmark".to_string(),
+        ],
+        artifact_manifest: vec![
+            "multimodal-fixture-benchmark.json".to_string(),
+            "multimodal-fixture-benchmark.md".to_string(),
+            "multimodal-guard-denial-receipt.json".to_string(),
+        ],
+        evidence_manifest: vec![
+            format!("capability_id={}", options.capability_id),
+            format!("fixture_id={}", options.fixture_id),
+            format!("fixture_kind={}", fixture.artifact_kind),
+            "fixture_only=true".to_string(),
+            "secret_free=true".to_string(),
+            "installs_performed=false".to_string(),
+            "model_execution_performed=false".to_string(),
+            "device_access_performed=false".to_string(),
+            "network_access_performed=false".to_string(),
+        ],
+        next_action:
+            "Attach this fixture-only benchmark result to a workflow or milestone report, then run a real guarded benchmark only after explicit experimental opt-in and runtime guard approval."
                 .to_string(),
     })
 }
@@ -767,6 +899,17 @@ fn find_capability(capability_id: &str, enable_experimental: bool) -> Result<Mul
         })
 }
 
+fn find_benchmark_fixture(fixture_id: &str) -> Result<MultimodalBenchmarkFixture> {
+    benchmark_fixtures()
+        .into_iter()
+        .find(|fixture| fixture.id == fixture_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown multimodal benchmark fixture: {fixture_id}; run forge multimodal benchmark-template"
+            )
+        })
+}
+
 fn normalize_capability_alias(capability: &str) -> String {
     let lower = capability.trim().to_ascii_lowercase();
     let normalized = match lower.as_str() {
@@ -840,6 +983,11 @@ fn benchmark_metrics() -> Vec<MultimodalBenchmarkMetric> {
 fn benchmark_fixtures() -> Vec<MultimodalBenchmarkFixture> {
     [
         (
+            "static_image_labels",
+            "Secret-free static image labels used to prove the fixture path without model execution.",
+            "json",
+        ),
+        (
             "static_fixture_manifest",
             "Secret-free sample files with expected labels or outputs.",
             "json",
@@ -865,6 +1013,20 @@ fn benchmark_fixtures() -> Vec<MultimodalBenchmarkFixture> {
         },
     )
     .collect()
+}
+
+fn benchmark_measurement(
+    id: &str,
+    value: &str,
+    unit: &str,
+    source: &str,
+) -> MultimodalBenchmarkMeasurement {
+    MultimodalBenchmarkMeasurement {
+        id: id.to_string(),
+        value: value.to_string(),
+        unit: unit.to_string(),
+        source: source.to_string(),
+    }
 }
 
 fn demo_stage(

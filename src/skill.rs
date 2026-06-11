@@ -78,7 +78,7 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 - Use `forge patch revert` or MCP tool `forge.patch.revert` to record a guarded rollback proposal. It does not run `git checkout` or restore files automatically; human approval must precede destructive restore execution.
 - Use `forge patch restore --confirm-restore --approved-by <operator>` or MCP `forge.patch.restore` only after a human-approved revert artifact exists; this is the explicit execution path that restores repo-local files and records `forge.patch_restore.v1` evidence.
 - Inspect Forge 0.5 release readiness through `forge.milestone.status`, the full release-gate manifest through `forge.milestone.manifest`, the export/demo baseline through `forge.milestone.export_demo`, and replacement-grade CLI demo evidence through `forge.milestone.cli_demo`; `groundwork`, `planned` and `blocked` capabilities prevent promotion.
-- Inspect the experimental multimodal track through `forge.multimodal.status`; generate plan-only model/runtime install manifests through `forge.multimodal.install_plan`; generate benchmark/report templates through `forge.multimodal.benchmark_template`; generate guarded local image/audio/Blender demo plans through `forge.multimodal.demo_plan`; evaluate camera, microphone, screen, input and peripheral access through `forge.multimodal.guard` before any device or automation action.
+- Inspect the experimental multimodal track through `forge.multimodal.status`; generate plan-only model/runtime install manifests through `forge.multimodal.install_plan`; generate benchmark/report templates through `forge.multimodal.benchmark_template`; record approval-gated fixture-only benchmark results through `forge.multimodal.benchmark_result` without installs, model execution, device access or network access; generate guarded local image/audio/Blender demo plans through `forge.multimodal.demo_plan`; evaluate camera, microphone, screen, input and peripheral access through `forge.multimodal.guard` before any device or automation action.
 - MCP mutations must still go through Forge so revisions, artifact hashes, origins and validation gates are persisted.
 
 ## Safety Rules
@@ -240,11 +240,13 @@ forge milestone cli-demo --origin codex --output json
 forge multimodal status --output json
 forge multimodal install-plan --capability audio_transcription --output json
 forge multimodal benchmark-template --capability audio_transcription --output json
+forge multimodal benchmark-result --capability image_understanding --fixture static_image_labels --approved-by <operator> --confirm-fixture-only --output json
 forge multimodal demo-plan --demo local_image_recognition --output json
 forge multimodal guard --capability camera --action access --output json
 forge mcp call forge.multimodal.status --output json
 forge mcp call forge.multimodal.install_plan --input '{"capability_id":"audio_transcription"}' --output json
 forge mcp call forge.multimodal.benchmark_template --input '{"capability_id":"audio_transcription"}' --output json
+forge mcp call forge.multimodal.benchmark_result --input '{"capability_id":"image_understanding","fixture_id":"static_image_labels","approved_by":"<operator>","confirm_fixture_only":true}' --output json
 forge mcp call forge.multimodal.demo_plan --input '{"demo_id":"local_image_recognition"}' --output json
 forge mcp call forge.multimodal.guard --input '{"capability":"camera","action":"access","enable_experimental":false,"allow":false}' --output json
 forge mcp call forge.milestone.status --input '{"version":"0.5"}' --output json

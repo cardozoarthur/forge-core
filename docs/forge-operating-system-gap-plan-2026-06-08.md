@@ -288,6 +288,13 @@ Estado verificado em `forge 0.4.177`, branch `main` alinhado com `origin/main`.
 - `forge sessions lifecycle`, MCP `forge.session.lifecycle` e `/sessions lifecycle` adicionam controle audit-only de lifecycle para shell sessions conhecidas, registrando estados `opened`, `attached`, `detached`, `closed`, `failed` ou `abandoned` no timeline global sem executar child process.
 - `forge milestone manifest --version 0.5 --output json` ainda retorna `promotion_decision.decision=fail`, bloqueado por `replacement_grade_cli` e `experimental_multimodal_runtime`. O harness, o `patch review`, o `patch diff` e o `patch restore` avançaram a capacidade de CLI de substituição, mas ela continua em `groundwork` até existir UX mais completa de permissão e file editing, controles mais profundos de lifecycle de provider/session e fluxos reais ponta a ponta de coding/research.
 
+### Atualização 2026-06-11 — Evidência Multimodal Fixture-Only
+
+- `forge multimodal benchmark-result --approved-by <operator> --confirm-fixture-only --output json` adiciona o primeiro artifact `forge.multimodal.benchmark_result.v1` para benchmark multimodal aprovado e fixture-only.
+- MCP `forge.multimodal.benchmark_result` expõe o mesmo contrato para agentes, com `async_safe=true`, `mutates_workflow=false` e schema estável para anexar evidência a workflows/milestones.
+- O resultado registra explicitamente `installs_performed=false`, `model_execution_performed=false`, `device_access_performed=false` e `network_access_performed=false`, além do guard check `no_camera_microphone_screen_or_input_access`.
+- O milestone 0.5 continua bloqueado: essa evidência prova a fronteira segura fixture-only, mas ainda não substitui feature flag explícita nem benchmark/demo real com runtime guard aprovado.
+
 ## Plano Incremental
 
 ### P0 — Contrato De Fonte Da Verdade

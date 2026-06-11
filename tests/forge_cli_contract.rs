@@ -1822,10 +1822,14 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .find(|capability| capability["id"] == "experimental_multimodal_runtime")
         .unwrap();
     assert_eq!(multimodal["status"], "groundwork");
+    assert!(multimodal["evidence"]
+        .as_str()
+        .unwrap()
+        .contains("forge multimodal benchmark-result"));
     assert!(multimodal["gap_before_promotion"]
         .as_str()
         .unwrap()
-        .contains("benchmark"));
+        .contains("real guarded benchmark"));
 
     assert_eq!(json["summary"]["validated"].as_u64().unwrap(), 9);
     assert_eq!(json["summary"]["groundwork"].as_u64().unwrap(), 2);
@@ -2031,6 +2035,14 @@ fn milestone_boundary_document_matches_validated_export_demo_runtime_state() {
         "the visible 0.5 milestone boundary should point to guarded demo-plan evidence"
     );
     assert!(
+        docs.contains("forge multimodal benchmark-result"),
+        "the visible 0.5 milestone boundary should point to approved fixture-only benchmark result evidence"
+    );
+    assert!(
+        docs.contains("forge.multimodal.benchmark_result"),
+        "the visible 0.5 milestone boundary should expose the MCP benchmark result surface"
+    );
+    assert!(
         docs.contains("forge milestone cli-demo"),
         "the visible 0.5 milestone boundary should point to replacement-grade CLI demo evidence"
     );
@@ -2077,6 +2089,14 @@ fn packaged_skill_mentions_multimodal_benchmark_and_demo_plan_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.multimodal.benchmark_template"),
         "the packaged Forge skill should expose the MCP benchmark-template tool to agent callers"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge multimodal benchmark-result"),
+        "the packaged Forge skill should teach agents how to record approved fixture-only benchmark results"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.multimodal.benchmark_result"),
+        "the packaged Forge skill should expose the MCP benchmark-result tool to agent callers"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge multimodal demo-plan"),
@@ -2311,6 +2331,120 @@ fn multimodal_benchmark_template_is_plan_only_and_does_not_touch_devices() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("runtime_guard_required")));
+}
+
+#[test]
+fn multimodal_fixture_benchmark_result_is_approval_gated_and_device_free() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "multimodal",
+            "benchmark-result",
+            "--capability",
+            "image_understanding",
+            "--fixture",
+            "static_image_labels",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--approved-by"))
+        .stderr(predicates::str::contains("--confirm-fixture-only"));
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "multimodal",
+            "benchmark-result",
+            "--capability",
+            "image_understanding",
+            "--fixture",
+            "static_image_labels",
+            "--approved-by",
+            "contract-test",
+            "--confirm-fixture-only",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.multimodal.benchmark_result.v1"
+    );
+    assert_eq!(json["status"], "fixture_benchmark_recorded");
+    assert_eq!(json["capability_id"], "image_understanding");
+    assert_eq!(json["fixture_id"], "static_image_labels");
+    assert_eq!(json["approved_by"], "contract-test");
+    assert_eq!(json["fixture_only"], true);
+    assert_eq!(json["feature_flag_enabled"], false);
+    assert_eq!(json["installs_performed"], false);
+    assert_eq!(json["model_execution_performed"], false);
+    assert_eq!(json["device_access_performed"], false);
+    assert_eq!(json["network_access_performed"], false);
+    assert_eq!(json["promotion_ready"], false);
+    assert!(json["artifact_manifest"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("multimodal-fixture-benchmark.json")));
+    assert!(json["guard_checks"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "no_camera_microphone_screen_or_input_access"
+        )));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    assert!(manifest_json["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| {
+            tool["name"] == "forge.multimodal.benchmark_result"
+                && tool["output_schema"] == "forge.multimodal.benchmark_result.v1"
+                && tool["async_safe"] == true
+                && tool["mutates_workflow"] == false
+        }));
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.multimodal.benchmark_result"])
+        .arg("--input")
+        .arg(
+            r#"{"capability_id":"ocr","fixture_id":"static_image_labels","approved_by":"mcp-contract-test","confirm_fixture_only":true}"#,
+        )
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.multimodal.benchmark_result.v1"
+    );
+    assert_eq!(mcp_json["result"]["capability_id"], "ocr");
+    assert_eq!(mcp_json["result"]["fixture_only"], true);
+    assert_eq!(mcp_json["result"]["model_execution_performed"], false);
 }
 
 #[test]
