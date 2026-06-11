@@ -4,6 +4,7 @@ use crate::addon::{
 };
 use crate::identity::ensure_workflow_policy;
 use crate::improve::{rank_improvement_candidates, OrchestratorImprovementCandidatesReport};
+use crate::memory::{project_memory_governance_report, ProjectMemoryGovernanceReport};
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
     WorkflowRegistryReport,
@@ -32,13 +33,14 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const OPS_SNAPSHOT_SCHEMA_VERSION: &str = "forge.ops.snapshot.v1";
 const OPS_ACTION_SCHEMA_VERSION: &str = "forge.ops.action.v1";
 const OPS_MODIFIER_LANE_SCHEMA_VERSION: &str = "forge.ops.modifier_lane.v1";
 const OPS_MODIFIER_PROPOSAL_SCHEMA_VERSION: &str = "forge.ops.modifier_proposal.v1";
+const OPS_MEMORY_CONTEXT_GOVERNANCE_SCHEMA_VERSION: &str = "forge.ops.memory_context_governance.v1";
 const OPS_ADDON_VIEW_RENDERERS_SCHEMA_VERSION: &str = "forge.ops.addon_view_renderers.v1";
 const OPS_ADDON_VIEW_INTERACTION_STATE_SCHEMA_VERSION: &str =
     "forge.ops.addon_view_interaction_state.v1";
@@ -58,6 +60,7 @@ pub struct OpsSnapshot {
     pub registry: WorkflowRegistryReport,
     pub improvement_candidates: OrchestratorImprovementCandidatesReport,
     pub modifier_lane: OpsModifierLane,
+    pub memory_context_governance: OpsMemoryContextGovernance,
     pub addon_observability: AddonObservabilityReport,
     pub addon_views: AddonViewReport,
     pub addon_view_renderers: OpsAddonViewRendererReport,
@@ -83,6 +86,36 @@ pub struct OpsActionSpec {
     pub path: String,
     pub description: String,
     pub mutates_workflow: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsMemoryContextGovernance {
+    pub schema_version: String,
+    pub project_governance: ProjectMemoryGovernanceReport,
+    pub workflow_count: usize,
+    pub governed_workflow_count: usize,
+    pub workflows: Vec<OpsWorkflowMemoryContextGovernance>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsWorkflowMemoryContextGovernance {
+    pub workflow_id: String,
+    pub status: String,
+    pub goal: String,
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    pub user_id: String,
+    pub channel_id: String,
+    pub memory_scope: String,
+    pub personality_scope: String,
+    pub tenant_policy_mode: String,
+    pub memory_policy_source: String,
+    pub effective_memory_level: String,
+    pub allowed_scopes: Vec<String>,
+    pub default_audience: String,
+    pub default_context_command: Vec<String>,
+    pub default_memory_search_command: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -448,6 +481,14 @@ pub fn build_ops_snapshot_with_addon_dirs(
     store: &ForgeStore,
     addon_dirs: &[PathBuf],
 ) -> Result<OpsSnapshot> {
+    build_ops_snapshot_with_addon_dirs_and_project(store, addon_dirs, None)
+}
+
+pub fn build_ops_snapshot_with_addon_dirs_and_project(
+    store: &ForgeStore,
+    addon_dirs: &[PathBuf],
+    project_root: Option<&Path>,
+) -> Result<OpsSnapshot> {
     let registry = list_workflows_with_filters(
         store,
         WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
@@ -458,6 +499,7 @@ pub fn build_ops_snapshot_with_addon_dirs(
     let addon_observability = addon_observability_report(store, &addon_catalog, None, None, 1000)?;
     let addon_views = list_addon_views(&addon_catalog, None, Some("ops_console"), Some("enabled"));
     let addon_view_renderers = build_addon_view_renderer_report_with_store(store, &addon_views)?;
+    let memory_context_governance = build_memory_context_governance(store, project_root)?;
     let visual_workflows = build_visual_workflows(store)?;
     Ok(OpsSnapshot {
         status: "ok".to_string(),
@@ -478,12 +520,177 @@ pub fn build_ops_snapshot_with_addon_dirs(
         registry,
         improvement_candidates,
         modifier_lane,
+        memory_context_governance,
         addon_observability,
         addon_views,
         addon_view_renderers,
         visual_workflows,
         actions: ops_actions(),
     })
+}
+
+fn build_memory_context_governance(
+    store: &ForgeStore,
+    project_root: Option<&Path>,
+) -> Result<OpsMemoryContextGovernance> {
+    let project_governance = project_memory_governance_report(project_root);
+    let project_governance_configured = project_governance.status == "configured";
+    let project_root_for_command = if project_governance.project_root.trim().is_empty() {
+        None
+    } else {
+        Some(project_governance.project_root.clone())
+    };
+    let mut workflows = store
+        .load_workflows()?
+        .into_iter()
+        .map(|workflow| {
+            let context = workflow.intent.operating_context.clone();
+            let task_id = workflow
+                .tasks
+                .first()
+                .map(|task| task.id.clone())
+                .unwrap_or_else(|| "<task-id>".to_string());
+            let memory_policy_source = if project_governance_configured {
+                "project_governance"
+            } else {
+                "workflow_operating_context"
+            }
+            .to_string();
+            let effective_memory_level = if project_governance_configured {
+                project_governance.memory_level.clone()
+            } else {
+                ops_memory_level_for_scope(&context.memory_scope)
+            };
+            let allowed_scopes = if project_governance_configured {
+                project_governance.default_scopes.clone()
+            } else {
+                ops_allowed_scopes_for_scope(&context.memory_scope)
+            };
+            let default_audience = if project_governance_configured {
+                project_governance.default_audience.clone()
+            } else {
+                ops_default_audience_for_scope(&context.memory_scope)
+            };
+            let mut default_context_command = vec![
+                "forge".to_string(),
+                "context".to_string(),
+                "--workflow".to_string(),
+                workflow.id.clone(),
+                "--task".to_string(),
+                task_id,
+            ];
+            if let Some(project_root) = &project_root_for_command {
+                default_context_command.push("--project-root".to_string());
+                default_context_command.push(project_root.clone());
+            }
+            default_context_command.push("--output".to_string());
+            default_context_command.push("json".to_string());
+
+            let mut default_memory_search_command = vec![
+                "forge".to_string(),
+                "memory".to_string(),
+                "search".to_string(),
+                "--workflow".to_string(),
+                workflow.id.clone(),
+                "--query".to_string(),
+                "<query>".to_string(),
+            ];
+            if let Some(project_root) = &project_root_for_command {
+                default_memory_search_command.push("--project-root".to_string());
+                default_memory_search_command.push(project_root.clone());
+            } else {
+                default_memory_search_command.push("--memory-level".to_string());
+                default_memory_search_command.push(effective_memory_level.clone());
+                for scope in &allowed_scopes {
+                    default_memory_search_command.push("--scope".to_string());
+                    default_memory_search_command.push(scope.clone());
+                }
+                default_memory_search_command.push("--audience".to_string());
+                default_memory_search_command.push(default_audience.clone());
+            }
+            default_memory_search_command.push("--output".to_string());
+            default_memory_search_command.push("json".to_string());
+
+            OpsWorkflowMemoryContextGovernance {
+                workflow_id: workflow.id,
+                status: workflow.status,
+                goal: workflow.goal,
+                organization_id: context.organization.id,
+                brand_id: context.brand.id,
+                product_id: context.product.id,
+                user_id: context.user.id,
+                channel_id: context.channel.id,
+                memory_scope: context.memory_scope,
+                personality_scope: context.personality_scope,
+                tenant_policy_mode: context.tenant_policy_mode,
+                memory_policy_source,
+                effective_memory_level,
+                allowed_scopes,
+                default_audience,
+                default_context_command,
+                default_memory_search_command,
+            }
+        })
+        .collect::<Vec<_>>();
+    workflows.sort_by(|left, right| left.workflow_id.cmp(&right.workflow_id));
+    let workflow_count = workflows.len();
+    let governed_workflow_count = workflows
+        .iter()
+        .filter(|workflow| workflow.memory_policy_source == "project_governance")
+        .count();
+    Ok(OpsMemoryContextGovernance {
+        schema_version: OPS_MEMORY_CONTEXT_GOVERNANCE_SCHEMA_VERSION.to_string(),
+        project_governance,
+        workflow_count,
+        governed_workflow_count,
+        workflows,
+    })
+}
+
+fn ops_memory_level_for_scope(memory_scope: &str) -> String {
+    match memory_scope
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "none" | "disabled" => "MEMORY_NONE".to_string(),
+        "session" | "processing" => "MEMORY_SESSION".to_string(),
+        "project" | "project_session" => "MEMORY_SHORT_TERM".to_string(),
+        "global" | "organization_project_session" => "MEMORY_FULL".to_string(),
+        "admin" | "unrestricted" => "MEMORY_ADMIN".to_string(),
+        _ => "MEMORY_STANDARD".to_string(),
+    }
+}
+
+fn ops_allowed_scopes_for_scope(memory_scope: &str) -> Vec<String> {
+    match ops_memory_level_for_scope(memory_scope).as_str() {
+        "MEMORY_NONE" => Vec::new(),
+        "MEMORY_SESSION" => vec!["processing".to_string()],
+        "MEMORY_SHORT_TERM" => vec!["project".to_string(), "processing".to_string()],
+        "MEMORY_FULL" | "MEMORY_ADMIN" => vec![
+            "global".to_string(),
+            "organization".to_string(),
+            "project".to_string(),
+            "processing".to_string(),
+        ],
+        _ => vec![
+            "organization".to_string(),
+            "project".to_string(),
+            "processing".to_string(),
+        ],
+    }
+}
+
+fn ops_default_audience_for_scope(memory_scope: &str) -> String {
+    if matches!(
+        ops_memory_level_for_scope(memory_scope).as_str(),
+        "MEMORY_FULL" | "MEMORY_ADMIN"
+    ) {
+        "internal".to_string()
+    } else {
+        "manager".to_string()
+    }
 }
 
 pub fn build_addon_view_renderer_report(
@@ -1762,6 +1969,16 @@ pub fn serve_ops_console_with_addon_dirs(
     port: u16,
     addon_dirs: &[PathBuf],
 ) -> Result<OpsServeReport> {
+    serve_ops_console_with_addon_dirs_and_project(store_path, host, port, addon_dirs, None)
+}
+
+pub fn serve_ops_console_with_addon_dirs_and_project(
+    store_path: PathBuf,
+    host: &str,
+    port: u16,
+    addon_dirs: &[PathBuf],
+    project_root: Option<PathBuf>,
+) -> Result<OpsServeReport> {
     let listener = TcpListener::bind((host, port))
         .with_context(|| format!("failed to bind Forge ops server on {host}:{port}"))?;
     let addr = listener.local_addr()?;
@@ -1778,7 +1995,12 @@ pub fn serve_ops_console_with_addon_dirs(
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                if let Err(error) = handle_stream(&store_path, addon_dirs, &mut stream) {
+                if let Err(error) = handle_stream(
+                    &store_path,
+                    addon_dirs,
+                    project_root.as_deref(),
+                    &mut stream,
+                ) {
                     let response = error_response(500, "Internal Server Error", &error.to_string());
                     let _ = stream.write_all(&response.to_http_bytes());
                 }
@@ -1800,7 +2022,16 @@ pub fn handle_ops_http_request_with_addon_dirs(
     request: &str,
     addon_dirs: &[PathBuf],
 ) -> OpsHttpResponse {
-    match route_ops_http_request(store, request, addon_dirs) {
+    handle_ops_http_request_with_addon_dirs_and_project(store, request, addon_dirs, None)
+}
+
+pub fn handle_ops_http_request_with_addon_dirs_and_project(
+    store: &ForgeStore,
+    request: &str,
+    addon_dirs: &[PathBuf],
+    project_root: Option<&Path>,
+) -> OpsHttpResponse {
+    match route_ops_http_request(store, request, addon_dirs, project_root) {
         Ok(response) => response,
         Err(error) => error_response(400, "Bad Request", &error.to_string()),
     }
@@ -1809,13 +2040,19 @@ pub fn handle_ops_http_request_with_addon_dirs(
 fn handle_stream(
     store_path: &PathBuf,
     addon_dirs: &[PathBuf],
+    project_root: Option<&Path>,
     stream: &mut TcpStream,
 ) -> Result<()> {
     let mut buffer = vec![0; MAX_HTTP_REQUEST_BYTES];
     let bytes_read = stream.read(&mut buffer)?;
     let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
     let store = ForgeStore::open(store_path)?;
-    let response = handle_ops_http_request_with_addon_dirs(&store, &request, addon_dirs);
+    let response = handle_ops_http_request_with_addon_dirs_and_project(
+        &store,
+        &request,
+        addon_dirs,
+        project_root,
+    );
     stream.write_all(&response.to_http_bytes())?;
     Ok(())
 }
@@ -1824,16 +2061,20 @@ fn route_ops_http_request(
     store: &ForgeStore,
     request: &str,
     addon_dirs: &[PathBuf],
+    project_root: Option<&Path>,
 ) -> Result<OpsHttpResponse> {
     let parsed = ParsedRequest::parse(request)?;
     match (parsed.method.as_str(), parsed.path.as_str()) {
         ("GET", "/") => {
-            let snapshot = build_ops_snapshot_with_addon_dirs(store, addon_dirs)?;
+            let snapshot =
+                build_ops_snapshot_with_addon_dirs_and_project(store, addon_dirs, project_root)?;
             Ok(html_response(render_ops_html(&snapshot)))
         }
-        ("GET", "/api/snapshot") => {
-            json_response(&build_ops_snapshot_with_addon_dirs(store, addon_dirs)?)
-        }
+        ("GET", "/api/snapshot") => json_response(&build_ops_snapshot_with_addon_dirs_and_project(
+            store,
+            addon_dirs,
+            project_root,
+        )?),
         ("POST", "/api/run/drive") => {
             let run_id = parsed.required("run_id")?;
             let executor = parsed
@@ -2646,6 +2887,25 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
             "<tr><td colspan=\"6\">Nenhuma proposta da lane modificadora registrada.</td></tr>",
         );
     }
+    let memory_governance = &snapshot.memory_context_governance;
+    let mut memory_rows = String::new();
+    for workflow in &memory_governance.workflows {
+        memory_rows.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td></tr>",
+            escape_html(&workflow.workflow_id),
+            escape_html(&workflow.memory_policy_source),
+            escape_html(&workflow.effective_memory_level),
+            escape_html(&workflow.allowed_scopes.join(", ")),
+            escape_html(&workflow.default_audience),
+            escape_html(&workflow.tenant_policy_mode),
+            escape_html(&workflow.default_context_command.join(" ")),
+            escape_html(&workflow.default_memory_search_command.join(" ")),
+            escape_html(&truncate(&workflow.goal, 120)),
+        ));
+    }
+    if memory_rows.is_empty() {
+        memory_rows.push_str("<tr><td colspan=\"9\">Nenhum workflow disponível para governança de memória/contexto.</td></tr>");
+    }
 
     format!(
         r#"<!doctype html>
@@ -2707,6 +2967,7 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
     <span class="pill">addons enabled: {}</span>
     <span class="pill">addons unauthorized: {}</span>
     <span class="pill">addon views: {}</span>
+    <span class="pill">memory governance: {}</span>
   </div>
   <h2>Workflows</h2>
   <table>
@@ -2716,6 +2977,12 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
   <h2>Visualização operacional</h2>
   <p class="section-note">Tarefas e subtarefas em formato visual, com resumo do workspace criativo para whiteboard, telas, componentes, páginas, tokens e colaboração humano+IA.</p>
   {}
+  <h2>Governança de memória e contexto</h2>
+  <p class="section-note"><code>{}</code>: project root <code>{}</code>, config <code>{}</code>, nível <strong>{}</strong>, audiência <strong>{}</strong>, privacidade <strong>{}</strong>, retenção <strong>{}</strong>. Cada workflow abaixo mostra o comando governado para pedir contexto e pesquisar memória sem embutir histórico amplo no prompt do executor.</p>
+  <table>
+    <thead><tr><th>Workflow</th><th>Fonte</th><th>Nível</th><th>Escopos</th><th>Audiência</th><th>Tenant policy</th><th>Context command</th><th>Memory search</th><th>Goal</th></tr></thead>
+    <tbody>{}</tbody>
+  </table>
   <h2>Views de Addons</h2>
   <p class="section-note">Composição dinâmica de UI/TUI/Ops declarada por Addons ativos para esta superfície.</p>
   {}
@@ -2811,8 +3078,17 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
         snapshot.addon_observability.enabled_count,
         snapshot.addon_observability.unauthorized_count,
         snapshot.addon_views.view_count,
+        escape_html(&memory_governance.project_governance.status),
         rows,
         visual_sections,
+        escape_html(&memory_governance.schema_version),
+        escape_html(&memory_governance.project_governance.project_root),
+        escape_html(&memory_governance.project_governance.config_path),
+        escape_html(&memory_governance.project_governance.memory_level),
+        escape_html(&memory_governance.project_governance.default_audience),
+        escape_html(&memory_governance.project_governance.privacy_mode),
+        escape_html(&memory_governance.project_governance.retention_mode),
+        memory_rows,
         addon_view_cards,
         addon_renderer_cards,
         addon_view_rows,

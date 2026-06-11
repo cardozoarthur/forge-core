@@ -29193,7 +29193,9 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
     let addon_dir = temp.path().join("addons");
+    let project_root = temp.path().join("governed-project");
     fs::create_dir_all(&addon_dir).unwrap();
+    fs::create_dir_all(project_root.join(".forge")).unwrap();
     fs::write(
         addon_dir.join("interactive-renderers.yaml"),
         r#"
@@ -29296,6 +29298,36 @@ views:
     let workflow_id = started_json["workflow_id"].as_str().unwrap();
 
     let store_handle = forge_core::storage::ForgeStore::open(&store).unwrap();
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "memory",
+            "configure",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--memory-level",
+            "MEMORY_SHORT_TERM",
+            "--default-scope",
+            "project",
+            "--default-scope",
+            "processing",
+            "--default-audience",
+            "manager",
+            "--privacy-mode",
+            "private_by_default",
+            "--retention-mode",
+            "processing_auto_archive",
+            "--approved-by",
+            "ops-test",
+            "--reason",
+            "Ops console should show project memory governance.",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
     let create_whiteboard_request = format!(
         "POST /api/visual/create-artifact HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nworkflow_id={workflow_id}&kind=whiteboard&title=Mapa+colaborativo+AI+Humano&origin=ops-web"
     );
@@ -29362,6 +29394,8 @@ views:
             store.to_str().unwrap(),
             "ops",
             "snapshot",
+            "--project-root",
+            project_root.to_str().unwrap(),
             "--addon-dir",
             addon_dir.to_str().unwrap(),
             "--output",
@@ -29436,6 +29470,28 @@ views:
         snapshot_json["addon_observability"]["schema_version"],
         "forge.addon_observability.v1"
     );
+    assert_eq!(
+        snapshot_json["memory_context_governance"]["schema_version"],
+        "forge.ops.memory_context_governance.v1"
+    );
+    assert_eq!(
+        snapshot_json["memory_context_governance"]["project_governance"]["status"],
+        "configured"
+    );
+    assert_eq!(
+        snapshot_json["memory_context_governance"]["project_governance"]["memory_level"],
+        "MEMORY_SHORT_TERM"
+    );
+    assert!(snapshot_json["memory_context_governance"]["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|workflow| workflow["workflow_id"] == workflow_id
+            && workflow["default_context_command"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("--project-root"))
+            && workflow["memory_policy_source"] == "project_governance"));
     assert!(
         snapshot_json["addon_observability"]["addon_count"]
             .as_u64()
@@ -29672,6 +29728,8 @@ views:
     )
     .unwrap();
     let custom_html = forge_core::ops::render_ops_html(&custom_snapshot);
+    assert!(custom_html.contains("Governança de memória e contexto"));
+    assert!(custom_html.contains("forge.ops.memory_context_governance.v1"));
     assert!(custom_html.contains("Estado interativo"));
     assert!(custom_html.contains("Hover reativo"));
     assert!(custom_html.contains("Filtros seguros"));

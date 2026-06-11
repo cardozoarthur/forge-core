@@ -120,8 +120,8 @@ use forge_core::multimodal::{
     resolve_multimodal_feature_flag, MultimodalBenchmarkResultOptions,
 };
 use forge_core::ops::{
-    build_ops_snapshot_with_addon_dirs, record_addon_renderer_client_event,
-    serve_ops_console_with_addon_dirs, OpsAddonRendererClientEventInput,
+    build_ops_snapshot_with_addon_dirs_and_project, record_addon_renderer_client_event,
+    serve_ops_console_with_addon_dirs_and_project, OpsAddonRendererClientEventInput,
 };
 use forge_core::patch::{
     build_patch_apply, build_patch_diff, build_patch_plan, build_patch_restore, build_patch_revert,
@@ -1957,6 +1957,8 @@ enum IdentityCommands {
 #[derive(Debug, Subcommand)]
 enum OpsCommands {
     Snapshot {
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long = "addon-dir")]
         addon_dirs: Vec<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -1967,6 +1969,8 @@ enum OpsCommands {
         host: String,
         #[arg(long, default_value_t = 8765)]
         port: u16,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long = "addon-dir")]
         addon_dirs: Vec<PathBuf>,
     },
@@ -7353,20 +7357,35 @@ fn run() -> Result<i32> {
             }
         },
         Commands::Ops { command } => match command {
-            OpsCommands::Snapshot { addon_dirs, output } => {
+            OpsCommands::Snapshot {
+                project_root,
+                addon_dirs,
+                output,
+            } => {
                 let store = ForgeStore::open(cli.store)?;
                 let dirs = addon_dirs_or_default(addon_dirs);
-                let report = build_ops_snapshot_with_addon_dirs(&store, &dirs)?;
+                let report = build_ops_snapshot_with_addon_dirs_and_project(
+                    &store,
+                    &dirs,
+                    project_root.as_deref(),
+                )?;
                 print_response(output, &report)?;
                 Ok(0)
             }
             OpsCommands::Serve {
                 host,
                 port,
+                project_root,
                 addon_dirs,
             } => {
                 let dirs = addon_dirs_or_default(addon_dirs);
-                serve_ops_console_with_addon_dirs(cli.store, &host, port, &dirs)?;
+                serve_ops_console_with_addon_dirs_and_project(
+                    cli.store,
+                    &host,
+                    port,
+                    &dirs,
+                    project_root,
+                )?;
                 Ok(0)
             }
             OpsCommands::RendererEvent {
