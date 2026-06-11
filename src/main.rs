@@ -69,11 +69,12 @@ use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff_with_project;
 use forge_core::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, build_harness_doctor_report,
-    build_harness_mode_report, inspect_cli_harness_shim_status, install_cli_harness_shim,
-    persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
-    resolve_harness_runtime_policy, retrieve_headroom_blob, run_cli_harness_exec,
-    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
-    HarnessDoctorOptions, HarnessModeOptions, HarnessRuntimePolicyOptions,
+    build_harness_headroom_plan, build_harness_mode_report, inspect_cli_harness_shim_status,
+    install_cli_harness_shim, persist_token_headroom_report,
+    resolve_harness_forge_first_source_for_project, resolve_harness_runtime_policy,
+    retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
+    CliShimStatusOptions, CliWrapperPlanOptions, HarnessDoctorOptions, HarnessHeadroomPlanOptions,
+    HarnessModeOptions, HarnessRuntimePolicyOptions,
 };
 use forge_core::identity::{
     audit_tenant_index, ensure_operating_context_policy, ensure_workflow_policy,
@@ -678,6 +679,32 @@ enum HarnessCommands {
         executor: String,
         #[arg(long = "shim-dir")]
         shim_dir: PathBuf,
+        #[arg(long = "forge-first")]
+        forge_first: bool,
+        #[arg(long = "observe-only", conflicts_with = "forge_first")]
+        observe_only: bool,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
+        #[arg(long = "task")]
+        task_id: Option<String>,
+        #[arg(long = "run")]
+        run_id: Option<String>,
+        #[arg(long = "context-budget")]
+        context_budget: Option<usize>,
+        #[arg(long = "token-headroom")]
+        token_headroom: bool,
+        #[arg(long = "no-token-headroom", conflicts_with = "token_headroom")]
+        no_token_headroom: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    HeadroomPlan {
+        #[arg(long)]
+        executor: String,
+        #[arg(long = "cmd")]
+        command: Vec<String>,
         #[arg(long = "forge-first")]
         forge_first: bool,
         #[arg(long = "observe-only", conflicts_with = "forge_first")]
@@ -5564,6 +5591,56 @@ fn run() -> Result<i32> {
                     require_token_headroom_for_forge_first: runtime_policy
                         .require_token_headroom_for_forge_first,
                 })?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            HarnessCommands::HeadroomPlan {
+                executor,
+                command,
+                forge_first,
+                observe_only,
+                project_root,
+                workflow_id,
+                task_id,
+                run_id,
+                context_budget,
+                token_headroom,
+                no_token_headroom,
+                output,
+            } => {
+                let (forge_first, forge_first_source) =
+                    resolve_harness_forge_first_source_for_project(
+                        forge_first,
+                        observe_only,
+                        project_root.as_deref(),
+                    );
+                let (token_headroom_input, token_headroom_source) =
+                    harness_cli_token_headroom_input(token_headroom, no_token_headroom);
+                let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+                    project_root: project_root.as_deref(),
+                    context_budget,
+                    context_budget_source: "explicit_flag",
+                    token_headroom: token_headroom_input,
+                    token_headroom_source,
+                    forge_first,
+                    default_context_budget: DEFAULT_CONTEXT_BUDGET,
+                });
+                let report = build_harness_headroom_plan(HarnessHeadroomPlanOptions {
+                    executor: &executor,
+                    command: &command,
+                    forge_first,
+                    forge_first_source,
+                    project_root: project_root.as_deref(),
+                    workflow_id: workflow_id.as_deref(),
+                    task_id: task_id.as_deref(),
+                    run_id: run_id.as_deref(),
+                    context_budget: runtime_policy.context_budget,
+                    context_budget_source: &runtime_policy.context_budget_source,
+                    token_headroom: runtime_policy.token_headroom,
+                    token_headroom_source: &runtime_policy.token_headroom_source,
+                    require_token_headroom_for_forge_first: runtime_policy
+                        .require_token_headroom_for_forge_first,
+                });
                 print_response(output, &report)?;
                 Ok(0)
             }

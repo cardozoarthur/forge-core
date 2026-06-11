@@ -1009,6 +1009,158 @@ fn harness_doctor_audits_forge_first_headroom_and_shim_readiness_for_cli_and_mcp
     assert_eq!(mcp_json["result"]["shim_ready"], false);
 }
 
+#[test]
+fn harness_headroom_plan_exposes_wrapper_policy_for_cli_mcp_and_skill() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("project");
+    fs::create_dir_all(project.join(".forge")).unwrap();
+    fs::write(
+        project.join(".forge").join("harness.json"),
+        r#"{
+            "default_mode": "forge_first",
+            "context_budget": 3456,
+            "default_token_headroom": false,
+            "require_token_headroom_for_forge_first": true
+        }"#,
+    )
+    .unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "headroom-plan",
+            "--executor",
+            "codex",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.harness.headroom_plan.v1");
+    assert_eq!(json["status"], "harness_headroom_plan_ready");
+    assert_eq!(json["executor"], "codex");
+    assert_eq!(json["project_root"], project.to_str().unwrap());
+    assert_eq!(json["forge_first"], true);
+    assert_eq!(json["forge_first_source"], "project_config");
+    assert_eq!(json["context_budget"], 3456);
+    assert_eq!(json["context_budget_source"], "project_config");
+    assert_eq!(json["token_headroom_enabled"], true);
+    assert_eq!(
+        json["token_headroom_source"],
+        "project_policy_required_for_forge_first"
+    );
+    assert_eq!(json["require_token_headroom_for_forge_first"], true);
+    assert_eq!(
+        json["wrapper_plan"]["schema_version"],
+        "forge.harness.cli_wrapper_plan.v1"
+    );
+    assert!(json["wrapper_env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["name"] == "FORGE_CONTEXT_BUDGET" && item["value"] == "3456"));
+    assert!(json["wrapper_env"].as_array().unwrap().iter().any(|item| {
+        item["name"] == "FORGE_TOKEN_HEADROOM_SOURCE"
+            && item["value"] == "project_policy_required_for_forge_first"
+    }));
+    assert!(json["compression_pipeline"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("content_router")));
+    assert!(json["reserve_strategy"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "reserve_context_budget_for_prompt_packet"
+        )));
+    assert!(json["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("forge harness wrap-plan")));
+
+    let tools_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tools_json: Value = serde_json::from_slice(&tools_output).unwrap();
+    let tool = find_mcp_tool(&tools_json, "forge.harness.headroom_plan");
+    assert_eq!(tool["output_schema"], "forge.harness.headroom_plan.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let input = serde_json::json!({
+        "executor": "codex",
+        "project_root": project,
+        "forge_first": false,
+        "observe_only": true,
+        "context_budget": 2048,
+        "token_headroom": false
+    });
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.headroom_plan",
+            "--input",
+            &input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.harness.headroom_plan.v1"
+    );
+    assert_eq!(mcp_json["result"]["forge_first"], false);
+    assert_eq!(
+        mcp_json["result"]["forge_first_source"],
+        "observe_only_flag"
+    );
+    assert_eq!(mcp_json["result"]["context_budget"], 2048);
+    assert_eq!(mcp_json["result"]["context_budget_source"], "mcp_input");
+    assert_eq!(mcp_json["result"]["token_headroom_enabled"], false);
+    assert_eq!(mcp_json["result"]["token_headroom_source"], "mcp_input");
+
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge harness headroom-plan"),
+        "the packaged Forge skill should include the explicit harness headroom plan CLI command"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.harness.headroom_plan"),
+        "the packaged Forge skill should expose the harness headroom plan MCP tool"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn harness_exec_applies_headroom_to_child_output_and_persists_retrieval_refs() {

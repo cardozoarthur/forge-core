@@ -16,6 +16,7 @@ pub const CLI_HARNESS_EXEC_SCHEMA_VERSION: &str = "forge.harness.exec_receipt.v1
 pub const CLI_HARNESS_EXEC_EVENT_SCHEMA_VERSION: &str = "forge.harness.exec_event.v1";
 pub const CLI_HARNESS_MODE_SCHEMA_VERSION: &str = "forge.harness.mode.v1";
 pub const CLI_HARNESS_DOCTOR_SCHEMA_VERSION: &str = "forge.harness.doctor.v1";
+pub const CLI_HARNESS_HEADROOM_PLAN_SCHEMA_VERSION: &str = "forge.harness.headroom_plan.v1";
 pub const CLI_SHIM_INSTALL_SCHEMA_VERSION: &str = "forge.harness.shim_install.v1";
 pub const CLI_SHIM_STATUS_SCHEMA_VERSION: &str = "forge.harness.shim_status.v1";
 const CLI_SHIM_MARKER: &str = "# forge-harness-shim:v1";
@@ -130,6 +131,32 @@ pub struct HarnessDoctorReport {
     pub notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessHeadroomPlanReport {
+    pub schema_version: String,
+    pub status: String,
+    pub executor: String,
+    pub project_root: String,
+    pub forge_first: bool,
+    pub forge_first_source: String,
+    pub workflow_id: Option<String>,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub context_budget: usize,
+    pub context_budget_source: String,
+    pub token_headroom_enabled: bool,
+    pub token_headroom_source: String,
+    pub require_token_headroom_for_forge_first: bool,
+    pub wrapper_env: Vec<CliWrapperEnvVar>,
+    pub wrapper_plan: CliWrapperPlanReport,
+    pub compression_pipeline: Vec<String>,
+    pub reserve_strategy: Vec<String>,
+    pub retrieval_policy: Vec<String>,
+    pub mcp_tools: Vec<String>,
+    pub next_commands: Vec<String>,
+    pub notes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct HarnessModeOptions<'a> {
     pub forge_first: bool,
@@ -143,6 +170,23 @@ pub struct HarnessDoctorOptions<'a> {
     pub executor: &'a str,
     pub forge_first: bool,
     pub observe_only: bool,
+    pub project_root: Option<&'a Path>,
+    pub workflow_id: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+    pub run_id: Option<&'a str>,
+    pub context_budget: usize,
+    pub context_budget_source: &'a str,
+    pub token_headroom: bool,
+    pub token_headroom_source: &'a str,
+    pub require_token_headroom_for_forge_first: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HarnessHeadroomPlanOptions<'a> {
+    pub executor: &'a str,
+    pub command: &'a [String],
+    pub forge_first: bool,
+    pub forge_first_source: &'a str,
     pub project_root: Option<&'a Path>,
     pub workflow_id: Option<&'a str>,
     pub task_id: Option<&'a str>,
@@ -712,6 +756,132 @@ pub fn build_harness_doctor_report(
                 .to_string(),
         ],
     })
+}
+
+pub fn build_harness_headroom_plan(
+    options: HarnessHeadroomPlanOptions<'_>,
+) -> HarnessHeadroomPlanReport {
+    let HarnessHeadroomPlanOptions {
+        executor,
+        command,
+        forge_first,
+        forge_first_source,
+        project_root,
+        workflow_id,
+        task_id,
+        run_id,
+        context_budget,
+        context_budget_source,
+        token_headroom,
+        token_headroom_source,
+        require_token_headroom_for_forge_first,
+    } = options;
+    let executor = normalize_executor(executor);
+    let project_root_path = project_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let wrapper_plan = build_cli_wrapper_plan(CliWrapperPlanOptions {
+        executor: &executor,
+        command,
+        forge_first,
+        forge_first_source,
+        workflow_id,
+        task_id,
+        run_id,
+        context_budget,
+        context_budget_source,
+        token_headroom,
+        token_headroom_source,
+        require_token_headroom_for_forge_first,
+    });
+    let mut wrapper_env = wrapper_plan.env.clone();
+    wrapper_env.push(env_var(
+        "FORGE_TOKEN_HEADROOM_SOURCE",
+        token_headroom_source,
+        "records which flag, project policy or API input selected token-headroom",
+    ));
+    wrapper_env.push(env_var(
+        "FORGE_HEADROOM_PLAN_SCHEMA",
+        CLI_HARNESS_HEADROOM_PLAN_SCHEMA_VERSION,
+        "lets downstream wrappers identify the Forge headroom planning contract",
+    ));
+
+    let project_root_display = project_root_path.display().to_string();
+    let token_headroom_flag = if token_headroom {
+        "--token-headroom"
+    } else {
+        "--no-token-headroom"
+    };
+    let mut next_commands = vec![
+        format!(
+            "forge harness wrap-plan --executor {} --project-root {} --context-budget {} {} --output json",
+            shell_quote(&executor),
+            shell_quote(&project_root_display),
+            context_budget,
+            token_headroom_flag,
+        ),
+        format!(
+            "forge harness token-headroom --content <payload> --kind log --budget-tokens {} --output json",
+            context_budget,
+        ),
+        "forge interactive harness --output json".to_string(),
+    ];
+    if require_token_headroom_for_forge_first {
+        next_commands.push(
+            "keep require_token_headroom_for_forge_first enabled for Forge-first child CLIs"
+                .to_string(),
+        );
+    }
+
+    HarnessHeadroomPlanReport {
+        schema_version: CLI_HARNESS_HEADROOM_PLAN_SCHEMA_VERSION.to_string(),
+        status: "harness_headroom_plan_ready".to_string(),
+        executor,
+        project_root: project_root_display,
+        forge_first,
+        forge_first_source: normalize_harness_mode_source(forge_first_source, forge_first),
+        workflow_id: normalize_optional_text(workflow_id),
+        task_id: normalize_optional_text(task_id),
+        run_id: normalize_optional_text(run_id),
+        context_budget,
+        context_budget_source: context_budget_source.to_string(),
+        token_headroom_enabled: token_headroom,
+        token_headroom_source: token_headroom_source.to_string(),
+        require_token_headroom_for_forge_first,
+        wrapper_env,
+        wrapper_plan,
+        compression_pipeline: vec![
+            "content_router".to_string(),
+            "deterministic_log_json_code_text_compressors".to_string(),
+            "reversible_retrieval_refs".to_string(),
+            "local_sqlite_persistence_when_requested".to_string(),
+            "guarded_stdout_stderr_headroom_on_exec".to_string(),
+        ],
+        reserve_strategy: vec![
+            "reserve_context_budget_for_prompt_packet".to_string(),
+            "reserve_headroom_for_tool_output_refs".to_string(),
+            "prefer_retrieval_ref_over_large_inline_payload".to_string(),
+            "keep_lineage_and_policy_env_uncompressed".to_string(),
+        ],
+        retrieval_policy: vec![
+            "original_and_compressed_hashes_are_reported".to_string(),
+            "persisted_refs_use_forge_harness_headroom_uri".to_string(),
+            "retrieval_requires_forge_harness_retrieve_headroom".to_string(),
+        ],
+        mcp_tools: vec![
+            "forge.harness.headroom_plan".to_string(),
+            "forge.harness.token_headroom".to_string(),
+            "forge.harness.retrieve_headroom".to_string(),
+            "forge.harness.wrap_plan".to_string(),
+        ],
+        next_commands,
+        notes: vec![
+            "This is a read-only plan: it does not install shims or execute child CLIs."
+                .to_string(),
+            "Headroom benchmark ideas absorbed here are local-first compression, wrapper env shaping, reversible refs and MCP-visible readiness without copying external code."
+                .to_string(),
+        ],
+    }
 }
 
 pub fn resolve_harness_forge_first_source(
