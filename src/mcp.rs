@@ -14,6 +14,11 @@ use crate::addon::{
     resolve_goal_capabilities_with_store, revoke_addon_permission,
     run_addon_runtime_contract_dispatch, sync_addon_package_registry, trust_addon_package_key,
     uninstall_addon, upgrade_addon, validate_addon_catalog,
+    AddonPackageInput as AddonPackageRequest,
+    AddonPlannerDispatchInput as AddonPlannerDispatchRequest,
+    AddonPlanningStrategyInput as AddonPlanningStrategyRequest,
+    AddonRuntimeContractCompletionInput as AddonRuntimeContractCompletionRequest,
+    AddonTrustKeyInput as AddonTrustKeyRequest, CapabilityRegistrySyncInput,
 };
 use crate::artifact::{hex_sha256, list_workflow_artifacts, ListedArtifact};
 use crate::aws_ops::{
@@ -40,7 +45,7 @@ use crate::event::{
     recover_stale_event_services, route_inbound_event, run_event_runtime_daemon,
     run_event_runtime_reconcile, run_event_service_supervisor, run_event_webhook_ingress_service,
     run_event_worker_service, run_inbound_event_worker_loop, scan_inbound_event_inbox,
-    EventEgressEmitInput, InboundEventIngestInput,
+    EventEgressEmitInput, InboundEventIngestInput, InboundEventWorkerLoopOptions,
 };
 use crate::executor::{
     build_brain_session_history_report, build_brain_sessions_report_with_options,
@@ -93,7 +98,7 @@ use crate::multimodal::{
     build_multimodal_status_with_feature_flag, evaluate_multimodal_guard,
     resolve_multimodal_feature_flag, MultimodalBenchmarkResultOptions,
 };
-use crate::ops::record_addon_renderer_client_event;
+use crate::ops::{record_addon_renderer_client_event, OpsAddonRendererClientEventInput};
 use crate::patch::{
     build_patch_apply, build_patch_diff, build_patch_plan, build_patch_restore, build_patch_revert,
     build_patch_review, PatchDiffOptions,
@@ -5603,12 +5608,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(record_addon_renderer_client_event(
                 store,
                 &addon_dirs,
-                &workflow_id,
-                addon_id.as_deref(),
-                &view_id,
-                &input.event_kind,
-                &actor,
-                payload.as_deref(),
+                OpsAddonRendererClientEventInput {
+                    workflow_id: &workflow_id,
+                    addon_id: addon_id.as_deref(),
+                    view_id: &view_id,
+                    event_kind: &input.event_kind,
+                    actor: &actor,
+                    payload: payload.as_deref(),
+                },
             )?)?
         }
         "forge.events.observability" => {
@@ -5731,12 +5738,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(run_inbound_event_worker_loop(
                 store,
                 &project_root,
-                input.status.as_deref(),
-                input.limit.unwrap_or(20),
-                input.max_cycles.unwrap_or(1),
-                input.interval_seconds.unwrap_or(300),
-                input.idle_exit.unwrap_or(false),
-                stop_file.as_deref(),
+                InboundEventWorkerLoopOptions {
+                    status: input.status.as_deref(),
+                    limit: input.limit.unwrap_or(20),
+                    max_cycles: input.max_cycles.unwrap_or(1),
+                    interval_seconds: input.interval_seconds.unwrap_or(300),
+                    idle_exit: input.idle_exit.unwrap_or(false),
+                    stop_file: stop_file.as_deref(),
+                },
             )?)?
         }
         "forge.events.service_plan" => {
@@ -6489,15 +6498,17 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(enqueue_addon_planner_dispatch(
                 store,
                 &catalog,
-                addon_id.as_deref(),
-                &contract_id,
-                &input.goal,
-                &constraints,
-                workflow_id.as_deref(),
-                task_id.as_deref(),
-                input.context.unwrap_or_else(|| serde_json::json!({})),
-                input.source.as_deref().unwrap_or("mcp"),
-                input.dry_run.unwrap_or(false),
+                AddonPlannerDispatchRequest {
+                    addon_id: addon_id.as_deref(),
+                    contract_id: &contract_id,
+                    goal: &input.goal,
+                    constraints: &constraints,
+                    workflow_id: workflow_id.as_deref(),
+                    task_id: task_id.as_deref(),
+                    context: input.context.unwrap_or_else(|| serde_json::json!({})),
+                    source: input.source.as_deref().unwrap_or("mcp"),
+                    dry_run: input.dry_run.unwrap_or(false),
+                },
             )?)?
         }
         "forge.addons.execute_planner" => {
@@ -6517,17 +6528,21 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(execute_addon_planning_strategy(
                 store,
                 &catalog,
-                addon_id.as_deref(),
-                &contract_id,
-                &input.goal,
-                &constraints,
-                workflow_id.as_deref(),
-                task_id.as_deref(),
-                input.context.unwrap_or_else(|| serde_json::json!({})),
-                &worker_id,
-                input.lease_seconds.unwrap_or(300),
-                input.source.as_deref().unwrap_or("mcp"),
-                input.dry_run.unwrap_or(false),
+                AddonPlanningStrategyRequest {
+                    dispatch: AddonPlannerDispatchRequest {
+                        addon_id: addon_id.as_deref(),
+                        contract_id: &contract_id,
+                        goal: &input.goal,
+                        constraints: &constraints,
+                        workflow_id: workflow_id.as_deref(),
+                        task_id: task_id.as_deref(),
+                        context: input.context.unwrap_or_else(|| serde_json::json!({})),
+                        source: input.source.as_deref().unwrap_or("mcp"),
+                        dry_run: input.dry_run.unwrap_or(false),
+                    },
+                    worker_id: &worker_id,
+                    lease_seconds: input.lease_seconds.unwrap_or(300),
+                },
             )?)?
         }
         "forge.addons.dispatches" => {
@@ -6610,13 +6625,15 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(complete_addon_runtime_contract_dispatch(
                 store,
                 &catalog,
-                &dispatch_id,
-                &worker_id,
-                input.status.as_deref().unwrap_or("completed"),
-                input.result.unwrap_or_else(|| serde_json::json!({})),
-                input.signature.as_deref(),
-                input.attestation.unwrap_or_else(|| serde_json::json!({})),
-                input.dry_run.unwrap_or(false),
+                AddonRuntimeContractCompletionRequest {
+                    dispatch_id: &dispatch_id,
+                    worker_id: &worker_id,
+                    completion_status: input.status.as_deref().unwrap_or("completed"),
+                    result: input.result.unwrap_or_else(|| serde_json::json!({})),
+                    signature: input.signature.as_deref(),
+                    attestation: input.attestation.unwrap_or_else(|| serde_json::json!({})),
+                    dry_run: input.dry_run.unwrap_or(false),
+                },
             )?)?
         }
         "forge.addons.register_worker" => {
@@ -6725,12 +6742,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     store,
                     &input.goal,
                     &catalog,
-                    &registry_sources,
-                    registry_cache_dir.as_deref(),
-                    input.allow_remote_registry.unwrap_or(false),
-                    input.registry_max_bytes.unwrap_or(10 * 1024 * 1024),
-                    input.registry_max_packages.unwrap_or(50),
-                    registry_lock_path.as_deref(),
+                    CapabilityRegistrySyncInput {
+                        registry_sources: &registry_sources,
+                        cache_dir: registry_cache_dir.as_deref(),
+                        allow_remote: input.allow_remote_registry.unwrap_or(false),
+                        max_bytes: input.registry_max_bytes.unwrap_or(10 * 1024 * 1024),
+                        max_packages: input.registry_max_packages.unwrap_or(50),
+                        lock_path: registry_lock_path.as_deref(),
+                    },
                 )?
             };
             serde_json::to_value(report)?
@@ -6754,28 +6773,33 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let input: AddonPackageInput = parse_input(input)?;
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let package_path = input.package_path.as_deref().map(PathBuf::from);
+            let manifest_path = PathBuf::from(input.manifest);
             serde_json::to_value(package_addon(
                 store,
-                &PathBuf::from(input.manifest),
-                &addon_dirs,
-                input.repository.as_deref(),
-                input.channel.as_deref().unwrap_or("stable"),
-                input.signature.as_deref(),
-                input.public_key.as_deref(),
-                package_path.as_deref(),
+                AddonPackageRequest {
+                    manifest_path: &manifest_path,
+                    addon_dirs: &addon_dirs,
+                    repository: input.repository.as_deref(),
+                    channel: input.channel.as_deref().unwrap_or("stable"),
+                    signature: input.signature.as_deref(),
+                    public_key: input.public_key.as_deref(),
+                    package_path: package_path.as_deref(),
+                },
             )?)?
         }
         "forge.addons.trust_key" => {
             let input: AddonTrustKeyInput = parse_input(input)?;
             serde_json::to_value(trust_addon_package_key(
                 store,
-                &input.repository,
-                input.channel.as_deref().unwrap_or("stable"),
-                &input.public_key,
-                input.trust_level.as_deref().unwrap_or("trusted"),
-                input.approved_by.as_deref().unwrap_or("human"),
-                input.source.as_deref().unwrap_or("mcp"),
-                input.data.unwrap_or_else(|| serde_json::json!({})),
+                AddonTrustKeyRequest {
+                    repository: &input.repository,
+                    channel: input.channel.as_deref().unwrap_or("stable"),
+                    public_key: &input.public_key,
+                    trust_level: input.trust_level.as_deref().unwrap_or("trusted"),
+                    approved_by: input.approved_by.as_deref().unwrap_or("human"),
+                    source: input.source.as_deref().unwrap_or("mcp"),
+                    data: input.data.unwrap_or_else(|| serde_json::json!({})),
+                },
             )?)?
         }
         "forge.addons.trust_store" => {

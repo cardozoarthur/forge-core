@@ -422,6 +422,15 @@ pub struct OpsAddonRendererClientEventReport {
     pub recorded_event_kind: String,
 }
 
+pub struct OpsAddonRendererClientEventInput<'a> {
+    pub workflow_id: &'a str,
+    pub addon_id: Option<&'a str>,
+    pub view_id: &'a str,
+    pub event_kind: &'a str,
+    pub actor: &'a str,
+    pub payload: Option<&'a str>,
+}
+
 #[derive(Debug)]
 pub struct OpsHttpResponse {
     pub status_code: u16,
@@ -773,10 +782,7 @@ fn merge_renderer_filter_payload(filters: &mut BTreeMap<String, Value>, payload:
         return;
     }
     if let Some(filter_id) = string_value(payload, "filter_id") {
-        let value = payload
-            .get("value")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!(true));
+        let value = payload.get("value").cloned().unwrap_or(Value::Bool(true));
         filters.insert(filter_id, value);
         return;
     }
@@ -996,68 +1002,78 @@ fn infer_form_field_type(field: &str) -> String {
 pub fn record_addon_renderer_client_event(
     store: &ForgeStore,
     addon_dirs: &[PathBuf],
-    workflow_id: &str,
-    addon_id: Option<&str>,
-    view_id: &str,
-    event_kind: &str,
-    actor: &str,
-    payload: Option<&str>,
+    input: OpsAddonRendererClientEventInput<'_>,
 ) -> Result<OpsAddonRendererClientEventReport> {
-    ensure_workflow_policy(store, workflow_id, "addon renderer client event")?;
+    ensure_workflow_policy(store, input.workflow_id, "addon renderer client event")?;
     let snapshot = build_ops_snapshot_with_addon_dirs(store, addon_dirs)?;
     let matching_renderers = snapshot
         .addon_view_renderers
         .renderers
         .iter()
         .filter(|renderer| {
-            renderer.view_id == view_id
-                && addon_id.map_or(true, |addon_id| renderer.addon_id == addon_id)
+            renderer.view_id == input.view_id
+                && input
+                    .addon_id
+                    .is_none_or(|addon_id| renderer.addon_id == addon_id)
         })
         .collect::<Vec<_>>();
     if matching_renderers.is_empty() {
-        if let Some(addon_id) = addon_id {
-            bail!("addon renderer view not found: addon {addon_id} view {view_id}");
+        if let Some(addon_id) = input.addon_id {
+            bail!(
+                "addon renderer view not found: addon {addon_id} view {}",
+                input.view_id
+            );
         }
-        bail!("addon renderer view not found: {view_id}");
+        bail!("addon renderer view not found: {}", input.view_id);
     }
-    if addon_id.is_none() && matching_renderers.len() > 1 {
-        bail!("addon renderer view id is ambiguous: {view_id}; provide addon_id");
+    if input.addon_id.is_none() && matching_renderers.len() > 1 {
+        bail!(
+            "addon renderer view id is ambiguous: {}; provide addon_id",
+            input.view_id
+        );
     }
     let renderer = matching_renderers[0];
     if !renderer.safe_renderer {
-        bail!("addon renderer view is not safe to receive client events: {view_id}");
+        bail!(
+            "addon renderer view is not safe to receive client events: {}",
+            input.view_id
+        );
     }
     if !renderer
         .interaction_state
         .allowed_client_events
         .iter()
-        .any(|allowed| allowed == event_kind)
+        .any(|allowed| allowed == input.event_kind)
     {
-        bail!("client event {event_kind} is not allowed for addon renderer view {view_id}");
+        bail!(
+            "client event {} is not allowed for addon renderer view {}",
+            input.event_kind,
+            input.view_id
+        );
     }
-    let payload = parse_renderer_event_payload(payload)?;
+    let payload = parse_renderer_event_payload(input.payload)?;
     let data = serde_json::json!({
         "schema_version": OPS_ADDON_RENDERER_CLIENT_EVENT_SCHEMA_VERSION,
-        "workflow_id": workflow_id,
+        "workflow_id": input.workflow_id,
         "addon_id": &renderer.addon_id,
         "view_id": &renderer.view_id,
         "renderer_family": &renderer.renderer_family,
-        "event_kind": event_kind,
-        "actor": actor,
+        "event_kind": input.event_kind,
+        "actor": input.actor,
         "state_key": &renderer.interaction_state.state_key,
         "external_code_execution": renderer.interaction_state.external_code_execution,
         "payload": &payload,
     });
-    store.record_event(workflow_id, "addon_renderer_client_event", &data)?;
+    store.record_event(input.workflow_id, "addon_renderer_client_event", &data)?;
     Ok(OpsAddonRendererClientEventReport {
         schema_version: OPS_ADDON_RENDERER_CLIENT_EVENT_SCHEMA_VERSION.to_string(),
         status: "addon_renderer_client_event_recorded".to_string(),
-        workflow_id: workflow_id.to_string(),
+        workflow_id: input.workflow_id.to_string(),
         addon_id: renderer.addon_id.clone(),
         view_id: renderer.view_id.clone(),
         renderer_family: renderer.renderer_family.clone(),
-        event_kind: event_kind.to_string(),
-        actor: actor.to_string(),
+        event_kind: input.event_kind.to_string(),
+        actor: input.actor.to_string(),
         state_key: renderer.interaction_state.state_key.clone(),
         payload,
         allowed_client_events: renderer.interaction_state.allowed_client_events.clone(),
@@ -2003,12 +2019,14 @@ fn route_ops_http_request(
             let report = record_addon_renderer_client_event(
                 store,
                 addon_dirs,
-                workflow_id,
-                addon_id,
-                view_id,
-                event_kind,
-                actor,
-                payload,
+                OpsAddonRendererClientEventInput {
+                    workflow_id,
+                    addon_id,
+                    view_id,
+                    event_kind,
+                    actor,
+                    payload,
+                },
             )?;
             action_response("addon_renderer_event", &report)
         }

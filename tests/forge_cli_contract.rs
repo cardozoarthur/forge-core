@@ -1,6 +1,6 @@
 use assert_cmd::Command;
 use forge_core::artifact::hex_sha256;
-use forge_core::storage::ForgeStore;
+use forge_core::storage::{ForgeStore, GlobalEventWrite};
 use rusqlite::Connection;
 use serde_json::Value;
 use std::fs;
@@ -4554,7 +4554,7 @@ fn patch_diff_builds_multi_file_navigation_without_applying_changes() {
     assert_eq!(json["navigation"]["has_previous_file"], true);
     assert_eq!(json["navigation"]["has_next_file"], false);
     assert!(json["files"].as_array().unwrap().len() >= 2);
-    assert!(json["files"][0]["hunks"].as_array().unwrap().len() >= 1);
+    assert!(!json["files"][0]["hunks"].as_array().unwrap().is_empty());
     assert!(json["files"][1]["hunks"][0]["lines"]
         .as_array()
         .unwrap()
@@ -10625,8 +10625,8 @@ fn improve_apply_event_policy_requires_approval_and_records_rollback_gate() {
         .unwrap();
     assert_eq!(updated.revisions.len(), 1);
     assert_eq!(updated.tasks[0].executor, ExecutorKind::Command);
-    assert_eq!(updated.tasks[0].execution_policy.ai_allowed, false);
-    assert_eq!(updated.tasks[0].execution_policy.deterministic, true);
+    assert!(!updated.tasks[0].execution_policy.ai_allowed);
+    assert!(updated.tasks[0].execution_policy.deterministic);
 
     let noop_output = forge()
         .args([
@@ -24910,28 +24910,28 @@ tenant_policy_mode: enforce
     {
         let store_handle = ForgeStore::open(&store).unwrap();
         store_handle
-            .record_global_event(
-                "cost_incremental_seed",
-                "visible",
-                Some(&visible_workflow_id),
-                "executor_response_promoted",
-                "codex",
-                "recorded",
-                &serde_json::json!({"message": "visible incremental event"}),
-                &visible_tenant_context,
-            )
+            .record_global_event(GlobalEventWrite {
+                source: "cost_incremental_seed",
+                source_id: "visible",
+                workflow_id: Some(&visible_workflow_id),
+                kind: "executor_response_promoted",
+                origin: "codex",
+                status: "recorded",
+                data: &serde_json::json!({"message": "visible incremental event"}),
+                tenant_context: &visible_tenant_context,
+            })
             .unwrap();
         store_handle
-            .record_global_event(
-                "cost_incremental_seed",
-                "hidden",
-                Some(&hidden_workflow_id),
-                "executor_response_promoted",
-                "codex",
-                "recorded",
-                &serde_json::json!({"message": "hidden incremental event"}),
-                &hidden_tenant_context,
-            )
+            .record_global_event(GlobalEventWrite {
+                source: "cost_incremental_seed",
+                source_id: "hidden",
+                workflow_id: Some(&hidden_workflow_id),
+                kind: "executor_response_promoted",
+                origin: "codex",
+                status: "recorded",
+                data: &serde_json::json!({"message": "hidden incremental event"}),
+                tenant_context: &hidden_tenant_context,
+            })
             .unwrap();
     }
 
@@ -29137,9 +29137,11 @@ views:
     assert!(html.contains("Criar artefato visual"));
     assert!(html.contains("Registrar colaboração"));
     assert!(html.contains("Atualizar token"));
-    let custom_snapshot =
-        forge_core::ops::build_ops_snapshot_with_addon_dirs(&store_handle, &[addon_dir.clone()])
-            .unwrap();
+    let custom_snapshot = forge_core::ops::build_ops_snapshot_with_addon_dirs(
+        &store_handle,
+        std::slice::from_ref(&addon_dir),
+    )
+    .unwrap();
     let custom_html = forge_core::ops::render_ops_html(&custom_snapshot);
     assert!(custom_html.contains("Estado interativo"));
     assert!(custom_html.contains("Hover reativo"));
@@ -29157,7 +29159,7 @@ views:
     let renderer_event_response = forge_core::ops::handle_ops_http_request_with_addon_dirs(
         &store_handle,
         &renderer_event_request,
-        &[addon_dir.clone()],
+        std::slice::from_ref(&addon_dir),
     );
     assert_eq!(renderer_event_response.status_code, 200);
     let renderer_event_json: Value = serde_json::from_slice(&renderer_event_response.body).unwrap();
@@ -29204,9 +29206,11 @@ views:
         .any(|event| event["kind"] == "addon_renderer_client_event"
             && event["data"]["view_id"] == "renderer.metrics_chart"
             && event["data"]["event_kind"] == "hover_changed"));
-    let stateful_snapshot =
-        forge_core::ops::build_ops_snapshot_with_addon_dirs(&store_handle, &[addon_dir.clone()])
-            .unwrap();
+    let stateful_snapshot = forge_core::ops::build_ops_snapshot_with_addon_dirs(
+        &store_handle,
+        std::slice::from_ref(&addon_dir),
+    )
+    .unwrap();
     let stateful_snapshot_json = serde_json::to_value(&stateful_snapshot).unwrap();
     let stateful_chart_renderer = stateful_snapshot_json["addon_view_renderers"]["renderers"]
         .as_array()
@@ -29333,7 +29337,7 @@ views:
         forge_core::ops::handle_ops_http_request_with_addon_dirs(
             &store_handle,
             &ambiguous_renderer_event_request,
-            &[addon_dir.clone()],
+            std::slice::from_ref(&addon_dir),
         );
     assert_eq!(ambiguous_renderer_event_response.status_code, 400);
     let ambiguous_renderer_event_body =

@@ -3,7 +3,7 @@ use chrono::{Duration, Utc};
 use ed25519_dalek::{Signer, SigningKey};
 use forge_core::addon::load_addon_manifest_from_path;
 use forge_core::artifact::hex_sha256;
-use forge_core::storage::ForgeStore;
+use forge_core::storage::{ForgeStore, GlobalEventWrite};
 use rusqlite::Connection;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -608,7 +608,7 @@ fn post_json_with_retry_headers(
                     .collect::<String>();
                 let request = format!(
                     "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.as_bytes().len(),
+                    body.len(),
                     body
                 );
                 if let Err(error) = stream.write_all(request.as_bytes()) {
@@ -1729,9 +1729,7 @@ workflows:
         .map(|task| task["title"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert!(task_titles.contains(&"Catalog n8n workflow primitives"));
-    assert!(!task_titles
-        .iter()
-        .any(|title| *title == "Apply Addon workflow extension: n8n primitive research"));
+    assert!(!task_titles.contains(&"Apply Addon workflow extension: n8n primitive research"));
 }
 
 #[test]
@@ -2931,38 +2929,38 @@ tenant_policy_mode: enforce
         "tenant_policy_mode": "enforce"
     });
     store_handle
-        .record_global_event(
-            "obs_seed",
-            "visible",
-            None,
-            "ai_executor_completed",
-            "codex",
-            "recorded",
-            &serde_json::json!({
+        .record_global_event(GlobalEventWrite {
+            source: "obs_seed",
+            source_id: "visible",
+            workflow_id: None,
+            kind: "ai_executor_completed",
+            origin: "codex",
+            status: "recorded",
+            data: &serde_json::json!({
                 "node_id": "node-visible",
                 "addon_id": "forge.addon.visible",
                 "duration_ms": 222,
                 "message": "visible observability"
             }),
-            &tenant_context,
-        )
+            tenant_context: &tenant_context,
+        })
         .unwrap();
     store_handle
-        .record_global_event(
-            "obs_seed",
-            "hidden",
-            None,
-            "ai_executor_completed",
-            "codex",
-            "recorded",
-            &serde_json::json!({
+        .record_global_event(GlobalEventWrite {
+            source: "obs_seed",
+            source_id: "hidden",
+            workflow_id: None,
+            kind: "ai_executor_completed",
+            origin: "codex",
+            status: "recorded",
+            data: &serde_json::json!({
                 "node_id": "node-hidden",
                 "addon_id": "forge.addon.hidden",
                 "duration_ms": 999,
                 "message": "must not leak"
             }),
-            &other_tenant_context,
-        )
+            tenant_context: &other_tenant_context,
+        })
         .unwrap();
 
     let observability_output = forge()
@@ -3138,38 +3136,38 @@ tenant_policy_mode: enforce
         "tenant_policy_mode": "enforce"
     });
     store_handle
-        .record_global_event(
-            "history_seed",
-            "visible",
-            None,
-            "ai_executor_completed",
-            "codex",
-            "recorded",
-            &serde_json::json!({
+        .record_global_event(GlobalEventWrite {
+            source: "history_seed",
+            source_id: "visible",
+            workflow_id: None,
+            kind: "ai_executor_completed",
+            origin: "codex",
+            status: "recorded",
+            data: &serde_json::json!({
                 "node_id": "node-history-visible",
                 "addon_id": "forge.addon.history_visible",
                 "duration_ms": 333,
                 "retry_count": 1
             }),
-            &tenant_context,
-        )
+            tenant_context: &tenant_context,
+        })
         .unwrap();
     store_handle
-        .record_global_event(
-            "history_seed",
-            "hidden",
-            None,
-            "ai_executor_completed",
-            "codex",
-            "recorded",
-            &serde_json::json!({
+        .record_global_event(GlobalEventWrite {
+            source: "history_seed",
+            source_id: "hidden",
+            workflow_id: None,
+            kind: "ai_executor_completed",
+            origin: "codex",
+            status: "recorded",
+            data: &serde_json::json!({
                 "node_id": "node-history-hidden",
                 "addon_id": "forge.addon.history_hidden",
                 "duration_ms": 999,
                 "retry_count": 9
             }),
-            &other_tenant_context,
-        )
+            tenant_context: &other_tenant_context,
+        })
         .unwrap();
 
     let history_output = forge()
@@ -3836,38 +3834,38 @@ tenant_policy_mode: enforce
     });
     for index in 0..2 {
         store_handle
-            .record_global_event(
-                "policy_tenant_seed",
-                &format!("visible-{index}"),
-                None,
-                "ai_executor_completed",
-                "codex",
-                "recorded",
-                &serde_json::json!({
+            .record_global_event(GlobalEventWrite {
+                source: "policy_tenant_seed",
+                source_id: &format!("visible-{index}"),
+                workflow_id: None,
+                kind: "ai_executor_completed",
+                origin: "codex",
+                status: "recorded",
+                data: &serde_json::json!({
                     "node_id": "node-policy-visible",
                     "addon_id": "forge.addon.policy_visible",
                     "duration_ms": 75,
                     "retry_count": 0
                 }),
-                &tenant_context,
-            )
+                tenant_context: &tenant_context,
+            })
             .unwrap();
         store_handle
-            .record_global_event(
-                "policy_tenant_seed",
-                &format!("hidden-{index}"),
-                None,
-                "ai_executor_completed",
-                "codex",
-                "recorded",
-                &serde_json::json!({
+            .record_global_event(GlobalEventWrite {
+                source: "policy_tenant_seed",
+                source_id: &format!("hidden-{index}"),
+                workflow_id: None,
+                kind: "ai_executor_completed",
+                origin: "codex",
+                status: "recorded",
+                data: &serde_json::json!({
                     "node_id": "node-policy-hidden",
                     "addon_id": "forge.addon.policy_hidden",
                     "duration_ms": 900,
                     "retry_count": 0
                 }),
-                &other_tenant_context,
-            )
+                tenant_context: &other_tenant_context,
+            })
             .unwrap();
     }
 
@@ -13902,15 +13900,10 @@ capabilities:
         install_json["result"]["package"]["policy"]["signature"]["verification_status"],
         "verified"
     );
-    assert_eq!(
-        install_json["result"]["lifecycle"]["addon"]["source"]
-            .as_str()
-            .unwrap()
-            .starts_with(
-                "marketplace:registry://forge/payments:stable:forge.addon.payments@1.0.0#"
-            ),
-        true
-    );
+    assert!(install_json["result"]["lifecycle"]["addon"]["source"]
+        .as_str()
+        .unwrap()
+        .starts_with("marketplace:registry://forge/payments:stable:forge.addon.payments@1.0.0#"),);
 
     let capabilities_output = forge()
         .args([

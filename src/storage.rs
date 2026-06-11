@@ -6,6 +6,16 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::{Path, PathBuf};
 
+type InboundEventRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+);
+
 pub struct ForgeStore {
     path: PathBuf,
     connection: Connection,
@@ -18,6 +28,76 @@ pub struct TaskLeaseWrite<'a> {
     pub executor: &'a str,
     pub acquired_at: &'a str,
     pub expires_at: &'a str,
+    pub data: &'a serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MemoryPromotionQuery<'a> {
+    pub from_scope: Option<&'a str>,
+    pub to_scope: Option<&'a str>,
+    pub approved_by: Option<&'a str>,
+    pub workflow_id: Option<&'a str>,
+    pub organization_id: Option<&'a str>,
+    pub brand_id: Option<&'a str>,
+    pub product_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalEventWrite<'a> {
+    pub source: &'a str,
+    pub source_id: &'a str,
+    pub workflow_id: Option<&'a str>,
+    pub kind: &'a str,
+    pub origin: &'a str,
+    pub status: &'a str,
+    pub data: &'a serde_json::Value,
+    pub tenant_context: &'a serde_json::Value,
+}
+
+struct EventObservabilityIndexWrite<'a> {
+    global_event_id: i64,
+    workflow_id: Option<&'a str>,
+    kind: &'a str,
+    origin: &'a str,
+    source: &'a str,
+    organization_id: &'a str,
+    brand_id: &'a str,
+    product_id: &'a str,
+    data: &'a serde_json::Value,
+    created_at: &'a str,
+}
+
+pub struct AddonPermissionAuthorizationWrite<'a> {
+    pub addon_id: &'a str,
+    pub permission_id: &'a str,
+    pub status: &'a str,
+    pub risk: &'a str,
+    pub approved_by: &'a str,
+    pub source: &'a str,
+    pub data: &'a serde_json::Value,
+}
+
+pub struct IdentityMembershipWrite<'a> {
+    pub subject_scope: &'a str,
+    pub subject_id: &'a str,
+    pub organization_id: &'a str,
+    pub brand_id: &'a str,
+    pub product_id: &'a str,
+    pub role: &'a str,
+    pub status: &'a str,
+    pub source: &'a str,
+    pub data: &'a serde_json::Value,
+}
+
+pub struct IdentityLinkWrite<'a> {
+    pub id: &'a str,
+    pub left_scope: &'a str,
+    pub left_id: &'a str,
+    pub right_scope: &'a str,
+    pub right_id: &'a str,
+    pub link_type: &'a str,
+    pub status: &'a str,
+    pub source: &'a str,
     pub data: &'a serde_json::Value,
 }
 
@@ -97,6 +177,23 @@ pub struct CostLedgerIndexWrite {
     pub tokens_in: i64,
     pub tokens_out: i64,
     pub data: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CostLedgerIndexQuery<'a> {
+    pub workflow_id: Option<&'a str>,
+    pub organization_id: Option<&'a str>,
+    pub brand_id: Option<&'a str>,
+    pub product_id: Option<&'a str>,
+    pub source_kind: Option<&'a str>,
+    pub addon_id: Option<&'a str>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CostLedgerRetentionQuery<'a> {
+    pub index: CostLedgerIndexQuery<'a>,
+    pub updated_before: &'a str,
 }
 
 #[derive(Debug, Clone)]
@@ -1405,13 +1502,7 @@ impl ForgeStore {
 
     pub fn list_memory_promotions(
         &self,
-        from_scope: Option<&str>,
-        to_scope: Option<&str>,
-        approved_by: Option<&str>,
-        workflow_id: Option<&str>,
-        organization_id: Option<&str>,
-        brand_id: Option<&str>,
-        product_id: Option<&str>,
+        query: MemoryPromotionQuery<'_>,
     ) -> Result<Vec<StoredMemoryPromotionRecord>> {
         let mut statement = self.connection.prepare(
             r#"
@@ -1485,25 +1576,46 @@ impl ForgeStore {
                 data_json,
                 created_at,
             ) = row?;
-            if workflow_id.is_some_and(|filter| filter != workflow_id_value.as_str()) {
+            if query
+                .workflow_id
+                .is_some_and(|filter| filter != workflow_id_value.as_str())
+            {
                 continue;
             }
-            if organization_id.is_some_and(|filter| filter != organization_id_value.as_str()) {
+            if query
+                .organization_id
+                .is_some_and(|filter| filter != organization_id_value.as_str())
+            {
                 continue;
             }
-            if brand_id.is_some_and(|filter| filter != brand_id_value.as_str()) {
+            if query
+                .brand_id
+                .is_some_and(|filter| filter != brand_id_value.as_str())
+            {
                 continue;
             }
-            if product_id.is_some_and(|filter| filter != product_id_value.as_str()) {
+            if query
+                .product_id
+                .is_some_and(|filter| filter != product_id_value.as_str())
+            {
                 continue;
             }
-            if from_scope.is_some_and(|filter| filter != from_scope_value.as_str()) {
+            if query
+                .from_scope
+                .is_some_and(|filter| filter != from_scope_value.as_str())
+            {
                 continue;
             }
-            if to_scope.is_some_and(|filter| filter != to_scope_value.as_str()) {
+            if query
+                .to_scope
+                .is_some_and(|filter| filter != to_scope_value.as_str())
+            {
                 continue;
             }
-            if approved_by.is_some_and(|filter| filter != approved_by_value.as_str()) {
+            if query
+                .approved_by
+                .is_some_and(|filter| filter != approved_by_value.as_str())
+            {
                 continue;
             }
             records.push(StoredMemoryPromotionRecord {
@@ -1548,16 +1660,16 @@ impl ForgeStore {
             .map(|workflow| serde_json::to_value(&workflow.intent.operating_context))
             .transpose()?
             .unwrap_or_else(default_operating_context_json);
-        self.insert_global_event(
-            "workflow_event",
-            &event_id,
-            Some(workflow_id),
+        self.insert_global_event(GlobalEventWrite {
+            source: "workflow_event",
+            source_id: &event_id,
+            workflow_id: Some(workflow_id),
             kind,
-            &extract_event_origin(data),
-            "recorded",
+            origin: &extract_event_origin(data),
+            status: "recorded",
             data,
-            &tenant_context,
-        )?;
+            tenant_context: &tenant_context,
+        })?;
         if let Some(workflow) = workflow {
             self.save_tenant_index_record(
                 "event",
@@ -1775,21 +1887,15 @@ impl ForgeStore {
 
     pub fn load_cost_ledger_index(
         &self,
-        workflow_id: Option<&str>,
-        organization_id: Option<&str>,
-        brand_id: Option<&str>,
-        product_id: Option<&str>,
-        source_kind: Option<&str>,
-        addon_id: Option<&str>,
-        limit: Option<usize>,
+        query: CostLedgerIndexQuery<'_>,
     ) -> Result<Vec<StoredCostLedgerIndexRecord>> {
-        let workflow_filter = normalize_optional_filter(workflow_id);
-        let organization_filter = normalize_optional_filter(organization_id);
-        let brand_filter = normalize_optional_filter(brand_id);
-        let product_filter = normalize_optional_filter(product_id);
-        let source_kind_filter = normalize_optional_filter(source_kind);
-        let addon_filter = normalize_optional_filter(addon_id);
-        let limit = limit.filter(|limit| *limit > 0).unwrap_or(500);
+        let workflow_filter = normalize_optional_filter(query.workflow_id);
+        let organization_filter = normalize_optional_filter(query.organization_id);
+        let brand_filter = normalize_optional_filter(query.brand_id);
+        let product_filter = normalize_optional_filter(query.product_id);
+        let source_kind_filter = normalize_optional_filter(query.source_kind);
+        let addon_filter = normalize_optional_filter(query.addon_id);
+        let limit = query.limit.filter(|limit| *limit > 0).unwrap_or(500);
         let mut statement = self.connection.prepare(
             r#"
             SELECT row_key, source_kind, workflow_id, task_id, event_id,
@@ -1829,22 +1935,15 @@ impl ForgeStore {
 
     pub fn load_cost_ledger_retention_candidates(
         &self,
-        workflow_id: Option<&str>,
-        organization_id: Option<&str>,
-        brand_id: Option<&str>,
-        product_id: Option<&str>,
-        source_kind: Option<&str>,
-        addon_id: Option<&str>,
-        updated_before: &str,
-        limit: Option<usize>,
+        query: CostLedgerRetentionQuery<'_>,
     ) -> Result<Vec<StoredCostLedgerIndexRecord>> {
-        let workflow_filter = normalize_optional_filter(workflow_id);
-        let organization_filter = normalize_optional_filter(organization_id);
-        let brand_filter = normalize_optional_filter(brand_id);
-        let product_filter = normalize_optional_filter(product_id);
-        let source_kind_filter = normalize_optional_filter(source_kind);
-        let addon_filter = normalize_optional_filter(addon_id);
-        let limit = limit.filter(|limit| *limit > 0).unwrap_or(500);
+        let workflow_filter = normalize_optional_filter(query.index.workflow_id);
+        let organization_filter = normalize_optional_filter(query.index.organization_id);
+        let brand_filter = normalize_optional_filter(query.index.brand_id);
+        let product_filter = normalize_optional_filter(query.index.product_id);
+        let source_kind_filter = normalize_optional_filter(query.index.source_kind);
+        let addon_filter = normalize_optional_filter(query.index.addon_id);
+        let limit = query.index.limit.filter(|limit| *limit > 0).unwrap_or(500);
         let mut statement = self.connection.prepare(
             r#"
             SELECT row_key, source_kind, workflow_id, task_id, event_id,
@@ -1866,7 +1965,7 @@ impl ForgeStore {
         )?;
         let rows = statement.query_map(
             params![
-                updated_before,
+                query.updated_before,
                 workflow_filter,
                 organization_filter,
                 brand_filter,
@@ -2008,18 +2107,18 @@ impl ForgeStore {
             records
         };
         for record in records {
-            self.upsert_event_observability_index_record(
-                record.id,
-                record.workflow_id.as_deref(),
-                &record.kind,
-                &record.origin,
-                &record.source,
-                &record.organization_id,
-                &record.brand_id,
-                &record.product_id,
-                &record.data,
-                &record.created_at,
-            )?;
+            self.upsert_event_observability_index_record(EventObservabilityIndexWrite {
+                global_event_id: record.id,
+                workflow_id: record.workflow_id.as_deref(),
+                kind: &record.kind,
+                origin: &record.origin,
+                source: &record.source,
+                organization_id: &record.organization_id,
+                brand_id: &record.brand_id,
+                product_id: &record.product_id,
+                data: &record.data,
+                created_at: &record.created_at,
+            })?;
         }
         Ok(())
     }
@@ -2171,18 +2270,9 @@ impl ForgeStore {
 
     fn upsert_event_observability_index_record(
         &self,
-        global_event_id: i64,
-        workflow_id: Option<&str>,
-        kind: &str,
-        origin: &str,
-        source: &str,
-        organization_id: &str,
-        brand_id: &str,
-        product_id: &str,
-        data: &serde_json::Value,
-        created_at: &str,
+        write: EventObservabilityIndexWrite<'_>,
     ) -> Result<()> {
-        let observability = build_event_observability(kind, data);
+        let observability = build_event_observability(write.kind, write.data);
         self.connection.execute(
             r#"
             INSERT INTO event_observability_index (
@@ -2242,16 +2332,16 @@ impl ForgeStore {
                 updated_at=CURRENT_TIMESTAMP
             "#,
             params![
-                global_event_id,
-                workflow_id.unwrap_or("_global"),
-                kind,
-                categorize_event(kind),
-                infer_severity(kind, data),
-                origin,
-                source,
-                organization_id,
-                brand_id,
-                product_id,
+                write.global_event_id,
+                write.workflow_id.unwrap_or("_global"),
+                write.kind,
+                categorize_event(write.kind),
+                infer_severity(write.kind, write.data),
+                write.origin,
+                write.source,
+                write.organization_id,
+                write.brand_id,
+                write.product_id,
                 observability.node_ref,
                 observability.addon_id,
                 observability.duration_ms,
@@ -2265,29 +2355,19 @@ impl ForgeStore {
                 observability.context_pressure_state,
                 observability.memory_level,
                 observability.memory_scope,
-                serde_json::to_string(data)?,
-                created_at,
+                serde_json::to_string(write.data)?,
+                write.created_at,
             ],
         )?;
         Ok(())
     }
 
-    fn insert_global_event(
-        &self,
-        source: &str,
-        source_id: &str,
-        workflow_id: Option<&str>,
-        kind: &str,
-        origin: &str,
-        status: &str,
-        data: &serde_json::Value,
-        tenant_context: &serde_json::Value,
-    ) -> Result<i64> {
-        let organization_id = tenant_context_identity_id(tenant_context, "organization");
-        let brand_id = tenant_context_identity_id(tenant_context, "brand");
-        let product_id = tenant_context_identity_id(tenant_context, "product");
-        let user_id = tenant_context_identity_id(tenant_context, "user");
-        let channel_id = tenant_context_identity_id(tenant_context, "channel");
+    fn insert_global_event(&self, write: GlobalEventWrite<'_>) -> Result<i64> {
+        let organization_id = tenant_context_identity_id(write.tenant_context, "organization");
+        let brand_id = tenant_context_identity_id(write.tenant_context, "brand");
+        let product_id = tenant_context_identity_id(write.tenant_context, "product");
+        let user_id = tenant_context_identity_id(write.tenant_context, "user");
+        let channel_id = tenant_context_identity_id(write.tenant_context, "channel");
         self.connection.execute(
             r#"
             INSERT INTO global_events (
@@ -2298,19 +2378,19 @@ impl ForgeStore {
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             "#,
             params![
-                source,
-                source_id,
-                workflow_id,
-                kind,
-                origin,
-                status,
+                write.source,
+                write.source_id,
+                write.workflow_id,
+                write.kind,
+                write.origin,
+                write.status,
                 organization_id,
                 brand_id,
                 product_id,
                 user_id,
                 channel_id,
-                serde_json::to_string(tenant_context)?,
-                serde_json::to_string(data)?,
+                serde_json::to_string(write.tenant_context)?,
+                serde_json::to_string(write.data)?,
             ],
         )?;
         let global_event_id = self.connection.last_insert_rowid();
@@ -2319,42 +2399,23 @@ impl ForgeStore {
             params![global_event_id],
             |row| row.get(0),
         )?;
-        self.upsert_event_observability_index_record(
+        self.upsert_event_observability_index_record(EventObservabilityIndexWrite {
             global_event_id,
-            workflow_id,
-            kind,
-            origin,
-            source,
-            &organization_id,
-            &brand_id,
-            &product_id,
-            data,
-            &created_at,
-        )?;
+            workflow_id: write.workflow_id,
+            kind: write.kind,
+            origin: write.origin,
+            source: write.source,
+            organization_id: &organization_id,
+            brand_id: &brand_id,
+            product_id: &product_id,
+            data: write.data,
+            created_at: &created_at,
+        })?;
         Ok(global_event_id)
     }
 
-    pub fn record_global_event(
-        &self,
-        source: &str,
-        source_id: &str,
-        workflow_id: Option<&str>,
-        kind: &str,
-        origin: &str,
-        status: &str,
-        data: &serde_json::Value,
-        tenant_context: &serde_json::Value,
-    ) -> Result<i64> {
-        self.insert_global_event(
-            source,
-            source_id,
-            workflow_id,
-            kind,
-            origin,
-            status,
-            data,
-            tenant_context,
-        )
+    pub fn record_global_event(&self, write: GlobalEventWrite<'_>) -> Result<i64> {
+        self.insert_global_event(write)
     }
 
     pub fn load_workflow_events(&self, workflow_id: &str) -> Result<Vec<StoreEvent>> {
@@ -2652,13 +2713,7 @@ impl ForgeStore {
 
     pub fn save_addon_permission_authorization(
         &self,
-        addon_id: &str,
-        permission_id: &str,
-        status: &str,
-        risk: &str,
-        approved_by: &str,
-        source: &str,
-        data: &serde_json::Value,
+        write: AddonPermissionAuthorizationWrite<'_>,
     ) -> Result<()> {
         self.connection.execute(
             r#"
@@ -2683,13 +2738,13 @@ impl ForgeStore {
                 updated_at=CURRENT_TIMESTAMP
             "#,
             params![
-                addon_id,
-                permission_id,
-                status,
-                risk,
-                approved_by,
-                source,
-                serde_json::to_string(data)?,
+                write.addon_id,
+                write.permission_id,
+                write.status,
+                write.risk,
+                write.approved_by,
+                write.source,
+                serde_json::to_string(write.data)?,
             ],
         )?;
         Ok(())
@@ -3541,18 +3596,7 @@ impl ForgeStore {
         Ok(records)
     }
 
-    pub fn save_identity_membership(
-        &self,
-        subject_scope: &str,
-        subject_id: &str,
-        organization_id: &str,
-        brand_id: &str,
-        product_id: &str,
-        role: &str,
-        status: &str,
-        source: &str,
-        data: &serde_json::Value,
-    ) -> Result<()> {
+    pub fn save_identity_membership(&self, write: IdentityMembershipWrite<'_>) -> Result<()> {
         self.connection.execute(
             r#"
             INSERT INTO identity_memberships (
@@ -3577,15 +3621,15 @@ impl ForgeStore {
                 updated_at=CURRENT_TIMESTAMP
             "#,
             params![
-                subject_scope,
-                subject_id,
-                organization_id,
-                brand_id,
-                product_id,
-                role,
-                status,
-                source,
-                serde_json::to_string(data)?,
+                write.subject_scope,
+                write.subject_id,
+                write.organization_id,
+                write.brand_id,
+                write.product_id,
+                write.role,
+                write.status,
+                write.source,
+                serde_json::to_string(write.data)?,
             ],
         )?;
         Ok(())
@@ -3679,18 +3723,7 @@ impl ForgeStore {
         Ok(records)
     }
 
-    pub fn save_identity_link(
-        &self,
-        id: &str,
-        left_scope: &str,
-        left_id: &str,
-        right_scope: &str,
-        right_id: &str,
-        link_type: &str,
-        status: &str,
-        source: &str,
-        data: &serde_json::Value,
-    ) -> Result<()> {
+    pub fn save_identity_link(&self, write: IdentityLinkWrite<'_>) -> Result<()> {
         self.connection.execute(
             r#"
             INSERT INTO identity_links (
@@ -3719,15 +3752,15 @@ impl ForgeStore {
                 updated_at=CURRENT_TIMESTAMP
             "#,
             params![
-                id,
-                left_scope,
-                left_id,
-                right_scope,
-                right_id,
-                link_type,
-                status,
-                source,
-                serde_json::to_string(data)?,
+                write.id,
+                write.left_scope,
+                write.left_id,
+                write.right_scope,
+                write.right_id,
+                write.link_type,
+                write.status,
+                write.source,
+                serde_json::to_string(write.data)?,
             ],
         )?;
         Ok(())
@@ -3857,22 +3890,22 @@ impl ForgeStore {
             "#,
             params![id, origin, action, status, serde_json::to_string(data)?],
         )?;
-        self.insert_global_event(
-            "event_inbox",
-            id,
-            None,
-            "inbound_event_ingested",
+        self.insert_global_event(GlobalEventWrite {
+            source: "event_inbox",
+            source_id: id,
+            workflow_id: None,
+            kind: "inbound_event_ingested",
             origin,
             status,
-            &serde_json::json!({
+            data: &serde_json::json!({
                 "event_id": id,
                 "origin": origin,
                 "action": action,
                 "status": status,
                 "data": data,
             }),
-            &default_operating_context_json(),
-        )?;
+            tenant_context: &default_operating_context_json(),
+        })?;
         Ok(())
     }
 
@@ -3898,36 +3931,28 @@ impl ForgeStore {
                 .get("workflow_id")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
-            self.insert_global_event(
-                "event_inbox",
-                id,
-                workflow_id.as_deref(),
-                "inbound_event_status_updated",
-                &event.origin,
+            self.insert_global_event(GlobalEventWrite {
+                source: "event_inbox",
+                source_id: id,
+                workflow_id: workflow_id.as_deref(),
+                kind: "inbound_event_status_updated",
+                origin: &event.origin,
                 status,
-                &serde_json::json!({
+                data: &serde_json::json!({
                     "event_id": event.id.clone(),
                     "origin": event.origin.clone(),
                     "action": event.action.clone(),
                     "status": status,
                     "data": data,
                 }),
-                &default_operating_context_json(),
-            )?;
+                tenant_context: &default_operating_context_json(),
+            })?;
         }
         Ok(())
     }
 
     pub fn load_inbound_event(&self, id: &str) -> Result<InboundEventRecord> {
-        let row: Option<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-        )> = self
+        let row: Option<InboundEventRow> = self
             .connection
             .query_row(
                 r#"

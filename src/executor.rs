@@ -1,7 +1,7 @@
 use crate::artifact::hex_sha256;
 use crate::harness::{inspect_cli_harness_shim_status, CliShimStatusOptions};
 use crate::intent::OperatingContextSpec;
-use crate::storage::ForgeStore;
+use crate::storage::{ForgeStore, GlobalEventWrite};
 use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -1370,16 +1370,16 @@ pub fn record_shell_session_plan(
         &hex_sha256(serde_json::to_string(&data)?.as_bytes())[..16]
     );
     let tenant_context = shell_session_tenant_context(store, launch_plan.workflow_id.as_deref())?;
-    let global_event_id = store.record_global_event(
-        "forge_shell",
-        &source_id,
-        launch_plan.workflow_id.as_deref(),
-        "shell_launch_planned",
+    let global_event_id = store.record_global_event(GlobalEventWrite {
+        source: "forge_shell",
+        source_id: &source_id,
+        workflow_id: launch_plan.workflow_id.as_deref(),
+        kind: "shell_launch_planned",
         origin,
-        "planned",
-        &data,
-        &tenant_context,
-    )?;
+        status: "planned",
+        data: &data,
+        tenant_context: &tenant_context,
+    })?;
 
     Ok(ShellSessionReceipt {
         schema_version: "forge.shell_session_receipt.v1".to_string(),
@@ -1446,16 +1446,16 @@ pub fn record_brain_session_lifecycle(
         &hex_sha256(serde_json::to_string(&data)?.as_bytes())[..16]
     );
     let tenant_context = shell_session_tenant_context(store, options.workflow_id)?;
-    let global_event_id = store.record_global_event(
-        "forge_session",
-        &source_id,
-        options.workflow_id,
-        "brain_session_lifecycle",
-        options.origin,
-        normalized_state,
-        &data,
-        &tenant_context,
-    )?;
+    let global_event_id = store.record_global_event(GlobalEventWrite {
+        source: "forge_session",
+        source_id: &source_id,
+        workflow_id: options.workflow_id,
+        kind: "brain_session_lifecycle",
+        origin: options.origin,
+        status: normalized_state,
+        data: &data,
+        tenant_context: &tenant_context,
+    })?;
 
     Ok(BrainSessionLifecycleReceipt {
         schema_version: "forge.brain_session_lifecycle.v1".to_string(),

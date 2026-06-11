@@ -1,7 +1,10 @@
 use crate::graph::{AtomicTask, ExecutorKind, Workflow};
 use crate::identity::ensure_operating_context_policy;
 use crate::intent::OperatingContextSpec;
-use crate::storage::{CostLedgerIndexWrite, ForgeStore, StoreEvent, StoredCostLedgerIndexRecord};
+use crate::storage::{
+    CostLedgerIndexQuery, CostLedgerIndexWrite, CostLedgerRetentionQuery, ForgeStore,
+    GlobalEventWrite, StoreEvent, StoredCostLedgerIndexRecord,
+};
 use anyhow::{bail, Context, Result};
 use chrono::{
     DateTime, Datelike, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Timelike, Utc,
@@ -135,6 +138,30 @@ pub struct CostLedgerIndexReport {
     pub materialized_row_count: usize,
     pub row_count: usize,
     pub rows: Vec<CostLedgerIndexRow>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CostLedgerHistoryQuery<'a> {
+    pub index: CostLedgerIndexQuery<'a>,
+    pub bucket: Option<&'a str>,
+    pub group_by: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CostLedgerMaintenanceQuery<'a> {
+    pub history: CostLedgerHistoryQuery<'a>,
+    pub retention_days: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CostLedgerIncrementalQuery<'a> {
+    pub after_sequence: Option<i64>,
+    pub organization_id: Option<&'a str>,
+    pub brand_id: Option<&'a str>,
+    pub product_id: Option<&'a str>,
+    pub source_kind: Option<&'a str>,
+    pub addon_id: Option<&'a str>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -476,15 +503,15 @@ pub fn build_cost_ledger_for_context(
 
 pub fn materialize_cost_ledger_index(
     store: &ForgeStore,
-    workflow_id: Option<&str>,
-    organization_id: Option<&str>,
-    brand_id: Option<&str>,
-    product_id: Option<&str>,
-    source_kind: Option<&str>,
-    addon_id: Option<&str>,
-    limit: Option<usize>,
+    query: CostLedgerIndexQuery<'_>,
 ) -> Result<CostLedgerIndexReport> {
-    let ledger = build_cost_ledger(store, workflow_id, organization_id, brand_id, product_id)?;
+    let ledger = build_cost_ledger(
+        store,
+        query.workflow_id,
+        query.organization_id,
+        query.brand_id,
+        query.product_id,
+    )?;
     let workflow_ids = ledger
         .workflows
         .iter()
@@ -492,24 +519,10 @@ pub fn materialize_cost_ledger_index(
         .collect::<Vec<_>>();
     let writes = cost_ledger_index_writes(&ledger);
     let materialized_row_count = store.replace_cost_ledger_index_records(&workflow_ids, &writes)?;
-    let records = store.load_cost_ledger_index(
-        workflow_id,
-        organization_id,
-        brand_id,
-        product_id,
-        source_kind,
-        addon_id,
-        limit,
-    )?;
+    let records = store.load_cost_ledger_index(query)?;
     Ok(cost_ledger_index_report_from_records(
         "cost_ledger_index_materialized",
-        workflow_id,
-        organization_id,
-        brand_id,
-        product_id,
-        source_kind,
-        addon_id,
-        limit,
+        query,
         materialized_row_count,
         records,
     ))
@@ -530,13 +543,15 @@ pub fn materialize_cost_ledger_index_for_context(
     if operating_context.tenant_policy_mode != "enforce" {
         return materialize_cost_ledger_index(
             store,
-            workflow_id,
-            organization_id,
-            brand_id,
-            product_id,
-            source_kind,
-            addon_id,
-            limit,
+            CostLedgerIndexQuery {
+                workflow_id,
+                organization_id,
+                brand_id,
+                product_id,
+                source_kind,
+                addon_id,
+                limit,
+            },
         );
     }
     let operation = "cost ledger materialize list";
@@ -557,40 +572,29 @@ pub fn materialize_cost_ledger_index_for_context(
     )?;
     materialize_cost_ledger_index(
         store,
-        workflow_id,
-        Some(&organization_id),
-        Some(&brand_id),
-        Some(&product_id),
-        source_kind,
-        addon_id,
-        limit,
+        CostLedgerIndexQuery {
+            workflow_id,
+            organization_id: Some(&organization_id),
+            brand_id: Some(&brand_id),
+            product_id: Some(&product_id),
+            source_kind,
+            addon_id,
+            limit,
+        },
     )
 }
 
 pub fn build_cost_ledger_history(
     store: &ForgeStore,
-    workflow_id: Option<&str>,
-    organization_id: Option<&str>,
-    brand_id: Option<&str>,
-    product_id: Option<&str>,
-    source_kind: Option<&str>,
-    addon_id: Option<&str>,
-    bucket: Option<&str>,
-    group_by: Option<&str>,
-    limit: Option<usize>,
+    query: CostLedgerHistoryQuery<'_>,
 ) -> Result<CostLedgerHistoryReport> {
-    let bucket = normalize_cost_history_bucket(bucket)?;
-    let group_by = normalize_cost_history_group_by(group_by)?;
+    let bucket = normalize_cost_history_bucket(query.bucket)?;
+    let group_by = normalize_cost_history_group_by(query.group_by)?;
     let mut rows = store
-        .load_cost_ledger_index(
-            workflow_id,
-            organization_id,
-            brand_id,
-            product_id,
-            source_kind,
-            addon_id,
-            None,
-        )?
+        .load_cost_ledger_index(CostLedgerIndexQuery {
+            limit: None,
+            ..query.index
+        })?
         .into_iter()
         .map(cost_ledger_index_row)
         .collect::<Vec<_>>();
@@ -600,22 +604,22 @@ pub fn build_cost_ledger_history(
             .then_with(|| left.row_key.cmp(&right.row_key))
     });
     let summary = summarize_cost_ledger_index_rows(&rows);
-    let buckets = build_cost_ledger_history_buckets(&rows, &bucket, &group_by, limit)?;
+    let buckets = build_cost_ledger_history_buckets(&rows, &bucket, &group_by, query.index.limit)?;
 
     Ok(CostLedgerHistoryReport {
         schema_version: COST_LEDGER_HISTORY_SCHEMA_VERSION.to_string(),
         status: "cost_ledger_history_loaded".to_string(),
         index_source: "sqlite_materialized".to_string(),
         filters: CostLedgerHistoryFilters {
-            workflow_id: normalize_filter(workflow_id),
-            organization_id: normalize_filter(organization_id),
-            brand_id: normalize_filter(brand_id),
-            product_id: normalize_filter(product_id),
-            source_kind: normalize_filter(source_kind),
-            addon_id: normalize_filter(addon_id),
+            workflow_id: normalize_filter(query.index.workflow_id),
+            organization_id: normalize_filter(query.index.organization_id),
+            brand_id: normalize_filter(query.index.brand_id),
+            product_id: normalize_filter(query.index.product_id),
+            source_kind: normalize_filter(query.index.source_kind),
+            addon_id: normalize_filter(query.index.addon_id),
             bucket,
             group_by,
-            limit: limit.filter(|limit| *limit > 0),
+            limit: query.index.limit.filter(|limit| *limit > 0),
         },
         summary,
         bucket_count: buckets.len(),
@@ -640,15 +644,19 @@ pub fn build_cost_ledger_history_for_context(
     if operating_context.tenant_policy_mode != "enforce" {
         return build_cost_ledger_history(
             store,
-            workflow_id,
-            organization_id,
-            brand_id,
-            product_id,
-            source_kind,
-            addon_id,
-            bucket,
-            group_by,
-            limit,
+            CostLedgerHistoryQuery {
+                index: CostLedgerIndexQuery {
+                    workflow_id,
+                    organization_id,
+                    brand_id,
+                    product_id,
+                    source_kind,
+                    addon_id,
+                    limit,
+                },
+                bucket,
+                group_by,
+            },
         );
     }
     ensure_operating_context_policy(store, operating_context, "cost history list")?;
@@ -672,56 +680,39 @@ pub fn build_cost_ledger_history_for_context(
     )?;
     build_cost_ledger_history(
         store,
-        workflow_id,
-        Some(&organization_id),
-        Some(&brand_id),
-        Some(&product_id),
-        source_kind,
-        addon_id,
-        bucket,
-        group_by,
-        limit,
+        CostLedgerHistoryQuery {
+            index: CostLedgerIndexQuery {
+                workflow_id,
+                organization_id: Some(&organization_id),
+                brand_id: Some(&brand_id),
+                product_id: Some(&product_id),
+                source_kind,
+                addon_id,
+                limit,
+            },
+            bucket,
+            group_by,
+        },
     )
 }
 
 pub fn maintain_cost_ledger(
     store: &ForgeStore,
-    workflow_id: Option<&str>,
-    organization_id: Option<&str>,
-    brand_id: Option<&str>,
-    product_id: Option<&str>,
-    source_kind: Option<&str>,
-    addon_id: Option<&str>,
-    bucket: Option<&str>,
-    group_by: Option<&str>,
-    limit: Option<usize>,
-    retention_days: Option<i64>,
+    query: CostLedgerMaintenanceQuery<'_>,
 ) -> Result<CostLedgerMaintenanceReport> {
-    let bucket = normalize_cost_history_bucket(bucket)?;
-    let group_by = normalize_cost_history_group_by(group_by)?;
-    let materialization = materialize_cost_ledger_index(
-        store,
-        workflow_id,
-        organization_id,
-        brand_id,
-        product_id,
-        source_kind,
-        addon_id,
-        limit,
-    )?;
+    let bucket = normalize_cost_history_bucket(query.history.bucket)?;
+    let group_by = normalize_cost_history_group_by(query.history.group_by)?;
+    let materialization = materialize_cost_ledger_index(store, query.history.index)?;
     let history = build_cost_ledger_history(
         store,
-        workflow_id,
-        organization_id,
-        brand_id,
-        product_id,
-        source_kind,
-        addon_id,
-        Some(&bucket),
-        Some(&group_by),
-        limit,
+        CostLedgerHistoryQuery {
+            bucket: Some(&bucket),
+            group_by: Some(&group_by),
+            ..query.history
+        },
     )?;
-    let retention = retention_days
+    let retention = query
+        .retention_days
         .filter(|days| *days > 0)
         .map(|days| CostLedgerRetentionPlan {
             mode: "plan_only".to_string(),
@@ -739,15 +730,15 @@ pub fn maintain_cost_ledger(
         schema_version: COST_LEDGER_MAINTENANCE_SCHEMA_VERSION.to_string(),
         status: "cost_ledger_maintenance_completed".to_string(),
         filters: CostLedgerMaintenanceFilters {
-            workflow_id: normalize_filter(workflow_id),
-            organization_id: normalize_filter(organization_id),
-            brand_id: normalize_filter(brand_id),
-            product_id: normalize_filter(product_id),
-            source_kind: normalize_filter(source_kind),
-            addon_id: normalize_filter(addon_id),
+            workflow_id: normalize_filter(query.history.index.workflow_id),
+            organization_id: normalize_filter(query.history.index.organization_id),
+            brand_id: normalize_filter(query.history.index.brand_id),
+            product_id: normalize_filter(query.history.index.product_id),
+            source_kind: normalize_filter(query.history.index.source_kind),
+            addon_id: normalize_filter(query.history.index.addon_id),
             bucket,
             group_by,
-            limit: limit.filter(|limit| *limit > 0),
+            limit: query.history.index.limit.filter(|limit| *limit > 0),
         },
         retention,
         materialized_row_count: materialization.materialized_row_count,
@@ -783,16 +774,22 @@ pub fn maintain_cost_ledger_for_context(
     if operating_context.tenant_policy_mode != "enforce" {
         return maintain_cost_ledger(
             store,
-            workflow_id,
-            organization_id,
-            brand_id,
-            product_id,
-            source_kind,
-            addon_id,
-            bucket,
-            group_by,
-            limit,
-            retention_days,
+            CostLedgerMaintenanceQuery {
+                history: CostLedgerHistoryQuery {
+                    index: CostLedgerIndexQuery {
+                        workflow_id,
+                        organization_id,
+                        brand_id,
+                        product_id,
+                        source_kind,
+                        addon_id,
+                        limit,
+                    },
+                    bucket,
+                    group_by,
+                },
+                retention_days,
+            },
         );
     }
     let operation = "cost ledger maintenance list";
@@ -813,16 +810,22 @@ pub fn maintain_cost_ledger_for_context(
     )?;
     maintain_cost_ledger(
         store,
-        workflow_id,
-        Some(&organization_id),
-        Some(&brand_id),
-        Some(&product_id),
-        source_kind,
-        addon_id,
-        bucket,
-        group_by,
-        limit,
-        retention_days,
+        CostLedgerMaintenanceQuery {
+            history: CostLedgerHistoryQuery {
+                index: CostLedgerIndexQuery {
+                    workflow_id,
+                    organization_id: Some(&organization_id),
+                    brand_id: Some(&brand_id),
+                    product_id: Some(&product_id),
+                    source_kind,
+                    addon_id,
+                    limit,
+                },
+                bucket,
+                group_by,
+            },
+            retention_days,
+        },
     )
 }
 
@@ -859,16 +862,22 @@ pub fn run_cost_ledger_daemon(
     for cycle in 1..=max_cycles {
         let maintenance = maintain_cost_ledger(
             store,
-            workflow_id,
-            organization_id,
-            brand_id,
-            product_id,
-            source_kind,
-            addon_id,
-            Some(&bucket),
-            Some(&group_by),
-            limit,
-            retention_days,
+            CostLedgerMaintenanceQuery {
+                history: CostLedgerHistoryQuery {
+                    index: CostLedgerIndexQuery {
+                        workflow_id,
+                        organization_id,
+                        brand_id,
+                        product_id,
+                        source_kind,
+                        addon_id,
+                        limit,
+                    },
+                    bucket: Some(&bucket),
+                    group_by: Some(&group_by),
+                },
+                retention_days,
+            },
         )?;
         total_materialized_row_count += maintenance.materialized_row_count;
         total_indexed_row_count += maintenance.indexed_row_count;
@@ -891,16 +900,16 @@ pub fn run_cost_ledger_daemon(
             "cost-ledger-daemon-{cycle}-{}",
             Utc::now().timestamp_millis()
         );
-        let global_event_id = store.record_global_event(
-            "cost_ledger_daemon",
-            &source_id,
+        let global_event_id = store.record_global_event(GlobalEventWrite {
+            source: "cost_ledger_daemon",
+            source_id: &source_id,
             workflow_id,
-            "cost_ledger_daemon_cycle",
+            kind: "cost_ledger_daemon_cycle",
             origin,
-            "recorded",
-            &data,
-            &tenant_context,
-        )?;
+            status: "recorded",
+            data: &data,
+            tenant_context: &tenant_context,
+        })?;
         let should_stop_for_idle = idle_exit && maintenance.indexed_row_count == 0;
         let slept_after_seconds = if cycle < max_cycles && !should_stop_for_idle {
             if interval_seconds > 0 {
@@ -1055,16 +1064,18 @@ pub fn apply_cost_ledger_retention(
     let cutoff = Utc::now() - ChronoDuration::days(retention_days);
     let cutoff_updated_before = cutoff.to_rfc3339();
     let candidates = store
-        .load_cost_ledger_retention_candidates(
-            workflow_id,
-            organization_id,
-            brand_id,
-            product_id,
-            source_kind,
-            addon_id,
-            &cutoff_updated_before,
-            limit,
-        )?
+        .load_cost_ledger_retention_candidates(CostLedgerRetentionQuery {
+            index: CostLedgerIndexQuery {
+                workflow_id,
+                organization_id,
+                brand_id,
+                product_id,
+                source_kind,
+                addon_id,
+                limit,
+            },
+            updated_before: &cutoff_updated_before,
+        })?
         .into_iter()
         .map(cost_ledger_index_row)
         .collect::<Vec<_>>();
@@ -1121,28 +1132,31 @@ pub fn apply_cost_ledger_retention(
     };
     let tenant_context =
         cost_daemon_tenant_context(store, workflow_id, organization_id, brand_id, product_id)?;
-    store.record_global_event(
-        "cost_ledger_retention",
-        &format!("cost-ledger-retention-{}", Utc::now().timestamp_millis()),
+    let source_id = format!("cost-ledger-retention-{}", Utc::now().timestamp_millis());
+    let event_kind = if deleted_row_count > 0 {
+        "cost_ledger_retention_applied"
+    } else {
+        "cost_ledger_retention_evaluated"
+    };
+    let event_data = json!({
+        "schema_version": &report.schema_version,
+        "status": &report.status,
+        "filters": &report.filters,
+        "cutoff_updated_before": &report.cutoff_updated_before,
+        "candidate_row_count": report.candidate_row_count,
+        "deleted_row_count": report.deleted_row_count,
+        "governance": &report.governance,
+    });
+    store.record_global_event(GlobalEventWrite {
+        source: "cost_ledger_retention",
+        source_id: &source_id,
         workflow_id,
-        if deleted_row_count > 0 {
-            "cost_ledger_retention_applied"
-        } else {
-            "cost_ledger_retention_evaluated"
-        },
+        kind: event_kind,
         origin,
-        "recorded",
-        &json!({
-            "schema_version": &report.schema_version,
-            "status": &report.status,
-            "filters": &report.filters,
-            "cutoff_updated_before": &report.cutoff_updated_before,
-            "candidate_row_count": report.candidate_row_count,
-            "deleted_row_count": report.deleted_row_count,
-            "governance": &report.governance,
-        }),
-        &tenant_context,
-    )?;
+        status: "recorded",
+        data: &event_data,
+        tenant_context: &tenant_context,
+    })?;
     Ok(report)
 }
 
@@ -1218,23 +1232,17 @@ pub fn apply_cost_ledger_retention_for_context(
 
 pub fn materialize_cost_ledger_incremental(
     store: &ForgeStore,
-    after_sequence: Option<i64>,
-    organization_id: Option<&str>,
-    brand_id: Option<&str>,
-    product_id: Option<&str>,
-    source_kind: Option<&str>,
-    addon_id: Option<&str>,
-    limit: Option<usize>,
+    query: CostLedgerIncrementalQuery<'_>,
 ) -> Result<CostLedgerIncrementalReport> {
-    let limit = limit.filter(|limit| *limit > 0);
-    let after_sequence_floor = after_sequence.unwrap_or(0);
+    let limit = query.limit.filter(|limit| *limit > 0);
+    let after_sequence_floor = query.after_sequence.unwrap_or(0);
     let mut events = store
         .load_global_events()?
         .into_iter()
         .filter(|event| event.id > after_sequence_floor)
-        .filter(|event| filter_eq(organization_id, &event.organization_id))
-        .filter(|event| filter_eq(brand_id, &event.brand_id))
-        .filter(|event| filter_eq(product_id, &event.product_id))
+        .filter(|event| filter_eq(query.organization_id, &event.organization_id))
+        .filter(|event| filter_eq(query.brand_id, &event.brand_id))
+        .filter(|event| filter_eq(query.product_id, &event.product_id))
         .collect::<Vec<_>>();
     events.sort_by_key(|event| event.id);
     if let Some(limit) = limit {
@@ -1258,13 +1266,15 @@ pub fn materialize_cost_ledger_incremental(
     for workflow_id in &affected_workflow_ids {
         let report = materialize_cost_ledger_index(
             store,
-            Some(workflow_id),
-            organization_id,
-            brand_id,
-            product_id,
-            source_kind,
-            addon_id,
-            limit,
+            CostLedgerIndexQuery {
+                workflow_id: Some(workflow_id),
+                organization_id: query.organization_id,
+                brand_id: query.brand_id,
+                product_id: query.product_id,
+                source_kind: query.source_kind,
+                addon_id: query.addon_id,
+                limit,
+            },
         )?;
         materialized_row_count += report.materialized_row_count;
         materializations.push(report);
@@ -1273,12 +1283,12 @@ pub fn materialize_cost_ledger_incremental(
         schema_version: COST_LEDGER_INCREMENTAL_SCHEMA_VERSION.to_string(),
         status: "cost_ledger_incremental_completed".to_string(),
         filters: CostLedgerIncrementalFilters {
-            after_sequence,
-            organization_id: normalize_filter(organization_id),
-            brand_id: normalize_filter(brand_id),
-            product_id: normalize_filter(product_id),
-            source_kind: normalize_filter(source_kind),
-            addon_id: normalize_filter(addon_id),
+            after_sequence: query.after_sequence,
+            organization_id: normalize_filter(query.organization_id),
+            brand_id: normalize_filter(query.brand_id),
+            product_id: normalize_filter(query.product_id),
+            source_kind: normalize_filter(query.source_kind),
+            addon_id: normalize_filter(query.addon_id),
             limit,
         },
         event_count: events.len(),
@@ -1313,13 +1323,15 @@ pub fn materialize_cost_ledger_incremental_for_context(
     if operating_context.tenant_policy_mode != "enforce" {
         return materialize_cost_ledger_incremental(
             store,
-            after_sequence,
-            organization_id,
-            brand_id,
-            product_id,
-            source_kind,
-            addon_id,
-            limit,
+            CostLedgerIncrementalQuery {
+                after_sequence,
+                organization_id,
+                brand_id,
+                product_id,
+                source_kind,
+                addon_id,
+                limit,
+            },
         );
     }
     let operation = "cost ledger incremental list";
@@ -1340,13 +1352,15 @@ pub fn materialize_cost_ledger_incremental_for_context(
     )?;
     materialize_cost_ledger_incremental(
         store,
-        after_sequence,
-        Some(&organization_id),
-        Some(&brand_id),
-        Some(&product_id),
-        source_kind,
-        addon_id,
-        limit,
+        CostLedgerIncrementalQuery {
+            after_sequence,
+            organization_id: Some(&organization_id),
+            brand_id: Some(&brand_id),
+            product_id: Some(&product_id),
+            source_kind,
+            addon_id,
+            limit,
+        },
     )
 }
 
@@ -1415,13 +1429,7 @@ fn cost_ledger_index_writes(report: &CostLedgerReport) -> Vec<CostLedgerIndexWri
 
 fn cost_ledger_index_report_from_records(
     status: &str,
-    workflow_id: Option<&str>,
-    organization_id: Option<&str>,
-    brand_id: Option<&str>,
-    product_id: Option<&str>,
-    source_kind: Option<&str>,
-    addon_id: Option<&str>,
-    limit: Option<usize>,
+    query: CostLedgerIndexQuery<'_>,
     materialized_row_count: usize,
     records: Vec<StoredCostLedgerIndexRecord>,
 ) -> CostLedgerIndexReport {
@@ -1434,13 +1442,13 @@ fn cost_ledger_index_report_from_records(
         schema_version: COST_LEDGER_INDEX_SCHEMA_VERSION.to_string(),
         status: status.to_string(),
         filters: CostLedgerIndexFilters {
-            workflow_id: normalize_filter(workflow_id),
-            organization_id: normalize_filter(organization_id),
-            brand_id: normalize_filter(brand_id),
-            product_id: normalize_filter(product_id),
-            source_kind: normalize_filter(source_kind),
-            addon_id: normalize_filter(addon_id),
-            limit: limit.filter(|limit| *limit > 0),
+            workflow_id: normalize_filter(query.workflow_id),
+            organization_id: normalize_filter(query.organization_id),
+            brand_id: normalize_filter(query.brand_id),
+            product_id: normalize_filter(query.product_id),
+            source_kind: normalize_filter(query.source_kind),
+            addon_id: normalize_filter(query.addon_id),
+            limit: query.limit.filter(|limit| *limit > 0),
         },
         summary,
         materialized_row_count,

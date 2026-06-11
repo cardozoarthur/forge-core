@@ -1,6 +1,8 @@
 use crate::artifact::hex_sha256;
 use crate::identity::ensure_workflow_policy;
-use crate::storage::{ForgeStore, MemoryPromotionWrite, StoredMemoryPromotionRecord};
+use crate::storage::{
+    ForgeStore, MemoryPromotionQuery, MemoryPromotionWrite, StoredMemoryPromotionRecord,
+};
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use serde::Serialize;
@@ -1113,15 +1115,15 @@ pub fn list_memory_promotions(
     let product_id_filter = workflow_binding
         .as_ref()
         .map(|binding| binding.product_id.as_str());
-    let records = store.list_memory_promotions(
-        normalized_from.as_deref(),
-        normalized_to.as_deref(),
-        approved_by_filter.as_deref(),
-        workflow_id_filter,
-        organization_id_filter,
-        brand_id_filter,
-        product_id_filter,
-    )?;
+    let records = store.list_memory_promotions(MemoryPromotionQuery {
+        from_scope: normalized_from.as_deref(),
+        to_scope: normalized_to.as_deref(),
+        approved_by: approved_by_filter.as_deref(),
+        workflow_id: workflow_id_filter,
+        organization_id: organization_id_filter,
+        brand_id: brand_id_filter,
+        product_id: product_id_filter,
+    })?;
     let promotions = records
         .into_iter()
         .map(memory_promotion_index_entry_from_record)

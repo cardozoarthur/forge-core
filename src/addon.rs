@@ -6,11 +6,11 @@ use crate::graph::{
 };
 use crate::intent::{parse_intent, parse_intent_with_catalog};
 use crate::storage::{
-    AddonMarketplacePackageWrite, AddonTrustKeyWrite, ForgeStore, RuntimeContractDispatchWrite,
-    RuntimeWorkerWrite, StoredAddonCapabilityRecord, StoredAddonCapabilityWrite,
-    StoredAddonMarketplacePackageRecord, StoredAddonPermissionAuthorizationRecord,
-    StoredAddonRecord, StoredAddonTrustKeyRecord, StoredGlobalEventRecord,
-    StoredRuntimeContractDispatchRecord, StoredRuntimeWorkerRecord,
+    AddonMarketplacePackageWrite, AddonPermissionAuthorizationWrite, AddonTrustKeyWrite,
+    ForgeStore, RuntimeContractDispatchWrite, RuntimeWorkerWrite, StoredAddonCapabilityRecord,
+    StoredAddonCapabilityWrite, StoredAddonMarketplacePackageRecord,
+    StoredAddonPermissionAuthorizationRecord, StoredAddonRecord, StoredAddonTrustKeyRecord,
+    StoredGlobalEventRecord, StoredRuntimeContractDispatchRecord, StoredRuntimeWorkerRecord,
 };
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
@@ -38,6 +38,113 @@ pub const ADDON_EVENT_ADAPTERS_SCHEMA_VERSION: &str = "forge.addon_event_adapter
 pub const ADDON_OBSERVABILITY_SCHEMA_VERSION: &str = "forge.addon_observability.v1";
 pub const ADDON_RUNTIME_CONTRACTS_SCHEMA_VERSION: &str = "forge.addon_runtime_contracts.v1";
 pub const ADDON_PLANNER_REGISTRY_SCHEMA_VERSION: &str = "forge.addon_planner_registry.v1";
+
+type CapabilitySuggestionAction = (
+    String,
+    String,
+    String,
+    Vec<Vec<String>>,
+    Vec<String>,
+    Vec<String>,
+);
+
+pub struct AddonPlannerDispatchInput<'a> {
+    pub addon_id: Option<&'a str>,
+    pub contract_id: &'a str,
+    pub goal: &'a str,
+    pub constraints: &'a [String],
+    pub workflow_id: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+    pub context: serde_json::Value,
+    pub source: &'a str,
+    pub dry_run: bool,
+}
+
+pub struct AddonPlanningStrategyInput<'a> {
+    pub dispatch: AddonPlannerDispatchInput<'a>,
+    pub worker_id: &'a str,
+    pub lease_seconds: u64,
+}
+
+struct AddonPlanningStrategyReportInput<'a> {
+    status: &'a str,
+    goal: &'a str,
+    contract_id: &'a str,
+    worker_id: &'a str,
+    source: &'a str,
+    dry_run: bool,
+    dispatch_report: AddonRuntimeContractDispatchReport,
+    strategy_result: Option<serde_json::Value>,
+    validation: AddonPlanningStrategyResultValidation,
+    equivalence: AddonPlanningStrategyEquivalence,
+}
+
+pub struct AddonRuntimeContractCompletionInput<'a> {
+    pub dispatch_id: &'a str,
+    pub worker_id: &'a str,
+    pub completion_status: &'a str,
+    pub result: serde_json::Value,
+    pub signature: Option<&'a str>,
+    pub attestation: serde_json::Value,
+    pub dry_run: bool,
+}
+
+pub struct AddonPackageInput<'a> {
+    pub manifest_path: &'a Path,
+    pub addon_dirs: &'a [PathBuf],
+    pub repository: Option<&'a str>,
+    pub channel: &'a str,
+    pub signature: Option<&'a str>,
+    pub public_key: Option<&'a str>,
+    pub package_path: Option<&'a Path>,
+}
+
+pub struct AddonTrustKeyInput<'a> {
+    pub repository: &'a str,
+    pub channel: &'a str,
+    pub public_key: &'a str,
+    pub trust_level: &'a str,
+    pub approved_by: &'a str,
+    pub source: &'a str,
+    pub data: serde_json::Value,
+}
+
+pub struct CapabilityRegistrySyncInput<'a> {
+    pub registry_sources: &'a [String],
+    pub cache_dir: Option<&'a Path>,
+    pub allow_remote: bool,
+    pub max_bytes: u64,
+    pub max_packages: usize,
+    pub lock_path: Option<&'a Path>,
+}
+
+struct ExternalApiAttestationInput<'a> {
+    started_at: chrono::DateTime<Utc>,
+    status_code: Option<u16>,
+    response_bytes: Option<usize>,
+    outcome: &'a str,
+    response_sha256: Option<&'a str>,
+}
+
+struct RuntimeDispatchUpdateInput<'a> {
+    policy: AddonRuntimeContractPolicyEntry,
+    status: &'a str,
+    report_status: &'a str,
+    worker: &'a str,
+    dry_run: bool,
+    outcome: serde_json::Value,
+}
+
+struct AddonMigrationTaskInput<'a> {
+    id: &'a str,
+    title: &'a str,
+    dependencies: &'a [&'a str],
+    context_requirements: &'a [&'a str],
+    validation_rules: Vec<ValidationRule>,
+    expected_output: &'a str,
+    executor: ExecutorKind,
+    human_required: bool,
+}
 pub const ADDON_RUNTIME_CONTRACT_POLICY_SCHEMA_VERSION: &str =
     "forge.addon_runtime_contract_policy.v1";
 pub const ADDON_RUNTIME_CONTRACT_DISPATCH_SCHEMA_VERSION: &str =
@@ -2015,29 +2122,24 @@ pub fn enqueue_addon_runtime_contract_dispatch(
 pub fn enqueue_addon_planner_dispatch(
     store: &ForgeStore,
     catalog: &AddonCatalog,
-    addon_id: Option<&str>,
-    contract_id: &str,
-    goal: &str,
-    constraints: &[String],
-    workflow_id: Option<&str>,
-    task_id: Option<&str>,
-    context: serde_json::Value,
-    source: &str,
-    dry_run: bool,
+    input: AddonPlannerDispatchInput<'_>,
 ) -> Result<AddonRuntimeContractDispatchReport> {
     let policy = evaluate_addon_runtime_contract_policy(
         catalog,
-        addon_id,
-        Some(contract_id),
+        input.addon_id,
+        Some(input.contract_id),
         None,
         None,
         None,
     );
     if policy.contracts.is_empty() {
-        bail!("planner runtime contract not found: {contract_id}");
+        bail!("planner runtime contract not found: {}", input.contract_id);
     }
     if policy.contracts.len() > 1 {
-        bail!("planner runtime contract id is ambiguous across Addons: {contract_id}");
+        bail!(
+            "planner runtime contract id is ambiguous across Addons: {}",
+            input.contract_id
+        );
     }
     let policy_entry = policy.contracts.into_iter().next().unwrap();
     if !matches!(
@@ -2046,17 +2148,17 @@ pub fn enqueue_addon_planner_dispatch(
     ) {
         bail!(
             "runtime contract {} is not a planner strategy: {}",
-            contract_id,
+            input.contract_id,
             policy_entry.contract_type
         );
     }
 
-    let input = serde_json::json!({
+    let dispatch_payload = serde_json::json!({
         "schema_version": ADDON_PLANNER_DISPATCH_INPUT_SCHEMA_VERSION,
-        "goal": goal,
-        "constraints": constraints,
-        "workflow_id": workflow_id,
-        "task_id": task_id,
+        "goal": input.goal,
+        "constraints": input.constraints,
+        "workflow_id": input.workflow_id,
+        "task_id": input.task_id,
         "planner": {
             "addon_id": policy_entry.addon_id,
             "contract_id": policy_entry.contract_id,
@@ -2066,66 +2168,62 @@ pub fn enqueue_addon_planner_dispatch(
             "runtime": policy_entry.runtime,
             "entrypoint": policy_entry.entrypoint,
         },
-        "context": context,
+        "context": input.context,
         "requested_at": Utc::now().to_rfc3339(),
     });
     enqueue_addon_runtime_contract_dispatch(
         store,
         catalog,
-        addon_id,
-        contract_id,
-        input,
-        source,
-        dry_run,
+        input.addon_id,
+        input.contract_id,
+        dispatch_payload,
+        input.source,
+        input.dry_run,
     )
 }
 
 pub fn execute_addon_planning_strategy(
     store: &ForgeStore,
     catalog: &AddonCatalog,
-    addon_id: Option<&str>,
-    contract_id: &str,
-    goal: &str,
-    constraints: &[String],
-    workflow_id: Option<&str>,
-    task_id: Option<&str>,
-    context: serde_json::Value,
-    worker_id: &str,
-    lease_seconds: u64,
-    source: &str,
-    dry_run: bool,
+    input: AddonPlanningStrategyInput<'_>,
 ) -> Result<AddonPlanningStrategyExecutionReport> {
-    let core_workflow = create_workflow(parse_intent_with_catalog(goal, catalog));
+    let core_workflow = create_workflow(parse_intent_with_catalog(input.dispatch.goal, catalog));
     let core_tasks = core_workflow
         .tasks
         .iter()
         .map(addon_planner_task_shape_from_atomic_task)
         .collect::<Vec<_>>();
     let core_plan_sha256 = hex_sha256(&serde_json::to_vec(&core_tasks)?);
-    let dispatch_context =
-        addon_planner_dispatch_context(context, &core_workflow, &core_tasks, &core_plan_sha256)?;
+    let dispatch_context = addon_planner_dispatch_context(
+        input.dispatch.context.clone(),
+        &core_workflow,
+        &core_tasks,
+        &core_plan_sha256,
+    )?;
     let enqueue_report = enqueue_addon_planner_dispatch(
         store,
         catalog,
-        addon_id,
-        contract_id,
-        goal,
-        constraints,
-        workflow_id,
-        task_id,
-        dispatch_context,
-        source,
-        dry_run,
+        AddonPlannerDispatchInput {
+            addon_id: input.dispatch.addon_id,
+            contract_id: input.dispatch.contract_id,
+            goal: input.dispatch.goal,
+            constraints: input.dispatch.constraints,
+            workflow_id: input.dispatch.workflow_id,
+            task_id: input.dispatch.task_id,
+            context: dispatch_context,
+            source: input.dispatch.source,
+            dry_run: input.dispatch.dry_run,
+        },
     )?;
 
-    if dry_run || enqueue_report.blocked_count > 0 {
+    if input.dispatch.dry_run || enqueue_report.blocked_count > 0 {
         let validation = addon_planning_strategy_validation_not_executed(
-            if dry_run {
+            if input.dispatch.dry_run {
                 "dry_run"
             } else {
                 "dispatch_blocked"
             },
-            if dry_run {
+            if input.dispatch.dry_run {
                 "dry-run does not execute the planner worker"
             } else {
                 "planner dispatch is blocked by runtime contract policy"
@@ -2134,20 +2232,22 @@ pub fn execute_addon_planning_strategy(
         let equivalence =
             addon_planning_strategy_equivalence_not_ready(&core_tasks, &[], &core_plan_sha256)?;
         return Ok(addon_planning_strategy_execution_report(
-            if dry_run {
-                "planning_strategy_execution_dry_run"
-            } else {
-                "planning_strategy_dispatch_blocked"
+            AddonPlanningStrategyReportInput {
+                status: if input.dispatch.dry_run {
+                    "planning_strategy_execution_dry_run"
+                } else {
+                    "planning_strategy_dispatch_blocked"
+                },
+                goal: input.dispatch.goal,
+                contract_id: input.dispatch.contract_id,
+                worker_id: input.worker_id,
+                source: input.dispatch.source,
+                dry_run: input.dispatch.dry_run,
+                dispatch_report: enqueue_report,
+                strategy_result: None,
+                validation,
+                equivalence,
             },
-            goal,
-            contract_id,
-            worker_id,
-            source,
-            dry_run,
-            enqueue_report,
-            None,
-            validation,
-            equivalence,
         ));
     }
 
@@ -2160,8 +2260,8 @@ pub fn execute_addon_planning_strategy(
         store,
         catalog,
         &dispatch_id,
-        worker_id,
-        lease_seconds,
+        input.worker_id,
+        input.lease_seconds,
         false,
     )?;
     let strategy_result = addon_planning_strategy_result_from_dispatch(&execution_report);
@@ -2179,16 +2279,18 @@ pub fn execute_addon_planning_strategy(
     };
 
     Ok(addon_planning_strategy_execution_report(
-        status,
-        goal,
-        contract_id,
-        worker_id,
-        source,
-        false,
-        execution_report,
-        strategy_result,
-        validation,
-        equivalence,
+        AddonPlanningStrategyReportInput {
+            status,
+            goal: input.dispatch.goal,
+            contract_id: input.dispatch.contract_id,
+            worker_id: input.worker_id,
+            source: input.dispatch.source,
+            dry_run: false,
+            dispatch_report: execution_report,
+            strategy_result,
+            validation,
+            equivalence,
+        },
     ))
 }
 
@@ -2516,29 +2618,20 @@ fn compare_addon_planning_strategy_to_core(
 }
 
 fn addon_planning_strategy_execution_report(
-    status: &str,
-    goal: &str,
-    contract_id: &str,
-    worker_id: &str,
-    source: &str,
-    dry_run: bool,
-    dispatch_report: AddonRuntimeContractDispatchReport,
-    strategy_result: Option<serde_json::Value>,
-    validation: AddonPlanningStrategyResultValidation,
-    equivalence: AddonPlanningStrategyEquivalence,
+    input: AddonPlanningStrategyReportInput<'_>,
 ) -> AddonPlanningStrategyExecutionReport {
     AddonPlanningStrategyExecutionReport {
         schema_version: ADDON_PLANNING_STRATEGY_EXECUTION_SCHEMA_VERSION.to_string(),
-        status: status.to_string(),
-        goal: goal.to_string(),
-        contract_id: contract_id.to_string(),
-        worker_id: worker_id.to_string(),
-        source: source.to_string(),
-        dry_run,
-        dispatch_report,
-        strategy_result,
-        validation,
-        equivalence,
+        status: input.status.to_string(),
+        goal: input.goal.to_string(),
+        contract_id: input.contract_id.to_string(),
+        worker_id: input.worker_id.to_string(),
+        source: input.source.to_string(),
+        dry_run: input.dry_run,
+        dispatch_report: input.dispatch_report,
+        strategy_result: input.strategy_result,
+        validation: input.validation,
+        equivalence: input.equivalence,
     }
 }
 
@@ -2658,15 +2751,17 @@ pub fn run_addon_runtime_contract_dispatch(
         return update_runtime_dispatch_entry(
             store,
             entry,
-            prior_policy,
-            "blocked",
-            "runtime_contract_dispatch_blocked",
-            worker,
-            dry_run,
-            serde_json::json!({
-                "outcome": "policy_recheck_failed",
-                "reason": detail,
-            }),
+            RuntimeDispatchUpdateInput {
+                policy: prior_policy,
+                status: "blocked",
+                report_status: "runtime_contract_dispatch_blocked",
+                worker,
+                dry_run,
+                outcome: serde_json::json!({
+                    "outcome": "policy_recheck_failed",
+                    "reason": detail,
+                }),
+            },
         );
     }
 
@@ -2675,15 +2770,17 @@ pub fn run_addon_runtime_contract_dispatch(
         return update_runtime_dispatch_entry(
             store,
             entry,
-            policy_entry,
-            "blocked",
-            "runtime_contract_dispatch_blocked",
-            worker,
-            dry_run,
-            serde_json::json!({
-                "outcome": "policy_recheck_failed",
-                "reason": "runtime contract is no longer dispatchable",
-            }),
+            RuntimeDispatchUpdateInput {
+                policy: policy_entry,
+                status: "blocked",
+                report_status: "runtime_contract_dispatch_blocked",
+                worker,
+                dry_run,
+                outcome: serde_json::json!({
+                    "outcome": "policy_recheck_failed",
+                    "reason": "runtime contract is no longer dispatchable",
+                }),
+            },
         );
     }
 
@@ -2695,15 +2792,17 @@ pub fn run_addon_runtime_contract_dispatch(
         return update_runtime_dispatch_entry(
             store,
             entry,
-            policy_entry,
-            "blocked",
-            "runtime_contract_dispatch_blocked",
-            worker,
-            dry_run,
-            serde_json::json!({
-                "outcome": "contract_changed_after_enqueue",
-                "reason": "runtime contract shape changed after the dispatch was queued",
-            }),
+            RuntimeDispatchUpdateInput {
+                policy: policy_entry,
+                status: "blocked",
+                report_status: "runtime_contract_dispatch_blocked",
+                worker,
+                dry_run,
+                outcome: serde_json::json!({
+                    "outcome": "contract_changed_after_enqueue",
+                    "reason": "runtime contract shape changed after the dispatch was queued",
+                }),
+            },
         );
     }
 
@@ -2712,32 +2811,36 @@ pub fn run_addon_runtime_contract_dispatch(
             return update_runtime_dispatch_entry(
                 store,
                 entry,
-                policy_entry,
-                "completed",
-                "runtime_contract_dispatch_completed",
-                worker,
-                dry_run,
-                serde_json::json!({
-                    "outcome": "completed",
-                    "runtime": "forge_core_builtin",
-                    "output": output,
-                }),
+                RuntimeDispatchUpdateInput {
+                    policy: policy_entry,
+                    status: "completed",
+                    report_status: "runtime_contract_dispatch_completed",
+                    worker,
+                    dry_run,
+                    outcome: serde_json::json!({
+                        "outcome": "completed",
+                        "runtime": "forge_core_builtin",
+                        "output": output,
+                    }),
+                },
             );
         }
         let entrypoint = entry.entrypoint.clone();
         return update_runtime_dispatch_entry(
             store,
             entry,
-            policy_entry,
-            "blocked",
-            "runtime_contract_dispatch_blocked",
-            worker,
-            dry_run,
-            serde_json::json!({
-                "outcome": "unsupported_builtin_entrypoint",
-                "runtime": "forge_core_builtin",
-                "entrypoint": entrypoint,
-            }),
+            RuntimeDispatchUpdateInput {
+                policy: policy_entry,
+                status: "blocked",
+                report_status: "runtime_contract_dispatch_blocked",
+                worker,
+                dry_run,
+                outcome: serde_json::json!({
+                    "outcome": "unsupported_builtin_entrypoint",
+                    "runtime": "forge_core_builtin",
+                    "entrypoint": entrypoint,
+                }),
+            },
         );
     }
 
@@ -2752,19 +2855,21 @@ pub fn run_addon_runtime_contract_dispatch(
     update_runtime_dispatch_entry(
         store,
         entry,
-        policy_entry,
-        "needs_external_worker",
-        "runtime_contract_dispatch_needs_external_worker",
-        worker,
-        dry_run,
-        serde_json::json!({
-            "outcome": "needs_external_worker",
-            "runtime": runtime,
-            "entrypoint": entrypoint,
-            "eligible_worker_count": eligible_worker_count,
-            "eligible_workers": eligible_workers,
-            "reason": "Forge Core records the dispatch but does not execute external runtime code inline",
-        }),
+        RuntimeDispatchUpdateInput {
+            policy: policy_entry,
+            status: "needs_external_worker",
+            report_status: "runtime_contract_dispatch_needs_external_worker",
+            worker,
+            dry_run,
+            outcome: serde_json::json!({
+                "outcome": "needs_external_worker",
+                "runtime": runtime,
+                "entrypoint": entrypoint,
+                "eligible_worker_count": eligible_worker_count,
+                "eligible_workers": eligible_workers,
+                "reason": "Forge Core records the dispatch but does not execute external runtime code inline",
+            }),
+        },
     )
 }
 
@@ -2868,17 +2973,19 @@ pub fn execute_addon_runtime_contract_dispatch(
         return update_runtime_dispatch_entry(
             store,
             entry,
-            recheck.policy,
-            "blocked",
-            "runtime_contract_dispatch_blocked",
-            worker_id,
-            false,
-            recheck.outcome.unwrap_or_else(|| {
-                serde_json::json!({
-                    "outcome": "policy_recheck_failed",
-                    "reason": "runtime contract is no longer dispatchable",
-                })
-            }),
+            RuntimeDispatchUpdateInput {
+                policy: recheck.policy,
+                status: "blocked",
+                report_status: "runtime_contract_dispatch_blocked",
+                worker: worker_id,
+                dry_run: false,
+                outcome: recheck.outcome.unwrap_or_else(|| {
+                    serde_json::json!({
+                        "outcome": "policy_recheck_failed",
+                        "reason": "runtime contract is no longer dispatchable",
+                    })
+                }),
+            },
         );
     }
 
@@ -2888,29 +2995,33 @@ pub fn execute_addon_runtime_contract_dispatch(
             return update_runtime_dispatch_entry(
                 store,
                 entry,
-                recheck.policy,
-                "blocked",
-                "runtime_contract_dispatch_worker_rejected",
-                worker_id,
-                false,
-                serde_json::json!({
-                    "outcome": "runtime_worker_rejected",
-                    "worker_id": worker_id,
-                    "reason": error.to_string(),
-                }),
+                RuntimeDispatchUpdateInput {
+                    policy: recheck.policy,
+                    status: "blocked",
+                    report_status: "runtime_contract_dispatch_worker_rejected",
+                    worker: worker_id,
+                    dry_run: false,
+                    outcome: serde_json::json!({
+                        "outcome": "runtime_worker_rejected",
+                        "worker_id": worker_id,
+                        "reason": error.to_string(),
+                    }),
+                },
             );
         }
     };
     complete_addon_runtime_contract_dispatch(
         store,
         catalog,
-        dispatch_id,
-        worker_id,
-        &execution.status,
-        execution.result,
-        execution.signature.as_deref(),
-        execution.attestation,
-        false,
+        AddonRuntimeContractCompletionInput {
+            dispatch_id,
+            worker_id,
+            completion_status: &execution.status,
+            result: execution.result,
+            signature: execution.signature.as_deref(),
+            attestation: execution.attestation,
+            dry_run: false,
+        },
     )
 }
 
@@ -2954,17 +3065,19 @@ pub fn claim_addon_runtime_contract_dispatch(
         return update_runtime_dispatch_entry(
             store,
             entry,
-            recheck.policy,
-            "blocked",
-            "runtime_contract_dispatch_blocked",
-            worker_id,
-            dry_run,
-            recheck.outcome.unwrap_or_else(|| {
-                serde_json::json!({
-                    "outcome": "policy_recheck_failed",
-                    "reason": "runtime contract is no longer dispatchable",
-                })
-            }),
+            RuntimeDispatchUpdateInput {
+                policy: recheck.policy,
+                status: "blocked",
+                report_status: "runtime_contract_dispatch_blocked",
+                worker: worker_id,
+                dry_run,
+                outcome: recheck.outcome.unwrap_or_else(|| {
+                    serde_json::json!({
+                        "outcome": "policy_recheck_failed",
+                        "reason": "runtime contract is no longer dispatchable",
+                    })
+                }),
+            },
         );
     }
     if worker.runtime != entry.runtime {
@@ -3002,78 +3115,74 @@ pub fn claim_addon_runtime_contract_dispatch(
     update_runtime_dispatch_entry(
         store,
         entry,
-        recheck.policy,
-        "claimed_external_worker",
-        "runtime_contract_dispatch_claimed",
-        worker_id,
-        dry_run,
-        serde_json::json!({
-            "outcome": "claimed_external_worker",
-            "claim": {
-                "worker_id": worker.id.clone(),
-                "runtime": worker.runtime.clone(),
-                "trust_level": worker.trust_level.clone(),
-                "lease_seconds": lease_seconds,
-                "worker": worker,
-            },
-        }),
+        RuntimeDispatchUpdateInput {
+            policy: recheck.policy,
+            status: "claimed_external_worker",
+            report_status: "runtime_contract_dispatch_claimed",
+            worker: worker_id,
+            dry_run,
+            outcome: serde_json::json!({
+                "outcome": "claimed_external_worker",
+                "claim": {
+                    "worker_id": worker.id.clone(),
+                    "runtime": worker.runtime.clone(),
+                    "trust_level": worker.trust_level.clone(),
+                    "lease_seconds": lease_seconds,
+                    "worker": worker,
+                },
+            }),
+        },
     )
 }
 
 pub fn complete_addon_runtime_contract_dispatch(
     store: &ForgeStore,
     catalog: &AddonCatalog,
-    dispatch_id: &str,
-    worker_id: &str,
-    completion_status: &str,
-    result: serde_json::Value,
-    signature: Option<&str>,
-    attestation: serde_json::Value,
-    dry_run: bool,
+    input: AddonRuntimeContractCompletionInput<'_>,
 ) -> Result<AddonRuntimeContractDispatchReport> {
-    let final_status = match completion_status {
+    let final_status = match input.completion_status {
         "completed" | "success" => "completed",
         "failed" | "failure" | "error" => "failed",
         _ => bail!("completion status must be completed or failed"),
     };
     let record = store
-        .load_runtime_contract_dispatch(dispatch_id)?
-        .with_context(|| format!("runtime contract dispatch not found: {dispatch_id}"))?;
+        .load_runtime_contract_dispatch(input.dispatch_id)?
+        .with_context(|| format!("runtime contract dispatch not found: {}", input.dispatch_id))?;
     let entry = stored_runtime_dispatch_entry(record)?;
     if entry.status != "claimed_external_worker" {
         return Ok(dispatch_report(
             "runtime_contract_dispatch_not_claimed",
-            dry_run,
+            input.dry_run,
             vec![entry],
         ));
     }
-    let worker = match store.load_runtime_worker(worker_id)? {
+    let worker = match store.load_runtime_worker(input.worker_id)? {
         Some(worker) => runtime_worker_entry(worker),
         None => {
             return Ok(runtime_dispatch_preview_report(
                 entry,
                 None,
                 "runtime_contract_dispatch_completion_rejected",
-                worker_id,
-                dry_run,
+                input.worker_id,
+                input.dry_run,
                 serde_json::json!({
                     "outcome": "worker_not_registered",
-                    "worker_id": worker_id,
+                    "worker_id": input.worker_id,
                 }),
             ));
         }
     };
     let claimed_worker_id = claimed_external_worker_id(&entry);
-    if claimed_worker_id.as_deref() != Some(worker_id) {
+    if claimed_worker_id.as_deref() != Some(input.worker_id) {
         return Ok(runtime_dispatch_preview_report(
             entry,
             None,
             "runtime_contract_dispatch_completion_rejected",
-            worker_id,
-            dry_run,
+            input.worker_id,
+            input.dry_run,
             serde_json::json!({
                 "outcome": "worker_does_not_own_dispatch",
-                "worker_id": worker_id,
+                "worker_id": input.worker_id,
                 "claimed_worker_id": claimed_worker_id,
             }),
         ));
@@ -3085,11 +3194,11 @@ pub fn complete_addon_runtime_contract_dispatch(
                 entry,
                 None,
                 "runtime_contract_dispatch_completion_rejected",
-                worker_id,
-                dry_run,
+                input.worker_id,
+                input.dry_run,
                 serde_json::json!({
                     "outcome": "missing_claim_worker_snapshot",
-                    "worker_id": worker_id,
+                    "worker_id": input.worker_id,
                 }),
             ));
         }
@@ -3099,17 +3208,19 @@ pub fn complete_addon_runtime_contract_dispatch(
         return update_runtime_dispatch_entry(
             store,
             entry,
-            recheck.policy,
-            "blocked",
-            "runtime_contract_dispatch_blocked",
-            worker_id,
-            dry_run,
-            recheck.outcome.unwrap_or_else(|| {
-                serde_json::json!({
-                    "outcome": "policy_recheck_failed",
-                    "reason": "runtime contract is no longer dispatchable",
-                })
-            }),
+            RuntimeDispatchUpdateInput {
+                policy: recheck.policy,
+                status: "blocked",
+                report_status: "runtime_contract_dispatch_blocked",
+                worker: input.worker_id,
+                dry_run: input.dry_run,
+                outcome: recheck.outcome.unwrap_or_else(|| {
+                    serde_json::json!({
+                        "outcome": "policy_recheck_failed",
+                        "reason": "runtime contract is no longer dispatchable",
+                    })
+                }),
+            },
         );
     }
     if worker.runtime != entry.runtime {
@@ -3119,8 +3230,8 @@ pub fn complete_addon_runtime_contract_dispatch(
             entry,
             Some(recheck.policy),
             "runtime_contract_dispatch_completion_rejected",
-            worker_id,
-            dry_run,
+            input.worker_id,
+            input.dry_run,
             serde_json::json!({
                 "outcome": "worker_runtime_mismatch",
                 "worker_id": worker.id,
@@ -3136,11 +3247,11 @@ pub fn complete_addon_runtime_contract_dispatch(
             entry,
             Some(recheck.policy),
             "runtime_contract_dispatch_completion_rejected",
-            worker_id,
-            dry_run,
+            input.worker_id,
+            input.dry_run,
             serde_json::json!({
                 "outcome": "claim_runtime_mismatch",
-                "worker_id": worker_id,
+                "worker_id": input.worker_id,
                 "claimed_worker_runtime": claimed_runtime,
                 "dispatch_runtime": dispatch_runtime,
             }),
@@ -3151,23 +3262,23 @@ pub fn complete_addon_runtime_contract_dispatch(
             entry,
             Some(recheck.policy),
             "runtime_contract_dispatch_completion_rejected",
-            worker_id,
-            dry_run,
+            input.worker_id,
+            input.dry_run,
             serde_json::json!({
                 "outcome": "worker_disabled",
                 "worker_id": worker.id,
             }),
         ));
     }
-    let signature_value = signature.unwrap_or("").trim().to_string();
+    let signature_value = input.signature.unwrap_or("").trim().to_string();
     let signature_required = matches!(claimed_worker.trust_level.as_str(), "signed" | "trusted");
     if signature_required && signature_value.is_empty() {
         return Ok(runtime_dispatch_preview_report(
             entry,
             Some(recheck.policy),
             "runtime_contract_dispatch_completion_rejected",
-            worker_id,
-            dry_run,
+            input.worker_id,
+            input.dry_run,
             serde_json::json!({
                 "outcome": "missing_worker_signature",
                 "worker_id": claimed_worker.id,
@@ -3176,11 +3287,11 @@ pub fn complete_addon_runtime_contract_dispatch(
             }),
         ));
     }
-    let result_sha256 = hex_sha256(&serde_json::to_vec(&result)?);
-    let attestation_sha256 = hex_sha256(&serde_json::to_vec(&attestation)?);
+    let result_sha256 = hex_sha256(&serde_json::to_vec(&input.result)?);
+    let attestation_sha256 = hex_sha256(&serde_json::to_vec(&input.attestation)?);
     let signature_verification = verify_external_completion_signature(
         &entry.id,
-        worker_id,
+        input.worker_id,
         final_status,
         &result_sha256,
         &attestation_sha256,
@@ -3196,8 +3307,8 @@ pub fn complete_addon_runtime_contract_dispatch(
             entry,
             Some(recheck.policy),
             "runtime_contract_dispatch_completion_rejected",
-            worker_id,
-            dry_run,
+            input.worker_id,
+            input.dry_run,
             serde_json::json!({
                 "outcome": "worker_signature_verification_failed",
                 "worker_id": claimed_worker.id,
@@ -3216,27 +3327,29 @@ pub fn complete_addon_runtime_contract_dispatch(
     update_runtime_dispatch_entry(
         store,
         entry,
-        recheck.policy,
-        final_status,
-        report_status,
-        worker_id,
-        dry_run,
-        serde_json::json!({
-            "outcome": format!("external_worker_{final_status}"),
-            "worker_id": claimed_worker.id.clone(),
-            "worker_runtime": claimed_worker.runtime.clone(),
-            "worker_trust_level": claimed_worker.trust_level.clone(),
-            "current_worker_status": worker.status.clone(),
-            "signature_required": signature_required,
-            "signature_status": signature_status,
-            "signature_verification_source": "claim_snapshot",
-            "signature_verification": signature_verification,
-            "signature": signature_value,
-            "result_sha256": result_sha256,
-            "result": result,
-            "attestation_sha256": attestation_sha256,
-            "attestation": attestation,
-        }),
+        RuntimeDispatchUpdateInput {
+            policy: recheck.policy,
+            status: final_status,
+            report_status,
+            worker: input.worker_id,
+            dry_run: input.dry_run,
+            outcome: serde_json::json!({
+                "outcome": format!("external_worker_{final_status}"),
+                "worker_id": claimed_worker.id.clone(),
+                "worker_runtime": claimed_worker.runtime.clone(),
+                "worker_trust_level": claimed_worker.trust_level.clone(),
+                "current_worker_status": worker.status.clone(),
+                "signature_required": signature_required,
+                "signature_status": signature_status,
+                "signature_verification_source": "claim_snapshot",
+                "signature_verification": signature_verification,
+                "signature": signature_value,
+                "result_sha256": result_sha256,
+                "result": input.result,
+                "attestation_sha256": attestation_sha256,
+                "attestation": input.attestation,
+            }),
+        },
     )
 }
 
@@ -3316,18 +3429,18 @@ pub fn authorize_addon_permission(
     approved_by: &str,
     source: &str,
 ) -> Result<AddonPermissionAuthorizationChangeReport> {
-    store.save_addon_permission_authorization(
+    store.save_addon_permission_authorization(AddonPermissionAuthorizationWrite {
         addon_id,
         permission_id,
-        "approved",
+        status: "approved",
         risk,
         approved_by,
         source,
-        &serde_json::json!({
+        data: &serde_json::json!({
             "source": source,
             "approval_contract": "human-approved addon permission",
         }),
-    )?;
+    })?;
     sync_installed_addon_capability_index(store)?;
     addon_permission_authorization_change_report(
         store,
@@ -3345,18 +3458,18 @@ pub fn revoke_addon_permission(
     approved_by: &str,
     source: &str,
 ) -> Result<AddonPermissionAuthorizationChangeReport> {
-    store.save_addon_permission_authorization(
+    store.save_addon_permission_authorization(AddonPermissionAuthorizationWrite {
         addon_id,
         permission_id,
-        "revoked",
-        "unknown",
+        status: "revoked",
+        risk: "unknown",
         approved_by,
         source,
-        &serde_json::json!({
+        data: &serde_json::json!({
             "source": source,
             "revocation_contract": "human-revoked addon permission",
         }),
-    )?;
+    })?;
     sync_installed_addon_capability_index(store)?;
     addon_permission_authorization_change_report(
         store,
@@ -3395,30 +3508,29 @@ pub fn install_addon(
 
 pub fn package_addon(
     store: &ForgeStore,
-    manifest_path: &Path,
-    addon_dirs: &[PathBuf],
-    repository: Option<&str>,
-    channel: &str,
-    signature: Option<&str>,
-    public_key: Option<&str>,
-    package_path: Option<&Path>,
+    input: AddonPackageInput<'_>,
 ) -> Result<AddonPackageReport> {
-    let mut manifest = load_addon_manifest_from_path(manifest_path)?;
-    manifest.source = format!("file:{}", manifest_path.display());
-    let manifest_bytes = fs::read(manifest_path)
-        .with_context(|| format!("failed to read addon manifest {}", manifest_path.display()))?;
+    let mut manifest = load_addon_manifest_from_path(input.manifest_path)?;
+    manifest.source = format!("file:{}", input.manifest_path.display());
+    let manifest_bytes = fs::read(input.manifest_path).with_context(|| {
+        format!(
+            "failed to read addon manifest {}",
+            input.manifest_path.display()
+        )
+    })?;
     let manifest_sha256 = hex_sha256(&manifest_bytes);
     let manifest_canonical_sha256 = hex_sha256(&serde_json::to_vec(&manifest)?);
-    let validation = validate_candidate_catalog(store, addon_dirs, Some(manifest.clone()))?;
-    let repository = repository
+    let validation = validate_candidate_catalog(store, input.addon_dirs, Some(manifest.clone()))?;
+    let repository = input
+        .repository
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .or_else(|| manifest.metadata.get("repository").map(String::as_str))
         .unwrap_or("local");
-    let channel = if channel.trim().is_empty() {
+    let channel = if input.channel.trim().is_empty() {
         "stable"
     } else {
-        channel.trim()
+        input.channel.trim()
     };
     let package_id = format!("{}@{}", manifest.id, manifest.version);
     let payload_bytes = addon_package_signature_payload_bytes(
@@ -3431,8 +3543,8 @@ pub fn package_addon(
         channel,
     )?;
     let payload_sha256 = hex_sha256(&payload_bytes);
-    let signature_value = signature.unwrap_or("").trim();
-    let public_key_value = public_key.unwrap_or("").trim();
+    let signature_value = input.signature.unwrap_or("").trim();
+    let public_key_value = input.public_key.unwrap_or("").trim();
     let signature_status = if signature_value.is_empty() {
         "unsigned"
     } else if public_key_value.is_empty() {
@@ -3447,7 +3559,7 @@ pub fn package_addon(
         addon_id: manifest.id.clone(),
         addon_name: manifest.name.clone(),
         addon_version: manifest.version.clone(),
-        manifest_path: manifest_path.display().to_string(),
+        manifest_path: input.manifest_path.display().to_string(),
         manifest_sha256,
         manifest_canonical_sha256,
         manifest_bytes: manifest_bytes.len() as u64,
@@ -3458,15 +3570,15 @@ pub fn package_addon(
             update_strategy: "manual_install_upgrade_downgrade".to_string(),
             install_command: format!(
                 "forge addons install --manifest {} --output json",
-                manifest_path.display()
+                input.manifest_path.display()
             ),
             upgrade_command: format!(
                 "forge addons upgrade --manifest {} --output json",
-                manifest_path.display()
+                input.manifest_path.display()
             ),
             downgrade_command: format!(
                 "forge addons downgrade --manifest {} --output json",
-                manifest_path.display()
+                input.manifest_path.display()
             ),
         },
         signature: AddonPackageSignature {
@@ -3485,7 +3597,7 @@ pub fn package_addon(
         written_package_path: None,
         written_package_sha256: None,
     };
-    if let Some(path) = package_path {
+    if let Some(path) = input.package_path {
         let bytes = serde_json::to_vec_pretty(&report)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -3502,35 +3614,29 @@ pub fn package_addon(
 
 pub fn trust_addon_package_key(
     store: &ForgeStore,
-    repository: &str,
-    channel: &str,
-    public_key: &str,
-    trust_level: &str,
-    approved_by: &str,
-    source: &str,
-    data: serde_json::Value,
+    input: AddonTrustKeyInput<'_>,
 ) -> Result<AddonTrustKeyChangeReport> {
-    let repository = repository.trim();
+    let repository = input.repository.trim();
     if repository.is_empty() {
         bail!("repository is required for addon trust keys");
     }
-    let channel = normalize_marketplace_channel(channel);
-    let public_key = normalize_hex(public_key);
+    let channel = normalize_marketplace_channel(input.channel);
+    let public_key = normalize_hex(input.public_key);
     decode_hex_exact(&public_key, 32).with_context(|| "invalid Ed25519 public key hex")?;
-    let trust_level = if trust_level.trim().is_empty() {
+    let trust_level = if input.trust_level.trim().is_empty() {
         "trusted"
     } else {
-        trust_level.trim()
+        input.trust_level.trim()
     };
-    let approved_by = if approved_by.trim().is_empty() {
+    let approved_by = if input.approved_by.trim().is_empty() {
         "human"
     } else {
-        approved_by.trim()
+        input.approved_by.trim()
     };
-    let source = if source.trim().is_empty() {
+    let source = if input.source.trim().is_empty() {
         "cli"
     } else {
-        source.trim()
+        input.source.trim()
     };
     let key_id = format!(
         "addon-trust:{}",
@@ -3545,7 +3651,7 @@ pub fn trust_addon_package_key(
         trust_level,
         approved_by,
         source,
-        data: &data,
+        data: &input.data,
     })?;
     let key = store
         .list_addon_trust_keys(
@@ -4335,15 +4441,11 @@ pub fn resolve_goal_capabilities_with_registry_sync(
     store: &ForgeStore,
     goal: &str,
     catalog: &AddonCatalog,
-    registry_sources: &[String],
-    cache_dir: Option<&Path>,
-    allow_remote: bool,
-    max_bytes: u64,
-    max_packages: usize,
-    lock_path: Option<&Path>,
+    input: CapabilityRegistrySyncInput<'_>,
 ) -> Result<CapabilityResolutionReport> {
     let mut registry_syncs = Vec::new();
-    for source in registry_sources
+    for source in input
+        .registry_sources
         .iter()
         .map(|source| source.trim())
         .filter(|source| !source.is_empty())
@@ -4351,11 +4453,11 @@ pub fn resolve_goal_capabilities_with_registry_sync(
         registry_syncs.push(sync_addon_package_registry(
             store,
             source,
-            cache_dir,
-            allow_remote,
-            max_bytes,
-            max_packages,
-            lock_path,
+            input.cache_dir,
+            input.allow_remote,
+            input.max_bytes,
+            input.max_packages,
+            input.lock_path,
         )?);
     }
     let mut report = resolve_goal_capabilities_with_store(store, goal, catalog)?;
@@ -5935,11 +6037,13 @@ fn execute_external_api_worker(
                     worker,
                     entry,
                     config,
-                    started_at,
-                    None,
-                    None,
-                    "request_failed",
-                    None,
+                    ExternalApiAttestationInput {
+                        started_at,
+                        status_code: None,
+                        response_bytes: None,
+                        outcome: "request_failed",
+                        response_sha256: None,
+                    },
                 ),
             });
         }
@@ -5960,11 +6064,13 @@ fn execute_external_api_worker(
                 worker,
                 entry,
                 config,
-                started_at,
-                Some(response.status_code),
-                Some(response.body.len()),
-                "http_error",
-                Some(&response_sha256),
+                ExternalApiAttestationInput {
+                    started_at,
+                    status_code: Some(response.status_code),
+                    response_bytes: Some(response.body.len()),
+                    outcome: "http_error",
+                    response_sha256: Some(&response_sha256),
+                },
             ),
         });
     }
@@ -6004,15 +6110,17 @@ fn execute_external_api_worker(
                 worker,
                 entry,
                 config,
-                started_at,
-                Some(response.status_code),
-                Some(response.body.len()),
-                if status == "completed" {
-                    "completed"
-                } else {
-                    "failed"
+                ExternalApiAttestationInput {
+                    started_at,
+                    status_code: Some(response.status_code),
+                    response_bytes: Some(response.body.len()),
+                    outcome: if status == "completed" {
+                        "completed"
+                    } else {
+                        "failed"
+                    },
+                    response_sha256: Some(&response_sha256),
                 },
-                Some(&response_sha256),
             )
         });
     Ok(RuntimeWorkerExecution {
@@ -6204,15 +6312,11 @@ fn external_api_attestation(
     worker: &AddonRuntimeWorkerEntry,
     entry: &AddonRuntimeContractDispatchEntry,
     config: &ExternalApiWorkerConfig,
-    started_at: chrono::DateTime<Utc>,
-    status_code: Option<u16>,
-    response_bytes: Option<usize>,
-    outcome: &str,
-    response_sha256: Option<&str>,
+    input: ExternalApiAttestationInput<'_>,
 ) -> serde_json::Value {
     serde_json::json!({
         "schema_version": "forge.addon_runtime_worker_attestation.v1",
-        "outcome": outcome,
+        "outcome": input.outcome,
         "worker_id": worker.id,
         "runtime": worker.runtime,
         "trust_level": worker.trust_level,
@@ -6229,10 +6333,10 @@ fn external_api_attestation(
         "secret_env": config.auth.secret_env.as_deref(),
         "credential_vault": config.auth.credential_vault.as_ref(),
         "timeout_seconds": config.timeout_seconds,
-        "status_code": status_code,
-        "response_bytes": response_bytes,
-        "response_sha256": response_sha256,
-        "started_at": started_at.to_rfc3339(),
+        "status_code": input.status_code,
+        "response_bytes": input.response_bytes,
+        "response_sha256": input.response_sha256,
+        "started_at": input.started_at.to_rfc3339(),
         "finished_at": Utc::now().to_rfc3339(),
     })
 }
@@ -6582,36 +6686,35 @@ fn execute_builtin_runtime_contract(
 fn update_runtime_dispatch_entry(
     store: &ForgeStore,
     mut entry: AddonRuntimeContractDispatchEntry,
-    policy: AddonRuntimeContractPolicyEntry,
-    status: &str,
-    report_status: &str,
-    worker: &str,
-    dry_run: bool,
-    outcome: serde_json::Value,
+    input: RuntimeDispatchUpdateInput<'_>,
 ) -> Result<AddonRuntimeContractDispatchReport> {
-    let reported_status = if dry_run { "dry_run" } else { status };
+    let reported_status = if input.dry_run {
+        "dry_run"
+    } else {
+        input.status
+    };
     let data = runtime_processing_data(
         &entry.data,
         serde_json::json!({
-            "worker": worker,
-            "dry_run": dry_run,
+            "worker": input.worker,
+            "dry_run": input.dry_run,
             "previous_status": entry.status.clone(),
             "status": reported_status,
-            "would_update_status": status,
-            "policy_status": policy.status.clone(),
-            "dispatch_allowed": policy.dispatch_allowed,
-            "outcome": outcome,
+            "would_update_status": input.status,
+            "policy_status": input.policy.status.clone(),
+            "dispatch_allowed": input.policy.dispatch_allowed,
+            "outcome": input.outcome,
         }),
     );
     entry.status = reported_status.to_string();
-    entry.policy = policy;
+    entry.policy = input.policy;
     entry.data = data;
 
-    if !dry_run {
+    if !input.dry_run {
         let policy_value = serde_json::to_value(&entry.policy)?;
         store.update_runtime_contract_dispatch_state(
             &entry.id,
-            status,
+            input.status,
             &policy_value,
             &entry.data,
         )?;
@@ -6622,12 +6725,12 @@ fn update_runtime_dispatch_entry(
     }
 
     Ok(dispatch_report(
-        if dry_run {
+        if input.dry_run {
             "runtime_contract_dispatch_dry_run"
         } else {
-            report_status
+            input.report_status
         },
-        dry_run,
+        input.dry_run,
         vec![entry],
     ))
 }
@@ -7607,14 +7710,7 @@ fn capability_suggestion_action(
     addon: &AddonManifest,
     capability: &CapabilityDeclaration,
     missing: &MissingCapability,
-) -> (
-    String,
-    String,
-    String,
-    Vec<Vec<String>>,
-    Vec<String>,
-    Vec<String>,
-) {
+) -> CapabilitySuggestionAction {
     let permission_ids = addon
         .permissions
         .iter()
@@ -8205,96 +8301,96 @@ fn build_addon_migration_workflow(
     workflow.runtime.can_become_persistent = false;
     workflow.runtime.scale_to_zero_policy = "scale_to_zero_after_migration_audit".to_string();
     workflow.tasks = vec![
-        addon_migration_task(
-            "task-001",
-            "Snapshot installed Addon state",
-            &[],
-            &[
+        addon_migration_task(AddonMigrationTaskInput {
+            id: "task-001",
+            title: "Snapshot installed Addon state",
+            dependencies: &[],
+            context_requirements: &[
                 "installed Addon manifest",
                 "capability index",
                 "permission authorizations",
                 "marketplace package policy",
             ],
-            vec![migration_validation_rule(
+            validation_rules: vec![migration_validation_rule(
                 "addon_migration_backup",
                 "previous manifest, source and capability index snapshot are recorded before migration",
             )],
-            "pre-migration backup snapshot",
-            ExecutorKind::Command,
-            true,
-        ),
-        addon_migration_task(
-            "task-002",
-            "Apply declared Addon migration plan",
-            &["task-001"],
-            &[
+            expected_output: "pre-migration backup snapshot",
+            executor: ExecutorKind::Command,
+            human_required: true,
+        }),
+        addon_migration_task(AddonMigrationTaskInput {
+            id: "task-002",
+            title: "Apply declared Addon migration plan",
+            dependencies: &["task-001"],
+            context_requirements: &[
                 "compatibility.migrations entry",
                 "data migration plan",
                 "tenant policy",
                 "human approval evidence",
             ],
-            vec![migration_validation_rule(
+            validation_rules: vec![migration_validation_rule(
                 "addon_migration_apply",
                 &format!(
                     "strategy `{}` and data migration `{}` are applied with execution evidence",
                     migration.strategy, migration.data_migration
                 ),
             )],
-            "migration execution trace",
-            ExecutorKind::Mixed,
-            true,
-        ),
-        addon_migration_task(
-            "task-003",
-            "Validate migrated Addon state",
-            &["task-002"],
-            &[
+            expected_output: "migration execution trace",
+            executor: ExecutorKind::Mixed,
+            human_required: true,
+        }),
+        addon_migration_task(AddonMigrationTaskInput {
+            id: "task-003",
+            title: "Validate migrated Addon state",
+            dependencies: &["task-002"],
+            context_requirements: &[
                 "candidate Addon manifest",
                 "catalog validation",
                 "capability index rebuild evidence",
             ],
-            vec![migration_validation_rule(
+            validation_rules: vec![migration_validation_rule(
                 "addon_migration_validation",
                 "candidate catalog validates and materialized capabilities match the target version",
             )],
-            "post-migration validation evidence",
-            ExecutorKind::Command,
-            false,
-        ),
-        addon_migration_task(
-            "task-004",
-            "Prepare Addon rollback path",
-            &["task-001"],
-            &[
+            expected_output: "post-migration validation evidence",
+            executor: ExecutorKind::Command,
+            human_required: false,
+        }),
+        addon_migration_task(AddonMigrationTaskInput {
+            id: "task-004",
+            title: "Prepare Addon rollback path",
+            dependencies: &["task-001"],
+            context_requirements: &[
                 "rollback instructions",
                 "backup snapshot",
                 "previous Addon manifest",
             ],
-            vec![migration_validation_rule(
+            validation_rules: vec![migration_validation_rule(
                 "addon_migration_rollback_ready",
                 &format!("rollback path `{}` is executable from the backup snapshot", migration.rollback),
             )],
-            "rollback readiness evidence",
-            ExecutorKind::Command,
-            true,
-        ),
-        addon_migration_task(
-            "task-005",
-            "Package Addon migration audit",
-            &["task-003", "task-004"],
-            &[
+            expected_output: "rollback readiness evidence",
+            executor: ExecutorKind::Command,
+            human_required: true,
+        }),
+        addon_migration_task(AddonMigrationTaskInput {
+            id: "task-005",
+            title: "Package Addon migration audit",
+            dependencies: &["task-003", "task-004"],
+            context_requirements: &[
                 "migration execution trace",
                 "validation evidence",
                 "rollback readiness evidence",
             ],
-            vec![migration_validation_rule(
+            validation_rules: vec![migration_validation_rule(
                 "addon_migration_audit_package",
                 "migration audit package is ready for operator review",
             )],
-            "auditable Addon migration package",
-            ExecutorKind::Notification,
-            false,
-        ),
+            expected_output: "auditable Addon migration package",
+            executor: ExecutorKind::Notification,
+            human_required: false,
+        }),
     ];
     for task in &mut workflow.tasks {
         task.context_requirements
@@ -8309,26 +8405,17 @@ fn build_addon_migration_workflow(
     workflow
 }
 
-fn addon_migration_task(
-    id: &str,
-    title: &str,
-    dependencies: &[&str],
-    context_requirements: &[&str],
-    validation_rules: Vec<ValidationRule>,
-    expected_output: &str,
-    executor: ExecutorKind,
-    human_required: bool,
-) -> crate::graph::AtomicTask {
+fn addon_migration_task(input: AddonMigrationTaskInput<'_>) -> crate::graph::AtomicTask {
     let mut task = workflow_task(
-        id,
-        title,
-        dependencies,
-        context_requirements,
-        validation_rules,
-        expected_output,
-        (executor, 0.0),
+        input.id,
+        input.title,
+        input.dependencies,
+        input.context_requirements,
+        input.validation_rules,
+        input.expected_output,
+        (input.executor, 0.0),
     );
-    task.human_required = human_required;
+    task.human_required = input.human_required;
     task
 }
 

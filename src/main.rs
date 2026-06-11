@@ -16,7 +16,9 @@ use forge_core::addon::{
     register_addon_runtime_worker, resolve_goal_capabilities_with_registry_sync,
     resolve_goal_capabilities_with_store, revoke_addon_permission,
     run_addon_runtime_contract_dispatch, sync_addon_package_registry, trust_addon_package_key,
-    uninstall_addon, upgrade_addon, validate_addon_catalog,
+    uninstall_addon, upgrade_addon, validate_addon_catalog, AddonPackageInput,
+    AddonPlannerDispatchInput, AddonPlanningStrategyInput, AddonRuntimeContractCompletionInput,
+    AddonTrustKeyInput, CapabilityRegistrySyncInput,
 };
 use forge_core::artifact::list_workflow_artifacts;
 use forge_core::aws_ops::{
@@ -51,6 +53,7 @@ use forge_core::event::{
     run_event_runtime_reconcile, run_event_service_supervisor, run_event_webhook_ingress_server,
     run_event_webhook_ingress_service, run_event_worker_service, run_inbound_event_worker_loop,
     scan_inbound_event_inbox, EventEgressEmitInput, InboundEventIngestInput,
+    InboundEventWorkerLoopOptions,
 };
 use forge_core::execution::run_simulated;
 use forge_core::executor::{
@@ -114,7 +117,7 @@ use forge_core::multimodal::{
 };
 use forge_core::ops::{
     build_ops_snapshot_with_addon_dirs, record_addon_renderer_client_event,
-    serve_ops_console_with_addon_dirs,
+    serve_ops_console_with_addon_dirs, OpsAddonRendererClientEventInput,
 };
 use forge_core::patch::{
     build_patch_apply, build_patch_diff, build_patch_plan, build_patch_restore, build_patch_revert,
@@ -3869,12 +3872,14 @@ fn run() -> Result<i32> {
                 let report = run_inbound_event_worker_loop(
                     &store,
                     &project_root,
-                    status.as_deref(),
-                    limit,
-                    max_cycles,
-                    interval_seconds,
-                    idle_exit,
-                    stop_file.as_deref(),
+                    InboundEventWorkerLoopOptions {
+                        status: status.as_deref(),
+                        limit,
+                        max_cycles,
+                        interval_seconds,
+                        idle_exit,
+                        stop_file: stop_file.as_deref(),
+                    },
                 )?;
                 print_response(output, &report)?;
                 Ok(if report.failed_count > 0 { 1 } else { 0 })
@@ -4771,15 +4776,17 @@ fn run() -> Result<i32> {
                 let report = enqueue_addon_planner_dispatch(
                     &store,
                     &catalog,
-                    addon.as_deref(),
-                    &contract,
-                    &goal,
-                    &constraints,
-                    workflow_id.as_deref(),
-                    task_id.as_deref(),
-                    context_value,
-                    &source,
-                    dry_run,
+                    AddonPlannerDispatchInput {
+                        addon_id: addon.as_deref(),
+                        contract_id: &contract,
+                        goal: &goal,
+                        constraints: &constraints,
+                        workflow_id: workflow_id.as_deref(),
+                        task_id: task_id.as_deref(),
+                        context: context_value,
+                        source: &source,
+                        dry_run,
+                    },
                 )?;
                 let should_fail = report.blocked_count > 0;
                 print_response(output, &report)?;
@@ -4807,17 +4814,21 @@ fn run() -> Result<i32> {
                 let report = execute_addon_planning_strategy(
                     &store,
                     &catalog,
-                    addon.as_deref(),
-                    &contract,
-                    &goal,
-                    &constraints,
-                    workflow_id.as_deref(),
-                    task_id.as_deref(),
-                    context_value,
-                    &worker,
-                    lease_seconds,
-                    &source,
-                    dry_run,
+                    AddonPlanningStrategyInput {
+                        dispatch: AddonPlannerDispatchInput {
+                            addon_id: addon.as_deref(),
+                            contract_id: &contract,
+                            goal: &goal,
+                            constraints: &constraints,
+                            workflow_id: workflow_id.as_deref(),
+                            task_id: task_id.as_deref(),
+                            context: context_value,
+                            source: &source,
+                            dry_run,
+                        },
+                        worker_id: &worker,
+                        lease_seconds,
+                    },
                 )?;
                 let should_fail = matches!(
                     report.status.as_str(),
@@ -4937,13 +4948,15 @@ fn run() -> Result<i32> {
                 let report = complete_addon_runtime_contract_dispatch(
                     &store,
                     &catalog,
-                    &dispatch,
-                    &worker,
-                    &status,
-                    result_value,
-                    signature.as_deref(),
-                    attestation_value,
-                    dry_run,
+                    AddonRuntimeContractCompletionInput {
+                        dispatch_id: &dispatch,
+                        worker_id: &worker,
+                        completion_status: &status,
+                        result: result_value,
+                        signature: signature.as_deref(),
+                        attestation: attestation_value,
+                        dry_run,
+                    },
                 )?;
                 let should_fail = matches!(
                     report.status.as_str(),
@@ -5016,12 +5029,14 @@ fn run() -> Result<i32> {
                         &store,
                         &goal,
                         &catalog,
-                        &registry_sources,
-                        registry_cache_dir.as_deref(),
-                        allow_remote_registry,
-                        registry_max_bytes,
-                        registry_max_packages,
-                        registry_lock_path.as_deref(),
+                        CapabilityRegistrySyncInput {
+                            registry_sources: &registry_sources,
+                            cache_dir: registry_cache_dir.as_deref(),
+                            allow_remote: allow_remote_registry,
+                            max_bytes: registry_max_bytes,
+                            max_packages: registry_max_packages,
+                            lock_path: registry_lock_path.as_deref(),
+                        },
                     )?
                 };
                 print_response(output, &report)?;
@@ -5060,13 +5075,15 @@ fn run() -> Result<i32> {
                 let dirs = addon_dirs_or_default(addon_dirs);
                 let report = package_addon(
                     &store,
-                    &manifest,
-                    &dirs,
-                    repository.as_deref(),
-                    &channel,
-                    signature.as_deref(),
-                    public_key.as_deref(),
-                    package_path.as_deref(),
+                    AddonPackageInput {
+                        manifest_path: &manifest,
+                        addon_dirs: &dirs,
+                        repository: repository.as_deref(),
+                        channel: &channel,
+                        signature: signature.as_deref(),
+                        public_key: public_key.as_deref(),
+                        package_path: package_path.as_deref(),
+                    },
                 )?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -5085,13 +5102,15 @@ fn run() -> Result<i32> {
                 let data_value: serde_json::Value = serde_json::from_str(&data)?;
                 let report = trust_addon_package_key(
                     &store,
-                    &repository,
-                    &channel,
-                    &public_key,
-                    &trust_level,
-                    &approved_by,
-                    &source,
-                    data_value,
+                    AddonTrustKeyInput {
+                        repository: &repository,
+                        channel: &channel,
+                        public_key: &public_key,
+                        trust_level: &trust_level,
+                        approved_by: &approved_by,
+                        source: &source,
+                        data: data_value,
+                    },
                 )?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -7221,12 +7240,14 @@ fn run() -> Result<i32> {
                 let report = record_addon_renderer_client_event(
                     &store,
                     &dirs,
-                    &workflow_id,
-                    addon_id.as_deref(),
-                    &view_id,
-                    &event_kind,
-                    &actor,
-                    payload.as_deref(),
+                    OpsAddonRendererClientEventInput {
+                        workflow_id: &workflow_id,
+                        addon_id: addon_id.as_deref(),
+                        view_id: &view_id,
+                        event_kind: &event_kind,
+                        actor: &actor,
+                        payload: payload.as_deref(),
+                    },
                 )?;
                 print_response(output, &report)?;
                 Ok(0)

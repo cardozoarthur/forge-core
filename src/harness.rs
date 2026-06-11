@@ -1,6 +1,6 @@
 use crate::artifact::hex_sha256;
 use crate::intent::OperatingContextSpec;
-use crate::storage::{ForgeStore, HeadroomBlobWrite, StoredHeadroomBlobRecord};
+use crate::storage::{ForgeStore, GlobalEventWrite, HeadroomBlobWrite, StoredHeadroomBlobRecord};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -1350,16 +1350,16 @@ fn record_harness_exec_event_if_possible(
         &hex_sha256(serde_json::to_string(&data)?.as_bytes())[..16]
     );
     let tenant_context = harness_tenant_context(store, workflow_id)?;
-    let global_event_id = store.record_global_event(
-        "forge_harness",
-        &source_id,
+    let global_event_id = store.record_global_event(GlobalEventWrite {
+        source: "forge_harness",
+        source_id: &source_id,
         workflow_id,
-        &receipt.status,
-        "forge_harness",
-        harness_event_status(&receipt.status),
-        &data,
-        &tenant_context,
-    )?;
+        kind: &receipt.status,
+        origin: "forge_harness",
+        status: harness_event_status(&receipt.status),
+        data: &data,
+        tenant_context: &tenant_context,
+    })?;
     receipt.event_recorded = true;
     receipt.global_event_id = Some(global_event_id);
     Ok(())

@@ -1,6 +1,7 @@
 use crate::artifact::write_json_artifact;
 use crate::event::{
-    build_event_improvement_policy, build_event_observability, EventImprovementRecommendation,
+    build_event_improvement_policy, build_event_observability, EventImprovementPolicyQuery,
+    EventImprovementRecommendation, EventObservabilityQuery,
 };
 use crate::graph::{
     AsyncPolicy, AtomicTask, ExecutionPolicySpec, ExecutorKind, TaskStatus, ValidationRule,
@@ -983,7 +984,7 @@ fn build_cost_efficiency_report(
         average_cost(avoidable_estimated_cost_usd, repetitive_ai_tasks.len());
     let observed_costs = events
         .iter()
-        .filter(|event| event_task_id(event).map_or(true, |task_id| ai_task_ids.contains(task_id)))
+        .filter(|event| event_task_id(event).is_none_or(|task_id| ai_task_ids.contains(task_id)))
         .filter_map(observed_ai_cost_from_event)
         .collect::<Vec<_>>();
     let observed_ai_cost_total_usd =
@@ -1582,19 +1583,14 @@ pub fn apply_event_improvement_policy(
     let mut workflow = store.load_workflow(workflow_id)?;
     let policy_report = build_event_improvement_policy(
         store,
-        Some(workflow_id),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(20),
-        None,
+        EventImprovementPolicyQuery {
+            observability: EventObservabilityQuery {
+                workflow_id: Some(workflow_id),
+                limit: Some(20),
+                ..EventObservabilityQuery::default()
+            },
+            ..EventImprovementPolicyQuery::default()
+        },
     )?;
     let Some(recommendation) = select_event_policy_recommendation(
         &policy_report.recommendations,
@@ -3150,19 +3146,14 @@ pub fn generate_improvement(
     let target_version = target_version.unwrap_or_else(|| "next".to_string());
     let event_policy_report = build_event_improvement_policy(
         store,
-        Some(&workflow.id),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(5),
-        None,
+        EventImprovementPolicyQuery {
+            observability: EventObservabilityQuery {
+                workflow_id: Some(&workflow.id),
+                limit: Some(5),
+                ..EventObservabilityQuery::default()
+            },
+            ..EventImprovementPolicyQuery::default()
+        },
     )?;
     let event_improvement_policy = ImprovementProposalEventPolicy {
         schema_version: event_policy_report.schema_version.clone(),

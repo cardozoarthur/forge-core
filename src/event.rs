@@ -24,8 +24,8 @@ use crate::schedule::{
     ScheduleWorkerStatusReport,
 };
 use crate::storage::{
-    EventServiceWrite, ForgeStore, InboundEventRecord, StoreEvent, StoredEventObservabilityRecord,
-    StoredEventServiceRecord, StoredGlobalEventRecord,
+    EventServiceWrite, ForgeStore, GlobalEventWrite, InboundEventRecord, StoreEvent,
+    StoredEventObservabilityRecord, StoredEventServiceRecord, StoredGlobalEventRecord,
 };
 use crate::workflow::{
     attach_workflow_artifact, complete_workflow, pause_workflow, resume_workflow,
@@ -75,6 +75,58 @@ pub const EVENT_EGRESS_EMIT_SCHEMA_VERSION: &str = "forge.event_egress_emit.v1";
 pub const EVENT_EGRESS_REQUEST_SCHEMA_VERSION: &str = "forge.event_egress_request.v1";
 pub const EVENT_EGRESS_DELIVERY_EVIDENCE_SCHEMA_VERSION: &str =
     "forge.event_egress_delivery_evidence.v1";
+
+type WebhookIngressProgressCallback<'a> =
+    Option<&'a mut dyn FnMut(&[EventWebhookIngressEntry], &str) -> Result<()>>;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EventObservabilityQuery<'a> {
+    pub workflow_id: Option<&'a str>,
+    pub organization_id: Option<&'a str>,
+    pub brand_id: Option<&'a str>,
+    pub product_id: Option<&'a str>,
+    pub node_ref: Option<&'a str>,
+    pub addon_id: Option<&'a str>,
+    pub limit: Option<usize>,
+    pub after_sequence: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EventObservabilityHistoryQuery<'a> {
+    pub observability: EventObservabilityQuery<'a>,
+    pub bucket: Option<&'a str>,
+    pub group_by: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EventImprovementPolicyQuery<'a> {
+    pub observability: EventObservabilityQuery<'a>,
+    pub min_event_count: Option<usize>,
+    pub min_total_duration_ms: Option<i64>,
+    pub min_total_retry_count: Option<i64>,
+    pub min_context_pressure_bps: Option<i64>,
+    pub min_total_wait_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct InboundEventWorkerLoopOptions<'a> {
+    pub status: Option<&'a str>,
+    pub limit: usize,
+    pub max_cycles: usize,
+    pub interval_seconds: u64,
+    pub idle_exit: bool,
+    pub stop_file: Option<&'a Path>,
+}
+
+struct BlockedAdapterPolicyInput<'a> {
+    normalized_action: String,
+    transport: Option<String>,
+    schema: Option<String>,
+    auth_verified: Option<bool>,
+    status: &'a str,
+    issue: &'a str,
+    matched_adapter: Option<AddonEventAdapterView>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowEventStreamReport {
@@ -1293,44 +1345,29 @@ pub fn build_global_event_timeline_for_context(
 
 pub fn build_event_observability_index(
     store: &ForgeStore,
-    workflow_id: Option<&str>,
-    organization_id: Option<&str>,
-    brand_id: Option<&str>,
-    product_id: Option<&str>,
-    node_ref: Option<&str>,
-    addon_id: Option<&str>,
-    limit: Option<usize>,
-    after_sequence: Option<i64>,
+    query: EventObservabilityQuery<'_>,
 ) -> Result<EventObservabilityIndexReport> {
-    let (mut records, index_source) = load_event_observability_records(
-        store,
-        workflow_id,
-        organization_id,
-        brand_id,
-        product_id,
-        node_ref,
-        addon_id,
-    )?;
+    let (mut records, index_source) = load_event_observability_records(store, query)?;
     records.sort_by_key(|event| event.store_sequence);
     let summary = summarize_event_observability(&records);
     let tenants = summarize_event_observability_tenants(&records);
     let workflows = summarize_event_observability_workflows(&records);
     let nodes = summarize_event_observability_nodes(&records);
     let addons = summarize_event_observability_addons(&records);
-    let (events, page) = select_observability_page(records, limit, after_sequence);
+    let (events, page) = select_observability_page(records, query.limit, query.after_sequence);
     Ok(EventObservabilityIndexReport {
         schema_version: EVENT_OBSERVABILITY_INDEX_SCHEMA_VERSION.to_string(),
         status: "event_observability_index_loaded".to_string(),
         index_source,
         filters: EventObservabilityIndexFilters {
-            workflow_id: normalize_text(workflow_id),
-            organization_id: normalize_text(organization_id),
-            brand_id: normalize_text(brand_id),
-            product_id: normalize_text(product_id),
-            node_ref: normalize_text(node_ref),
-            addon_id: normalize_text(addon_id),
-            limit,
-            after_sequence,
+            workflow_id: normalize_text(query.workflow_id),
+            organization_id: normalize_text(query.organization_id),
+            brand_id: normalize_text(query.brand_id),
+            product_id: normalize_text(query.product_id),
+            node_ref: normalize_text(query.node_ref),
+            addon_id: normalize_text(query.addon_id),
+            limit: query.limit,
+            after_sequence: query.after_sequence,
         },
         page,
         summary,
@@ -1359,14 +1396,16 @@ pub fn build_event_observability_index_for_context(
     if operating_context.tenant_policy_mode != "enforce" {
         return build_event_observability_index(
             store,
-            workflow_id,
-            organization_id,
-            brand_id,
-            product_id,
-            node_ref,
-            addon_id,
-            limit,
-            after_sequence,
+            EventObservabilityQuery {
+                workflow_id,
+                organization_id,
+                brand_id,
+                product_id,
+                node_ref,
+                addon_id,
+                limit,
+                after_sequence,
+            },
         );
     }
     ensure_operating_context_policy(store, operating_context, "events observability list")?;
@@ -1390,43 +1429,28 @@ pub fn build_event_observability_index_for_context(
     )?;
     build_event_observability_index(
         store,
-        workflow_id,
-        Some(&organization_id),
-        Some(&brand_id),
-        Some(&product_id),
-        node_ref,
-        addon_id,
-        limit,
-        after_sequence,
+        EventObservabilityQuery {
+            workflow_id,
+            organization_id: Some(&organization_id),
+            brand_id: Some(&brand_id),
+            product_id: Some(&product_id),
+            node_ref,
+            addon_id,
+            limit,
+            after_sequence,
+        },
     )
 }
 
 pub fn build_event_observability_history(
     store: &ForgeStore,
-    workflow_id: Option<&str>,
-    organization_id: Option<&str>,
-    brand_id: Option<&str>,
-    product_id: Option<&str>,
-    node_ref: Option<&str>,
-    addon_id: Option<&str>,
-    bucket: Option<&str>,
-    group_by: Option<&str>,
-    limit: Option<usize>,
-    after_sequence: Option<i64>,
+    query: EventObservabilityHistoryQuery<'_>,
 ) -> Result<EventObservabilityHistoryReport> {
-    let bucket = normalize_history_bucket(bucket)?;
-    let group_by = normalize_history_group_by(group_by)?;
-    let (mut records, index_source) = load_event_observability_records(
-        store,
-        workflow_id,
-        organization_id,
-        brand_id,
-        product_id,
-        node_ref,
-        addon_id,
-    )?;
+    let bucket = normalize_history_bucket(query.bucket)?;
+    let group_by = normalize_history_group_by(query.group_by)?;
+    let (mut records, index_source) = load_event_observability_records(store, query.observability)?;
     records.sort_by_key(|event| event.store_sequence);
-    if let Some(after_sequence) = after_sequence {
+    if let Some(after_sequence) = query.observability.after_sequence {
         records.retain(|event| event.store_sequence > after_sequence);
     }
     let summary = summarize_event_observability(&records);
@@ -1434,7 +1458,7 @@ pub fn build_event_observability_history(
         &records,
         bucket.as_str(),
         group_by.as_str(),
-        limit,
+        query.observability.limit,
     )?;
 
     Ok(EventObservabilityHistoryReport {
@@ -1442,16 +1466,16 @@ pub fn build_event_observability_history(
         status: "event_observability_history_loaded".to_string(),
         index_source,
         filters: EventObservabilityHistoryFilters {
-            workflow_id: normalize_text(workflow_id),
-            organization_id: normalize_text(organization_id),
-            brand_id: normalize_text(brand_id),
-            product_id: normalize_text(product_id),
-            node_ref: normalize_text(node_ref),
-            addon_id: normalize_text(addon_id),
+            workflow_id: normalize_text(query.observability.workflow_id),
+            organization_id: normalize_text(query.observability.organization_id),
+            brand_id: normalize_text(query.observability.brand_id),
+            product_id: normalize_text(query.observability.product_id),
+            node_ref: normalize_text(query.observability.node_ref),
+            addon_id: normalize_text(query.observability.addon_id),
             bucket,
             group_by,
-            limit: limit.filter(|limit| *limit > 0),
-            after_sequence,
+            limit: query.observability.limit.filter(|limit| *limit > 0),
+            after_sequence: query.observability.after_sequence,
         },
         summary,
         bucket_count: buckets.len(),
@@ -1477,16 +1501,20 @@ pub fn build_event_observability_history_for_context(
     if operating_context.tenant_policy_mode != "enforce" {
         return build_event_observability_history(
             store,
-            workflow_id,
-            organization_id,
-            brand_id,
-            product_id,
-            node_ref,
-            addon_id,
-            bucket,
-            group_by,
-            limit,
-            after_sequence,
+            EventObservabilityHistoryQuery {
+                observability: EventObservabilityQuery {
+                    workflow_id,
+                    organization_id,
+                    brand_id,
+                    product_id,
+                    node_ref,
+                    addon_id,
+                    limit,
+                    after_sequence,
+                },
+                bucket,
+                group_by,
+            },
         );
     }
     ensure_operating_context_policy(
@@ -1514,53 +1542,40 @@ pub fn build_event_observability_history_for_context(
     )?;
     build_event_observability_history(
         store,
-        workflow_id,
-        Some(&organization_id),
-        Some(&brand_id),
-        Some(&product_id),
-        node_ref,
-        addon_id,
-        bucket,
-        group_by,
-        limit,
-        after_sequence,
+        EventObservabilityHistoryQuery {
+            observability: EventObservabilityQuery {
+                workflow_id,
+                organization_id: Some(&organization_id),
+                brand_id: Some(&brand_id),
+                product_id: Some(&product_id),
+                node_ref,
+                addon_id,
+                limit,
+                after_sequence,
+            },
+            bucket,
+            group_by,
+        },
     )
 }
 
 pub fn build_event_improvement_policy(
     store: &ForgeStore,
-    workflow_id: Option<&str>,
-    organization_id: Option<&str>,
-    brand_id: Option<&str>,
-    product_id: Option<&str>,
-    node_ref: Option<&str>,
-    addon_id: Option<&str>,
-    min_event_count: Option<usize>,
-    min_total_duration_ms: Option<i64>,
-    min_total_retry_count: Option<i64>,
-    min_context_pressure_bps: Option<i64>,
-    min_total_wait_seconds: Option<i64>,
-    limit: Option<usize>,
-    after_sequence: Option<i64>,
+    query: EventImprovementPolicyQuery<'_>,
 ) -> Result<EventImprovementPolicyReport> {
     let thresholds = EventImprovementPolicyThresholds {
-        min_event_count: min_event_count.unwrap_or(3).max(1),
-        min_total_duration_ms: min_total_duration_ms.unwrap_or(1_000).max(0),
-        min_total_retry_count: min_total_retry_count.unwrap_or(2).max(0),
-        min_context_pressure_bps: min_context_pressure_bps.unwrap_or(8_500).clamp(0, 10_000),
-        min_total_wait_seconds: min_total_wait_seconds.unwrap_or(60).max(0),
+        min_event_count: query.min_event_count.unwrap_or(3).max(1),
+        min_total_duration_ms: query.min_total_duration_ms.unwrap_or(1_000).max(0),
+        min_total_retry_count: query.min_total_retry_count.unwrap_or(2).max(0),
+        min_context_pressure_bps: query
+            .min_context_pressure_bps
+            .unwrap_or(8_500)
+            .clamp(0, 10_000),
+        min_total_wait_seconds: query.min_total_wait_seconds.unwrap_or(60).max(0),
     };
-    let (mut records, index_source) = load_event_observability_records(
-        store,
-        workflow_id,
-        organization_id,
-        brand_id,
-        product_id,
-        node_ref,
-        addon_id,
-    )?;
+    let (mut records, index_source) = load_event_observability_records(store, query.observability)?;
     records.sort_by_key(|event| event.store_sequence);
-    if let Some(after_sequence) = after_sequence {
+    if let Some(after_sequence) = query.observability.after_sequence {
         records.retain(|event| event.store_sequence > after_sequence);
     }
     let summary = summarize_event_observability(&records);
@@ -1573,7 +1588,7 @@ pub fn build_event_improvement_policy(
             .then_with(|| right.event_count.cmp(&left.event_count))
             .then_with(|| left.id.cmp(&right.id))
     });
-    if let Some(limit) = limit.filter(|limit| *limit > 0) {
+    if let Some(limit) = query.observability.limit.filter(|limit| *limit > 0) {
         recommendations.truncate(limit);
     }
     let status = if recommendations.is_empty() {
@@ -1586,14 +1601,14 @@ pub fn build_event_improvement_policy(
         status: status.to_string(),
         index_source,
         filters: EventImprovementPolicyFilters {
-            workflow_id: normalize_text(workflow_id),
-            organization_id: normalize_text(organization_id),
-            brand_id: normalize_text(brand_id),
-            product_id: normalize_text(product_id),
-            node_ref: normalize_text(node_ref),
-            addon_id: normalize_text(addon_id),
-            limit: limit.filter(|limit| *limit > 0),
-            after_sequence,
+            workflow_id: normalize_text(query.observability.workflow_id),
+            organization_id: normalize_text(query.observability.organization_id),
+            brand_id: normalize_text(query.observability.brand_id),
+            product_id: normalize_text(query.observability.product_id),
+            node_ref: normalize_text(query.observability.node_ref),
+            addon_id: normalize_text(query.observability.addon_id),
+            limit: query.observability.limit.filter(|limit| *limit > 0),
+            after_sequence: query.observability.after_sequence,
         },
         thresholds,
         summary,
@@ -1623,19 +1638,23 @@ pub fn build_event_improvement_policy_for_context(
     if operating_context.tenant_policy_mode != "enforce" {
         return build_event_improvement_policy(
             store,
-            workflow_id,
-            organization_id,
-            brand_id,
-            product_id,
-            node_ref,
-            addon_id,
-            min_event_count,
-            min_total_duration_ms,
-            min_total_retry_count,
-            min_context_pressure_bps,
-            min_total_wait_seconds,
-            limit,
-            after_sequence,
+            EventImprovementPolicyQuery {
+                observability: EventObservabilityQuery {
+                    workflow_id,
+                    organization_id,
+                    brand_id,
+                    product_id,
+                    node_ref,
+                    addon_id,
+                    limit,
+                    after_sequence,
+                },
+                min_event_count,
+                min_total_duration_ms,
+                min_total_retry_count,
+                min_context_pressure_bps,
+                min_total_wait_seconds,
+            },
         );
     }
     ensure_operating_context_policy(store, operating_context, "events improvement policy list")?;
@@ -1659,39 +1678,38 @@ pub fn build_event_improvement_policy_for_context(
     )?;
     build_event_improvement_policy(
         store,
-        workflow_id,
-        Some(&organization_id),
-        Some(&brand_id),
-        Some(&product_id),
-        node_ref,
-        addon_id,
-        min_event_count,
-        min_total_duration_ms,
-        min_total_retry_count,
-        min_context_pressure_bps,
-        min_total_wait_seconds,
-        limit,
-        after_sequence,
+        EventImprovementPolicyQuery {
+            observability: EventObservabilityQuery {
+                workflow_id,
+                organization_id: Some(&organization_id),
+                brand_id: Some(&brand_id),
+                product_id: Some(&product_id),
+                node_ref,
+                addon_id,
+                limit,
+                after_sequence,
+            },
+            min_event_count,
+            min_total_duration_ms,
+            min_total_retry_count,
+            min_context_pressure_bps,
+            min_total_wait_seconds,
+        },
     )
 }
 
 fn load_event_observability_records(
     store: &ForgeStore,
-    workflow_id: Option<&str>,
-    organization_id: Option<&str>,
-    brand_id: Option<&str>,
-    product_id: Option<&str>,
-    node_ref: Option<&str>,
-    addon_id: Option<&str>,
+    query: EventObservabilityQuery<'_>,
 ) -> Result<(Vec<EventObservabilityRecord>, String)> {
     let mut records = store
         .load_event_observability_index(
-            workflow_id,
-            organization_id,
-            brand_id,
-            product_id,
-            node_ref,
-            addon_id,
+            query.workflow_id,
+            query.organization_id,
+            query.brand_id,
+            query.product_id,
+            query.node_ref,
+            query.addon_id,
         )?
         .into_iter()
         .map(event_observability_record_from_store)
@@ -1699,10 +1717,10 @@ fn load_event_observability_records(
     let index_source = if records.is_empty() {
         let timeline = build_global_event_timeline(
             store,
-            workflow_id,
-            organization_id,
-            brand_id,
-            product_id,
+            query.workflow_id,
+            query.organization_id,
+            query.brand_id,
+            query.product_id,
             None,
             None,
         )?;
@@ -1710,10 +1728,10 @@ fn load_event_observability_records(
             .events
             .into_iter()
             .filter(|event| {
-                filter_matches_optional(node_ref, event.observability.node_ref.as_deref())
+                filter_matches_optional(query.node_ref, event.observability.node_ref.as_deref())
             })
             .filter(|event| {
-                filter_matches_optional(addon_id, event.observability.addon_id.as_deref())
+                filter_matches_optional(query.addon_id, event.observability.addon_id.as_deref())
             })
             .map(event_observability_record)
             .collect::<Vec<_>>();
@@ -2368,12 +2386,7 @@ fn build_scoped_event_improvement_recommendations(
         if bucket.event_count < thresholds.min_event_count {
             continue;
         }
-        if scope == "node"
-            && (bucket.ai_signal_count > 0
-                || bucket.total_selected_context_bytes > 0
-                || bucket.total_duration_ms >= thresholds.min_total_duration_ms)
-            && bucket.total_duration_ms >= thresholds.min_total_duration_ms
-        {
+        if scope == "node" && bucket.total_duration_ms >= thresholds.min_total_duration_ms {
             recommendations.push(event_improvement_recommendation(
                 &bucket,
                 thresholds,
@@ -2744,17 +2757,12 @@ pub fn scan_inbound_event_inbox(
 pub fn run_inbound_event_worker_loop(
     store: &ForgeStore,
     project_root: &Path,
-    status: Option<&str>,
-    limit: usize,
-    max_cycles: usize,
-    interval_seconds: u64,
-    idle_exit: bool,
-    stop_file: Option<&Path>,
+    options: InboundEventWorkerLoopOptions<'_>,
 ) -> Result<InboundEventWorkerLoopReport> {
-    let requested_status = normalize_text(status).unwrap_or_else(|| "pending".to_string());
-    let limit = limit.max(1);
-    let max_cycles = max_cycles.max(1);
-    let stop_file_display = stop_file.map(|path| path.display().to_string());
+    let requested_status = normalize_text(options.status).unwrap_or_else(|| "pending".to_string());
+    let limit = options.limit.max(1);
+    let max_cycles = options.max_cycles.max(1);
+    let stop_file_display = options.stop_file.map(|path| path.display().to_string());
     let mut cycles = Vec::new();
     let mut scanned_count = 0usize;
     let mut routed_count = 0usize;
@@ -2764,7 +2772,7 @@ pub fn run_inbound_event_worker_loop(
     let mut stop_requested = false;
 
     for cycle in 1..=max_cycles {
-        if event_stop_file_requested(stop_file) {
+        if event_stop_file_requested(options.stop_file) {
             stop_requested = true;
             stopped_reason = "stop_file_requested".to_string();
             break;
@@ -2777,9 +2785,14 @@ pub fn run_inbound_event_worker_loop(
         if idle {
             idle_cycle_count += 1;
         }
-        let should_stop_for_idle = idle && idle_exit;
-        let should_sleep = cycle < max_cycles && !should_stop_for_idle && interval_seconds > 0;
-        let slept_after_seconds = if should_sleep { interval_seconds } else { 0 };
+        let should_stop_for_idle = idle && options.idle_exit;
+        let should_sleep =
+            cycle < max_cycles && !should_stop_for_idle && options.interval_seconds > 0;
+        let slept_after_seconds = if should_sleep {
+            options.interval_seconds
+        } else {
+            0
+        };
         cycles.push(InboundEventWorkerLoopCycle {
             cycle,
             slept_after_seconds,
@@ -2789,13 +2802,13 @@ pub fn run_inbound_event_worker_loop(
             stopped_reason = "idle_exit".to_string();
             break;
         }
-        if event_stop_file_requested(stop_file) {
+        if event_stop_file_requested(options.stop_file) {
             stop_requested = true;
             stopped_reason = "stop_file_requested".to_string();
             break;
         }
         if should_sleep {
-            sleep(Duration::from_secs(interval_seconds));
+            sleep(Duration::from_secs(options.interval_seconds));
         }
     }
 
@@ -2815,8 +2828,8 @@ pub fn run_inbound_event_worker_loop(
         requested_status,
         limit,
         max_cycles,
-        interval_seconds,
-        idle_exit,
+        interval_seconds: options.interval_seconds,
+        idle_exit: options.idle_exit,
         cycle_count: cycles.len(),
         scanned_count,
         routed_count,
@@ -3018,16 +3031,17 @@ pub fn build_event_service_plan(
     };
     let operating_context = load_project_operating_context(&project_root)?;
     let tenant_context = serde_json::to_value(&operating_context)?;
-    let global_event_id = store.record_global_event(
-        "event_service_plan",
-        &report.service_id,
-        None,
-        "event_service_plan_created",
-        "forge",
-        &report.status,
-        &serde_json::to_value(&report)?,
-        &tenant_context,
-    )?;
+    let event_data = serde_json::to_value(&report)?;
+    let global_event_id = store.record_global_event(GlobalEventWrite {
+        source: "event_service_plan",
+        source_id: &report.service_id,
+        workflow_id: None,
+        kind: "event_service_plan_created",
+        origin: "forge",
+        status: &report.status,
+        data: &event_data,
+        tenant_context: &tenant_context,
+    })?;
     report.global_event_id = Some(global_event_id);
     Ok(report)
 }
@@ -3355,16 +3369,17 @@ pub fn run_event_worker_service(
     };
     let operating_context = load_project_operating_context(project_root)?;
     let tenant_context = serde_json::to_value(&operating_context)?;
-    let global_event_id = store.record_global_event(
-        "event_service_run",
-        &service_id,
-        None,
-        report_status,
-        "forge",
-        report_status,
-        &serde_json::to_value(&report)?,
-        &tenant_context,
-    )?;
+    let event_data = serde_json::to_value(&report)?;
+    let global_event_id = store.record_global_event(GlobalEventWrite {
+        source: "event_service_run",
+        source_id: &service_id,
+        workflow_id: None,
+        kind: report_status,
+        origin: "forge",
+        status: report_status,
+        data: &event_data,
+        tenant_context: &tenant_context,
+    })?;
     report.global_event_id = Some(global_event_id);
     Ok(report)
 }
@@ -3715,16 +3730,17 @@ pub fn run_event_webhook_ingress_service(
     };
     let operating_context = load_project_operating_context(project_root)?;
     let tenant_context = serde_json::to_value(&operating_context)?;
-    let global_event_id = store.record_global_event(
-        "event_service_run",
-        &service_id,
-        None,
-        report_status,
-        "forge",
-        report_status,
-        &serde_json::to_value(&report)?,
-        &tenant_context,
-    )?;
+    let event_data = serde_json::to_value(&report)?;
+    let global_event_id = store.record_global_event(GlobalEventWrite {
+        source: "event_service_run",
+        source_id: &service_id,
+        workflow_id: None,
+        kind: report_status,
+        origin: "forge",
+        status: report_status,
+        data: &event_data,
+        tenant_context: &tenant_context,
+    })?;
     report.global_event_id = Some(global_event_id);
     Ok(report)
 }
@@ -3944,16 +3960,17 @@ pub fn run_event_service_supervisor(
     };
     let operating_context = load_project_operating_context(project_root)?;
     let tenant_context = serde_json::to_value(&operating_context)?;
-    let global_event_id = store.record_global_event(
-        "event_service_supervisor",
-        &report.supervisor_id,
-        None,
+    let event_data = serde_json::to_value(&report)?;
+    let global_event_id = store.record_global_event(GlobalEventWrite {
+        source: "event_service_supervisor",
+        source_id: &report.supervisor_id,
+        workflow_id: None,
+        kind: status,
+        origin: "forge",
         status,
-        "forge",
-        status,
-        &serde_json::to_value(&report)?,
-        &tenant_context,
-    )?;
+        data: &event_data,
+        tenant_context: &tenant_context,
+    })?;
     report.global_event_id = Some(global_event_id);
     Ok(report)
 }
@@ -4104,16 +4121,17 @@ pub fn recover_stale_event_services(
     if report.recovered_count > 0 {
         let operating_context = load_project_operating_context(&project_root)?;
         let tenant_context = serde_json::to_value(&operating_context)?;
-        let global_event_id = store.record_global_event(
-            "event_services_recovery",
-            &report.recovery_id,
-            None,
+        let event_data = serde_json::to_value(&report)?;
+        let global_event_id = store.record_global_event(GlobalEventWrite {
+            source: "event_services_recovery",
+            source_id: &report.recovery_id,
+            workflow_id: None,
+            kind: status,
+            origin: &report.origin,
             status,
-            &report.origin,
-            status,
-            &serde_json::to_value(&report)?,
-            &tenant_context,
-        )?;
+            data: &event_data,
+            tenant_context: &tenant_context,
+        })?;
         report.global_event_id = Some(global_event_id);
     }
     Ok(report)
@@ -4419,16 +4437,17 @@ pub fn run_event_runtime_reconcile(
     };
     let operating_context = load_project_operating_context(&project_root)?;
     let tenant_context = serde_json::to_value(&operating_context)?;
-    let global_event_id = store.record_global_event(
-        "event_runtime_reconcile",
-        &report.reconcile_id,
-        None,
+    let event_data = serde_json::to_value(&report)?;
+    let global_event_id = store.record_global_event(GlobalEventWrite {
+        source: "event_runtime_reconcile",
+        source_id: &report.reconcile_id,
+        workflow_id: None,
+        kind: status,
+        origin: "forge",
         status,
-        "forge",
-        status,
-        &serde_json::to_value(&report)?,
-        &tenant_context,
-    )?;
+        data: &event_data,
+        tenant_context: &tenant_context,
+    })?;
     report.global_event_id = Some(global_event_id);
     Ok(report)
 }
@@ -4842,16 +4861,17 @@ pub fn run_event_runtime_daemon(
     };
     let operating_context = load_project_operating_context(&project_root)?;
     let tenant_context = serde_json::to_value(&operating_context)?;
-    let global_event_id = store.record_global_event(
-        "event_runtime_daemon",
-        &service_id,
-        None,
-        report_status,
-        "forge",
-        report_status,
-        &serde_json::to_value(&report)?,
-        &tenant_context,
-    )?;
+    let event_data = serde_json::to_value(&report)?;
+    let global_event_id = store.record_global_event(GlobalEventWrite {
+        source: "event_runtime_daemon",
+        source_id: &service_id,
+        workflow_id: None,
+        kind: report_status,
+        origin: "forge",
+        status: report_status,
+        data: &event_data,
+        tenant_context: &tenant_context,
+    })?;
     report.global_event_id = Some(global_event_id);
     Ok(report)
 }
@@ -4920,7 +4940,7 @@ fn run_event_webhook_ingress_server_with_progress(
     signature_header: &str,
     progress_interval_seconds: u64,
     stop_file: Option<&Path>,
-    mut progress_callback: Option<&mut dyn FnMut(&[EventWebhookIngressEntry], &str) -> Result<()>>,
+    mut progress_callback: WebhookIngressProgressCallback<'_>,
 ) -> Result<EventWebhookIngressReport> {
     let host = required_text("host", host)?;
     let path = normalize_webhook_path(path)?;
@@ -5070,7 +5090,7 @@ fn run_event_webhook_ingress_server_with_progress(
 }
 
 fn emit_webhook_ingress_progress(
-    progress_callback: &mut Option<&mut dyn FnMut(&[EventWebhookIngressEntry], &str) -> Result<()>>,
+    progress_callback: &mut WebhookIngressProgressCallback<'_>,
     events: &[EventWebhookIngressEntry],
     phase: &str,
 ) -> Result<()> {
@@ -5389,20 +5409,17 @@ fn evaluate_event_egress_adapter_policy(
         issues.push("egress origin is not allowed by the adapter".to_string());
     }
 
-    if auth_requires_verification(&adapter.adapter.auth)
-        && !auth_is_hmac(&adapter.adapter.auth)
-        && !auth_is_bearer(&adapter.adapter.auth)
-        && !(is_telegram_transport && auth_is_bot_token(&adapter.adapter.auth))
-    {
+    let auth_supported_for_egress = auth_is_hmac(&adapter.adapter.auth)
+        || auth_is_bearer(&adapter.adapter.auth)
+        || (is_telegram_transport && auth_is_bot_token(&adapter.adapter.auth));
+    if auth_requires_verification(&adapter.adapter.auth) && !auth_supported_for_egress {
         status = "adapter_auth_not_supported_for_egress".to_string();
         allowed = false;
         issues.push(format!(
             "egress adapter auth `{}` requires a transport-specific signer/secret provider",
             adapter.adapter.auth
         ));
-    } else if (auth_is_hmac(&adapter.adapter.auth)
-        || auth_is_bearer(&adapter.adapter.auth)
-        || (is_telegram_transport && auth_is_bot_token(&adapter.adapter.auth)))
+    } else if auth_supported_for_egress
         && !input.dry_run
         && !event_adapter_has_secret_provider(&adapter.adapter)
     {
@@ -5803,21 +5820,22 @@ fn record_event_egress_global_event(
 ) -> Result<i64> {
     let tenant_context = serde_json::to_value(operating_context)?;
     let workflow_id = extract_string(&request.payload, &["workflow_id"]);
-    store.record_global_event(
-        "event_egress",
-        &request.request_id,
-        workflow_id.as_deref(),
+    let event_data = json!({
+        "request": request,
+        "adapter_policy": adapter_policy,
+        "delivery": delivery,
+        "dry_run": dry_run,
+    });
+    store.record_global_event(GlobalEventWrite {
+        source: "event_egress",
+        source_id: &request.request_id,
+        workflow_id: workflow_id.as_deref(),
+        kind: status,
+        origin: &request.origin,
         status,
-        &request.origin,
-        status,
-        &json!({
-            "request": request,
-            "adapter_policy": adapter_policy,
-            "delivery": delivery,
-            "dry_run": dry_run,
-        }),
-        &tenant_context,
-    )
+        data: &event_data,
+        tenant_context: &tenant_context,
+    })
 }
 
 fn build_event_egress_auth_headers(
@@ -6512,7 +6530,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 fn decode_hex_bytes(value: &str) -> Result<Vec<u8>> {
     let value = value.trim();
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         bail!("hex string must have an even length");
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
@@ -6794,13 +6812,15 @@ fn evaluate_inbound_event_adapter_policy(
     if action_candidates.is_empty() {
         return blocked_adapter_policy(
             event,
-            normalized_action,
-            transport,
-            schema,
-            auth_verified,
-            "adapter_action_not_allowed",
-            "event origin matched at least one adapter, but action is not declared",
-            None,
+            BlockedAdapterPolicyInput {
+                normalized_action,
+                transport,
+                schema,
+                auth_verified,
+                status: "adapter_action_not_allowed",
+                issue: "event origin matched at least one adapter, but action is not declared",
+                matched_adapter: None,
+            },
         );
     }
 
@@ -6811,13 +6831,15 @@ fn evaluate_inbound_event_adapter_policy(
     if schema_candidates.is_empty() {
         return blocked_adapter_policy(
             event,
-            normalized_action,
-            transport,
-            schema,
-            auth_verified,
-            "adapter_schema_mismatch",
-            "event schema does not match the declared adapter schema or event types",
-            None,
+            BlockedAdapterPolicyInput {
+                normalized_action,
+                transport,
+                schema,
+                auth_verified,
+                status: "adapter_schema_mismatch",
+                issue: "event schema does not match the declared adapter schema or event types",
+                matched_adapter: None,
+            },
         );
     }
 
@@ -6872,27 +6894,21 @@ fn evaluate_inbound_event_adapter_policy(
 
 fn blocked_adapter_policy(
     event: &InboundEventRecord,
-    normalized_action: String,
-    transport: Option<String>,
-    schema: Option<String>,
-    auth_verified: Option<bool>,
-    status: &str,
-    issue: &str,
-    matched_adapter: Option<AddonEventAdapterView>,
+    input: BlockedAdapterPolicyInput<'_>,
 ) -> InboundEventAdapterPolicyReport {
     InboundEventAdapterPolicyReport {
         schema_version: EVENT_ADAPTER_POLICY_SCHEMA_VERSION.to_string(),
-        status: status.to_string(),
+        status: input.status.to_string(),
         allowed: false,
         enforced: true,
         origin: event.origin.clone(),
         action: event.action.clone(),
-        normalized_action,
-        transport,
-        schema,
-        auth_verified,
-        issues: vec![issue.to_string()],
-        matched_adapter,
+        normalized_action: input.normalized_action,
+        transport: input.transport,
+        schema: input.schema,
+        auth_verified: input.auth_verified,
+        issues: vec![input.issue.to_string()],
+        matched_adapter: input.matched_adapter,
     }
 }
 
@@ -6982,7 +6998,7 @@ fn route_start_workflow(
     ensure_operating_context_policy(store, &operating_context, "route start_workflow")?;
     let mut workflow = create_workflow(parse_intent_with_catalog_and_context(
         &goal,
-        &addon_catalog,
+        addon_catalog,
         operating_context,
     ));
     workflow.status = "planned".to_string();

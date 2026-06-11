@@ -1,8 +1,8 @@
 use crate::artifact::hex_sha256;
 use crate::intent::{ContextIdentityRef, OperatingContextSpec};
 use crate::storage::{
-    ForgeStore, StoredIdentityLinkRecord, StoredIdentityMembershipRecord, StoredIdentityRecord,
-    TenantIndexRecord,
+    ForgeStore, IdentityLinkWrite, IdentityMembershipWrite, StoredIdentityLinkRecord,
+    StoredIdentityMembershipRecord, StoredIdentityRecord, TenantIndexRecord,
 };
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -443,17 +443,17 @@ pub fn update_identity_membership(
     data["membership_update_source"] = json!(input.source);
     data["membership_update_schema_version"] = json!(IDENTITY_MEMBERSHIP_UPDATE_SCHEMA_VERSION);
 
-    store.save_identity_membership(
-        &record.subject_scope,
-        &record.subject_id,
-        &record.organization_id,
-        &record.brand_id,
-        &record.product_id,
-        &role,
-        &status,
-        &input.source,
-        &data,
-    )?;
+    store.save_identity_membership(IdentityMembershipWrite {
+        subject_scope: &record.subject_scope,
+        subject_id: &record.subject_id,
+        organization_id: &record.organization_id,
+        brand_id: &record.brand_id,
+        product_id: &record.product_id,
+        role: &role,
+        status: &status,
+        source: &input.source,
+        data: &data,
+    })?;
     let after = store
         .list_identity_memberships(
             Some(record.subject_scope.as_str()),
@@ -530,9 +530,17 @@ pub fn link_identity(store: &ForgeStore, input: IdentityLinkInput) -> Result<Ide
         },
         "reason": input.reason,
     });
-    store.save_identity_link(
-        &link_id, &left.0, &left.1, &right.0, &right.1, &link_type, "active", source, &data,
-    )?;
+    store.save_identity_link(IdentityLinkWrite {
+        id: &link_id,
+        left_scope: &left.0,
+        left_id: &left.1,
+        right_scope: &right.0,
+        right_id: &right.1,
+        link_type: &link_type,
+        status: "active",
+        source,
+        data: &data,
+    })?;
     let link = store
         .list_identity_links(Some(&left.0), Some(&left.1), Some("active"))?
         .into_iter()
@@ -690,17 +698,17 @@ pub fn sync_project_operating_context(
             &identity_data(&context.context, identity),
         )?;
     }
-    store.save_identity_membership(
-        &context.context.user.scope,
-        &context.context.user.id,
-        &context.context.organization.id,
-        &context.context.brand.id,
-        &context.context.product.id,
-        "operator",
-        "active",
-        &context.source,
-        &membership_data(&context.context, "operator"),
-    )?;
+    store.save_identity_membership(IdentityMembershipWrite {
+        subject_scope: &context.context.user.scope,
+        subject_id: &context.context.user.id,
+        organization_id: &context.context.organization.id,
+        brand_id: &context.context.brand.id,
+        product_id: &context.context.product.id,
+        role: "operator",
+        status: "active",
+        source: &context.source,
+        data: &membership_data(&context.context, "operator"),
+    })?;
     let identities = store
         .list_identity_records(None, None)?
         .into_iter()
