@@ -1830,6 +1830,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "high",
         ),
         slash(
+            "/patch review",
+            "Patch Review",
+            "Review current file diffs for a bounded patch without editing files. Use: /patch review --workflow <id> --task <id> --path <path>",
+            &["forge", "patch", "review", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>"],
+            false,
+            "medium",
+        ),
+        slash(
             "/patch revert",
             "Patch Revert",
             "Record a guarded revert proposal without silently restoring files. Use: /patch revert --workflow <id> --task <id> --apply-artifact <id>",
@@ -2114,6 +2122,60 @@ fn dispatch_patch_command(
                 println!("  Patch apply failed: {stderr}");
             }
         }
+        "review" => {
+            println!("  Patch Review: collecting current diff evidence...");
+            let review_output = Command::new(
+                std::env::args()
+                    .next()
+                    .unwrap_or_else(|| "forge".to_string()),
+            )
+            .args(["--store", &store_str, "patch", "review"])
+            .args(rest.split_whitespace().skip(1).collect::<Vec<_>>())
+            .arg("--output")
+            .arg("json")
+            .output()?;
+            if review_output.status.success() {
+                let stdout = String::from_utf8_lossy(&review_output.stdout);
+                if let Ok(review) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                    println!(
+                        "  Status: {}",
+                        review["status"].as_str().unwrap_or("reviewed")
+                    );
+                    println!(
+                        "  Changed paths: {}",
+                        review["summary"]["changed_path_count"]
+                            .as_u64()
+                            .unwrap_or(0)
+                    );
+                    println!(
+                        "  Diff check passed: {}",
+                        review["summary"]["diff_check_passed"]
+                            .as_bool()
+                            .unwrap_or(false)
+                    );
+                    println!(
+                        "  Recommendation: {}",
+                        review["summary"]["approval_recommendation"]
+                            .as_str()
+                            .unwrap_or("review_required")
+                    );
+                    if let Some(paths) = review["path_reviews"].as_array() {
+                        for path in paths {
+                            println!(
+                                "  File: {} changed={}",
+                                path["path"].as_str().unwrap_or("?"),
+                                path["changed"].as_bool().unwrap_or(false)
+                            );
+                        }
+                    }
+                } else {
+                    println!("  Patch review recorded.");
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&review_output.stderr);
+                println!("  Patch review failed: {stderr}");
+            }
+        }
         "revert" => {
             println!("  Patch Revert: recording guarded revert proposal.");
             println!("  WARNING: Revert does NOT silently restore files. It records intent.");
@@ -2149,11 +2211,12 @@ fn dispatch_patch_command(
             println!(
                 "  Usage: /patch plan --workflow <id> --task <id> --intent \"...\" --path <path>"
             );
+            println!("         /patch review --workflow <id> --task <id> --path <path>");
             println!("         /patch apply --workflow <id> --task <id> --path <path>");
             println!("         /patch revert --workflow <id> --task <id> --apply-artifact <id>");
         }
         other => {
-            println!("  Unknown patch subcommand: {other}. Use plan, apply, or revert.");
+            println!("  Unknown patch subcommand: {other}. Use plan, review, apply, or revert.");
         }
     }
 
@@ -2676,6 +2739,18 @@ mod tests {
         let route = report.slash_command.unwrap();
         assert_eq!(route.name, "/patch apply");
         assert!(route.recognized);
+    }
+
+    #[test]
+    fn slash_patch_review_is_recognized() {
+        let report =
+            route_slash_command("/patch review --workflow wf_1 --task task_1 --path Cargo.toml");
+        assert_eq!(report.input_kind, "slash_command");
+        let route = report.slash_command.unwrap();
+        assert_eq!(route.name, "/patch review");
+        assert!(route.recognized);
+        assert!(!route.mutates_workflow);
+        assert_eq!(route.risk_level, "medium");
     }
 
     #[test]

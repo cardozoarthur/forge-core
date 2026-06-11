@@ -88,7 +88,7 @@ use crate::multimodal::{
     build_multimodal_status, evaluate_multimodal_guard,
 };
 use crate::ops::record_addon_renderer_client_event;
-use crate::patch::{build_patch_apply, build_patch_plan, build_patch_revert};
+use crate::patch::{build_patch_apply, build_patch_plan, build_patch_revert, build_patch_review};
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
 };
@@ -1562,6 +1562,15 @@ struct PatchPlanInput {
 
 #[derive(Debug, Deserialize)]
 struct PatchApplyInput {
+    workflow_id: String,
+    task_id: String,
+    paths: Vec<String>,
+    origin: Option<String>,
+    plan_artifact: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchReviewInput {
     workflow_id: String,
     task_id: String,
     paths: Vec<String>,
@@ -4920,6 +4929,21 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
+                "forge.patch.review",
+                "Review File Patch",
+                "Review current repo diffs for a bounded file patch, persist review evidence, and keep source files unchanged.",
+                object_schema(&[
+                    ("workflow_id", "string", "workflow id"),
+                    ("task_id", "string", "task id"),
+                    ("paths", "array", "repo-relative file paths to review"),
+                    ("origin", "string", "codex|opencode|skill|mcp"),
+                    ("plan_artifact", "string", "optional patch plan artifact for lineage"),
+                ], &["workflow_id", "task_id", "paths"]),
+                "forge.patch_review.v1",
+                &["forge", "patch", "review", "--workflow", "<workflow-id>", "--task", "<task-id>", "--path", "<path>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
                 "forge.patch.revert",
                 "Revert File Patch",
                 "Record a guarded revert proposal for a previously applied file patch without restoring files automatically.",
@@ -7420,6 +7444,17 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.origin.as_deref().unwrap_or("mcp"),
                 input.plan_artifact.as_deref(),
                 None,
+            )?)?
+        }
+        "forge.patch.review" => {
+            let input: PatchReviewInput = parse_input(input)?;
+            serde_json::to_value(build_patch_review(
+                store,
+                &input.workflow_id,
+                &input.task_id,
+                input.paths,
+                input.origin.as_deref().unwrap_or("mcp"),
+                input.plan_artifact.as_deref(),
             )?)?
         }
         "forge.patch.revert" => {

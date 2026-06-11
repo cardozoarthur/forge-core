@@ -282,7 +282,8 @@ Estado verificado em `forge 0.4.177`, branch `main` alinhado com `origin/main`.
 - MCP `forge.harness.mode` retorna o mesmo contrato, permitindo que agentes auditem a política de harness sem abrir terminal interativo e sem executar brains.
 - `forge interactive home --output json` inclui `dashboard.harness_mode_panel`, então o operador vê o modo Forge-first no painel inicial junto dos demais painéis operacionais.
 - `forge interactive slash-commands --output json` inclui `/harness`, comando scriptable e de baixo risco equivalente a `forge harness mode --output json`.
-- `forge milestone manifest --version 0.5 --output json` ainda retorna `promotion_decision.decision=fail`, bloqueado por `replacement_grade_cli` e `experimental_multimodal_runtime`. O harness avançou a capacidade de CLI de substituição, mas ela continua em `groundwork` até existir revisão diff/patch na TUI, restauração aprovada de arquivos, gestão de provider/session e fluxos reais ponta a ponta de coding/research.
+- `forge patch review`, MCP `forge.patch.review` e `/patch review` adicionam o primeiro contrato read-only de revisão de diff: coletam `git diff --stat`, `git diff --check`, `git status --short`, resumo por arquivo, recomendação de aprovação e artifact `forge.patch_review.v1` sem editar arquivos.
+- `forge milestone manifest --version 0.5 --output json` ainda retorna `promotion_decision.decision=fail`, bloqueado por `replacement_grade_cli` e `experimental_multimodal_runtime`. O harness e o `patch review` avançaram a capacidade de CLI de substituição, mas ela continua em `groundwork` até existir navegação rica de diff multi-file na TUI, restauração aprovada de arquivos, gestão de provider/session e fluxos reais ponta a ponta de coding/research.
 
 ## Plano Incremental
 

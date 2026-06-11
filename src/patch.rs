@@ -261,8 +261,57 @@ fn diff_review_commands(paths: &[String]) -> Vec<String> {
 // Patch apply
 // ---------------------------------------------------------------------------
 
+const PATCH_REVIEW_SCHEMA_VERSION: &str = "forge.patch_review.v1";
 const PATCH_APPLY_SCHEMA_VERSION: &str = "forge.patch_apply.v1";
 const PATCH_REVERT_SCHEMA_VERSION: &str = "forge.patch_revert.v1";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PatchReviewReport {
+    pub schema_version: String,
+    pub status: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub origin: String,
+    pub applies_changes: bool,
+    pub external_resources_mutated: bool,
+    pub requires_human_approval: bool,
+    pub plan_artifact: Option<PatchApplyArtifactRef>,
+    pub summary: PatchReviewSummary,
+    pub path_reviews: Vec<PatchPathReview>,
+    pub commands: Vec<PatchReviewCommandResult>,
+    pub artifact: Option<PatchApplyArtifactRef>,
+    pub safety_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PatchReviewSummary {
+    pub changed_path_count: usize,
+    pub diff_present: bool,
+    pub diff_check_passed: bool,
+    pub blocked_paths: Vec<String>,
+    pub approval_recommendation: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PatchPathReview {
+    pub path: String,
+    pub allowed: bool,
+    pub exists: bool,
+    pub bytes: u64,
+    pub sha256: Option<String>,
+    pub changed: bool,
+    pub status_line: Option<String>,
+    pub diff_excerpt: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PatchReviewCommandResult {
+    pub command: String,
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PatchApplyReport {
@@ -276,6 +325,212 @@ pub struct PatchApplyReport {
     pub validation: PatchValidationSummary,
     pub artifact: Option<PatchApplyArtifactRef>,
     pub rollback_instructions: Vec<String>,
+}
+
+pub fn build_patch_review(
+    store: &ForgeStore,
+    workflow_id: &str,
+    task_id: &str,
+    paths: Vec<String>,
+    origin: &str,
+    plan_artifact_path: Option<&str>,
+) -> Result<PatchReviewReport> {
+    ensure_workflow_policy(store, workflow_id, "patch review")?;
+    if paths.is_empty() {
+        bail!("at least one patch path is required");
+    }
+
+    let workflow = store.load_workflow(workflow_id)?;
+    if !workflow.tasks.iter().any(|task| task.id == task_id) {
+        bail!("task {task_id} not found in workflow {workflow_id}");
+    }
+
+    let mut allowed_paths = Vec::new();
+    let mut blocked_paths = Vec::new();
+    for path in paths {
+        let normalized = path.trim().to_string();
+        if normalized.is_empty() || !is_repo_relative_path(&normalized) {
+            blocked_paths.push(normalized);
+        } else {
+            allowed_paths.push(normalized);
+        }
+    }
+    allowed_paths.sort();
+    allowed_paths.dedup();
+    blocked_paths.sort();
+    blocked_paths.dedup();
+
+    let plan_ref = if let Some(plan_path) = plan_artifact_path {
+        let plan_bytes = fs::read(plan_path)
+            .with_context(|| format!("failed to read plan artifact: {plan_path}"))?;
+        Some(PatchApplyArtifactRef {
+            kind: "patch_plan".to_string(),
+            path: plan_path.to_string(),
+            sha256: hex_sha256(&plan_bytes),
+            bytes: plan_bytes.len() as u64,
+        })
+    } else {
+        None
+    };
+
+    let mut commands = Vec::new();
+    if !allowed_paths.is_empty() {
+        commands.push(run_git_review_command(
+            "git diff --stat",
+            &["diff", "--stat"],
+            &allowed_paths,
+        ));
+        commands.push(run_git_review_command(
+            "git diff --check",
+            &["diff", "--check"],
+            &allowed_paths,
+        ));
+        commands.push(run_git_review_command(
+            "git status --short",
+            &["status", "--short"],
+            &allowed_paths,
+        ));
+    }
+
+    let status_output = commands
+        .iter()
+        .find(|command| command.command.starts_with("git status --short"))
+        .map(|command| command.stdout.as_str())
+        .unwrap_or("");
+    let path_reviews = allowed_paths
+        .iter()
+        .map(|path| build_path_review(path, status_output))
+        .collect::<Result<Vec<_>>>()?;
+
+    let changed_path_count = path_reviews.iter().filter(|review| review.changed).count();
+    let diff_present = changed_path_count > 0;
+    let diff_check_passed = commands
+        .iter()
+        .find(|command| command.command.starts_with("git diff --check"))
+        .map(|command| command.exit_code == Some(0))
+        .unwrap_or(false);
+    let approval_recommendation = if allowed_paths.is_empty() {
+        "blocked_paths_only"
+    } else if !diff_check_passed {
+        "fix_diff_check_before_review"
+    } else if diff_present {
+        "ready_for_human_review"
+    } else {
+        "no_changes_to_review"
+    }
+    .to_string();
+    let status = if allowed_paths.is_empty() {
+        "patch_review_blocked"
+    } else if diff_present {
+        "patch_review_ready"
+    } else {
+        "patch_review_no_changes"
+    }
+    .to_string();
+
+    let mut report = PatchReviewReport {
+        schema_version: PATCH_REVIEW_SCHEMA_VERSION.to_string(),
+        status,
+        workflow_id: workflow_id.to_string(),
+        task_id: task_id.to_string(),
+        origin: origin.to_string(),
+        applies_changes: false,
+        external_resources_mutated: false,
+        requires_human_approval: true,
+        plan_artifact: plan_ref,
+        summary: PatchReviewSummary {
+            changed_path_count,
+            diff_present,
+            diff_check_passed,
+            blocked_paths,
+            approval_recommendation,
+        },
+        path_reviews,
+        commands,
+        artifact: None,
+        safety_notes: vec![
+            "This command reviews local file diffs only; it does not edit source files."
+                .to_string(),
+            "Patch review must precede human approval for apply or revert execution."
+                .to_string(),
+            "Git commands run with path arguments separated from the command to avoid shell expansion."
+                .to_string(),
+        ],
+    };
+
+    if !allowed_paths.is_empty() {
+        let payload = serde_json::to_value(&report)?;
+        let relative_path = format!("tmp/{workflow_id}-{task_id}-patch-review.json");
+        let (path, _) = write_json_artifact(&store.base_dir(), &relative_path, &payload)?;
+        let attached = attach_workflow_artifact(store, workflow_id, &path, "patch_review", origin)?;
+        report.artifact = Some(PatchApplyArtifactRef::from_artifact(&attached));
+    }
+
+    Ok(report)
+}
+
+fn build_path_review(path: &str, status_output: &str) -> Result<PatchPathReview> {
+    let snapshot = snapshot_file(path)?;
+    let diff = run_git_review_command("git diff", &["diff"], &[path.to_string()]);
+    let status_line = status_output
+        .lines()
+        .find(|line| line.split_whitespace().last() == Some(path))
+        .map(str::to_string);
+    let diff_excerpt = bounded_command_text(&diff.stdout);
+    let changed = !diff_excerpt.trim().is_empty() || status_line.is_some();
+
+    Ok(PatchPathReview {
+        path: path.to_string(),
+        allowed: true,
+        exists: snapshot.exists,
+        bytes: snapshot.bytes,
+        sha256: snapshot.sha256,
+        changed,
+        status_line,
+        diff_excerpt,
+    })
+}
+
+fn run_git_review_command(
+    label: &str,
+    git_args: &[&str],
+    paths: &[String],
+) -> PatchReviewCommandResult {
+    let mut command = Command::new("git");
+    command.args(git_args);
+    command.arg("--");
+    command.args(paths);
+    match command.output() {
+        Ok(output) => {
+            let passed = output.status.success();
+            PatchReviewCommandResult {
+                command: format!("{label} -- {}", paths.join(" ")),
+                status: if passed { "passed" } else { "failed" }.to_string(),
+                exit_code: output.status.code(),
+                stdout: bounded_command_text(&String::from_utf8_lossy(&output.stdout)),
+                stderr: bounded_command_text(&String::from_utf8_lossy(&output.stderr)),
+            }
+        }
+        Err(error) => PatchReviewCommandResult {
+            command: format!("{label} -- {}", paths.join(" ")),
+            status: "error".to_string(),
+            exit_code: None,
+            stdout: String::new(),
+            stderr: format!("failed to execute git command: {error}"),
+        },
+    }
+}
+
+fn bounded_command_text(text: &str) -> String {
+    const MAX_BYTES: usize = 12_000;
+    if text.len() <= MAX_BYTES {
+        return text.to_string();
+    }
+    let mut end = MAX_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...[truncated]", &text[..end])
 }
 
 #[derive(Debug, Clone, Serialize)]

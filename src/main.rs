@@ -111,7 +111,9 @@ use forge_core::ops::{
     build_ops_snapshot_with_addon_dirs, record_addon_renderer_client_event,
     serve_ops_console_with_addon_dirs,
 };
-use forge_core::patch::{build_patch_apply, build_patch_plan, build_patch_revert};
+use forge_core::patch::{
+    build_patch_apply, build_patch_plan, build_patch_revert, build_patch_review,
+};
 use forge_core::registry::{
     attach_reuse_candidates_as_child_subflows, context_action_catalog, find_reuse_candidates,
     list_workflows_with_filters, quality_action_catalog, WorkflowLifecycleFilter,
@@ -3110,6 +3112,20 @@ enum PatchCommands {
         output: OutputFormat,
     },
     Apply {
+        #[arg(long)]
+        workflow: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long = "path")]
+        paths: Vec<String>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long = "plan-artifact")]
+        plan_artifact: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Review {
         #[arg(long)]
         workflow: String,
         #[arg(long)]
@@ -7085,6 +7101,26 @@ fn run() -> Result<i32> {
                     &origin,
                     plan_artifact.as_deref(),
                     None,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            PatchCommands::Review {
+                workflow,
+                task,
+                paths,
+                origin,
+                plan_artifact,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_patch_review(
+                    &store,
+                    &workflow,
+                    &task,
+                    paths,
+                    &origin,
+                    plan_artifact.as_deref(),
                 )?;
                 print_response(output, &report)?;
                 Ok(0)

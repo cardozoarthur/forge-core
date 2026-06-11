@@ -3213,6 +3213,128 @@ fn patch_plan_blocks_external_parent_paths_without_attaching_artifacts() {
 }
 
 #[test]
+fn patch_review_summarizes_current_diff_without_applying_changes() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let target = temp.path().join("sample.txt");
+    fs::write(&target, "alpha\n").unwrap();
+    let git_init = std::process::Command::new("git")
+        .arg("init")
+        .current_dir(temp.path())
+        .status()
+        .expect("git init should run");
+    assert!(git_init.success());
+    let git_add = std::process::Command::new("git")
+        .args(["add", "sample.txt"])
+        .current_dir(temp.path())
+        .status()
+        .expect("git add should run");
+    assert!(git_add.success());
+
+    let planned = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Demonstrate a Forge-owned file patch review",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+
+    forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "patch",
+            "plan",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--intent",
+            "Review the sample file diff",
+            "--path",
+            "sample.txt",
+            "--origin",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    fs::write(&target, "alpha\nbeta\n").unwrap();
+    let before_review = fs::read(&target).unwrap();
+
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "patch",
+            "review",
+            "--workflow",
+            workflow_id,
+            "--task",
+            "task-001",
+            "--path",
+            "sample.txt",
+            "--origin",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let after_review = fs::read(&target).unwrap();
+    assert_eq!(
+        before_review, after_review,
+        "patch review must not edit source files"
+    );
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.patch_review.v1");
+    assert_eq!(json["status"], "patch_review_ready");
+    assert_eq!(json["workflow_id"], workflow_id);
+    assert_eq!(json["task_id"], "task-001");
+    assert_eq!(json["applies_changes"], false);
+    assert_eq!(json["external_resources_mutated"], false);
+    assert_eq!(json["requires_human_approval"], true);
+    assert_eq!(json["summary"]["changed_path_count"], 1);
+    assert_eq!(json["summary"]["diff_present"], true);
+    assert_eq!(json["summary"]["diff_check_passed"], true);
+    assert_eq!(
+        json["summary"]["approval_recommendation"],
+        "ready_for_human_review"
+    );
+    assert!(json["path_reviews"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|review| review["path"] == "sample.txt"
+            && review["changed"] == true
+            && review["diff_excerpt"].as_str().unwrap().contains("+beta")));
+    assert!(json["artifact"]["path"]
+        .as_str()
+        .unwrap()
+        .contains("attached-patch_review-"));
+}
+
+#[test]
 fn patch_apply_records_file_state_and_validation() {
     let temp = tempdir().unwrap();
     let store_path = temp.path().join("forge.sqlite");
@@ -3447,6 +3569,44 @@ fn mcp_exposes_patch_apply_and_revert_tools() {
         assert!(required.contains(&"task_id"));
         assert!(required.contains(&"apply_artifact"));
     }
+}
+
+#[test]
+fn mcp_exposes_patch_review_tool_and_skill_guidance() {
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge patch review"),
+        "the packaged Forge skill should teach agents to request bounded patch reviews"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.patch.review"),
+        "the packaged Forge skill should expose the MCP patch review tool"
+    );
+
+    let output = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tool = json["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "forge.patch.review")
+        .expect("forge.patch.review tool must be in MCP manifest");
+    assert_eq!(tool["output_schema"], "forge.patch_review.v1");
+    let required: Vec<&str> = tool["input_schema"]["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert!(required.contains(&"workflow_id"));
+    assert!(required.contains(&"task_id"));
+    assert!(required.contains(&"paths"));
 }
 
 #[test]
@@ -33436,6 +33596,11 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         .unwrap()
         .iter()
         .any(|command| command["name"] == "/patch apply" && command["mutates_workflow"] == true));
+    assert!(slash_json["result"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command["name"] == "/patch review" && command["mutates_workflow"] == false));
 
     let route_input = serde_json::json!({
         "input": "What is the current Forge status?",
