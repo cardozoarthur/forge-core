@@ -24,7 +24,8 @@ use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{build_context_package_with_checkpoint, DEFAULT_CONTEXT_BUDGET};
 use crate::cost::{
     apply_cost_ledger_retention, build_cost_ledger, build_cost_ledger_history,
-    maintain_cost_ledger, materialize_cost_ledger_index, run_cost_ledger_daemon,
+    maintain_cost_ledger, materialize_cost_ledger_incremental, materialize_cost_ledger_index,
+    run_cost_ledger_daemon,
 };
 use crate::credential_vault::{
     run_describe as run_credential_vault_describe, run_records as run_credential_vault_records,
@@ -743,6 +744,21 @@ struct CostLedgerInput {
 struct CostLedgerMaterializeInput {
     workflow: Option<String>,
     workflow_id: Option<String>,
+    organization: Option<String>,
+    organization_id: Option<String>,
+    brand: Option<String>,
+    brand_id: Option<String>,
+    product: Option<String>,
+    product_id: Option<String>,
+    source_kind: Option<String>,
+    addon: Option<String>,
+    addon_id: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CostLedgerIncrementalInput {
+    after_sequence: Option<i64>,
     organization: Option<String>,
     organization_id: Option<String>,
     brand: Option<String>,
@@ -2176,6 +2192,26 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ),
                 "forge.cost_ledger_index.v1",
                 &["forge", "cost", "materialize", "--output", "json"],
+                ToolFlags::new(false, true),
+            ),
+            tool(
+                "forge.cost.incremental",
+                "Incremental Cost Ledger Materialization",
+                "Scan global events after a cursor, deduplicate affected workflows and materialize cost rows only for those workflows.",
+                object_schema(
+                    &[
+                        ("after_sequence", "integer", "optional global event cursor"),
+                        ("organization_id", "string", "optional organization filter"),
+                        ("brand_id", "string", "optional brand filter"),
+                        ("product_id", "string", "optional product filter"),
+                        ("source_kind", "string", "planned_task|observed_event filter for returned rows"),
+                        ("addon_id", "string", "optional Addon id filter"),
+                        ("limit", "integer", "optional scanned event and persisted row limit"),
+                    ],
+                    &[],
+                ),
+                "forge.cost_ledger_incremental.v1",
+                &["forge", "cost", "incremental", "--output", "json"],
                 ToolFlags::new(false, true),
             ),
             tool(
@@ -5428,6 +5464,23 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(materialize_cost_ledger_index(
                 store,
                 workflow_id.as_deref(),
+                organization_id.as_deref(),
+                brand_id.as_deref(),
+                product_id.as_deref(),
+                input.source_kind.as_deref(),
+                addon_id.as_deref(),
+                input.limit,
+            )?)?
+        }
+        "forge.cost.incremental" => {
+            let input: CostLedgerIncrementalInput = parse_input(input)?;
+            let organization_id = input.organization_id.or(input.organization);
+            let brand_id = input.brand_id.or(input.brand);
+            let product_id = input.product_id.or(input.product);
+            let addon_id = input.addon_id.or(input.addon);
+            serde_json::to_value(materialize_cost_ledger_incremental(
+                store,
+                input.after_sequence,
                 organization_id.as_deref(),
                 brand_id.as_deref(),
                 product_id.as_deref(),

@@ -33,7 +33,8 @@ use forge_core::cluster::{
 use forge_core::context::build_context_package_with_checkpoint;
 use forge_core::cost::{
     apply_cost_ledger_retention, build_cost_ledger, build_cost_ledger_history,
-    maintain_cost_ledger, materialize_cost_ledger_index, run_cost_ledger_daemon,
+    maintain_cost_ledger, materialize_cost_ledger_incremental, materialize_cost_ledger_index,
+    run_cost_ledger_daemon,
 };
 use forge_core::credential_vault::{
     run_describe as run_credential_vault_describe, run_exec as run_credential_vault_exec,
@@ -361,6 +362,24 @@ enum CostCommands {
     Materialize {
         #[arg(long)]
         workflow: Option<String>,
+        #[arg(long)]
+        organization: Option<String>,
+        #[arg(long)]
+        brand: Option<String>,
+        #[arg(long)]
+        product: Option<String>,
+        #[arg(long = "source-kind")]
+        source_kind: Option<String>,
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Incremental {
+        #[arg(long = "after-sequence")]
+        after_sequence: Option<i64>,
         #[arg(long)]
         organization: Option<String>,
         #[arg(long)]
@@ -5105,6 +5124,30 @@ fn run() -> Result<i32> {
                 let report = materialize_cost_ledger_index(
                     &store,
                     workflow.as_deref(),
+                    organization.as_deref(),
+                    brand.as_deref(),
+                    product.as_deref(),
+                    source_kind.as_deref(),
+                    addon.as_deref(),
+                    limit,
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            CostCommands::Incremental {
+                after_sequence,
+                organization,
+                brand,
+                product,
+                source_kind,
+                addon,
+                limit,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = materialize_cost_ledger_incremental(
+                    &store,
+                    after_sequence,
                     organization.as_deref(),
                     brand.as_deref(),
                     product.as_deref(),

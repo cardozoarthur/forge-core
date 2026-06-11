@@ -11075,6 +11075,7 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
         "forge.events.timeline",
         "forge.improve.candidates",
         "forge.improve.promote_event_policy",
+        "forge.cost.incremental",
         "forge.cost.daemon",
         "forge.cost.retention",
         "forge.cost.ledger",
@@ -20148,6 +20149,67 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
         "cost_ledger_retention_applied"
     );
     assert_eq!(mcp_retention["result"]["deleted_row_count"], 1);
+
+    let incremental_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "incremental",
+            "--after-sequence",
+            "0",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let incremental: Value = serde_json::from_slice(&incremental_output).unwrap();
+    assert_eq!(
+        incremental["schema_version"],
+        "forge.cost_ledger_incremental.v1"
+    );
+    assert_eq!(incremental["status"], "cost_ledger_incremental_completed");
+    assert!(incremental["affected_workflow_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(workflow_id.to_string())));
+    assert!(incremental["next_after_sequence"].as_i64().unwrap() >= promoted_event.id);
+    assert!(incremental["materialization_count"].as_u64().unwrap() >= 1);
+    assert!(incremental["materializations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|report| report["filters"]["workflow_id"] == workflow_id));
+
+    let mcp_incremental_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.cost.incremental",
+            "--input",
+            r#"{"after_sequence":0}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_incremental: Value = serde_json::from_slice(&mcp_incremental_output).unwrap();
+    assert_eq!(
+        mcp_incremental["result"]["schema_version"],
+        "forge.cost_ledger_incremental.v1"
+    );
+    assert!(mcp_incremental["result"]["affected_workflow_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(workflow_id.to_string())));
 
     let timeline_output = forge()
         .args([

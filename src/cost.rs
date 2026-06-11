@@ -6,7 +6,7 @@ use chrono::{
 };
 use serde::Serialize;
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const COST_LEDGER_SCHEMA_VERSION: &str = "forge.cost_ledger.v1";
 pub const COST_LEDGER_INDEX_SCHEMA_VERSION: &str = "forge.cost_ledger_index.v1";
@@ -14,6 +14,7 @@ pub const COST_LEDGER_HISTORY_SCHEMA_VERSION: &str = "forge.cost_ledger_history.
 pub const COST_LEDGER_MAINTENANCE_SCHEMA_VERSION: &str = "forge.cost_ledger_maintenance.v1";
 pub const COST_LEDGER_DAEMON_SCHEMA_VERSION: &str = "forge.cost_ledger_daemon.v1";
 pub const COST_LEDGER_RETENTION_SCHEMA_VERSION: &str = "forge.cost_ledger_retention.v1";
+pub const COST_LEDGER_INCREMENTAL_SCHEMA_VERSION: &str = "forge.cost_ledger_incremental.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CostLedgerReport {
@@ -350,6 +351,39 @@ pub struct CostLedgerRetentionGovernance {
     pub reason: Option<String>,
     pub confirm: bool,
     pub destructive_actions_performed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CostLedgerIncrementalReport {
+    pub schema_version: String,
+    pub status: String,
+    pub filters: CostLedgerIncrementalFilters,
+    pub event_count: usize,
+    pub affected_workflow_count: usize,
+    pub affected_workflow_ids: Vec<String>,
+    pub materialization_count: usize,
+    pub materialized_row_count: usize,
+    pub next_after_sequence: i64,
+    pub materializations: Vec<CostLedgerIndexReport>,
+    pub incremental_policy: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CostLedgerIncrementalFilters {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_sequence: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brand_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 #[derive(Default)]
@@ -822,6 +856,88 @@ pub fn apply_cost_ledger_retention(
         &tenant_context,
     )?;
     Ok(report)
+}
+
+pub fn materialize_cost_ledger_incremental(
+    store: &ForgeStore,
+    after_sequence: Option<i64>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    source_kind: Option<&str>,
+    addon_id: Option<&str>,
+    limit: Option<usize>,
+) -> Result<CostLedgerIncrementalReport> {
+    let limit = limit.filter(|limit| *limit > 0);
+    let after_sequence_floor = after_sequence.unwrap_or(0);
+    let mut events = store
+        .load_global_events()?
+        .into_iter()
+        .filter(|event| event.id > after_sequence_floor)
+        .filter(|event| filter_eq(organization_id, &event.organization_id))
+        .filter(|event| filter_eq(brand_id, &event.brand_id))
+        .filter(|event| filter_eq(product_id, &event.product_id))
+        .collect::<Vec<_>>();
+    events.sort_by_key(|event| event.id);
+    if let Some(limit) = limit {
+        events.truncate(limit);
+    }
+    let next_after_sequence = events
+        .iter()
+        .map(|event| event.id)
+        .max()
+        .unwrap_or(after_sequence_floor);
+    let affected_workflow_ids = events
+        .iter()
+        .filter_map(|event| event.workflow_id.as_deref())
+        .filter(|workflow_id| !workflow_id.trim().is_empty())
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut materializations = Vec::new();
+    let mut materialized_row_count = 0;
+    for workflow_id in &affected_workflow_ids {
+        let report = materialize_cost_ledger_index(
+            store,
+            Some(workflow_id),
+            organization_id,
+            brand_id,
+            product_id,
+            source_kind,
+            addon_id,
+            limit,
+        )?;
+        materialized_row_count += report.materialized_row_count;
+        materializations.push(report);
+    }
+    Ok(CostLedgerIncrementalReport {
+        schema_version: COST_LEDGER_INCREMENTAL_SCHEMA_VERSION.to_string(),
+        status: "cost_ledger_incremental_completed".to_string(),
+        filters: CostLedgerIncrementalFilters {
+            after_sequence,
+            organization_id: normalize_filter(organization_id),
+            brand_id: normalize_filter(brand_id),
+            product_id: normalize_filter(product_id),
+            source_kind: normalize_filter(source_kind),
+            addon_id: normalize_filter(addon_id),
+            limit,
+        },
+        event_count: events.len(),
+        affected_workflow_count: affected_workflow_ids.len(),
+        affected_workflow_ids,
+        materialization_count: materializations.len(),
+        materialized_row_count,
+        next_after_sequence,
+        materializations,
+        incremental_policy: vec![
+            "scan global_events after the supplied cursor".to_string(),
+            "deduplicate affected workflow ids before materializing cost rows".to_string(),
+            "leave global events untouched so the cursor is not self-fed by incremental maintenance"
+                .to_string(),
+            "use full workflow materialization only for workflows with new event evidence".to_string(),
+        ],
+    })
 }
 
 fn cost_ledger_index_writes(report: &CostLedgerReport) -> Vec<CostLedgerIndexWrite> {
