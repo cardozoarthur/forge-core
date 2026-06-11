@@ -5543,7 +5543,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.milestone.cli_demo",
                 "Generate Replacement CLI Demo",
-                "Generate deterministic Forge-first replacement-grade CLI demo evidence for coding, research/artifact and long-running async workflows without mutating external resources.",
+                "Generate deterministic Forge-first replacement-grade CLI demo evidence for coding, patch lifecycle artifacts, research/artifact and long-running async workflows without mutating external resources.",
                 object_schema(&[("origin", "string", "codex|opencode|skill|mcp")], &[]),
                 "forge.milestone.cli_demo.v1",
                 &[

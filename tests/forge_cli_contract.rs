@@ -2950,6 +2950,10 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
     assert!(replacement_cli["evidence"]
         .as_str()
         .unwrap()
+        .contains("patch_lifecycle_demo"));
+    assert!(replacement_cli["evidence"]
+        .as_str()
+        .unwrap()
         .contains("exec --project-root"));
     assert!(replacement_cli["gap_before_promotion"]
         .as_str()
@@ -4340,6 +4344,68 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("diff_review_required")));
+    assert!(coding["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("patch_lifecycle_artifacts_recorded")));
+    assert_eq!(
+        coding["patch_lifecycle"]["schema_version"],
+        "forge.milestone.patch_lifecycle_demo.v1"
+    );
+    assert_eq!(
+        coding["patch_lifecycle"]["status"],
+        "patch_lifecycle_demo_ready"
+    );
+    assert_eq!(
+        coding["patch_lifecycle"]["external_resources_mutated"],
+        false
+    );
+    assert_eq!(coding["patch_lifecycle"]["restored_to_clean_state"], true);
+    assert_eq!(coding["patch_lifecycle"]["target_path"], "src/demo.rs");
+    assert!(coding["patch_lifecycle"]["artifact_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|artifact| artifact["kind"] == "patch_plan"
+            && artifact["schema_version"] == "forge.patch_plan.v1"));
+    assert!(coding["patch_lifecycle"]["artifact_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|artifact| artifact["kind"] == "patch_review"
+            && artifact["schema_version"] == "forge.patch_review.v1"));
+    assert!(coding["patch_lifecycle"]["artifact_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|artifact| artifact["kind"] == "patch_diff"
+            && artifact["schema_version"] == "forge.patch_diff.v1"));
+    assert!(coding["patch_lifecycle"]["artifact_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|artifact| artifact["kind"] == "patch_apply"
+            && artifact["schema_version"] == "forge.patch_apply.v1"));
+    assert!(coding["patch_lifecycle"]["artifact_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|artifact| artifact["kind"] == "patch_revert"
+            && artifact["schema_version"] == "forge.patch_revert.v1"));
+    assert!(coding["patch_lifecycle"]["artifact_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|artifact| artifact["kind"] == "patch_restore"
+            && artifact["schema_version"] == "forge.patch_restore.v1"));
+    assert!(coding["patch_lifecycle"]["gates"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("patch_edit_intake_required")));
+    assert!(coding["patch_lifecycle"]["gates"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("human_restore_approval_recorded")));
     assert!(coding["commands"]
         .as_array()
         .unwrap()
@@ -4404,6 +4470,63 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
 }
 
 #[test]
+fn milestone_cli_demo_supports_default_relative_store_when_patch_fixture_changes_cwd() {
+    let temp = tempdir().unwrap();
+
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "milestone",
+            "cli-demo",
+            "--origin",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let coding = json["flows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|flow| flow["kind"] == "coding_task")
+        .unwrap();
+    let patch_lifecycle = &coding["patch_lifecycle"];
+    assert_eq!(
+        patch_lifecycle["schema_version"],
+        "forge.milestone.patch_lifecycle_demo.v1"
+    );
+    assert_eq!(patch_lifecycle["restored_to_clean_state"], true);
+
+    let repository_path = Path::new(patch_lifecycle["repository_path"].as_str().unwrap());
+    assert!(repository_path.starts_with(temp.path().join(".forge").join("tmp")));
+    assert!(
+        !repository_path.join(".forge").exists(),
+        "patch lifecycle artifacts must stay under the original store when the fixture changes cwd"
+    );
+
+    let patch_plan = patch_lifecycle["artifact_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|artifact| artifact["kind"] == "patch_plan")
+        .unwrap();
+    let patch_plan_path = temp
+        .path()
+        .join(".forge")
+        .join(patch_plan["path"].as_str().unwrap());
+    assert!(
+        patch_plan_path.exists(),
+        "patch lifecycle artifacts should be written under the default relative store"
+    );
+}
+
+#[test]
 fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -4415,6 +4538,10 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.milestone.cli_demo"),
         "the packaged Forge skill should expose the MCP replacement CLI demo tool"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.milestone.patch_lifecycle_demo.v1"),
+        "the packaged Forge skill should mention the replacement CLI patch lifecycle demo receipt"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge interactive command-palette"),
@@ -4444,6 +4571,10 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
     assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
         tool["name"] == "forge.milestone.cli_demo"
             && tool["output_schema"] == "forge.milestone.cli_demo.v1"
+            && tool["description"]
+                .as_str()
+                .unwrap()
+                .contains("patch lifecycle artifacts")
             && tool["async_safe"] == false
             && tool["mutates_workflow"] == true
     }));

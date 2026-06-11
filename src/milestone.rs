@@ -4,6 +4,10 @@ use crate::ir::{
     ir_schema_version, CreativeArtifact, DesignToken, DocumentSection, DocumentSpec, ScreenSpec,
     SemanticAlias, TokenCollection, TokenType,
 };
+use crate::patch::{
+    build_patch_apply, build_patch_diff, build_patch_plan, build_patch_restore, build_patch_revert,
+    build_patch_review, PatchApplyArtifactRef, PatchDiffOptions, PatchPlanArtifactRef,
+};
 use crate::request::{heartbeat_request, start_async_request, RunActivity};
 use crate::schedule::{create_daily_goal_research_workflow, run_daily_goal_research_smoke};
 use crate::storage::ForgeStore;
@@ -13,7 +17,10 @@ use crate::workflow::{
 use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const MILESTONE_STATUS_SCHEMA_VERSION: &str = "forge.milestone.status.v1";
 const MILESTONE_MANIFEST_SCHEMA_VERSION: &str = "forge.milestone.manifest.v1";
@@ -349,6 +356,7 @@ pub struct MilestoneDemoArtifact {
 }
 
 const CLI_DEMO_SCHEMA_VERSION: &str = "forge.milestone.cli_demo.v1";
+const PATCH_LIFECYCLE_DEMO_SCHEMA_VERSION: &str = "forge.milestone.patch_lifecycle_demo.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MilestoneCliDemoReport {
@@ -375,8 +383,40 @@ pub struct ReplacementCliDemoFlow {
     pub commands: Vec<String>,
     pub artifact_refs: Vec<String>,
     pub validation_evidence: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch_lifecycle: Option<MilestonePatchLifecycleDemo>,
     pub activity: Option<RunActivity>,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestonePatchLifecycleDemo {
+    pub schema_version: String,
+    pub status: String,
+    pub target_path: String,
+    pub repository_path: String,
+    pub external_resources_mutated: bool,
+    pub restored_to_clean_state: bool,
+    pub plan_status: String,
+    pub review_status: String,
+    pub diff_status: String,
+    pub apply_status: String,
+    pub revert_status: String,
+    pub restore_status: String,
+    pub artifact_refs: Vec<MilestonePatchLifecycleArtifact>,
+    pub gates: Vec<String>,
+    pub commands: Vec<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestonePatchLifecycleArtifact {
+    pub kind: String,
+    pub schema_version: String,
+    pub status: String,
+    pub path: String,
+    pub sha256: String,
+    pub bytes: u64,
 }
 
 pub fn build_milestone_export_demo(
@@ -537,6 +577,8 @@ pub fn build_replacement_cli_demo(
         origin,
     )?;
     coding_workflow = store.load_workflow(&coding_workflow.id)?;
+    let patch_lifecycle =
+        build_replacement_cli_patch_lifecycle_demo(store, &coding_workflow.id, origin)?;
 
     let research = create_daily_goal_research_workflow(
         store,
@@ -607,12 +649,16 @@ pub fn build_replacement_cli_demo(
                 validation_evidence: vec![
                     "bounded_context_required".to_string(),
                     "diff_review_required".to_string(),
+                    "patch_lifecycle_artifacts_recorded".to_string(),
+                    "patch_edit_intake_required".to_string(),
+                    "approved_restore_returns_fixture_to_clean_state".to_string(),
                     "validation_before_promotion".to_string(),
                     "artifact_lineage_attached".to_string(),
                     "json_stable_commands".to_string(),
                 ],
+                patch_lifecycle: Some(patch_lifecycle),
                 activity: None,
-                summary: "The coding demo proves the Forge CLI has a native flow shape for context routing, executor handoff, diff-review artifact lineage, validation and inspection. It remains groundwork because Forge does not yet edit files or render an in-TUI diff approval UX by itself.".to_string(),
+                summary: "The coding demo proves the Forge CLI has a native flow shape for context routing, executor handoff, edit intake, patch plan/review/diff/apply/revert/restore artifact lineage, validation and inspection. It remains groundwork because richer interactive terminal editing still needs broader UX evidence.".to_string(),
             },
             ReplacementCliDemoFlow {
                 kind: "research_artifact".to_string(),
@@ -634,6 +680,7 @@ pub fn build_replacement_cli_demo(
                     "telegram_delivery_recorded_without_secrets".to_string(),
                     "schedule_loop_lineage_preserved".to_string(),
                 ],
+                patch_lifecycle: None,
                 activity: None,
                 summary: "The research demo uses the canonical daily Goal workflow to produce Markdown, PDF and Telegram delivery records through Forge-owned workflow semantics without live external delivery or secrets.".to_string(),
             },
@@ -658,19 +705,301 @@ pub fn build_replacement_cli_demo(
                     "workflow_lifecycle_marked_running".to_string(),
                     "resume_status_commands_available".to_string(),
                 ],
+                patch_lifecycle: None,
                 activity: Some(heartbeat.activity),
                 summary: "The async demo proves Forge can start a durable run, mark it active through heartbeat, expose status/list/inspect visibility and keep orchestration authority during long-running executor work.".to_string(),
             },
         ],
         remaining_gaps: vec![
-            "Native file editing with permission gates and rollback remains required before replacement-grade promotion.".to_string(),
-            "In-TUI diff/patch approval, deeper provider/session lifecycle controls and richer terminal UX remain required.".to_string(),
+            "Executor-driven real project editing and broader TUI apply/approval ergonomics remain required before replacement-grade promotion.".to_string(),
+            "Deeper provider/session lifecycle controls and richer terminal UX remain required.".to_string(),
             "This demo is deterministic evidence and does not claim Forge 0.5 promotion readiness.".to_string(),
         ],
         lean_governance: vec![
             "The demo reuses existing request, schedule, artifact and validation primitives instead of adding a separate agent shell architecture.".to_string(),
             "No Docker, Kubernetes, Knative, model install, device access, Telegram send or external resource mutation is performed.".to_string(),
         ],
+    })
+}
+
+fn build_replacement_cli_patch_lifecycle_demo(
+    store: &ForgeStore,
+    workflow_id: &str,
+    origin: &str,
+) -> Result<MilestonePatchLifecycleDemo> {
+    let artifact_store = open_absolute_store_view(store)?;
+    let store = &artifact_store;
+    let workflow = store.load_workflow(workflow_id)?;
+    let task_id = workflow
+        .tasks
+        .first()
+        .map(|task| task.id.clone())
+        .ok_or_else(|| anyhow::anyhow!("replacement CLI demo workflow has no tasks"))?;
+    let repository_path = prepare_patch_lifecycle_demo_repository(store, workflow_id)?;
+    let target_path = "src/demo.rs".to_string();
+
+    with_current_dir(&repository_path, || {
+        let plan = build_patch_plan(
+            store,
+            workflow_id,
+            &task_id,
+            vec![target_path.clone()],
+            "Update the demo fixture through Forge-owned patch lifecycle evidence.",
+            origin,
+        )?;
+        let plan_artifact_path = patch_plan_artifact_path(store, &plan.artifact, "patch plan")?;
+
+        fs::write(
+            repository_path.join(&target_path),
+            "pub fn demo_message() -> &'static str {\n    \"updated through forge patch lifecycle\"\n}\n",
+        )?;
+
+        let review = build_patch_review(
+            store,
+            workflow_id,
+            &task_id,
+            vec![target_path.clone()],
+            origin,
+            Some(&plan_artifact_path),
+        )?;
+        let diff = build_patch_diff(
+            store,
+            workflow_id,
+            &task_id,
+            vec![target_path.clone()],
+            PatchDiffOptions {
+                file_index: 0,
+                hunk_index: 0,
+                context_lines: 3,
+                origin,
+            },
+        )?;
+        let validation_commands = vec![format!("git diff --check -- {target_path}")];
+        let apply = build_patch_apply(
+            store,
+            workflow_id,
+            &task_id,
+            vec![target_path.clone()],
+            origin,
+            Some(&plan_artifact_path),
+            Some(&validation_commands),
+        )?;
+        let apply_artifact_path = patch_apply_artifact_path(store, &apply.artifact, "patch apply")?;
+        let revert = build_patch_revert(
+            store,
+            workflow_id,
+            &task_id,
+            &apply_artifact_path,
+            origin,
+            None,
+        )?;
+        let revert_artifact_path =
+            patch_apply_artifact_path(store, &revert.artifact, "patch revert")?;
+        let restore = build_patch_restore(
+            store,
+            workflow_id,
+            &task_id,
+            &revert_artifact_path,
+            "forge_cli_demo",
+            true,
+            origin,
+        )?;
+        let restored_to_clean_state = patch_demo_target_is_clean(&repository_path, &target_path)?;
+
+        Ok(MilestonePatchLifecycleDemo {
+            schema_version: PATCH_LIFECYCLE_DEMO_SCHEMA_VERSION.to_string(),
+            status: if restored_to_clean_state {
+                "patch_lifecycle_demo_ready"
+            } else {
+                "patch_lifecycle_demo_restore_incomplete"
+            }
+            .to_string(),
+            target_path,
+            repository_path: repository_path.display().to_string(),
+            external_resources_mutated: false,
+            restored_to_clean_state,
+            plan_status: plan.status.clone(),
+            review_status: review.status.clone(),
+            diff_status: diff.status.clone(),
+            apply_status: apply.status.clone(),
+            revert_status: revert.status.clone(),
+            restore_status: restore.status.clone(),
+            artifact_refs: vec![
+                summarize_plan_artifact("patch_plan", &plan.schema_version, &plan.status, &plan.artifact)?,
+                summarize_patch_artifact("patch_review", &review.schema_version, &review.status, &review.artifact)?,
+                summarize_patch_artifact("patch_diff", &diff.schema_version, &diff.status, &diff.artifact)?,
+                summarize_patch_artifact("patch_apply", &apply.schema_version, &apply.status, &apply.artifact)?,
+                summarize_patch_artifact("patch_revert", &revert.schema_version, &revert.status, &revert.artifact)?,
+                summarize_patch_artifact("patch_restore", &restore.schema_version, &restore.status, &restore.artifact)?,
+            ],
+            gates: vec![
+                "patch_edit_intake_required".to_string(),
+                "plan_before_executor_edit".to_string(),
+                "review_before_apply".to_string(),
+                "diff_navigation_before_approval".to_string(),
+                "validation_before_apply_record".to_string(),
+                "rollback_proposal_before_restore".to_string(),
+                "human_restore_approval_recorded".to_string(),
+            ],
+            commands: vec![
+                "forge interactive patch-workbench --output json".to_string(),
+                format!("forge patch plan --workflow {workflow_id} --task {task_id} --intent <intent> --path src/demo.rs --origin forge_cli --output json"),
+                format!("forge patch review --workflow {workflow_id} --task {task_id} --path src/demo.rs --plan-artifact <patch-plan> --origin forge_cli --output json"),
+                format!("forge patch diff --workflow {workflow_id} --task {task_id} --path src/demo.rs --file-index 0 --hunk-index 0 --output json"),
+                format!("forge patch apply --workflow {workflow_id} --task {task_id} --path src/demo.rs --plan-artifact <patch-plan> --origin forge_cli --output json"),
+                format!("forge patch revert --workflow {workflow_id} --task {task_id} --apply-artifact <patch-apply> --origin forge_cli --output json"),
+                format!("forge patch restore --workflow {workflow_id} --task {task_id} --revert-artifact <patch-revert> --approved-by forge_cli_demo --confirm-restore --origin forge_cli --output json"),
+            ],
+            summary: "Deterministic fixture repo executed the full Forge patch lifecycle with plan, review, diff, apply record, revert proposal and approved restore artifacts, then returned the target file to a clean Git state.".to_string(),
+        })
+    })
+}
+
+fn open_absolute_store_view(store: &ForgeStore) -> Result<ForgeStore> {
+    let path = if store.path().is_absolute() {
+        store.path().to_path_buf()
+    } else {
+        env::current_dir()?.join(store.path())
+    };
+    ForgeStore::open(path)
+}
+
+fn prepare_patch_lifecycle_demo_repository(
+    store: &ForgeStore,
+    workflow_id: &str,
+) -> Result<PathBuf> {
+    let repository_path = store
+        .base_dir()
+        .join("tmp")
+        .join(format!("{workflow_id}-patch-lifecycle-repo"));
+    if repository_path.exists() {
+        fs::remove_dir_all(&repository_path)?;
+    }
+    fs::create_dir_all(repository_path.join("src"))?;
+    fs::write(
+        repository_path.join("src/demo.rs"),
+        "pub fn demo_message() -> &'static str {\n    \"initial\"\n}\n",
+    )?;
+    run_demo_git(&repository_path, &["init", "-q"])?;
+    run_demo_git(
+        &repository_path,
+        &["config", "user.email", "forge@example.com"],
+    )?;
+    run_demo_git(&repository_path, &["config", "user.name", "Forge CLI Demo"])?;
+    run_demo_git(&repository_path, &["add", "src/demo.rs"])?;
+    run_demo_git(&repository_path, &["commit", "-q", "-m", "initial fixture"])?;
+    Ok(repository_path)
+}
+
+fn with_current_dir<T>(dir: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    let previous = env::current_dir()?;
+    env::set_current_dir(dir)?;
+    let result = operation();
+    env::set_current_dir(previous)?;
+    result
+}
+
+fn run_demo_git(repository_path: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repository_path)
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn patch_demo_target_is_clean(repository_path: &Path, target_path: &str) -> Result<bool> {
+    let status = Command::new("git")
+        .args(["status", "--short", "--", target_path])
+        .current_dir(repository_path)
+        .output()?;
+    if !status.status.success() {
+        bail!(
+            "git status failed while checking patch lifecycle restore: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
+    let content = fs::read_to_string(repository_path.join(target_path))?;
+    Ok(status.stdout.is_empty() && content.contains("\"initial\""))
+}
+
+fn patch_plan_artifact_path(
+    store: &ForgeStore,
+    artifact: &Option<PatchPlanArtifactRef>,
+    label: &str,
+) -> Result<String> {
+    let Some(artifact) = artifact else {
+        bail!("{label} did not produce an artifact");
+    };
+    Ok(resolve_store_artifact_path(store, &artifact.path)
+        .display()
+        .to_string())
+}
+
+fn patch_apply_artifact_path(
+    store: &ForgeStore,
+    artifact: &Option<PatchApplyArtifactRef>,
+    label: &str,
+) -> Result<String> {
+    let Some(artifact) = artifact else {
+        bail!("{label} did not produce an artifact");
+    };
+    Ok(resolve_store_artifact_path(store, &artifact.path)
+        .display()
+        .to_string())
+}
+
+fn resolve_store_artifact_path(store: &ForgeStore, artifact_path: &str) -> PathBuf {
+    let path = Path::new(artifact_path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        store.base_dir().join(path)
+    }
+}
+
+fn summarize_plan_artifact(
+    kind: &str,
+    schema_version: &str,
+    status: &str,
+    artifact: &Option<PatchPlanArtifactRef>,
+) -> Result<MilestonePatchLifecycleArtifact> {
+    let Some(artifact) = artifact else {
+        bail!("{kind} artifact is missing");
+    };
+    Ok(MilestonePatchLifecycleArtifact {
+        kind: kind.to_string(),
+        schema_version: schema_version.to_string(),
+        status: status.to_string(),
+        path: artifact.path.clone(),
+        sha256: artifact.sha256.clone(),
+        bytes: artifact.bytes,
+    })
+}
+
+fn summarize_patch_artifact(
+    kind: &str,
+    schema_version: &str,
+    status: &str,
+    artifact: &Option<PatchApplyArtifactRef>,
+) -> Result<MilestonePatchLifecycleArtifact> {
+    let Some(artifact) = artifact else {
+        bail!("{kind} artifact is missing");
+    };
+    Ok(MilestonePatchLifecycleArtifact {
+        kind: kind.to_string(),
+        schema_version: schema_version.to_string(),
+        status: status.to_string(),
+        path: artifact.path.clone(),
+        sha256: artifact.sha256.clone(),
+        bytes: artifact.bytes,
     })
 }
 
@@ -743,8 +1072,8 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
             "replacement_grade_cli",
             "Replacement-grade Forge CLI",
             "groundwork",
-            "0.4.x validates the no-argument interactive home, slash commands, conversational routing, human decisions, async run handoff and observability surfaces. 0.4.144 adds `forge milestone cli-demo` and MCP tool `forge.milestone.cli_demo`, which generate deterministic Forge-first demo evidence for coding, research/artifact and long-running async flows. 0.4.145 adds executor-aware, runtime-aware and cost-sensitive routing classification to the interactive conversational router, plus creative artifact and design token dependency fields to `forge inspect` output. 0.4.146 adds registry-level run health summaries so `forge list` and `forge inspect` expose running, stale and missing-heartbeat runs even when `active_run_count` is zero. 0.4.148 adds process-liveness-aware run activity so a recorded live executor PID keeps long-running handoffs active after heartbeat TTL expiry instead of forcing stale recovery. 0.4.150 adds `forge patch plan` and MCP tool `forge.patch.plan` as a plan-only file-editing contract with repo-relative permission gates, file snapshots, diff-review commands, validation commands and workflow artifact lineage. 0.4.151 adds apply artifacts and guarded revert proposals so rollback intent is recorded without silently executing destructive file restores. 0.4.152 adds in-TUI `/patch plan`, `/patch apply` and `/patch revert` slash commands to the interactive REPL with human approval prompts before execution, plus two-token slash command routing support. 0.4.153 adds in-TUI `/context` and `/handoff` commands so operators can inspect bounded context routes and explicitly approve executor handoff lease acquisition from inside `forge`. 0.4.154 exposes `forge.interactive.home`, `forge.interactive.slash_commands` and `forge.interactive.route` through MCP so agents can inspect and use the same interactive command/chat routing model without taking over orchestration. The patch lifecycle now includes `forge patch review`, MCP `forge.patch.review` and `/patch review`, which persist `forge.patch_review.v1` evidence with Git diff/status/check summaries before apply approval while keeping source files unchanged, `forge patch diff`, MCP `forge.patch.diff` and `/patch diff`, which persist `forge.patch_diff.v1` evidence for read-only multi-file diff navigation, and `forge patch restore`, MCP `forge.patch.restore` and `/patch restore`, which persist `forge.patch_restore.v1` evidence for explicit, approved repo-local file restoration from a revert artifact. The interactive home now carries `forge.interactive.ui_composition.v1` with ordered regions, Core widgets, safe Addon widgets and refresh/inspection commands for TUI/web/agent dashboard composition, plus `forge.interactive.structured_logs.v1` with recent event sequence, workflow, category, severity, origin, correlation, observability and payload preview for timeline drill-downs; the dedicated `forge interactive readiness`/`forge.interactive.readiness` surface exposes executor, runtime, brain, shell, Forge-controlled surface and harness readiness with corrective commands before shell or handoff without loading the full home, the dedicated `forge interactive harness`/`forge.interactive.harness` surface exposes a consolidated harness center with mode, doctor, shim status, wrap-plan and token-headroom preview without loading the full home or executing child CLIs, the dedicated `forge interactive sessions`/`forge.interactive.sessions` surface exposes provider/session readiness, lifecycle state, per-session `operation_plan`, shell history commands and next lifecycle controls without opening or attaching shells, the dedicated `forge interactive command-palette`/`forge.interactive.command_palette` surface exposes grouped contextual navigation, workflow, patch, permission, harness, session and observability actions with mutation and approval flags without mutating state, the dedicated `forge interactive autocomplete`/`forge.interactive.autocomplete` surface exposes read-only slash-command and command-palette suggestions for partial operator input with score, source panel, mutation and approval flags, the dedicated `forge interactive patch-workbench`/`forge.interactive.patch_workbench` surface exposes Git status, file lanes, bounded inline `diff_preview`, multi-file `diff_review_queue`, `forge.interactive.patch_edit_intake.v1` required inputs and form readiness, diff stat/check, explicit `approval_flow` review/approval/rollback gates and permission-gated patch lifecycle commands for native file-editing and rich diff-review UI without mutating files, the dedicated `forge interactive permissions`/`forge.interactive.permissions` surface exposes tenant memberships, Addon permission authorizations, pending/timed-out human approvals and granular next-action commands without mutating state, the dedicated `forge interactive workflow-dag`/`forge.interactive.workflow_dag` surface exposes dependency nodes, edges, readiness, human waits and drill-down commands without loading the full home, the dedicated `forge interactive structured-logs`/`forge.interactive.structured_logs` surface exposes the same log contract without loading the full home, and the home plus dedicated `forge interactive task-board`/`forge.interactive.task_board` surface also carry `forge.interactive.task_board.v1`, giving TUI/web/agent dashboards workflow lanes, operable per-task cards, ready handoffs, checkpoint resume candidates, human waits, artifacts and direct next-action commands. The harness also emits guarded CLI execution receipts with Forge-first wrapper env, workflow/task/run lineage, non-destructive PATH shim installation, automatic native CLI discovery that excludes the shim directory, read-only shim status audits for PATH precedence/ownership/recursion, executor-sync projection of Forge-first shim readiness into brain/shell entrypoints, plan-only `forge shells` / MCP `forge.shell.launch_plan` launch reports with readiness/preflight/context/handoff/heartbeat gates, `forge.shell.record_plan` receipts that write `shell_launch_planned` global events, `forge sessions` / MCP `forge.sessions` reports with session lifecycle state, `forge.brain_session_operation_plan.v1` recommendations, `forge sessions lifecycle` / MCP `forge.session.lifecycle` audit-only lifecycle receipts, ordered transition policy with `previous_state`, `lifecycle_sequence`, invalid transition rejection, `lifecycle_policy.allowed_next_states`, next lifecycle commands and provider/state/readiness filters in `forge sessions` plus MCP `forge.sessions`, and `forge sessions history`, MCP `forge.session.history` and `/sessions history` for per-session chronological audit history, `forge.harness.exec_event.v1` global events for guarded CLI receipts with task/node correlation, output hashes/excerpts and reversible stdout/stderr token-headroom reports for authorized real child execution, project `.forge/harness.json` `require_lineage_for_exec` policy that returns `harness_exec_blocked_by_project_policy` when real child execution lacks workflow/task/run lineage, `forge harness doctor` plus MCP `forge.harness.doctor` consolidated readiness audits and the interactive home `harness_doctor_panel`, `forge harness mode --project-root` plus MCP `forge.harness.mode` `project_root` diagnostics for auditing another project before launching a brain CLI, and `forge harness wrap-plan --project-root` plus MCP `forge.harness.wrap_plan` `project_root` support so wrapper planning respects a remote project's Forge-first defaults before shell execution, and `forge harness install-shims --project-root` plus MCP `forge.harness.install_shims` `project_root` support so shim installation uses the same remote project defaults, and `forge harness exec --project-root` plus MCP `forge.harness.exec` `project_root` support so execution uses remote defaults and policy without changing child `cwd`. This is enabling groundwork, not proof that `forge` can replace Codex/OpenCode for daily permission-gated shell work and end-to-end coding/research workflows.",
-            "Add deeper end-to-end coding/research workflows and continue hardening file editing permission UX before promoting this beyond groundwork.",
+            "0.4.x validates the no-argument interactive home, slash commands, conversational routing, human decisions, async run handoff and observability surfaces. 0.4.144 adds `forge milestone cli-demo` and MCP tool `forge.milestone.cli_demo`, which generate deterministic Forge-first demo evidence for coding, research/artifact and long-running async flows, including `forge.milestone.patch_lifecycle_demo.v1` with plan/review/diff/apply/revert/restore artifact lineage in an isolated fixture repo. 0.4.145 adds executor-aware, runtime-aware and cost-sensitive routing classification to the interactive conversational router, plus creative artifact and design token dependency fields to `forge inspect` output. 0.4.146 adds registry-level run health summaries so `forge list` and `forge inspect` expose running, stale and missing-heartbeat runs even when `active_run_count` is zero. 0.4.148 adds process-liveness-aware run activity so a recorded live executor PID keeps long-running handoffs active after heartbeat TTL expiry instead of forcing stale recovery. 0.4.150 adds `forge patch plan` and MCP tool `forge.patch.plan` as a plan-only file-editing contract with repo-relative permission gates, file snapshots, diff-review commands, validation commands and workflow artifact lineage. 0.4.151 adds apply artifacts and guarded revert proposals so rollback intent is recorded without silently executing destructive file restores. 0.4.152 adds in-TUI `/patch plan`, `/patch apply` and `/patch revert` slash commands to the interactive REPL with human approval prompts before execution, plus two-token slash command routing support. 0.4.153 adds in-TUI `/context` and `/handoff` commands so operators can inspect bounded context routes and explicitly approve executor handoff lease acquisition from inside `forge`. 0.4.154 exposes `forge.interactive.home`, `forge.interactive.slash_commands` and `forge.interactive.route` through MCP so agents can inspect and use the same interactive command/chat routing model without taking over orchestration. The patch lifecycle now includes `forge patch review`, MCP `forge.patch.review` and `/patch review`, which persist `forge.patch_review.v1` evidence with Git diff/status/check summaries before apply approval while keeping source files unchanged, `forge patch diff`, MCP `forge.patch.diff` and `/patch diff`, which persist `forge.patch_diff.v1` evidence for read-only multi-file diff navigation, and `forge patch restore`, MCP `forge.patch.restore` and `/patch restore`, which persist `forge.patch_restore.v1` evidence for explicit, approved repo-local file restoration from a revert artifact. The interactive home now carries `forge.interactive.ui_composition.v1` with ordered regions, Core widgets, safe Addon widgets and refresh/inspection commands for TUI/web/agent dashboard composition, plus `forge.interactive.structured_logs.v1` with recent event sequence, workflow, category, severity, origin, correlation, observability and payload preview for timeline drill-downs; the dedicated `forge interactive readiness`/`forge.interactive.readiness` surface exposes executor, runtime, brain, shell, Forge-controlled surface and harness readiness with corrective commands before shell or handoff without loading the full home, the dedicated `forge interactive harness`/`forge.interactive.harness` surface exposes a consolidated harness center with mode, doctor, shim status, wrap-plan and token-headroom preview without loading the full home or executing child CLIs, the dedicated `forge interactive sessions`/`forge.interactive.sessions` surface exposes provider/session readiness, lifecycle state, per-session `operation_plan`, shell history commands and next lifecycle controls without opening or attaching shells, the dedicated `forge interactive command-palette`/`forge.interactive.command_palette` surface exposes grouped contextual navigation, workflow, patch, permission, harness, session and observability actions with mutation and approval flags without mutating state, the dedicated `forge interactive autocomplete`/`forge.interactive.autocomplete` surface exposes read-only slash-command and command-palette suggestions for partial operator input with score, source panel, mutation and approval flags, the dedicated `forge interactive patch-workbench`/`forge.interactive.patch_workbench` surface exposes Git status, file lanes, bounded inline `diff_preview`, multi-file `diff_review_queue`, `forge.interactive.patch_edit_intake.v1` required inputs and form readiness, diff stat/check, explicit `approval_flow` review/approval/rollback gates and permission-gated patch lifecycle commands for native file-editing and rich diff-review UI without mutating files, the dedicated `forge interactive permissions`/`forge.interactive.permissions` surface exposes tenant memberships, Addon permission authorizations, pending/timed-out human approvals and granular next-action commands without mutating state, the dedicated `forge interactive workflow-dag`/`forge.interactive.workflow_dag` surface exposes dependency nodes, edges, readiness, human waits and drill-down commands without loading the full home, the dedicated `forge interactive structured-logs`/`forge.interactive.structured_logs` surface exposes the same log contract without loading the full home, and the home plus dedicated `forge interactive task-board`/`forge.interactive.task_board` surface also carry `forge.interactive.task_board.v1`, giving TUI/web/agent dashboards workflow lanes, operable per-task cards, ready handoffs, checkpoint resume candidates, human waits, artifacts and direct next-action commands. The harness also emits guarded CLI execution receipts with Forge-first wrapper env, workflow/task/run lineage, non-destructive PATH shim installation, automatic native CLI discovery that excludes the shim directory, read-only shim status audits for PATH precedence/ownership/recursion, executor-sync projection of Forge-first shim readiness into brain/shell entrypoints, plan-only `forge shells` / MCP `forge.shell.launch_plan` launch reports with readiness/preflight/context/handoff/heartbeat gates, `forge.shell.record_plan` receipts that write `shell_launch_planned` global events, `forge sessions` / MCP `forge.sessions` reports with session lifecycle state, `forge.brain_session_operation_plan.v1` recommendations, `forge sessions lifecycle` / MCP `forge.session.lifecycle` audit-only lifecycle receipts, ordered transition policy with `previous_state`, `lifecycle_sequence`, invalid transition rejection, `lifecycle_policy.allowed_next_states`, next lifecycle commands and provider/state/readiness filters in `forge sessions` plus MCP `forge.sessions`, and `forge sessions history`, MCP `forge.session.history` and `/sessions history` for per-session chronological audit history, `forge.harness.exec_event.v1` global events for guarded CLI receipts with task/node correlation, output hashes/excerpts and reversible stdout/stderr token-headroom reports for authorized real child execution, project `.forge/harness.json` `require_lineage_for_exec` policy that returns `harness_exec_blocked_by_project_policy` when real child execution lacks workflow/task/run lineage, `forge harness doctor` plus MCP `forge.harness.doctor` consolidated readiness audits and the interactive home `harness_doctor_panel`, `forge harness mode --project-root` plus MCP `forge.harness.mode` `project_root` diagnostics for auditing another project before launching a brain CLI, and `forge harness wrap-plan --project-root` plus MCP `forge.harness.wrap_plan` `project_root` support so wrapper planning respects a remote project's Forge-first defaults before shell execution, and `forge harness install-shims --project-root` plus MCP `forge.harness.install_shims` `project_root` support so shim installation uses the same remote project defaults, and `forge harness exec --project-root` plus MCP `forge.harness.exec` `project_root` support so execution uses remote defaults and policy without changing child `cwd`. This is enabling groundwork, not proof that `forge` can replace Codex/OpenCode for daily permission-gated shell work and end-to-end coding/research workflows.",
+            "Add broader executor-driven real-project editing/research workflows and continue hardening terminal file editing UX before promoting this beyond groundwork.",
         ),
         capability(
             "experimental_multimodal_runtime",
