@@ -577,6 +577,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 "/sync".to_string(),
                 "/brains".to_string(),
                 "/shells".to_string(),
+                "/harness".to_string(),
                 "/validate".to_string(),
                 "/logs".to_string(),
                 "/workers".to_string(),
@@ -1557,6 +1558,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/harness",
+            "Harness",
+            "Audit the effective Forge-first CLI harness mode before opening brain shells.",
+            &["forge", "harness", "mode", "--output", "json"],
+            false,
+            "low",
+        ),
+        slash(
             "/runtimes",
             "Runtimes",
             "List runtime policy.",
@@ -2511,6 +2520,28 @@ mod tests {
         assert!(route.recognized);
         assert!(!route.mutates_workflow);
         assert_eq!(route.risk_level, "low");
+    }
+
+    #[test]
+    fn route_slash_command_recognizes_harness_audit() {
+        let report = route_slash_command("/harness");
+        assert_eq!(report.input_kind, "slash_command");
+        assert_eq!(report.routing_decision, "slash_command");
+        let route = report.slash_command.unwrap();
+        assert_eq!(route.name, "/harness");
+        assert!(route.recognized);
+        assert!(!route.mutates_workflow);
+        assert_eq!(route.risk_level, "low");
+        assert_eq!(
+            route.equivalent_command,
+            vec![
+                "forge".to_string(),
+                "harness".to_string(),
+                "mode".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]
+        );
     }
 
     #[test]

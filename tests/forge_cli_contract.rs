@@ -32290,6 +32290,7 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     assert!(text.contains("/context"));
     assert!(text.contains("/brains"));
     assert!(text.contains("/shells"));
+    assert!(text.contains("/harness"));
     assert!(text.contains("/pm"));
     assert!(text.contains("/decision"));
 }
@@ -32942,6 +32943,7 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         "/executors",
         "/brains",
         "/shells",
+        "/harness",
         "/runtimes",
         "/validate",
         "/approve",
@@ -33357,6 +33359,10 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("/brains")));
+    assert!(home_json["result"]["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/harness")));
     assert!(home_json["result"]["dashboard"]["workflow_focus"].is_array());
     assert_eq!(
         home_json["result"]["dashboard"]["harness_mode_panel"]["schema_version"],
