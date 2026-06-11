@@ -1602,6 +1602,79 @@ pub fn build_event_improvement_policy(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn build_event_improvement_policy_for_context(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    node_ref: Option<&str>,
+    addon_id: Option<&str>,
+    min_event_count: Option<usize>,
+    min_total_duration_ms: Option<i64>,
+    min_total_retry_count: Option<i64>,
+    min_context_pressure_bps: Option<i64>,
+    min_total_wait_seconds: Option<i64>,
+    limit: Option<usize>,
+    after_sequence: Option<i64>,
+    operating_context: &OperatingContextSpec,
+) -> Result<EventImprovementPolicyReport> {
+    if operating_context.tenant_policy_mode != "enforce" {
+        return build_event_improvement_policy(
+            store,
+            workflow_id,
+            organization_id,
+            brand_id,
+            product_id,
+            node_ref,
+            addon_id,
+            min_event_count,
+            min_total_duration_ms,
+            min_total_retry_count,
+            min_context_pressure_bps,
+            min_total_wait_seconds,
+            limit,
+            after_sequence,
+        );
+    }
+    ensure_operating_context_policy(store, operating_context, "events improvement policy list")?;
+    let organization_id = enforce_timeline_tenant_filter(
+        "events improvement policy list",
+        "organization",
+        organization_id,
+        &operating_context.organization.id,
+    )?;
+    let brand_id = enforce_timeline_tenant_filter(
+        "events improvement policy list",
+        "brand",
+        brand_id,
+        &operating_context.brand.id,
+    )?;
+    let product_id = enforce_timeline_tenant_filter(
+        "events improvement policy list",
+        "product",
+        product_id,
+        &operating_context.product.id,
+    )?;
+    build_event_improvement_policy(
+        store,
+        workflow_id,
+        Some(&organization_id),
+        Some(&brand_id),
+        Some(&product_id),
+        node_ref,
+        addon_id,
+        min_event_count,
+        min_total_duration_ms,
+        min_total_retry_count,
+        min_context_pressure_bps,
+        min_total_wait_seconds,
+        limit,
+        after_sequence,
+    )
+}
+
 fn load_event_observability_records(
     store: &ForgeStore,
     workflow_id: Option<&str>,

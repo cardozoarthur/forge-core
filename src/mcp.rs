@@ -32,7 +32,7 @@ use crate::credential_vault::{
     CREDENTIAL_VAULT_COMMAND_SCHEMA,
 };
 use crate::event::{
-    build_event_improvement_policy, build_event_observability_history_for_context,
+    build_event_improvement_policy_for_context, build_event_observability_history_for_context,
     build_event_observability_index_for_context, build_event_service_plan,
     build_global_event_timeline_for_context, build_workflow_event_stream, emit_event_egress,
     ingest_inbound_event, list_event_services, list_inbound_event_inbox,
@@ -745,6 +745,7 @@ struct EventImprovementPolicyInput {
     min_total_wait_seconds: Option<i64>,
     limit: Option<usize>,
     after_sequence: Option<i64>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1747,6 +1748,11 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         ("product_id", "string", "optional product filter"),
                         ("node_ref", "string", "optional node/task reference filter"),
                         ("addon_id", "string", "optional Addon id filter"),
+                        (
+                            "project_root",
+                            "string",
+                            "optional project root used for tenant-policy enforcement",
+                        ),
                         ("min_events", "integer", "minimum event count before a scope is considered"),
                         ("min_duration_ms", "integer", "minimum total duration before repeated work is considered expensive"),
                         ("min_retries", "integer", "minimum total retries before rework is recommended"),
@@ -5207,7 +5213,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let product_id = input.product_id.or(input.product);
             let node_ref = input.node_ref.or(input.node);
             let addon_id = input.addon_id.or(input.addon);
-            serde_json::to_value(build_event_improvement_policy(
+            let project_root = input
+                .project_root
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let operating_context = load_project_operating_context(&project_root)?;
+            serde_json::to_value(build_event_improvement_policy_for_context(
                 store,
                 workflow_id.as_deref(),
                 organization_id.as_deref(),
@@ -5222,6 +5233,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.min_wait_seconds.or(input.min_total_wait_seconds),
                 input.limit,
                 input.after_sequence,
+                &operating_context,
             )?)?
         }
         "forge.events.ingest" => {

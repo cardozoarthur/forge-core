@@ -3770,6 +3770,225 @@ fn event_improvement_policy_recommends_deterministic_and_context_repairs_for_cli
 }
 
 #[test]
+fn event_improvement_policy_enforces_project_tenant_policy_for_global_recommendations() {
+    let temp = tempdir().unwrap();
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: policy-org
+  label: Policy Org
+brand:
+  scope: brand
+  id: policy-brand
+  label: Policy Brand
+product:
+  scope: product
+  id: policy-product
+  label: Policy Product
+user:
+  scope: user
+  id: policy-user
+  label: Policy User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+
+    let store = temp.path().join("forge.sqlite");
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let store_handle = ForgeStore::open(&store).unwrap();
+    let tenant_context = serde_json::json!({
+        "organization": {"scope": "organization", "id": "policy-org", "label": "Policy Org"},
+        "brand": {"scope": "brand", "id": "policy-brand", "label": "Policy Brand"},
+        "product": {"scope": "product", "id": "policy-product", "label": "Policy Product"},
+        "user": {"scope": "user", "id": "policy-user", "label": "Policy User"},
+        "channel": {"scope": "channel", "id": "local_cli", "label": "Local CLI"},
+        "tenant_policy_mode": "enforce"
+    });
+    let other_tenant_context = serde_json::json!({
+        "organization": {"scope": "organization", "id": "other-policy-org", "label": "Other Policy Org"},
+        "brand": {"scope": "brand", "id": "other-policy-brand", "label": "Other Policy Brand"},
+        "product": {"scope": "product", "id": "other-policy-product", "label": "Other Policy Product"},
+        "user": {"scope": "user", "id": "other-policy-user", "label": "Other Policy User"},
+        "channel": {"scope": "channel", "id": "api", "label": "API"},
+        "tenant_policy_mode": "enforce"
+    });
+    for index in 0..2 {
+        store_handle
+            .record_global_event(
+                "policy_tenant_seed",
+                &format!("visible-{index}"),
+                None,
+                "ai_executor_completed",
+                "codex",
+                "recorded",
+                &serde_json::json!({
+                    "node_id": "node-policy-visible",
+                    "addon_id": "forge.addon.policy_visible",
+                    "duration_ms": 75,
+                    "retry_count": 0
+                }),
+                &tenant_context,
+            )
+            .unwrap();
+        store_handle
+            .record_global_event(
+                "policy_tenant_seed",
+                &format!("hidden-{index}"),
+                None,
+                "ai_executor_completed",
+                "codex",
+                "recorded",
+                &serde_json::json!({
+                    "node_id": "node-policy-hidden",
+                    "addon_id": "forge.addon.policy_hidden",
+                    "duration_ms": 900,
+                    "retry_count": 0
+                }),
+                &other_tenant_context,
+            )
+            .unwrap();
+    }
+
+    let policy_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "improvement-policy",
+            "--min-events",
+            "2",
+            "--min-duration-ms",
+            "100",
+            "--min-retries",
+            "99",
+            "--min-context-pressure-bps",
+            "10000",
+            "--min-wait-seconds",
+            "9999",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let policy_json: Value = serde_json::from_slice(&policy_output).unwrap();
+    assert_eq!(policy_json["filters"]["organization_id"], "policy-org");
+    assert_eq!(policy_json["summary"]["total_event_count"], 2);
+    assert!(policy_json["recommendations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|recommendation| recommendation["organization_id"] == "policy-org"));
+
+    let mcp_policy_input = serde_json::json!({
+        "project_root": temp.path().display().to_string(),
+        "min_events": 2,
+        "min_duration_ms": 100,
+        "min_retries": 99,
+        "min_context_pressure_bps": 10000,
+        "min_wait_seconds": 9999
+    });
+    let mcp_policy_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.events.improvement_policy",
+            "--input",
+            &mcp_policy_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_policy_json: Value = serde_json::from_slice(&mcp_policy_output).unwrap();
+    assert_eq!(
+        mcp_policy_json["result"]["filters"]["organization_id"],
+        "policy-org"
+    );
+    assert_eq!(mcp_policy_json["result"]["summary"]["total_event_count"], 2);
+
+    forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "membership-update",
+            "--subject",
+            "policy-user",
+            "--organization",
+            "policy-org",
+            "--brand",
+            "policy-brand",
+            "--product",
+            "policy-product",
+            "--deny",
+            "context:read",
+            "--source",
+            "test-cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let denied_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "improvement-policy",
+            "--min-events",
+            "2",
+            "--min-duration-ms",
+            "100",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let denied_stderr = String::from_utf8(denied_output).unwrap();
+    assert!(
+        denied_stderr.contains("multi-tenant enforcement blocked events improvement policy list")
+    );
+    assert!(denied_stderr.contains("context:read"));
+}
+
+#[test]
 fn tenant_index_tracks_async_run_resources() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
