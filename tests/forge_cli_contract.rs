@@ -32237,8 +32237,16 @@ fn parallel_scheduling_detects_independent_tasks_in_same_wave() {
 fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("harness.json"),
+        r#"{"default_mode":"forge_first"}"#,
+    )
+    .unwrap();
 
     let output = forge()
+        .current_dir(temp.path())
         .args(["--store", store.to_str().unwrap(), "interactive", "home"])
         .assert()
         .success()
@@ -32260,6 +32268,9 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     assert!(text.contains("Brain router"));
     assert!(text.contains("Forge-controlled surfaces"));
     assert!(text.contains("Shell entrypoints"));
+    assert!(text.contains("Harness mode"));
+    assert!(text.contains("forge_first"));
+    assert!(text.contains("project_config"));
     assert!(text.contains("Runtime/node status"));
     assert!(text.contains("Scheduler worker status"));
     assert!(text.contains("Workflow focus"));
@@ -33324,6 +33335,7 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
     let home = forge()
         .arg("--store")
         .arg(store.to_str().unwrap())
+        .current_dir(temp.path())
         .args(["mcp", "call", "forge.interactive.home"])
         .args(["--output", "json"])
         .assert()
@@ -33346,6 +33358,14 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         .unwrap()
         .contains(&serde_json::json!("/brains")));
     assert!(home_json["result"]["dashboard"]["workflow_focus"].is_array());
+    assert_eq!(
+        home_json["result"]["dashboard"]["harness_mode_panel"]["schema_version"],
+        "forge.harness.mode.v1"
+    );
+    assert!(
+        home_json["result"]["dashboard"]["harness_mode_panel"]["effective_mode"].is_string(),
+        "interactive home should expose harness mode for shell and brain dashboards"
+    );
     assert!(
         home_json["result"]["dashboard"]["task_board_panel"]["schema_version"]
             == "forge.interactive.task_board.v1",

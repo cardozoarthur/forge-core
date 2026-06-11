@@ -4,6 +4,7 @@ use crate::cost::build_cost_ledger;
 use crate::event::build_global_event_timeline;
 use crate::executor::load_executors;
 use crate::graph::{AtomicTask, ExecutorKind, TaskStatus};
+use crate::harness::{build_harness_mode_report, HarnessModeOptions, HarnessModeReport};
 use crate::memory::memory_policy_report;
 use crate::ops::build_addon_view_renderer_report;
 use crate::registry::{
@@ -57,6 +58,7 @@ pub struct InteractiveDashboard {
     pub brain_router: String,
     pub forge_controlled_surfaces: Vec<String>,
     pub shell_entrypoints: Vec<String>,
+    pub harness_mode_panel: HarnessModeReport,
     pub runtime_node_status: String,
     pub repository_context: String,
     pub estimated_costs: String,
@@ -342,6 +344,11 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             )
         })
         .collect::<Vec<_>>();
+    let harness_mode_panel = build_harness_mode_report(HarnessModeOptions {
+        forge_first: false,
+        observe_only: false,
+        project_root: None,
+    });
     let runtime_node_status = if runtimes.usable.is_empty() {
         "no allowed async run substrates".to_string()
     } else {
@@ -537,6 +544,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             brain_router,
             forge_controlled_surfaces,
             shell_entrypoints,
+            harness_mode_panel,
             runtime_node_status,
             repository_context: env::current_dir()
                 .map(|path| path.display().to_string())
@@ -800,6 +808,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Brain router: {brain_router}\n\
          Forge-controlled surfaces: {forge_controlled_surfaces}\n\
          Shell entrypoints: {shell_entrypoints}\n\
+         Harness mode: {harness_effective_mode} from {harness_source}; project config {harness_project_status}; audit {harness_audit_command}\n\
          Runtime/node status: {runtime_node_status}\n\
          Scheduler worker status: {scheduler_worker_status}\n\
          Workflow focus: {workflow_focus}\n\
@@ -830,6 +839,10 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         brain_router = d.brain_router,
         forge_controlled_surfaces = forge_controlled_surfaces,
         shell_entrypoints = shell_entrypoints,
+        harness_effective_mode = d.harness_mode_panel.effective_mode,
+        harness_source = d.harness_mode_panel.forge_first_source,
+        harness_project_status = d.harness_mode_panel.project_config_status,
+        harness_audit_command = "forge harness mode --output json",
         runtime_node_status = d.runtime_node_status,
         scheduler_worker_status = d.scheduler_worker_status,
         workflow_focus = workflow_focus,
