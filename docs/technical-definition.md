@@ -416,10 +416,13 @@ scope, tenant policy, brand voice/tone/values, terminology, design token/compone
 sources, design guidelines and operating policy, plus a compact versioned
 `personality_decision` with the Forge-owned routing owner, organization/brand/product/user/channel,
 selected persona mode/profile, selected voice/tone, brand voice/tone/values, style sources,
-fallback mode and audit flag. The prompt packet also carries `organization_context_sha256`,
-`personality_decision_sha256`, `organization_context_required` and
-`personality_decision_required`, so adapters cannot silently ignore organizational context or
-personality routing while still using a bounded task-local packet. These inputs, plus context
+fallback mode and audit flag, plus a compact versioned `company_work_decision` with the
+multidisciplinary operating checklist for product, technical, financial, administrative,
+marketing, communication and delivery work. The prompt packet also carries
+`organization_context_sha256`, `personality_decision_sha256`, `company_work_decision_sha256`,
+`organization_context_required`, `personality_decision_required` and
+`company_work_decision_required`, so adapters cannot silently ignore organizational context,
+personality routing or company operating discipline while still using a bounded task-local packet. These inputs, plus context
 checksum and lineage checksum, are folded into a stable adapter-facing hash. Packets also include a versioned
 `replay_manifest` that records the replay command, selector version, budget,
 context checksum and content-addressed shard refs; prompt packets bind its checksum

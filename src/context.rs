@@ -26,6 +26,7 @@ const EXECUTOR_PROMPT_PACKET_VERSION: &str = "forge.executor.prompt_packet.v2";
 const ORGANIZATION_PROMPT_CONTEXT_SCHEMA_VERSION: &str =
     "forge.context.organization_prompt_context.v1";
 const PERSONALITY_DECISION_SCHEMA_VERSION: &str = "forge.context.personality_decision.v1";
+const COMPANY_WORK_DECISION_SCHEMA_VERSION: &str = "forge.context.company_work_decision.v1";
 const CONTEXT_REPLAY_MANIFEST_SCHEMA_VERSION: &str = "forge.context.replay_manifest.v1";
 const CONTEXT_SELECTION_RECEIPT_SCHEMA_VERSION: &str = "forge.context.selection_receipt.v1";
 const EXECUTION_POLICY_DECISION_SCHEMA_VERSION: &str = "forge.context.execution_policy_decision.v1";
@@ -269,6 +270,8 @@ pub struct ContextPromptPacket {
     pub organization_context_sha256: String,
     pub personality_decision: ContextPersonalityDecision,
     pub personality_decision_sha256: String,
+    pub company_work_decision: ContextCompanyWorkDecision,
+    pub company_work_decision_sha256: String,
     pub context_sha256: String,
     pub lineage_sha256: String,
     pub replay_manifest_sha256: String,
@@ -326,6 +329,26 @@ pub struct ContextPersonalityDecision {
     pub style_sources: Vec<String>,
     pub selection_reason: String,
     pub fallback_mode: String,
+    pub validation_gate: String,
+    pub auditable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextCompanyWorkDecision {
+    pub schema_version: String,
+    pub decision_owner: String,
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    pub user_id: String,
+    pub channel_id: String,
+    pub task_id: String,
+    pub task_title: String,
+    pub operating_depth: String,
+    pub departments: Vec<String>,
+    pub required_decisions: Vec<String>,
+    pub request_rule: String,
+    pub sensitive_action_rule: String,
     pub validation_gate: String,
     pub auditable: bool,
 }
@@ -913,6 +936,8 @@ struct ContextPromptPacketSeed {
     organization_context_sha256: String,
     personality_decision: ContextPersonalityDecision,
     personality_decision_sha256: String,
+    company_work_decision: ContextCompanyWorkDecision,
+    company_work_decision_sha256: String,
     context_sha256: String,
     lineage_sha256: String,
     replay_manifest_sha256: String,
@@ -2030,6 +2055,9 @@ fn build_prompt_packet(input: PromptPacketInput<'_>) -> Result<ContextPromptPack
         build_personality_decision(input.operating_context, persona, input.persona_profile);
     let personality_decision_sha256 =
         hex_sha256(serde_json::to_string(&personality_decision)?.as_bytes());
+    let company_work_decision = build_company_work_decision(input.operating_context, input.task);
+    let company_work_decision_sha256 =
+        hex_sha256(serde_json::to_string(&company_work_decision)?.as_bytes());
     let seed = ContextPromptPacketSeed {
         schema_version: PROMPT_PACKET_SCHEMA_VERSION,
         packet_version: EXECUTOR_PROMPT_PACKET_VERSION,
@@ -2052,6 +2080,8 @@ fn build_prompt_packet(input: PromptPacketInput<'_>) -> Result<ContextPromptPack
         organization_context_sha256: organization_context_sha256.clone(),
         personality_decision: personality_decision.clone(),
         personality_decision_sha256: personality_decision_sha256.clone(),
+        company_work_decision: company_work_decision.clone(),
+        company_work_decision_sha256: company_work_decision_sha256.clone(),
         context_sha256: input.context_sha256.to_string(),
         lineage_sha256: input.lineage.lineage_sha256.clone(),
         replay_manifest_sha256: input.replay_manifest_sha256.to_string(),
@@ -2081,6 +2111,8 @@ fn build_prompt_packet(input: PromptPacketInput<'_>) -> Result<ContextPromptPack
         organization_context_sha256: seed.organization_context_sha256,
         personality_decision: seed.personality_decision,
         personality_decision_sha256: seed.personality_decision_sha256,
+        company_work_decision: seed.company_work_decision,
+        company_work_decision_sha256: seed.company_work_decision_sha256,
         context_sha256: seed.context_sha256,
         lineage_sha256: seed.lineage_sha256,
         replay_manifest_sha256: seed.replay_manifest_sha256,
@@ -2182,6 +2214,44 @@ fn build_personality_decision(
         fallback_mode,
         validation_gate: "personality_decision_required".to_string(),
         auditable: persona.map(|persona| persona.auditable).unwrap_or(true),
+    }
+}
+
+fn build_company_work_decision(
+    context: &OperatingContextSpec,
+    task: &AtomicTask,
+) -> ContextCompanyWorkDecision {
+    ContextCompanyWorkDecision {
+        schema_version: COMPANY_WORK_DECISION_SCHEMA_VERSION.to_string(),
+        decision_owner: "forge_company_work_router".to_string(),
+        organization_id: context.organization.id.clone(),
+        brand_id: context.brand.id.clone(),
+        product_id: context.product.id.clone(),
+        user_id: context.user.id.clone(),
+        channel_id: context.channel.id.clone(),
+        task_id: task.id.clone(),
+        task_title: task.title.clone(),
+        operating_depth: "compact_multidisciplinary_review".to_string(),
+        departments: vec![
+            "product".to_string(),
+            "technical".to_string(),
+            "financial".to_string(),
+            "administrative".to_string(),
+            "marketing".to_string(),
+            "communication".to_string(),
+            "delivery".to_string(),
+        ],
+        required_decisions: vec![
+            "what_will_be_done".to_string(),
+            "how_it_will_be_done".to_string(),
+            "delivery_acceptance_and_evidence".to_string(),
+            "how_the_delivery_will_be_communicated".to_string(),
+            "cost_time_risk_owner".to_string(),
+        ],
+        request_rule: "Every customer request gets a product/business response before or alongside technical execution; small tasks may use a compact decision, large systems use full departmental review.".to_string(),
+        sensitive_action_rule: "Public communication, shared memory writes, external broadcasts, financial commitments and customer-impacting actions require explicit governance.".to_string(),
+        validation_gate: "company_work_decision_required".to_string(),
+        auditable: true,
     }
 }
 
@@ -2457,6 +2527,7 @@ fn prompt_packet_instruction_sources(persona: Option<&PersonaRoutingSpec>) -> Ve
         "forge_design_system".to_string(),
         "forge_operating_policy".to_string(),
         "forge_personality_router".to_string(),
+        "forge_company_work_router".to_string(),
     ]);
 
     if let Some(persona) = persona {
@@ -2480,6 +2551,7 @@ fn prompt_packet_validation_gates(
     let mut gates = BTreeSet::new();
     gates.insert("organization_context_required".to_string());
     gates.insert("personality_decision_required".to_string());
+    gates.insert("company_work_decision_required".to_string());
     if !task.execution_policy.validation_gate.trim().is_empty() {
         gates.insert(task.execution_policy.validation_gate.clone());
     }

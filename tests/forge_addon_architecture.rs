@@ -6111,6 +6111,66 @@ capabilities:
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("personality_decision_required")));
+    let company_work_decision = &context_json["prompt_packet"]["company_work_decision"];
+    assert_eq!(
+        company_work_decision["schema_version"],
+        "forge.context.company_work_decision.v1"
+    );
+    assert_eq!(
+        company_work_decision["decision_owner"],
+        "forge_company_work_router"
+    );
+    assert_eq!(
+        company_work_decision["organization_id"],
+        "digital-directive"
+    );
+    assert_eq!(company_work_decision["brand_id"], "forge");
+    assert_eq!(company_work_decision["product_id"], "forge-core");
+    assert_eq!(
+        company_work_decision["operating_depth"],
+        "compact_multidisciplinary_review"
+    );
+    assert_eq!(
+        company_work_decision["departments"],
+        serde_json::json!([
+            "product",
+            "technical",
+            "financial",
+            "administrative",
+            "marketing",
+            "communication",
+            "delivery"
+        ])
+    );
+    assert!(company_work_decision["required_decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|decision| decision == "what_will_be_done"));
+    assert!(company_work_decision["required_decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|decision| decision == "how_the_delivery_will_be_communicated"));
+    assert_eq!(
+        company_work_decision["request_rule"],
+        "Every customer request gets a product/business response before or alongside technical execution; small tasks may use a compact decision, large systems use full departmental review."
+    );
+    assert_eq!(
+        company_work_decision["validation_gate"],
+        "company_work_decision_required"
+    );
+    assert_eq!(
+        context_json["prompt_packet"]["company_work_decision_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert!(context_json["prompt_packet"]["validation_gates"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("company_work_decision_required")));
     assert_eq!(
         context_json["lineage"]["operating_context_sha256"]
             .as_str()
