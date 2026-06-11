@@ -47,10 +47,10 @@ use crate::executor::{
 };
 use crate::handoff::build_task_handoff;
 use crate::harness::{
-    analyze_token_headroom, build_cli_wrapper_plan, inspect_cli_harness_shim_status,
-    install_cli_harness_shim, persist_token_headroom_report, retrieve_headroom_blob,
-    run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions,
-    CliWrapperPlanOptions,
+    analyze_token_headroom, build_cli_wrapper_plan, build_harness_mode_report,
+    inspect_cli_harness_shim_status, install_cli_harness_shim, persist_token_headroom_report,
+    retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
+    CliShimStatusOptions, CliWrapperPlanOptions, HarnessModeOptions,
 };
 use crate::identity::{
     audit_tenant_index, ensure_workflow_policy, evaluate_tenant_policy_for_action,
@@ -410,6 +410,12 @@ struct HarnessRetrieveHeadroomInput {
     #[serde(alias = "ref")]
     retrieval_ref: String,
     include_content: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HarnessModeInput {
+    forge_first: Option<bool>,
+    observe_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4786,6 +4792,18 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.harness.mode",
+                "Inspect Harness Mode",
+                "Report the effective Forge-first harness mode, source, project config status and precedence before wrapper, shim or exec use.",
+                object_schema(&[
+                    ("forge_first", "boolean", "simulate an explicit Forge-first CLI flag"),
+                    ("observe_only", "boolean", "simulate an observe-only CLI override"),
+                ], &[]),
+                "forge.harness.mode.v1",
+                &["forge", "harness", "mode", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.harness.wrap_plan",
                 "Plan Forge-First CLI Wrapper",
                 "Return a non-destructive Forge-first wrapper plan for Codex, Claude, Gemini or OpenCode with context budget and token-headroom environment shaping.",
@@ -7271,6 +7289,14 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &input.retrieval_ref,
                 input.include_content.unwrap_or(false),
             )?)?
+        }
+        "forge.harness.mode" => {
+            let input: HarnessModeInput = parse_input(input)?;
+            serde_json::to_value(build_harness_mode_report(HarnessModeOptions {
+                forge_first: input.forge_first.unwrap_or(false),
+                observe_only: input.observe_only.unwrap_or(false),
+                project_root: None,
+            }))?
         }
         "forge.harness.wrap_plan" => {
             let input: HarnessWrapPlanInput = parse_input(input)?;

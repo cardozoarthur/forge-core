@@ -541,6 +541,7 @@ fn harness_cli_honors_project_forge_first_default_mode_config() {
 #[test]
 fn harness_mode_reports_effective_default_source_and_project_config_precedence() {
     let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
     let output = forge()
         .env_remove("FORGE_HARNESS_DEFAULT_MODE")
         .current_dir(temp.path())
@@ -595,6 +596,57 @@ fn harness_mode_reports_effective_default_source_and_project_config_precedence()
     assert_eq!(project_mode["forge_first_source"], "project_config");
     assert_eq!(project_mode["project_config_status"], "loaded");
     assert_eq!(project_mode["project_default_mode"], "forge_first");
+
+    let mcp_tools_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_tools: Value = serde_json::from_slice(&mcp_tools_output).unwrap();
+    let mcp_mode_tool = find_mcp_tool(&mcp_tools, "forge.harness.mode");
+    assert_eq!(mcp_mode_tool["output_schema"], "forge.harness.mode.v1");
+    assert_eq!(
+        mcp_mode_tool["input_schema"]["properties"]["observe_only"]["type"],
+        "boolean"
+    );
+    assert_eq!(mcp_mode_tool["async_safe"], true);
+    assert_eq!(mcp_mode_tool["mutates_workflow"], false);
+
+    let mcp_mode_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.mode",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_mode: Value = serde_json::from_slice(&mcp_mode_output).unwrap();
+    assert_eq!(mcp_mode["schema_version"], "forge.mcp.call.v1");
+    assert_eq!(
+        mcp_mode["result"]["schema_version"],
+        "forge.harness.mode.v1"
+    );
+    assert_eq!(mcp_mode["result"]["forge_first"], true);
+    assert_eq!(mcp_mode["result"]["forge_first_source"], "project_config");
+    assert_eq!(mcp_mode["result"]["project_config_status"], "loaded");
 
     let env_output = forge()
         .env("FORGE_HARNESS_DEFAULT_MODE", "forge_first")

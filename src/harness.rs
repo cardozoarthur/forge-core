@@ -14,6 +14,7 @@ pub const CLI_WRAPPER_PLAN_SCHEMA_VERSION: &str = "forge.harness.cli_wrapper_pla
 pub const HEADROOM_RETRIEVAL_SCHEMA_VERSION: &str = "forge.harness.headroom_retrieval.v1";
 pub const CLI_HARNESS_EXEC_SCHEMA_VERSION: &str = "forge.harness.exec_receipt.v1";
 pub const CLI_HARNESS_EXEC_EVENT_SCHEMA_VERSION: &str = "forge.harness.exec_event.v1";
+pub const CLI_HARNESS_MODE_SCHEMA_VERSION: &str = "forge.harness.mode.v1";
 pub const CLI_SHIM_INSTALL_SCHEMA_VERSION: &str = "forge.harness.shim_install.v1";
 pub const CLI_SHIM_STATUS_SCHEMA_VERSION: &str = "forge.harness.shim_status.v1";
 const CLI_SHIM_MARKER: &str = "# forge-harness-shim:v1";
@@ -74,6 +75,42 @@ pub struct CliWrapperPlanOptions<'a> {
     pub run_id: Option<&'a str>,
     pub context_budget: usize,
     pub token_headroom: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessModeReport {
+    pub schema_version: String,
+    pub status: String,
+    pub forge_first: bool,
+    pub effective_mode: String,
+    pub forge_first_source: String,
+    pub env_default_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_default_value: Option<String>,
+    pub project_config_path: String,
+    pub project_config_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_default_mode: Option<String>,
+    pub precedence: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HarnessModeOptions<'a> {
+    pub forge_first: bool,
+    pub observe_only: bool,
+    pub project_root: Option<&'a Path>,
+}
+
+struct HarnessForgeFirstMode {
+    forge_first: bool,
+    source: &'static str,
+}
+
+struct HarnessProjectDefaultMode {
+    path: PathBuf,
+    status: &'static str,
+    forge_first: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -394,6 +431,55 @@ pub fn retrieve_headroom_blob(
         retrieval_ref,
         include_content,
     ))
+}
+
+pub fn build_harness_mode_report(options: HarnessModeOptions<'_>) -> HarnessModeReport {
+    let HarnessModeOptions {
+        forge_first,
+        observe_only,
+        project_root,
+    } = options;
+    let mode = resolve_harness_forge_first(forge_first, observe_only, project_root);
+    let env_default_value = env::var("FORGE_HARNESS_DEFAULT_MODE").ok();
+    let project_root = project_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let project = read_harness_project_mode(&project_root);
+    HarnessModeReport {
+        schema_version: CLI_HARNESS_MODE_SCHEMA_VERSION.to_string(),
+        status: "harness_mode_resolved".to_string(),
+        forge_first: mode.forge_first,
+        effective_mode: harness_effective_mode(mode.forge_first).to_string(),
+        forge_first_source: mode.source.to_string(),
+        env_default_present: env_default_value.is_some(),
+        env_default_value,
+        project_config_path: project.path.display().to_string(),
+        project_config_status: project.status.to_string(),
+        project_default_mode: project
+            .forge_first
+            .map(harness_effective_mode)
+            .map(ToString::to_string),
+        precedence: vec![
+            "observe_only_flag".to_string(),
+            "explicit_flag".to_string(),
+            "env_default".to_string(),
+            "project_config".to_string(),
+            "default_observe_only".to_string(),
+        ],
+        notes: vec![
+            "This report is read-only and does not install shims or execute brain CLIs."
+                .to_string(),
+            "Use it before wrap-plan, install-shims or exec when the active Forge-first policy is unclear.".to_string(),
+        ],
+    }
+}
+
+pub fn resolve_harness_forge_first_source(
+    flag_forge_first: bool,
+    flag_observe_only: bool,
+) -> (bool, &'static str) {
+    let mode = resolve_harness_forge_first(flag_forge_first, flag_observe_only, None);
+    (mode.forge_first, mode.source)
 }
 
 pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperPlanReport {
@@ -1069,6 +1155,103 @@ fn normalize_harness_mode_source(value: &str, forge_first: bool) -> String {
     } else {
         "default_observe_only".to_string()
     }
+}
+
+fn resolve_harness_forge_first(
+    flag_forge_first: bool,
+    flag_observe_only: bool,
+    project_root: Option<&Path>,
+) -> HarnessForgeFirstMode {
+    if flag_observe_only {
+        return HarnessForgeFirstMode {
+            forge_first: false,
+            source: "observe_only_flag",
+        };
+    }
+    if flag_forge_first {
+        return HarnessForgeFirstMode {
+            forge_first: true,
+            source: "explicit_flag",
+        };
+    }
+    if harness_default_mode_prefers_forge_first() {
+        return HarnessForgeFirstMode {
+            forge_first: true,
+            source: "env_default",
+        };
+    }
+    if let Some(forge_first) = harness_project_default_mode(project_root) {
+        return HarnessForgeFirstMode {
+            forge_first,
+            source: "project_config",
+        };
+    }
+    HarnessForgeFirstMode {
+        forge_first: false,
+        source: "default_observe_only",
+    }
+}
+
+fn harness_default_mode_prefers_forge_first() -> bool {
+    env::var("FORGE_HARNESS_DEFAULT_MODE")
+        .ok()
+        .map(|value| harness_mode_prefers_forge_first(&value))
+        .unwrap_or(false)
+}
+
+fn harness_project_default_mode(project_root: Option<&Path>) -> Option<bool> {
+    let project_root = match project_root {
+        Some(path) => path.to_path_buf(),
+        None => env::current_dir().ok()?,
+    };
+    read_harness_project_mode(&project_root).forge_first
+}
+
+fn read_harness_project_mode(project_root: &Path) -> HarnessProjectDefaultMode {
+    let path = project_root.join(".forge/harness.json");
+    let Ok(content) = fs::read_to_string(&path) else {
+        return HarnessProjectDefaultMode {
+            path,
+            status: "missing",
+            forge_first: None,
+        };
+    };
+    let Ok(config) = serde_json::from_str::<Value>(&content) else {
+        return HarnessProjectDefaultMode {
+            path,
+            status: "invalid_json",
+            forge_first: None,
+        };
+    };
+    let forge_first = match config.get("default_mode") {
+        Some(Value::String(value)) => Some(harness_mode_prefers_forge_first(value)),
+        Some(Value::Bool(value)) => Some(*value),
+        _ => None,
+    };
+    HarnessProjectDefaultMode {
+        path,
+        status: if forge_first.is_some() {
+            "loaded"
+        } else {
+            "missing_default_mode"
+        },
+        forge_first,
+    }
+}
+
+fn harness_effective_mode(forge_first: bool) -> &'static str {
+    if forge_first {
+        "forge_first"
+    } else {
+        "observe_only"
+    }
+}
+
+fn harness_mode_prefers_forge_first(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "forge_first" | "forge-first" | "forgefirst" | "1" | "true" | "yes" | "on"
+    )
 }
 
 struct CliShimScriptOptions<'a> {
