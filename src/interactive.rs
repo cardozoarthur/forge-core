@@ -33,6 +33,7 @@ use std::process::Command;
 const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
 const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_board.v1";
 const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
+const INTERACTIVE_READINESS_SCHEMA_VERSION: &str = "forge.interactive.readiness.v1";
 const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
 const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
 const INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION: &str = "forge.interactive.structured_logs.v1";
@@ -166,6 +167,41 @@ pub struct InteractiveUiCompositionCommands {
     pub refresh: Vec<String>,
     pub inspect_addons: Vec<String>,
     pub open_task_board: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveReadinessPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub executor_count: usize,
+    pub usable_executor_count: usize,
+    pub usable_executors: Vec<String>,
+    pub needs_executor_approval: bool,
+    pub runtime_count: usize,
+    pub usable_runtime_count: usize,
+    pub usable_runtimes: Vec<String>,
+    pub needs_runtime_approval: bool,
+    pub brain_count: usize,
+    pub selected_brain: String,
+    pub forge_controlled_surface_count: usize,
+    pub forge_controlled_surfaces: Vec<String>,
+    pub shell_count: usize,
+    pub forge_first_shell_count: usize,
+    pub shell_entrypoints: Vec<String>,
+    pub harness_mode: HarnessModeReport,
+    pub harness_doctor: HarnessDoctorReport,
+    pub next_actions: Vec<String>,
+    pub commands: InteractiveReadinessCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveReadinessCommands {
+    pub sync: Vec<String>,
+    pub brains: Vec<String>,
+    pub sessions: Vec<String>,
+    pub shells: Vec<String>,
+    pub harness_mode: Vec<String>,
+    pub harness_doctor: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -805,6 +841,89 @@ pub fn slash_command_catalog() -> SlashCommandCatalogReport {
     }
 }
 
+pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveReadinessPanel> {
+    let executors = load_executors(store)?;
+    let runtimes = load_runtimes(store)?;
+    let repository_context_path = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let harness_shim_dir = default_interactive_harness_shim_dir();
+    let harness_mode = build_harness_mode_report(HarnessModeOptions {
+        forge_first: false,
+        observe_only: false,
+        project_root: Some(&repository_context_path),
+    });
+    let harness_doctor = build_harness_doctor_report(HarnessDoctorOptions {
+        shim_dir: &harness_shim_dir,
+        executor: "codex",
+        forge_first: false,
+        observe_only: false,
+        project_root: Some(&repository_context_path),
+        workflow_id: None,
+        task_id: None,
+        run_id: None,
+        context_budget: 1200,
+        context_budget_source: "interactive_default",
+        token_headroom: true,
+        token_headroom_source: "interactive_default",
+        require_token_headroom_for_forge_first: false,
+    })?;
+    let shell_entrypoints = executors
+        .brain_router
+        .shell_sessions
+        .iter()
+        .map(|session| {
+            format!(
+                "{}: {}",
+                session.id,
+                if session.entry_command.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    session.entry_command.join(" ")
+                }
+            )
+        })
+        .collect::<Vec<_>>();
+    let forge_first_shell_count = executors
+        .brain_router
+        .shell_sessions
+        .iter()
+        .filter(|session| session.forge_first_ready)
+        .count();
+    let next_actions = readiness_next_actions(
+        executors.usable.is_empty(),
+        executors.needs_human_approval,
+        runtimes.needs_human_approval,
+        &harness_doctor,
+    );
+
+    Ok(InteractiveReadinessPanel {
+        schema_version: INTERACTIVE_READINESS_SCHEMA_VERSION.to_string(),
+        status: "interactive_readiness_ready".to_string(),
+        executor_count: executors.executors.len(),
+        usable_executor_count: executors.usable.len(),
+        usable_executors: executors.usable.clone(),
+        needs_executor_approval: executors.needs_human_approval,
+        runtime_count: runtimes.runtimes.len(),
+        usable_runtime_count: runtimes.usable.len(),
+        usable_runtimes: runtimes.usable.clone(),
+        needs_runtime_approval: runtimes.needs_human_approval,
+        brain_count: executors.brain_router.brains.len(),
+        selected_brain: executors
+            .brain_router
+            .selected_brain
+            .clone()
+            .unwrap_or_else(|| "none".to_string()),
+        forge_controlled_surface_count: executors.brain_router.forge_controlled_surfaces.len(),
+        forge_controlled_surfaces: executors.brain_router.forge_controlled_surfaces.clone(),
+        shell_count: executors.brain_router.shell_sessions.len(),
+        forge_first_shell_count,
+        shell_entrypoints,
+        harness_mode,
+        harness_doctor,
+        next_actions,
+        commands: readiness_commands(),
+    })
+}
+
 pub fn build_interactive_task_board(store: &ForgeStore) -> Result<InteractiveTaskBoardPanel> {
     let workflows = list_workflows_with_filters(
         store,
@@ -833,6 +952,90 @@ fn default_interactive_harness_shim_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".forge/bin")
+}
+
+fn readiness_next_actions(
+    no_usable_executors: bool,
+    needs_executor_approval: bool,
+    needs_runtime_approval: bool,
+    harness_doctor: &HarnessDoctorReport,
+) -> Vec<String> {
+    let mut actions = vec![
+        "forge sync all --home $HOME --shim-dir $HOME/.forge/bin --allow codex --allow opencode --output json".to_string(),
+    ];
+    if no_usable_executors || needs_executor_approval {
+        actions.push("review executor approvals before handoff".to_string());
+    }
+    if needs_runtime_approval {
+        actions.push("review runtime approvals before async substrate use".to_string());
+    }
+    if !harness_doctor.forge_first_ready || !harness_doctor.shim_ready {
+        actions.push(
+            "forge harness install-shims --shim-dir $HOME/.forge/bin --executor codex --project-root . --output json"
+                .to_string(),
+        );
+    }
+    actions.push(
+        "forge harness doctor --executor codex --shim-dir $HOME/.forge/bin --project-root . --output json"
+            .to_string(),
+    );
+    actions
+}
+
+fn readiness_commands() -> InteractiveReadinessCommands {
+    InteractiveReadinessCommands {
+        sync: vec![
+            "sync".to_string(),
+            "all".to_string(),
+            "--home".to_string(),
+            "$HOME".to_string(),
+            "--shim-dir".to_string(),
+            "$HOME/.forge/bin".to_string(),
+            "--allow".to_string(),
+            "codex".to_string(),
+            "--allow".to_string(),
+            "opencode".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        brains: vec![
+            "brains".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        sessions: vec![
+            "sessions".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        shells: vec![
+            "shells".to_string(),
+            "--executor".to_string(),
+            "codex".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        harness_mode: vec![
+            "harness".to_string(),
+            "mode".to_string(),
+            "--project-root".to_string(),
+            ".".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        harness_doctor: vec![
+            "harness".to_string(),
+            "doctor".to_string(),
+            "--executor".to_string(),
+            "codex".to_string(),
+            "--shim-dir".to_string(),
+            "$HOME/.forge/bin".to_string(),
+            "--project-root".to_string(),
+            ".".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
 }
 
 pub fn route_interactive_input(
@@ -1210,6 +1413,33 @@ pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> Strin
         checkpoints = panel.checkpoint_resume_candidates,
         artifacts = panel.artifact_count,
         lanes = render_task_board_lane_summary(panel),
+    )
+}
+
+pub fn render_interactive_readiness(panel: &InteractiveReadinessPanel) -> String {
+    let usable_executors = if panel.usable_executors.is_empty() {
+        "none".to_string()
+    } else {
+        panel.usable_executors.join(", ")
+    };
+    let next_actions = if panel.next_actions.is_empty() {
+        "none".to_string()
+    } else {
+        panel.next_actions.join(" | ")
+    };
+    format!(
+        "Interactive readiness: {status}; executors {usable_executor_count}/{executor_count}, brains {brain_count}, shells {forge_first_shell_count}/{shell_count} Forge-first, selected brain {selected_brain}\nHarness mode: {harness_mode}; harness doctor: {harness_doctor}; usable executors: {usable_executors}\nNext actions: {next_actions}\n",
+        status = panel.status,
+        usable_executor_count = panel.usable_executor_count,
+        executor_count = panel.executor_count,
+        brain_count = panel.brain_count,
+        forge_first_shell_count = panel.forge_first_shell_count,
+        shell_count = panel.shell_count,
+        selected_brain = panel.selected_brain,
+        harness_mode = panel.harness_mode.status,
+        harness_doctor = panel.harness_doctor.status,
+        usable_executors = usable_executors,
+        next_actions = next_actions,
     )
 }
 

@@ -36193,6 +36193,115 @@ fn interactive_structured_logs_command_and_mcp_surface_are_dedicated() {
 }
 
 #[test]
+fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let readiness_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "readiness",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let readiness: Value = serde_json::from_slice(&readiness_output).unwrap();
+    assert_eq!(
+        readiness["schema_version"],
+        "forge.interactive.readiness.v1"
+    );
+    assert_eq!(readiness["status"], "interactive_readiness_ready");
+    assert!(readiness["executor_count"].is_u64());
+    assert!(readiness["brain_count"].is_u64());
+    assert!(readiness["shell_count"].as_u64().unwrap() >= 1);
+    assert!(
+        readiness["forge_controlled_surface_count"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(readiness["usable_executors"].is_array());
+    assert!(readiness["selected_brain"].is_string());
+    assert_eq!(
+        readiness["harness_mode"]["schema_version"],
+        "forge.harness.mode.v1"
+    );
+    assert_eq!(
+        readiness["harness_doctor"]["schema_version"],
+        "forge.harness.doctor.v1"
+    );
+    assert!(readiness["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action
+            .as_str()
+            .unwrap_or_default()
+            .contains("forge sync all")));
+    assert!(readiness["commands"]["sync"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("sync")));
+    assert!(readiness["commands"]["harness_doctor"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("harness")));
+
+    let readiness_text = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "readiness",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(readiness_text).unwrap();
+    assert!(text.contains("Interactive readiness"));
+    assert!(text.contains("harness doctor"));
+    assert!(text.contains("selected brain"));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.readiness");
+    assert_eq!(tool["output_schema"], "forge.interactive.readiness.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.readiness"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.readiness.v1"
+    );
+    assert_eq!(mcp_json["result"]["status"], "interactive_readiness_ready");
+}
+
+#[test]
 fn interactive_task_board_lanes_include_operable_task_cards() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -37043,6 +37152,14 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge interactive structured-logs"),
         "the packaged Forge skill should include the structured logs CLI command"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.readiness"),
+        "the packaged Forge skill should expose the dedicated readiness surface through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge interactive readiness"),
+        "the packaged Forge skill should include the readiness CLI command"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("ui_composition_panel"),
