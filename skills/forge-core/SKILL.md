@@ -29,7 +29,7 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 
 - Use `forge mcp tools --output json` to discover stable agent-facing tools before wiring a Codex/OpenCode workflow.
 - Inspect the no-argument interactive dashboard through `forge.interactive.home`, discover slash commands through `forge.interactive.slash_commands`, and route conversational input through `forge.interactive.route` when an agent needs the same command/chat classification as the TUI without launching a local terminal.
-- For human+AI assisted operation, use `forge ops snapshot --output json` for an operational registry view or `forge ops serve --host 127.0.0.1 --port 8765` to open the local web console. The console is local-only by default and lets operators observe workflows, drive runs, step deterministic work, complete tasks with evidence and update workflow goals or task nodes in real time. Its modifier lane lets a separate strategic AI or human propose goal/node mutations and apply them through Forge-owned events while execution continues. Its visual surface shows tasks/subtasks and lets operators create whiteboards, screens, wireframes, flows, components, documents, token collections, token patches and collaboration events through Forge-owned workflow revisions.
+- For human+AI assisted operation, use `forge ops snapshot --output json` for an operational registry view or `forge ops serve --host 127.0.0.1 --port 8765` to open the local web console. The console is local-only by default and lets operators observe workflows, drive runs, step deterministic work, complete tasks with evidence and update workflow goals or task nodes in real time. Its modifier lane lets a separate strategic AI or human propose goal/node mutations and apply them through Forge-owned events while execution continues. Its visual surface shows tasks/subtasks and lets operators create whiteboards, screens, wireframes, flows, components, documents, token collections, token patches and collaboration events through Forge-owned workflow revisions. Addon renderer interactions are validated against `allowed_client_events` and can be recorded through `/api/addon-renderer/event`, `forge ops renderer-event` or MCP `forge.ops.addon_renderer_event`, then projected back into snapshot runtime state.
 - Treat `outcome_status` from `forge request status`, `forge request drive` and `forge list` as the final-result gate. If it says `support_only`, update the goal or tasks with explicit user-facing deliverables. If it says `needs_user_delivery_evidence` or `needs_final_outcome_audit`, continue the workflow instead of claiming completion.
 - For async handoff, call `forge mcp call forge.run.start --input '{"goal":"<objective>","origin":"codex"}' --output json`, return `result.run_id` quickly, and let Forge remain the source of truth.
 - While an executor is alive, refresh observability with `forge request heartbeat --run <run-id> --executor codex --summary "<short progress>" --ttl-seconds 300 --pid <executor-pid> --origin codex --output json` or `forge.run.heartbeat`; this keeps `forge request status`, `forge request list` and `forge inspect` honest about active self-runs, including long runs whose heartbeat TTL expires while the recorded process is still alive.
@@ -88,6 +88,7 @@ forge request list --status stale --output json
 forge request recover-stale --run <run-id> --origin codex --output json
 forge ops snapshot --output json
 forge ops serve --host 127.0.0.1 --port 8765
+forge ops renderer-event --workflow <workflow-id> --view <view-id> --event-kind hover_changed --payload '{"point":"series.current"}' --output json
 forge mcp tools --output json
 forge credential-vault records --contract /path/to/vault.contract.yaml --data /path/to/vault.data.yaml --output json
 forge credential-vault exec --contract /path/to/vault.contract.yaml --data /path/to/vault.data.yaml --record login -- command-that-needs-secrets
@@ -100,6 +101,7 @@ forge mcp call forge.aws.inventory --input '{"regions":"us-east-1,sa-east-1"}' -
 forge mcp call forge.interactive.home --output json
 forge mcp call forge.interactive.slash_commands --output json
 forge mcp call forge.interactive.route --input '{"input":"What is the current Forge status?","origin":"codex"}' --output json
+forge mcp call forge.ops.addon_renderer_event --input '{"workflow_id":"<workflow-id>","view_id":"<view-id>","event_kind":"refresh_requested","payload":{"refresh":true}}' --output json
 forge mcp call forge.run.start --input '{"goal":"Improve Forge Core","origin":"codex"}' --output json
 forge mcp call forge.run.heartbeat --input '{"run_id":"<run-id>","executor":"codex","summary":"executor alive","ttl_seconds":300,"origin":"codex"}' --output json
 forge mcp call forge.run.drive --input '{"run_id":"<run-id>","executor":"codex","ttl_seconds":300,"origin":"codex"}' --output json

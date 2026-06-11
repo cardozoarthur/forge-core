@@ -11051,6 +11051,8 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
     assert!(skill.contains("forge plan"));
     assert!(skill.contains("forge validate"));
     assert!(skill.contains("forge mcp tools"));
+    assert!(skill.contains("forge ops renderer-event"));
+    assert!(skill.contains("forge.ops.addon_renderer_event"));
     assert!(skill.contains("forge mcp call forge.run.start"));
     assert!(skill.contains("forge.workflow.attach_artifact"));
     assert!(skill.contains("forge.context.request"));
@@ -11093,6 +11095,7 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
         "forge.workflow.list",
         "forge.workflow.inspect",
         "forge.events.timeline",
+        "forge.ops.addon_renderer_event",
         "forge.improve.candidates",
         "forge.improve.promote_event_policy",
         "forge.cost.incremental",
@@ -23862,6 +23865,79 @@ views:
     assert!(stateful_html.contains("Estado persistido"));
     assert!(stateful_html.contains("hover_changed"));
     assert!(stateful_html.contains("cost_series"));
+    let cli_renderer_event = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "ops",
+            "renderer-event",
+            "--addon-dir",
+            addon_dir.to_str().unwrap(),
+            "--workflow",
+            workflow_id,
+            "--view",
+            "renderer.metrics_chart",
+            "--event-kind",
+            "selection_changed",
+            "--actor",
+            "cli:codex",
+            "--payload",
+            r#"{"selection":{"row_key":"row-2"}}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cli_renderer_event_json: Value = serde_json::from_slice(&cli_renderer_event).unwrap();
+    assert_eq!(
+        cli_renderer_event_json["schema_version"],
+        "forge.ops.addon_renderer_client_event.v1"
+    );
+    assert_eq!(
+        cli_renderer_event_json["status"],
+        "addon_renderer_client_event_recorded"
+    );
+    assert_eq!(cli_renderer_event_json["event_kind"], "selection_changed");
+
+    let mcp_renderer_input = serde_json::json!({
+        "workflow_id": workflow_id,
+        "view_id": "renderer.metrics_chart",
+        "event_kind": "refresh_requested",
+        "actor": "mcp:codex",
+        "payload": {"refresh": true},
+        "addon_dirs": [addon_dir.to_str().unwrap()]
+    })
+    .to_string();
+    let mcp_renderer_event = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.ops.addon_renderer_event",
+            "--input",
+            &mcp_renderer_input,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_renderer_event_json: Value = serde_json::from_slice(&mcp_renderer_event).unwrap();
+    assert_eq!(mcp_renderer_event_json["status"], "ok");
+    assert_eq!(
+        mcp_renderer_event_json["result"]["schema_version"],
+        "forge.ops.addon_renderer_client_event.v1"
+    );
+    assert_eq!(
+        mcp_renderer_event_json["result"]["event_kind"],
+        "refresh_requested"
+    );
 
     let proposed_goal = "Objetivo proposto pela lane modificadora";
     let propose_goal_request = format!(

@@ -993,7 +993,7 @@ fn infer_form_field_type(field: &str) -> String {
     }
 }
 
-fn record_addon_renderer_client_event(
+pub fn record_addon_renderer_client_event(
     store: &ForgeStore,
     addon_dirs: &[PathBuf],
     workflow_id: &str,

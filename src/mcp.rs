@@ -78,6 +78,7 @@ use crate::multimodal::{
     build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
     build_multimodal_status, evaluate_multimodal_guard,
 };
+use crate::ops::record_addon_renderer_client_event;
 use crate::patch::{build_patch_apply, build_patch_plan, build_patch_revert};
 use crate::registry::{
     list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
@@ -647,6 +648,18 @@ struct WorkflowInspectInput {
 struct WorkflowEventsInput {
     workflow_id: String,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpsAddonRendererEventInput {
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    view: Option<String>,
+    view_id: Option<String>,
+    event_kind: String,
+    actor: Option<String>,
+    payload: Option<Value>,
+    addon_dirs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1604,6 +1617,37 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.event_timeline.v1",
                 &["forge", "events", "timeline", "--output", "json"],
                 ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.ops.addon_renderer_event",
+                "Record Addon Renderer Event",
+                "Record a safe client-side interaction for an Addon renderer after validating the renderer's allowed_client_events contract.",
+                object_schema(
+                    &[
+                        ("workflow_id", "string", "workflow id"),
+                        ("view_id", "string", "Addon view id"),
+                        ("event_kind", "string", "filter_changed|selection_changed|refresh_requested|hover_changed|draft_changed|submit_requested"),
+                        ("actor", "string", "operator or agent id"),
+                        ("payload", "object", "optional event payload"),
+                        ("addon_dirs", "array", "optional Addon manifest directories"),
+                    ],
+                    &["workflow_id", "view_id", "event_kind"],
+                ),
+                "forge.ops.addon_renderer_client_event.v1",
+                &[
+                    "forge",
+                    "ops",
+                    "renderer-event",
+                    "--workflow",
+                    "<workflow-id>",
+                    "--view",
+                    "<view-id>",
+                    "--event-kind",
+                    "<event-kind>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, true),
             ),
             tool(
                 "forge.events.observability",
@@ -5034,6 +5078,39 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 product_id.as_deref(),
                 input.limit,
                 input.after_sequence,
+            )?)?
+        }
+        "forge.ops.addon_renderer_event" => {
+            let input: OpsAddonRendererEventInput = parse_input(input)?;
+            let workflow_id = input
+                .workflow_id
+                .or(input.workflow)
+                .ok_or_else(|| anyhow::anyhow!("workflow_id is required"))?;
+            let view_id = input
+                .view_id
+                .or(input.view)
+                .ok_or_else(|| anyhow::anyhow!("view_id is required"))?;
+            let actor = input.actor.unwrap_or_else(|| "mcp".to_string());
+            let payload = input.payload.as_ref().map(Value::to_string);
+            let addon_dirs = input
+                .addon_dirs
+                .unwrap_or_else(|| {
+                    default_addon_dirs()
+                        .into_iter()
+                        .map(|path| path.to_string_lossy().to_string())
+                        .collect()
+                })
+                .into_iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
+            serde_json::to_value(record_addon_renderer_client_event(
+                store,
+                &addon_dirs,
+                &workflow_id,
+                &view_id,
+                &input.event_kind,
+                &actor,
+                payload.as_deref(),
             )?)?
         }
         "forge.events.observability" => {

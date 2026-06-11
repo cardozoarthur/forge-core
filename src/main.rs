@@ -101,7 +101,10 @@ use forge_core::multimodal::{
     build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
     build_multimodal_status, evaluate_multimodal_guard,
 };
-use forge_core::ops::{build_ops_snapshot_with_addon_dirs, serve_ops_console_with_addon_dirs};
+use forge_core::ops::{
+    build_ops_snapshot_with_addon_dirs, record_addon_renderer_client_event,
+    serve_ops_console_with_addon_dirs,
+};
 use forge_core::patch::{build_patch_apply, build_patch_plan, build_patch_revert};
 use forge_core::registry::{
     attach_reuse_candidates_as_child_subflows, context_action_catalog, find_reuse_candidates,
@@ -1769,6 +1772,22 @@ enum OpsCommands {
         port: u16,
         #[arg(long = "addon-dir")]
         addon_dirs: Vec<PathBuf>,
+    },
+    RendererEvent {
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long = "workflow")]
+        workflow_id: String,
+        #[arg(long = "view")]
+        view_id: String,
+        #[arg(long = "event-kind")]
+        event_kind: String,
+        #[arg(long, default_value = "forge-cli")]
+        actor: String,
+        #[arg(long)]
+        payload: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
     },
 }
 
@@ -6667,6 +6686,29 @@ fn run() -> Result<i32> {
             } => {
                 let dirs = addon_dirs_or_default(addon_dirs);
                 serve_ops_console_with_addon_dirs(cli.store, &host, port, &dirs)?;
+                Ok(0)
+            }
+            OpsCommands::RendererEvent {
+                addon_dirs,
+                workflow_id,
+                view_id,
+                event_kind,
+                actor,
+                payload,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let report = record_addon_renderer_client_event(
+                    &store,
+                    &dirs,
+                    &workflow_id,
+                    &view_id,
+                    &event_kind,
+                    &actor,
+                    payload.as_deref(),
+                )?;
+                print_response(output, &report)?;
                 Ok(0)
             }
         },
