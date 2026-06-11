@@ -534,6 +534,8 @@ enum SkillCommands {
         target: Vec<String>,
         #[arg(long = "executor-path")]
         executor_paths: Vec<PathBuf>,
+        #[arg(long = "shim-dir")]
+        shim_dirs: Vec<PathBuf>,
         #[arg(long = "runtime-path")]
         runtime_paths: Vec<PathBuf>,
         #[arg(long)]
@@ -1855,6 +1857,8 @@ enum SyncCommands {
         home: PathBuf,
         #[arg(long = "executor-path")]
         executor_paths: Vec<PathBuf>,
+        #[arg(long = "shim-dir")]
+        shim_dirs: Vec<PathBuf>,
         #[arg(long)]
         allow: Vec<String>,
         #[arg(long)]
@@ -1883,6 +1887,8 @@ enum SyncCommands {
         home: PathBuf,
         #[arg(long = "executor-path")]
         executor_paths: Vec<PathBuf>,
+        #[arg(long = "shim-dir")]
+        shim_dirs: Vec<PathBuf>,
         #[arg(long = "runtime-path")]
         runtime_paths: Vec<PathBuf>,
         #[arg(long)]
@@ -5450,6 +5456,7 @@ fn run() -> Result<i32> {
                 home,
                 target,
                 executor_paths,
+                shim_dirs,
                 runtime_paths,
                 allow,
                 deny,
@@ -5463,6 +5470,7 @@ fn run() -> Result<i32> {
                     ExecutorSyncOptions {
                         home: home.clone(),
                         executor_paths,
+                        shim_dirs,
                         allow: allow.clone(),
                         deny: deny.clone(),
                         prompt: !no_prompt,
@@ -5492,6 +5500,7 @@ fn run() -> Result<i32> {
             SyncCommands::Executors {
                 home,
                 executor_paths,
+                shim_dirs,
                 allow,
                 deny,
                 no_prompt,
@@ -5503,6 +5512,7 @@ fn run() -> Result<i32> {
                     ExecutorSyncOptions {
                         home,
                         executor_paths,
+                        shim_dirs,
                         allow,
                         deny,
                         prompt: !no_prompt,
@@ -5536,6 +5546,7 @@ fn run() -> Result<i32> {
             SyncCommands::All {
                 home,
                 executor_paths,
+                shim_dirs,
                 runtime_paths,
                 allow,
                 deny,
@@ -5548,6 +5559,7 @@ fn run() -> Result<i32> {
                     ExecutorSyncOptions {
                         home: home.clone(),
                         executor_paths,
+                        shim_dirs,
                         allow: allow.clone(),
                         deny: deny.clone(),
                         prompt: !no_prompt,

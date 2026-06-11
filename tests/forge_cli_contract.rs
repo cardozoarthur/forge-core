@@ -13850,6 +13850,146 @@ fn sync_persists_human_allowed_executor_policy() {
     assert_eq!(opencode["decision_source"], "human_deny");
 }
 
+#[cfg(unix)]
+#[test]
+fn sync_projects_forge_first_shims_into_executor_and_brain_readiness() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let home = temp.path().join("home");
+    let real_bin = temp.path().join("real-bin");
+    let shim_dir = home.join(".forge/bin");
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(home.join(".codex/config.toml"), "model = \"test\"\n").unwrap();
+    write_fake_cli(&real_bin, "codex");
+    fs::create_dir_all(&shim_dir).unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "install-shims",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--real-cmd",
+            real_bin.join("codex").to_str().unwrap(),
+            "--forge-first",
+            "--workflow",
+            "wf_sync_harness",
+            "--run",
+            "run_sync_harness",
+            "--context-budget",
+            "900",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    let path = format!(
+        "{}:{}:{}",
+        shim_dir.display(),
+        real_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let synced = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "executors",
+            "--home",
+            home.to_str().unwrap(),
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--allow",
+            "codex",
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let synced_json: Value = serde_json::from_slice(&synced).unwrap();
+    let codex = find_executor(&synced_json, "codex");
+    assert_eq!(codex["allowed"], true);
+    assert_eq!(codex["non_interactive_ready"], true);
+    assert_eq!(codex["forge_first_ready"], true);
+    assert!(codex["command_path"]
+        .as_str()
+        .unwrap()
+        .ends_with("/home/.forge/bin/codex"));
+    assert_eq!(
+        codex["harness_status"]["schema_version"],
+        "forge.executor_harness_status.v1"
+    );
+    assert_eq!(codex["harness_status"]["status"], "shim_status_ready");
+    assert_eq!(codex["harness_status"]["path_precedence"], "shim_first");
+    assert_eq!(codex["harness_status"]["would_recurse"], false);
+    assert!(codex["harness_status"]["real_command"]
+        .as_str()
+        .unwrap()
+        .ends_with("/real-bin/codex"));
+    assert!(codex["forge_first_entrypoint"]
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .ends_with("/home/.forge/bin/codex"));
+
+    let brains = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "brains",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let brains_json: Value = serde_json::from_slice(&brains).unwrap();
+    let codex_brain = brains_json["brains"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|brain| brain["id"] == "codex")
+        .unwrap();
+    assert_eq!(codex_brain["forge_first_ready"], true);
+    assert!(codex_brain["forge_first_entrypoint"]
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .ends_with("/home/.forge/bin/codex"));
+    assert!(codex_brain["shell_entrypoints"][0][0]
+        .as_str()
+        .unwrap()
+        .ends_with("/home/.forge/bin/codex"));
+    assert!(brains_json["shell_sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|session| {
+            session["id"] == "codex-shell"
+                && session["launch_mode"] == "forge_first_harness"
+                && session["forge_first_ready"] == true
+        }));
+}
+
 #[test]
 fn brain_router_keeps_memory_skills_mcp_and_shells_under_forge_control() {
     let temp = tempdir().unwrap();

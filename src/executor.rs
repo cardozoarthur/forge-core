@@ -1,3 +1,4 @@
+use crate::harness::{inspect_cli_harness_shim_status, CliShimStatusOptions};
 use crate::storage::ForgeStore;
 use anyhow::Result;
 use chrono::Utc;
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant};
 pub struct ExecutorSyncOptions {
     pub home: PathBuf,
     pub executor_paths: Vec<PathBuf>,
+    pub shim_dirs: Vec<PathBuf>,
     pub allow: Vec<String>,
     pub deny: Vec<String>,
     pub prompt: bool,
@@ -32,9 +34,30 @@ pub struct ExecutorState {
     pub non_interactive_ready: bool,
     #[serde(default)]
     pub probe_evidence: Vec<String>,
+    #[serde(default)]
+    pub forge_first_ready: bool,
+    #[serde(default)]
+    pub forge_first_entrypoint: Option<Vec<String>>,
+    #[serde(default)]
+    pub harness_status: Option<ExecutorHarnessStatus>,
     pub allowed: bool,
     pub decision_source: String,
     pub synced_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutorHarnessStatus {
+    pub schema_version: String,
+    pub status: String,
+    pub shim_dir: String,
+    pub shim_path: String,
+    pub path_precedence: String,
+    pub forge_owned: bool,
+    pub executable: bool,
+    pub would_recurse: bool,
+    pub real_command: Option<String>,
+    pub store_path: Option<String>,
+    pub evidence: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,6 +119,9 @@ pub struct BrainCandidate {
     pub configured: bool,
     pub allowed: bool,
     pub non_interactive_ready: bool,
+    pub forge_first_ready: bool,
+    pub forge_first_entrypoint: Option<Vec<String>>,
+    pub harness_status: Option<ExecutorHarnessStatus>,
     pub shell_entrypoints: Vec<Vec<String>>,
     pub reason: String,
 }
@@ -106,6 +132,9 @@ pub struct BrainShellSessionSpec {
     pub brain_id: String,
     pub entry_command: Vec<String>,
     pub attachable: bool,
+    pub launch_mode: String,
+    pub forge_first_ready: bool,
+    pub forge_first_entrypoint: Option<Vec<String>>,
     pub role: String,
     pub state_boundary: String,
     pub safety_note: String,
@@ -239,7 +268,12 @@ pub fn sync_executors(
     let mut executors = Vec::new();
 
     for definition in EXECUTORS {
-        let mut state = probe_executor(definition, &options.home, &options.executor_paths);
+        let mut state = probe_executor(
+            definition,
+            &options.home,
+            &options.executor_paths,
+            &options.shim_dirs,
+        );
         apply_decision(&mut state, &previous, &allow, &deny, options.prompt)?;
         store.save_executor_state(&state.id, &serde_json::to_value(&state)?)?;
         executors.push(state);
@@ -306,6 +340,7 @@ fn probe_executor(
     definition: &ExecutorDefinition,
     home: &Path,
     executor_paths: &[PathBuf],
+    shim_dirs: &[PathBuf],
 ) -> ExecutorState {
     let command_path = find_executable(definition.command, executor_paths);
     let config_evidence = config_evidence(definition.id, home);
@@ -319,6 +354,17 @@ fn probe_executor(
         non_interactive_ready = ready;
         probe_evidence = evidence;
     }
+    let harness_status = probe_executor_harness(definition.id, home, shim_dirs);
+    let forge_first_ready = harness_status
+        .as_ref()
+        .is_some_and(|status| status.status == "shim_status_ready" && !status.would_recurse);
+    let forge_first_entrypoint = harness_status
+        .as_ref()
+        .filter(|_| forge_first_ready)
+        .map(|status| vec![status.shim_path.clone()]);
+    if let Some(status) = &harness_status {
+        probe_evidence.extend(status.evidence.clone());
+    }
 
     ExecutorState {
         id: definition.id.to_string(),
@@ -330,10 +376,67 @@ fn probe_executor(
         config_evidence,
         non_interactive_ready,
         probe_evidence,
+        forge_first_ready,
+        forge_first_entrypoint,
+        harness_status,
         allowed: false,
         decision_source: "unavailable".to_string(),
         synced_at: Utc::now().to_rfc3339(),
     }
+}
+
+fn probe_executor_harness(
+    executor: &str,
+    home: &Path,
+    explicit_shim_dirs: &[PathBuf],
+) -> Option<ExecutorHarnessStatus> {
+    let mut candidates = Vec::new();
+    for dir in explicit_shim_dirs {
+        candidates.push((dir.clone(), true));
+    }
+    let default_dir = home.join(".forge/bin");
+    if !candidates
+        .iter()
+        .any(|(dir, _)| same_path_or_display(dir, &default_dir))
+    {
+        candidates.push((default_dir, false));
+    }
+
+    let mut fallback = None;
+    for (shim_dir, explicit) in candidates {
+        let Ok(report) = inspect_cli_harness_shim_status(CliShimStatusOptions {
+            shim_dir: &shim_dir,
+            executor,
+        }) else {
+            continue;
+        };
+        if !report.shim_exists && !explicit {
+            continue;
+        }
+        let harness = ExecutorHarnessStatus {
+            schema_version: "forge.executor_harness_status.v1".to_string(),
+            status: report.status.clone(),
+            shim_dir: report.shim_dir.clone(),
+            shim_path: report.shim_path.clone(),
+            path_precedence: report.path_precedence.clone(),
+            forge_owned: report.forge_owned,
+            executable: report.executable,
+            would_recurse: report.would_recurse,
+            real_command: report.real_command.clone(),
+            store_path: report.store_path.clone(),
+            evidence: vec![
+                format!("harness_status:{}", report.status),
+                format!("path_precedence:{}", report.path_precedence),
+                format!("forge_owned:{}", report.forge_owned),
+                format!("would_recurse:{}", report.would_recurse),
+            ],
+        };
+        if harness.status == "shim_status_ready" {
+            return Some(harness);
+        }
+        fallback.get_or_insert(harness);
+    }
+    fallback
 }
 
 fn probe_non_interactive(id: &str, path: &Path) -> (bool, Vec<String>) {
@@ -591,6 +694,12 @@ fn candidate_dirs(executor_paths: &[PathBuf]) -> Vec<PathBuf> {
     dirs
 }
 
+fn same_path_or_display(left: &Path, right: &Path) -> bool {
+    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    left == right
+}
+
 fn is_executable(path: &Path) -> bool {
     if !path.is_file() {
         return false;
@@ -791,6 +900,9 @@ fn brain_candidate(executor: &ExecutorState) -> BrainCandidate {
         configured: executor.configured,
         allowed: executor.allowed,
         non_interactive_ready: executor.non_interactive_ready,
+        forge_first_ready: executor.forge_first_ready,
+        forge_first_entrypoint: executor.forge_first_entrypoint.clone(),
+        harness_status: executor.harness_status.clone(),
         shell_entrypoints: brain_shell_entrypoints(executor),
         reason: reason.to_string(),
     }
@@ -805,7 +917,15 @@ fn brain_execution_mode(id: &str) -> &'static str {
 }
 
 fn brain_shell_entrypoints(executor: &ExecutorState) -> Vec<Vec<String>> {
-    match executor.id.as_str() {
+    let mut entrypoints = Vec::new();
+    if let Some(entrypoint) = executor
+        .forge_first_entrypoint
+        .as_ref()
+        .filter(|_| executor.forge_first_ready)
+    {
+        entrypoints.push(entrypoint.clone());
+    }
+    entrypoints.extend(match executor.id.as_str() {
         "opencode" => vec![
             vec!["opencode".to_string()],
             vec![
@@ -837,7 +957,8 @@ fn brain_shell_entrypoints(executor: &ExecutorState) -> Vec<Vec<String>> {
             "<model>".to_string(),
         ]],
         _ => vec![vec![executor.command.clone()]],
-    }
+    });
+    entrypoints
 }
 
 fn brain_shell_sessions(brains: &[BrainCandidate]) -> Vec<BrainShellSessionSpec> {
@@ -846,6 +967,9 @@ fn brain_shell_sessions(brains: &[BrainCandidate]) -> Vec<BrainShellSessionSpec>
         brain_id: "forge".to_string(),
         entry_command: vec!["forge".to_string()],
         attachable: true,
+        launch_mode: "forge_control_tui".to_string(),
+        forge_first_ready: true,
+        forge_first_entrypoint: Some(vec!["forge".to_string()]),
         role: "primary_control_tui".to_string(),
         state_boundary: "Forge owns workflow state, memory, skills, MCP routing and shell lifecycle."
             .to_string(),
@@ -861,6 +985,14 @@ fn brain_shell_sessions(brains: &[BrainCandidate]) -> Vec<BrainShellSessionSpec>
                 brain_id: brain.id.clone(),
                 entry_command: entry_command.clone(),
                 attachable: brain.installed,
+                launch_mode: if brain.forge_first_ready {
+                    "forge_first_harness"
+                } else {
+                    "native_cli"
+                }
+                .to_string(),
+                forge_first_ready: brain.forge_first_ready,
+                forge_first_entrypoint: brain.forge_first_entrypoint.clone(),
                 role: "execution_brain_shell".to_string(),
                 state_boundary:
                     "External CLI session is an execution surface only; Forge remains the source of truth for memory, skills, MCPs, context and workflow lineage."
@@ -1303,6 +1435,9 @@ mod tests {
             config_evidence: vec!["test-config".to_string()],
             non_interactive_ready: true,
             probe_evidence: vec!["smoke test passed".to_string()],
+            forge_first_ready: false,
+            forge_first_entrypoint: None,
+            harness_status: None,
             allowed: true,
             decision_source: "human_allow".to_string(),
             synced_at: "2026-06-02T00:00:00Z".to_string(),
@@ -1371,6 +1506,9 @@ mod tests {
             probe_evidence: vec![
                 "non-interactive smoke test `--version` timed out after 2000ms".to_string(),
             ],
+            forge_first_ready: false,
+            forge_first_entrypoint: None,
+            harness_status: None,
             allowed: true,
             decision_source: "human_allow".to_string(),
             synced_at: "2026-06-02T00:00:00Z".to_string(),
@@ -1420,6 +1558,9 @@ mod tests {
                 "failed to list opencode models; non-interactive provider/model readiness is not validated"
                     .to_string(),
             ],
+            forge_first_ready: false,
+            forge_first_entrypoint: None,
+            harness_status: None,
             allowed: true,
             decision_source: "human_allow".to_string(),
             synced_at: "2026-06-02T00:00:00Z".to_string(),
