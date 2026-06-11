@@ -37013,6 +37013,25 @@ fn interactive_command_palette_surfaces_contextual_actions_for_replacement_cli()
                     .as_array()
                     .unwrap()
                     .contains(&serde_json::json!("diff"))
+                && entry["operation_plan"]["schema_version"]
+                    == "forge.interactive.command_palette_action_plan.v1"
+                && entry["operation_plan"]["status"] == "ready"
+                && entry["operation_plan"]["recommended_action"] == "execute_command"
+                && entry["operation_plan"]["diagnostic_only"] == false
+                && entry["operation_plan"]["blocked_reason"] == "ready"
+                && entry["operation_plan"]["next_commands"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!([
+                        "patch",
+                        "diff",
+                        "--workflow",
+                        "<workflow-id>",
+                        "--task",
+                        "<task-id>",
+                        "--output",
+                        "json"
+                    ]))
                 && entry["addon_contract"]["schema_version"]
                     == "forge.interactive.addon_action_contract.v1"
                 && entry["addon_contract"]["source_addon"] == "forge.addon.software_development"
@@ -37242,6 +37261,12 @@ fn interactive_autocomplete_suggests_slash_and_palette_actions_for_replacement_c
                 && suggestion["addon_contract"]["target"] == "forge patch diff"
                 && suggestion["addon_view_id"] == "software.patch_workbench"
                 && suggestion["addon_view_action_id"] == "patch.diff"
+                && suggestion["operation_plan"]["schema_version"]
+                    == "forge.interactive.command_palette_action_plan.v1"
+                && suggestion["operation_plan"]["status"] == "ready"
+                && suggestion["operation_plan"]["recommended_action"] == "execute_command"
+                && suggestion["operation_plan"]["diagnostic_only"] == false
+                && suggestion["operation_plan"]["blocked_reason"] == "ready"
                 && suggestion["requires_approval"] == false
         }));
 
@@ -37423,6 +37448,33 @@ views:
     );
     assert_eq!(entry["commands"], serde_json::json!([]));
     assert_eq!(
+        entry["operation_plan"]["schema_version"],
+        "forge.interactive.command_palette_action_plan.v1"
+    );
+    assert_eq!(entry["operation_plan"]["status"], "blocked");
+    assert_eq!(entry["operation_plan"]["diagnostic_only"], true);
+    assert_eq!(
+        entry["operation_plan"]["recommended_action"],
+        "inspect_addon_permission_gate"
+    );
+    assert_eq!(
+        entry["operation_plan"]["blocked_reason"],
+        "permission_gate_undeclared_permission"
+    );
+    assert!(entry["operation_plan"]["next_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!([
+            "addons",
+            "views",
+            "--addon",
+            "forge.addon.demo_ops",
+            "--surface",
+            "tui",
+            "--output",
+            "json"
+        ])));
+    assert_eq!(
         entry["addon_contract"]["schema_version"],
         "forge.interactive.addon_action_contract.v1"
     );
@@ -37469,6 +37521,16 @@ views:
     assert_eq!(
         suggestion["blocked_reason"],
         "permission_gate_undeclared_permission"
+    );
+    assert_eq!(
+        suggestion["operation_plan"]["schema_version"],
+        "forge.interactive.command_palette_action_plan.v1"
+    );
+    assert_eq!(suggestion["operation_plan"]["status"], "blocked");
+    assert_eq!(suggestion["operation_plan"]["diagnostic_only"], true);
+    assert_eq!(
+        suggestion["operation_plan"]["recommended_action"],
+        "inspect_addon_permission_gate"
     );
     assert_eq!(suggestion["insert_text"], "");
     assert_eq!(suggestion["equivalent_command"], serde_json::json!([]));
