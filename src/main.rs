@@ -145,7 +145,7 @@ use forge_core::workflow::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(name = "forge", version, about = "Forge Core workflow runtime")]
@@ -7274,6 +7274,12 @@ fn resolve_harness_forge_first(
             source: "env_default",
         };
     }
+    if let Some(forge_first) = harness_project_default_mode() {
+        return HarnessForgeFirstMode {
+            forge_first,
+            source: "project_config",
+        };
+    }
     HarnessForgeFirstMode {
         forge_first: false,
         source: "default_observe_only",
@@ -7283,13 +7289,31 @@ fn resolve_harness_forge_first(
 fn harness_default_mode_prefers_forge_first() -> bool {
     std::env::var("FORGE_HARNESS_DEFAULT_MODE")
         .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "forge_first" | "forge-first" | "forgefirst" | "1" | "true" | "yes" | "on"
-            )
-        })
+        .map(|value| harness_mode_prefers_forge_first(&value))
         .unwrap_or(false)
+}
+
+fn harness_project_default_mode() -> Option<bool> {
+    let current_dir = std::env::current_dir().ok()?;
+    read_harness_project_default_mode(&current_dir)
+}
+
+fn read_harness_project_default_mode(project_root: &Path) -> Option<bool> {
+    let path = project_root.join(".forge/harness.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+    match config.get("default_mode") {
+        Some(serde_json::Value::String(value)) => Some(harness_mode_prefers_forge_first(value)),
+        Some(serde_json::Value::Bool(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn harness_mode_prefers_forge_first(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "forge_first" | "forge-first" | "forgefirst" | "1" | "true" | "yes" | "on"
+    )
 }
 
 fn addon_dirs_or_default(addon_dirs: Vec<PathBuf>) -> Vec<PathBuf> {
