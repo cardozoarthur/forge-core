@@ -20972,6 +20972,282 @@ tenant_policy_mode: enforce
 }
 
 #[test]
+fn cost_incremental_enforces_project_tenant_policy_for_global_event_scan() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let visible_root = temp.path().join("visible");
+    let hidden_root = temp.path().join("hidden");
+    fs::create_dir_all(visible_root.join(".forge")).unwrap();
+    fs::create_dir_all(hidden_root.join(".forge")).unwrap();
+    fs::write(
+        visible_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: cost-incremental-org
+  label: Cost Incremental Org
+brand:
+  scope: brand
+  id: cost-incremental-brand
+  label: Cost Incremental Brand
+product:
+  scope: product
+  id: cost-incremental-product
+  label: Cost Incremental Product
+user:
+  scope: user
+  id: cost-incremental-user
+  label: Cost Incremental User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+    fs::write(
+        hidden_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: other-cost-incremental-org
+  label: Other Cost Incremental Org
+brand:
+  scope: brand
+  id: other-cost-incremental-brand
+  label: Other Cost Incremental Brand
+product:
+  scope: product
+  id: other-cost-incremental-product
+  label: Other Cost Incremental Product
+user:
+  scope: user
+  id: other-cost-incremental-user
+  label: Other Cost Incremental User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+
+    for project_root in [&visible_root, &hidden_root] {
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "identity",
+                "sync",
+                "--project-root",
+                project_root.to_str().unwrap(),
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    let visible_plan_output = forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Visible tenant cost incremental workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let visible_plan_json: Value = serde_json::from_slice(&visible_plan_output).unwrap();
+    let visible_workflow_id = visible_plan_json["workflow_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let hidden_plan_output = forge()
+        .current_dir(&hidden_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Hidden tenant cost incremental workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let hidden_plan_json: Value = serde_json::from_slice(&hidden_plan_output).unwrap();
+    let hidden_workflow_id = hidden_plan_json["workflow_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let visible_tenant_context = serde_json::json!({
+        "organization": {"scope": "organization", "id": "cost-incremental-org", "label": "Cost Incremental Org"},
+        "brand": {"scope": "brand", "id": "cost-incremental-brand", "label": "Cost Incremental Brand"},
+        "product": {"scope": "product", "id": "cost-incremental-product", "label": "Cost Incremental Product"},
+        "user": {"scope": "user", "id": "cost-incremental-user", "label": "Cost Incremental User"},
+        "channel": {"scope": "channel", "id": "local_cli", "label": "Local CLI"},
+        "tenant_policy_mode": "enforce"
+    });
+    let hidden_tenant_context = serde_json::json!({
+        "organization": {"scope": "organization", "id": "other-cost-incremental-org", "label": "Other Cost Incremental Org"},
+        "brand": {"scope": "brand", "id": "other-cost-incremental-brand", "label": "Other Cost Incremental Brand"},
+        "product": {"scope": "product", "id": "other-cost-incremental-product", "label": "Other Cost Incremental Product"},
+        "user": {"scope": "user", "id": "other-cost-incremental-user", "label": "Other Cost Incremental User"},
+        "channel": {"scope": "channel", "id": "local_cli", "label": "Local CLI"},
+        "tenant_policy_mode": "enforce"
+    });
+    {
+        let store_handle = ForgeStore::open(&store).unwrap();
+        store_handle
+            .record_global_event(
+                "cost_incremental_seed",
+                "visible",
+                Some(&visible_workflow_id),
+                "executor_response_promoted",
+                "codex",
+                "recorded",
+                &serde_json::json!({"message": "visible incremental event"}),
+                &visible_tenant_context,
+            )
+            .unwrap();
+        store_handle
+            .record_global_event(
+                "cost_incremental_seed",
+                "hidden",
+                Some(&hidden_workflow_id),
+                "executor_response_promoted",
+                "codex",
+                "recorded",
+                &serde_json::json!({"message": "hidden incremental event"}),
+                &hidden_tenant_context,
+            )
+            .unwrap();
+    }
+
+    let incremental_output = forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "incremental",
+            "--after-sequence",
+            "0",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let incremental_json: Value = serde_json::from_slice(&incremental_output).unwrap();
+    assert_eq!(
+        incremental_json["filters"]["organization_id"],
+        "cost-incremental-org"
+    );
+    assert!(incremental_json["event_count"].as_u64().unwrap() >= 1);
+    assert_eq!(incremental_json["affected_workflow_count"], 1);
+    assert!(incremental_json["affected_workflow_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(visible_workflow_id.clone())));
+    assert!(!incremental_json["affected_workflow_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(hidden_workflow_id.clone())));
+    assert_eq!(
+        incremental_json["materializations"][0]["filters"]["organization_id"],
+        "cost-incremental-org"
+    );
+
+    let mcp_incremental_input = serde_json::json!({
+        "project_root": visible_root.display().to_string(),
+        "after_sequence": 0
+    });
+    let mcp_incremental_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.cost.incremental",
+            "--input",
+            &mcp_incremental_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_incremental_json: Value = serde_json::from_slice(&mcp_incremental_output).unwrap();
+    assert_eq!(
+        mcp_incremental_json["result"]["filters"]["organization_id"],
+        "cost-incremental-org"
+    );
+    assert_eq!(mcp_incremental_json["result"]["affected_workflow_count"], 1);
+
+    forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "membership-update",
+            "--subject",
+            "cost-incremental-user",
+            "--organization",
+            "cost-incremental-org",
+            "--brand",
+            "cost-incremental-brand",
+            "--product",
+            "cost-incremental-product",
+            "--deny",
+            "context:read",
+            "--source",
+            "test-cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let denied_output = forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "incremental",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let denied_stderr = String::from_utf8(denied_output).unwrap();
+    assert!(denied_stderr.contains("multi-tenant enforcement blocked cost ledger incremental"));
+    assert!(denied_stderr.contains("context:read"));
+}
+
+#[test]
 fn cost_history_enforces_project_tenant_policy_for_global_rollups() {
     let temp = tempdir().unwrap();
     let forge_dir = temp.path().join(".forge");

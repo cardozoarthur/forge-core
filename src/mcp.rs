@@ -25,7 +25,7 @@ use crate::context::{build_context_package_with_checkpoint, DEFAULT_CONTEXT_BUDG
 use crate::cost::{
     apply_cost_ledger_retention, build_cost_ledger_for_context,
     build_cost_ledger_history_for_context, maintain_cost_ledger_for_context,
-    materialize_cost_ledger_incremental, materialize_cost_ledger_index_for_context,
+    materialize_cost_ledger_incremental_for_context, materialize_cost_ledger_index_for_context,
     run_cost_ledger_daemon_for_context,
 };
 use crate::credential_vault::{
@@ -792,6 +792,7 @@ struct CostLedgerIncrementalInput {
     addon: Option<String>,
     addon_id: Option<String>,
     limit: Option<usize>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2296,6 +2297,11 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         ("product_id", "string", "optional product filter"),
                         ("source_kind", "string", "planned_task|observed_event filter for returned rows"),
                         ("addon_id", "string", "optional Addon id filter"),
+                        (
+                            "project_root",
+                            "string",
+                            "optional project root used for tenant-policy enforcement",
+                        ),
                         ("limit", "integer", "optional scanned event and persisted row limit"),
                     ],
                     &[],
@@ -5654,7 +5660,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let brand_id = input.brand_id.or(input.brand);
             let product_id = input.product_id.or(input.product);
             let addon_id = input.addon_id.or(input.addon);
-            serde_json::to_value(materialize_cost_ledger_incremental(
+            let project_root = input
+                .project_root
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let operating_context = load_project_operating_context(&project_root)?;
+            serde_json::to_value(materialize_cost_ledger_incremental_for_context(
                 store,
                 input.after_sequence,
                 organization_id.as_deref(),
@@ -5663,6 +5674,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.source_kind.as_deref(),
                 addon_id.as_deref(),
                 input.limit,
+                &operating_context,
             )?)?
         }
         "forge.cost.history" => {
