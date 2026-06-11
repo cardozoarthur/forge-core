@@ -16503,6 +16503,16 @@ fn shells_launch_plan_selects_forge_first_entrypoint_without_running_brain() {
         .contains(&serde_json::json!(
             "forge_context_packet_required_before_ai_handoff"
         )));
+    for required_gate in [
+        "organization_context_required",
+        "personality_decision_required",
+        "company_work_decision_required",
+    ] {
+        assert!(json["safety_gates"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(required_gate)));
+    }
     let plan = json["launch_plans"].as_array().unwrap().first().unwrap();
     assert_eq!(plan["session_id"], "codex-shell");
     assert_eq!(plan["brain_id"], "codex");
@@ -16519,6 +16529,28 @@ fn shells_launch_plan_selects_forge_first_entrypoint_without_running_brain() {
         "forge.executor_harness_status.v1"
     );
     assert_eq!(plan["harness_status"]["status"], "shim_status_ready");
+    assert_eq!(
+        plan["prompt_packet_gate_policy"]["schema_version"],
+        "forge.shell.prompt_packet_gate_policy.v1"
+    );
+    assert_eq!(
+        plan["prompt_packet_gate_policy"]["context_source"],
+        "forge_context_packet"
+    );
+    assert_eq!(
+        plan["prompt_packet_gate_policy"]["policy"],
+        "verify_prompt_packet_required_gates_before_brain_launch"
+    );
+    for required_gate in [
+        "organization_context_required",
+        "personality_decision_required",
+        "company_work_decision_required",
+    ] {
+        assert!(plan["prompt_packet_gate_policy"]["required_gates"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(required_gate)));
+    }
     assert_eq!(
         plan["preflight_commands"][0],
         serde_json::json!([

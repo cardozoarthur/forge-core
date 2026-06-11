@@ -170,6 +170,7 @@ pub struct ShellLaunchPlan {
     pub forge_first_ready: bool,
     pub forge_first_entrypoint: Option<Vec<String>>,
     pub harness_status: Option<ExecutorHarnessStatus>,
+    pub prompt_packet_gate_policy: ShellPromptPacketGatePolicy,
     pub dry_run: bool,
     pub execution_boundary: String,
     pub context_command: Option<Vec<String>>,
@@ -181,6 +182,15 @@ pub struct ShellLaunchPlan {
     pub next_actions: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ShellPromptPacketGatePolicy {
+    pub schema_version: String,
+    pub context_source: String,
+    pub required_gates: Vec<String>,
+    pub policy: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ShellLaunchPlanOptions {
     pub executor_filter: Option<String>,
@@ -189,6 +199,31 @@ pub struct ShellLaunchPlanOptions {
     pub run_id: Option<String>,
     pub context_budget: Option<usize>,
     pub ttl_seconds: Option<u64>,
+}
+
+const PROMPT_PACKET_REQUIRED_GATES: [&str; 3] = [
+    "organization_context_required",
+    "personality_decision_required",
+    "company_work_decision_required",
+];
+
+fn prompt_packet_required_gates() -> Vec<String> {
+    PROMPT_PACKET_REQUIRED_GATES
+        .iter()
+        .map(|gate| (*gate).to_string())
+        .collect()
+}
+
+fn shell_prompt_packet_gate_policy() -> ShellPromptPacketGatePolicy {
+    ShellPromptPacketGatePolicy {
+        schema_version: "forge.shell.prompt_packet_gate_policy.v1".to_string(),
+        context_source: "forge_context_packet".to_string(),
+        required_gates: prompt_packet_required_gates(),
+        policy: "verify_prompt_packet_required_gates_before_brain_launch".to_string(),
+        reason:
+            "Forge-first brain shells must receive bounded prompt packets with organization, personality and company-work decisions before execution."
+                .to_string(),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1051,6 +1086,16 @@ fn build_brain_router(
         .map(brain_candidate)
         .collect::<Vec<BrainCandidate>>();
     brains.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut safety_gates = vec![
+        "sync_executors_before_handoff".to_string(),
+        "human_authorization_for_external_cli_use".to_string(),
+        "forge_context_packet_required_before_ai_handoff".to_string(),
+    ];
+    safety_gates.extend(prompt_packet_required_gates());
+    safety_gates.extend([
+        "credential_vault_secrets_never_printed".to_string(),
+        "validation_or_final_audit_required_before_claiming_completion".to_string(),
+    ]);
 
     BrainRouterReport {
         schema_version: "forge.brain_router.v1".to_string(),
@@ -1092,13 +1137,7 @@ fn build_brain_router(
             "child_process_execution_when_authorized_by_forge".to_string(),
         ],
         shell_sessions: brain_shell_sessions(&brains),
-        safety_gates: vec![
-            "sync_executors_before_handoff".to_string(),
-            "human_authorization_for_external_cli_use".to_string(),
-            "forge_context_packet_required_before_ai_handoff".to_string(),
-            "credential_vault_secrets_never_printed".to_string(),
-            "validation_or_final_audit_required_before_claiming_completion".to_string(),
-        ],
+        safety_gates,
         brains,
     }
 }
@@ -1299,6 +1338,7 @@ pub fn build_shell_launch_plan(
                 forge_first_ready: session.forge_first_ready,
                 forge_first_entrypoint: session.forge_first_entrypoint.clone(),
                 harness_status: harness_status.clone(),
+                prompt_packet_gate_policy: shell_prompt_packet_gate_policy(),
                 dry_run: true,
                 execution_boundary: "plan_only_no_child_process_started".to_string(),
                 context_command: context_command.clone(),
