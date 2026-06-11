@@ -9,8 +9,8 @@ use crate::storage::{
     AddonMarketplacePackageWrite, AddonTrustKeyWrite, ForgeStore, RuntimeContractDispatchWrite,
     RuntimeWorkerWrite, StoredAddonCapabilityRecord, StoredAddonCapabilityWrite,
     StoredAddonMarketplacePackageRecord, StoredAddonPermissionAuthorizationRecord,
-    StoredAddonRecord, StoredAddonTrustKeyRecord, StoredRuntimeContractDispatchRecord,
-    StoredRuntimeWorkerRecord,
+    StoredAddonRecord, StoredAddonTrustKeyRecord, StoredGlobalEventRecord,
+    StoredRuntimeContractDispatchRecord, StoredRuntimeWorkerRecord,
 };
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
@@ -734,6 +734,9 @@ pub struct AddonObservabilityTotals {
     pub failed_dispatch_count: usize,
     pub blocked_dispatch_count: usize,
     pub needs_external_worker_count: usize,
+    pub runtime_event_count: usize,
+    pub runtime_consumed_event_count: usize,
+    pub runtime_emitted_event_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -774,6 +777,13 @@ pub struct AddonEventFlowSummary {
     pub consumed_event_types: Vec<String>,
     pub emitted_event_types: Vec<String>,
     pub transports: Vec<String>,
+    pub runtime_event_count: usize,
+    pub runtime_consumed_event_count: usize,
+    pub runtime_emitted_event_count: usize,
+    pub runtime_event_types: Vec<String>,
+    pub runtime_transports: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_runtime_event_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1705,6 +1715,7 @@ pub fn addon_observability_report(
     let addon_filter = normalize_filter(addon_id);
     let lifecycle_filter = normalize_filter(lifecycle);
     let dispatch_limit = dispatch_limit.max(1);
+    let runtime_events = store.load_global_events()?;
     let mut addons = Vec::new();
     for addon in catalog.addons.iter().filter(|addon| {
         addon_filter
@@ -1713,7 +1724,12 @@ pub fn addon_observability_report(
             .unwrap_or(true)
             && filter_matches(lifecycle_filter.as_deref(), &addon.lifecycle)
     }) {
-        addons.push(addon_observability_entry(store, addon, dispatch_limit)?);
+        addons.push(addon_observability_entry(
+            store,
+            addon,
+            dispatch_limit,
+            &runtime_events,
+        )?);
     }
     let enabled_count = addons
         .iter()
@@ -6690,6 +6706,7 @@ fn addon_observability_entry(
     store: &ForgeStore,
     addon: &AddonManifest,
     dispatch_limit: usize,
+    runtime_events: &[StoredGlobalEventRecord],
 ) -> Result<AddonObservabilityEntry> {
     let dispatches =
         store.list_runtime_contract_dispatches(Some(&addon.id), None, None, dispatch_limit)?;
@@ -6743,7 +6760,7 @@ fn addon_observability_entry(
             .iter()
             .map(|integration| integration.id.clone())
             .collect(),
-        event_flow: addon_event_flow_summary(addon),
+        event_flow: addon_event_flow_summary(addon, runtime_events),
         dispatches: addon_dispatch_observability(&dispatches),
     })
 }
@@ -6766,11 +6783,17 @@ fn addon_observability_totals(addons: &[AddonObservabilityEntry]) -> AddonObserv
         totals.failed_dispatch_count += addon.dispatches.failed_count;
         totals.blocked_dispatch_count += addon.dispatches.blocked_count;
         totals.needs_external_worker_count += addon.dispatches.needs_external_worker_count;
+        totals.runtime_event_count += addon.event_flow.runtime_event_count;
+        totals.runtime_consumed_event_count += addon.event_flow.runtime_consumed_event_count;
+        totals.runtime_emitted_event_count += addon.event_flow.runtime_emitted_event_count;
     }
     totals
 }
 
-fn addon_event_flow_summary(addon: &AddonManifest) -> AddonEventFlowSummary {
+fn addon_event_flow_summary(
+    addon: &AddonManifest,
+    runtime_events: &[StoredGlobalEventRecord],
+) -> AddonEventFlowSummary {
     let mut summary = AddonEventFlowSummary::default();
     for adapter in &addon.event_adapters {
         let direction = adapter.direction.trim().to_lowercase();
@@ -6798,7 +6821,124 @@ fn addon_event_flow_summary(addon: &AddonManifest) -> AddonEventFlowSummary {
             extend_unique(&mut summary.emitted_event_types, event_types);
         }
     }
+    apply_addon_runtime_event_flow(&mut summary, &addon.id, runtime_events);
     summary
+}
+
+fn apply_addon_runtime_event_flow(
+    summary: &mut AddonEventFlowSummary,
+    addon_id: &str,
+    events: &[StoredGlobalEventRecord],
+) {
+    for event in events {
+        if addon_runtime_event_addon_id(event).as_deref() != Some(addon_id) {
+            continue;
+        }
+        summary.runtime_event_count += 1;
+        summary.latest_runtime_event_at = Some(event.created_at.clone());
+        if let Some(event_type) = addon_runtime_event_type(event) {
+            extend_unique(&mut summary.runtime_event_types, vec![event_type]);
+        }
+        if let Some(transport) = addon_runtime_event_transport(event) {
+            extend_unique(&mut summary.runtime_transports, vec![transport]);
+        }
+        match addon_runtime_event_direction(event).as_deref() {
+            Some("egress") | Some("outbound") | Some("emit") | Some("emitted") => {
+                summary.runtime_emitted_event_count += 1;
+            }
+            Some("ingress") | Some("inbound") | Some("consume") | Some("consumed") => {
+                summary.runtime_consumed_event_count += 1;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn addon_runtime_event_addon_id(event: &StoredGlobalEventRecord) -> Option<String> {
+    first_json_text(
+        &event.data,
+        &[
+            &["addon_id"],
+            &["addon"],
+            &["request", "addon_id"],
+            &["adapter_policy", "addon_id"],
+            &["adapter_policy", "matched_adapter", "addon_id"],
+        ],
+    )
+}
+
+fn addon_runtime_event_direction(event: &StoredGlobalEventRecord) -> Option<String> {
+    first_json_text(
+        &event.data,
+        &[
+            &["direction"],
+            &["event_direction"],
+            &["request", "direction"],
+            &["adapter_policy", "direction"],
+            &["adapter_policy", "matched_adapter", "adapter", "direction"],
+        ],
+    )
+    .map(|direction| direction.to_ascii_lowercase())
+    .or_else(|| {
+        let source = event.source.to_ascii_lowercase();
+        let kind = event.kind.to_ascii_lowercase();
+        if source.contains("egress") || kind.contains("egress") {
+            Some("egress".to_string())
+        } else if source.contains("ingress") || kind.contains("ingress") || kind.contains("inbound")
+        {
+            Some("ingress".to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn addon_runtime_event_type(event: &StoredGlobalEventRecord) -> Option<String> {
+    first_json_text(
+        &event.data,
+        &[
+            &["event_type"],
+            &["type"],
+            &["request", "event_type"],
+            &["adapter_policy", "event_type"],
+        ],
+    )
+}
+
+fn addon_runtime_event_transport(event: &StoredGlobalEventRecord) -> Option<String> {
+    first_json_text(
+        &event.data,
+        &[
+            &["transport"],
+            &["request", "transport"],
+            &["adapter_policy", "transport"],
+            &["adapter_policy", "matched_adapter", "adapter", "transport"],
+        ],
+    )
+}
+
+fn first_json_text(value: &serde_json::Value, paths: &[&[&str]]) -> Option<String> {
+    paths.iter().find_map(|path| json_text_at_path(value, path))
+}
+
+fn json_text_at_path(value: &serde_json::Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    current
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            current
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToString::to_string)
+        })
 }
 
 fn addon_dispatch_observability(

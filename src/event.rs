@@ -7713,6 +7713,7 @@ fn observability_value_candidates(data: &Value) -> Vec<&Value> {
                 "replay_manifest",
                 "memory_policy",
                 "operating_context",
+                "request",
             ] {
                 if let Some(value) = candidate.get(key) {
                     candidates.push(value);

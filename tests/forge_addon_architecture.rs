@@ -8290,6 +8290,45 @@ event_adapters:
         })
         .collect::<Vec<_>>();
     assert_eq!(egress_events.len(), 2);
+    assert!(egress_events
+        .iter()
+        .all(|event| event["observability"]["addon_id"] == "forge.addon.partner"));
+
+    let observability_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "observability",
+            "--addon",
+            "forge.addon.partner",
+            "--addon-dir",
+            addon_dir.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let observability_json: Value = serde_json::from_slice(&observability_output).unwrap();
+    let event_flow = &observability_json["addons"][0]["event_flow"];
+    assert_eq!(event_flow["runtime_event_count"], 2);
+    assert_eq!(event_flow["runtime_emitted_event_count"], 2);
+    assert_eq!(event_flow["runtime_consumed_event_count"], 0);
+    assert!(event_flow["runtime_event_types"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("partner.notification".to_string())));
+    assert!(event_flow["runtime_transports"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("webhook".to_string())));
+    assert_eq!(
+        observability_json["totals"]["runtime_emitted_event_count"],
+        2
+    );
 
     handle.join().unwrap();
 }
