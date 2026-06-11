@@ -264,6 +264,7 @@ pub struct CliHarnessExecOptions<'a> {
     pub token_headroom: bool,
     pub dry_run: bool,
     pub allow_exec: bool,
+    pub project_root: Option<&'a Path>,
     pub cwd: Option<&'a Path>,
 }
 
@@ -912,6 +913,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         token_headroom,
         dry_run,
         allow_exec,
+        project_root,
         cwd,
     } = options;
     let wrapper_plan = build_cli_wrapper_plan(CliWrapperPlanOptions {
@@ -929,10 +931,13 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
     let cwd_path = cwd
         .map(Path::to_path_buf)
         .unwrap_or(env::current_dir().context("failed to read current directory")?);
+    let policy_root = project_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| cwd_path.clone());
     let cwd_display = cwd_path.display().to_string();
     let (resolved_executable, resolution_status) = resolve_executable(command.first(), &cwd_path);
     let command_sha256 = hex_sha256(command.join("\0").as_bytes());
-    let project_policy = read_harness_project_exec_policy(&cwd_path);
+    let project_policy = read_harness_project_exec_policy(&policy_root);
     let project_policy_status =
         harness_project_exec_policy_status(&project_policy, dry_run, workflow_id, task_id, run_id);
     let mut safety_checks = vec![

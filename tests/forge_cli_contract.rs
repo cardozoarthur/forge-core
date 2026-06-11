@@ -1091,6 +1091,186 @@ printf 'policy-exec-ok:%s\n' "$FORGE_WORKFLOW_ID"
 }
 
 #[test]
+fn harness_exec_can_use_explicit_project_root_without_changing_child_cwd_for_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("remote-project");
+    let child_cwd = temp.path().join("child-cwd");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(project.join(".forge")).unwrap();
+    fs::create_dir_all(&child_cwd).unwrap();
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(
+        project.join(".forge").join("harness.json"),
+        r#"{"default_mode":"forge_first","require_lineage_for_exec":true}"#,
+    )
+    .unwrap();
+    write_fake_executor(
+        &bin_dir,
+        "forge-project-root-cli",
+        r#"#!/bin/sh
+printf 'pwd:%s workflow:%s source:%s\n' "$PWD" "$FORGE_WORKFLOW_ID" "$FORGE_HARNESS_MODE_SOURCE"
+"#,
+    );
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let blocked = forge()
+        .env("PATH", &path)
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "exec",
+            "--executor",
+            "codex",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--execute",
+            "--allow-exec",
+            "--cwd",
+            child_cwd.to_str().unwrap(),
+            "--output",
+            "json",
+            "--",
+            "forge-project-root-cli",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let blocked_json: Value = serde_json::from_slice(&blocked).unwrap();
+    assert_eq!(
+        blocked_json["status"],
+        "harness_exec_blocked_by_project_policy"
+    );
+    assert_eq!(blocked_json["forge_first"], true);
+    assert_eq!(blocked_json["forge_first_source"], "project_config");
+    assert_eq!(blocked_json["cwd"], child_cwd.display().to_string());
+    assert_eq!(
+        blocked_json["project_policy_path"],
+        project
+            .join(".forge")
+            .join("harness.json")
+            .display()
+            .to_string()
+    );
+    assert_eq!(
+        blocked_json["project_policy_status"],
+        "lineage_required_missing"
+    );
+
+    let allowed = forge()
+        .env("PATH", &path)
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "exec",
+            "--executor",
+            "codex",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--workflow",
+            "wf_project_root",
+            "--task",
+            "task-project-root",
+            "--run",
+            "run-project-root",
+            "--execute",
+            "--allow-exec",
+            "--cwd",
+            child_cwd.to_str().unwrap(),
+            "--output",
+            "json",
+            "--",
+            "forge-project-root-cli",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let allowed_json: Value = serde_json::from_slice(&allowed).unwrap();
+    assert_eq!(allowed_json["status"], "harness_exec_completed");
+    assert_eq!(allowed_json["forge_first_source"], "project_config");
+    assert_eq!(
+        allowed_json["project_policy_status"],
+        "lineage_required_satisfied"
+    );
+    let stdout_excerpt = allowed_json["stdout_excerpt"].as_str().unwrap();
+    assert!(stdout_excerpt.contains(&format!("pwd:{}", child_cwd.display())));
+    assert!(stdout_excerpt.contains("workflow:wf_project_root"));
+    assert!(stdout_excerpt.contains("source:project_config"));
+
+    let mcp_tools_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_tools: Value = serde_json::from_slice(&mcp_tools_output).unwrap();
+    let mcp_exec_tool = find_mcp_tool(&mcp_tools, "forge.harness.exec");
+    assert_eq!(
+        mcp_exec_tool["input_schema"]["properties"]["project_root"]["type"],
+        "string"
+    );
+
+    let mcp_input = serde_json::json!({
+        "executor": "codex",
+        "command": ["forge-project-root-cli"],
+        "project_root": project.display().to_string(),
+        "workflow_id": "wf_mcp_project_root",
+        "task_id": "task-mcp-project-root",
+        "run_id": "run-mcp-project-root",
+        "dry_run": false,
+        "allow_exec": true,
+        "cwd": child_cwd.display().to_string()
+    });
+    let mcp_output = forge()
+        .env("PATH", &path)
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.exec",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp_json["result"]["status"], "harness_exec_completed");
+    assert_eq!(mcp_json["result"]["forge_first_source"], "project_config");
+    assert_eq!(mcp_json["result"]["cwd"], child_cwd.display().to_string());
+    assert!(mcp_json["result"]["stdout_excerpt"]
+        .as_str()
+        .unwrap()
+        .contains("source:project_config"));
+}
+
+#[test]
 fn harness_mode_can_audit_explicit_project_root_from_cli_and_mcp() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -2321,6 +2501,10 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .as_str()
         .unwrap()
         .contains("install-shims --project-root"));
+    assert!(replacement_cli["evidence"]
+        .as_str()
+        .unwrap()
+        .contains("exec --project-root"));
     assert!(replacement_cli["gap_before_promotion"]
         .as_str()
         .unwrap()

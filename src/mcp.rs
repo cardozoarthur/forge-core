@@ -485,6 +485,7 @@ struct HarnessExecInput {
     token_headroom: Option<bool>,
     dry_run: Option<bool>,
     allow_exec: Option<bool>,
+    project_root: Option<String>,
     cwd: Option<String>,
 }
 
@@ -4973,10 +4974,11 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("token_headroom", "boolean", "enable token-headroom env"),
                     ("dry_run", "boolean", "default true; false requests guarded execution"),
                     ("allow_exec", "boolean", "must be true together with dry_run=false before executing"),
+                    ("project_root", "string", "optional project root containing .forge/harness.json"),
                     ("cwd", "string", "optional child working directory"),
                 ], &["executor"]),
                 "forge.harness.exec_receipt.v1",
-                &["forge", "harness", "exec", "--executor", "<executor>", "--", "<cmd>"],
+                &["forge", "harness", "exec", "--executor", "<executor>", "--project-root", "<project-root>", "--", "<cmd>"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -7594,11 +7596,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
             let cwd = input.cwd.as_deref().map(std::path::Path::new);
-            let forge_first = input.forge_first.unwrap_or(true);
-            let forge_first_source = if input.forge_first.is_some() {
-                "mcp_input"
+            let project_root = input.project_root.as_deref().map(std::path::Path::new);
+            let (forge_first, forge_first_source) = if let Some(forge_first) = input.forge_first {
+                (forge_first, "mcp_input")
+            } else if let Some(project_root) = project_root {
+                resolve_harness_forge_first_source_for_project(false, false, Some(project_root))
             } else {
-                "mcp_default"
+                (true, "mcp_default")
             };
             serde_json::to_value(run_cli_harness_exec(CliHarnessExecOptions {
                 store: Some(store),
@@ -7613,6 +7617,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 token_headroom: input.token_headroom.unwrap_or(true),
                 dry_run: input.dry_run.unwrap_or(true),
                 allow_exec: input.allow_exec.unwrap_or(false),
+                project_root,
                 cwd,
             })?)?
         }

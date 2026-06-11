@@ -64,9 +64,9 @@ use forge_core::handoff::build_task_handoff;
 use forge_core::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, build_harness_mode_report,
     inspect_cli_harness_shim_status, install_cli_harness_shim, persist_token_headroom_report,
-    resolve_harness_forge_first_source, resolve_harness_forge_first_source_for_project,
-    retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
-    CliShimStatusOptions, CliWrapperPlanOptions, HarnessModeOptions,
+    resolve_harness_forge_first_source_for_project, retrieve_headroom_blob, run_cli_harness_exec,
+    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
+    HarnessModeOptions,
 };
 use forge_core::identity::{
     audit_tenant_index, ensure_operating_context_policy, ensure_workflow_policy,
@@ -724,6 +724,8 @@ enum HarnessCommands {
         execute: bool,
         #[arg(long = "allow-exec", default_value_t = false)]
         allow_exec: bool,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long)]
         cwd: Option<PathBuf>,
         #[arg(last = true, num_args = 0.., allow_hyphen_values = true)]
@@ -5404,12 +5406,17 @@ fn run() -> Result<i32> {
                 token_headroom,
                 execute,
                 allow_exec,
+                project_root,
                 cwd,
                 command,
                 output,
             } => {
                 let (forge_first, forge_first_source) =
-                    resolve_harness_forge_first_source(forge_first, observe_only);
+                    resolve_harness_forge_first_source_for_project(
+                        forge_first,
+                        observe_only,
+                        project_root.as_deref(),
+                    );
                 let store = ForgeStore::open(cli.store)?;
                 let report = run_cli_harness_exec(CliHarnessExecOptions {
                     store: Some(&store),
@@ -5424,6 +5431,7 @@ fn run() -> Result<i32> {
                     token_headroom,
                     dry_run: !execute,
                     allow_exec,
+                    project_root: project_root.as_deref(),
                     cwd: cwd.as_deref(),
                 })?;
                 print_response(output, &report)?;
