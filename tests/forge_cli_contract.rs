@@ -36268,6 +36268,20 @@ fn interactive_home_exposes_task_board_handoffs_checkpoints_and_artifacts() {
                 .unwrap()
                 .iter()
                 .any(|widget| widget["source"] == "addon")));
+    assert!(ui_composition["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|region| region["region_id"] == "addons"
+            && region["widgets"].as_array().unwrap().iter().any(|widget| {
+                widget["widget_id"]
+                    == "addon:forge.addon.software_development:software.patch_workbench"
+                    && widget["panel"] == "software.patch_workbench"
+                    && widget["renderer_family"] == "editor_renderer"
+                    && widget["commands"].as_array().unwrap().contains(&serde_json::json!(
+                        "forge addons views --addon forge.addon.software_development --surface tui --output json"
+                    ))
+            })));
     assert!(ui_composition["commands"]["refresh"]
         .as_array()
         .unwrap()

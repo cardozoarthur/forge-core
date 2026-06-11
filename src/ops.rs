@@ -1702,6 +1702,8 @@ fn classify_addon_view_renderer_family(view_type: &str, component: &str) -> Stri
         || normalized.contains("form")
         || normalized.contains("input")
         || normalized.contains("builder")
+        || normalized.contains("workbench")
+        || normalized.contains("patch")
     {
         "editor_renderer".to_string()
     } else if normalized.contains("table")

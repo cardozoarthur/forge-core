@@ -1237,8 +1237,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
     let addon_renderer_report = load_addon_catalog_from_store(store, &default_addon_dirs())
         .ok()
         .map(|catalog| {
-            let addon_views =
-                list_addon_views(&catalog, None, Some("ops_console"), Some("enabled"));
+            let addon_views = list_addon_views(&catalog, None, None, Some("enabled"));
             build_addon_view_renderer_report(&addon_views)
         })
         .unwrap_or_else(|| OpsAddonViewRendererReport {
@@ -4981,7 +4980,7 @@ fn build_ui_composition_panel(
         "data_list_renderer",
         "standard",
         "full",
-        vec!["forge addons views --surface ops_console --output json".to_string()],
+        vec!["forge addons views --output json".to_string()],
     )];
     addon_region_widgets.append(&mut addon_widgets);
 
@@ -5209,8 +5208,6 @@ fn build_ui_composition_panel(
             inspect_addons: vec![
                 "addons".to_string(),
                 "views".to_string(),
-                "--surface".to_string(),
-                "ops_console".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
