@@ -136,6 +136,9 @@ pub struct CliHarnessExecReceipt {
     pub dry_run: bool,
     pub allow_exec: bool,
     pub execution_mode: String,
+    pub project_policy_path: String,
+    pub project_policy_status: String,
+    pub require_lineage_for_exec: bool,
     pub resolved_executable: Option<String>,
     pub resolution_status: String,
     pub wrapper_plan: CliWrapperPlanReport,
@@ -903,13 +906,19 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
     let cwd_display = cwd_path.display().to_string();
     let (resolved_executable, resolution_status) = resolve_executable(command.first(), &cwd_path);
     let command_sha256 = hex_sha256(command.join("\0").as_bytes());
-    let safety_checks = vec![
+    let project_policy = read_harness_project_exec_policy(&cwd_path);
+    let project_policy_status =
+        harness_project_exec_policy_status(&project_policy, dry_run, workflow_id, task_id, run_id);
+    let mut safety_checks = vec![
         "dry_run is the default; real execution requires --execute and --allow-exec".to_string(),
         "resolved executable is recorded before running the child process".to_string(),
         "Forge env overlay is applied only to the child process".to_string(),
         "stdout and stderr are summarized by bytes, sha256 and bounded excerpts".to_string(),
         "workflow/task/run lineage, token-headroom settings and harness events stay explicit in the receipt".to_string(),
     ];
+    if project_policy.require_lineage_for_exec {
+        safety_checks.push("project_require_lineage_for_exec".to_string());
+    }
 
     if dry_run {
         let mut receipt = exec_receipt(CliExecReceiptInput {
@@ -921,6 +930,9 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             dry_run,
             allow_exec,
             execution_mode: "dry_run".to_string(),
+            project_policy_path: project_policy.path.display().to_string(),
+            project_policy_status: project_policy_status.to_string(),
+            require_lineage_for_exec: project_policy.require_lineage_for_exec,
             resolved_executable,
             resolution_status,
             status: "harness_exec_dry_run".to_string(),
@@ -951,6 +963,9 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             dry_run,
             allow_exec,
             execution_mode: "blocked".to_string(),
+            project_policy_path: project_policy.path.display().to_string(),
+            project_policy_status: project_policy_status.to_string(),
+            require_lineage_for_exec: project_policy.require_lineage_for_exec,
             resolved_executable,
             resolution_status,
             status: "harness_exec_blocked_without_allow_exec".to_string(),
@@ -971,6 +986,43 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         record_harness_exec_event_if_possible(store, workflow_id, task_id, run_id, &mut receipt)?;
         return Ok(receipt);
     }
+    if project_policy_status == "lineage_required_missing" {
+        let mut receipt = exec_receipt(CliExecReceiptInput {
+            wrapper_plan,
+            command,
+            command_sha256,
+            cwd: cwd_display,
+            forge_first,
+            dry_run,
+            allow_exec,
+            execution_mode: "blocked".to_string(),
+            project_policy_path: project_policy.path.display().to_string(),
+            project_policy_status: project_policy_status.to_string(),
+            require_lineage_for_exec: project_policy.require_lineage_for_exec,
+            resolved_executable,
+            resolution_status,
+            status: "harness_exec_blocked_by_project_policy".to_string(),
+            safety_checks,
+            executed: false,
+            success: None,
+            exit_code: None,
+            stdout_bytes: None,
+            stderr_bytes: None,
+            stdout_sha256: None,
+            stderr_sha256: None,
+            stdout_excerpt: None,
+            stderr_excerpt: None,
+            output_headroom_enabled: token_headroom,
+            stdout_headroom: None,
+            stderr_headroom: None,
+        });
+        receipt.notes.push(
+            "Project harness policy requires workflow, task and run lineage before real execution."
+                .to_string(),
+        );
+        record_harness_exec_event_if_possible(store, workflow_id, task_id, run_id, &mut receipt)?;
+        return Ok(receipt);
+    }
     let Some(executable) = resolved_executable.clone() else {
         let mut receipt = exec_receipt(CliExecReceiptInput {
             wrapper_plan,
@@ -981,6 +1033,9 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
             dry_run,
             allow_exec,
             execution_mode: "blocked".to_string(),
+            project_policy_path: project_policy.path.display().to_string(),
+            project_policy_status: project_policy_status.to_string(),
+            require_lineage_for_exec: project_policy.require_lineage_for_exec,
             resolved_executable,
             resolution_status,
             status: "harness_exec_blocked_missing_executable".to_string(),
@@ -1039,6 +1094,9 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         dry_run,
         allow_exec,
         execution_mode: "guarded_exec".to_string(),
+        project_policy_path: project_policy.path.display().to_string(),
+        project_policy_status: project_policy_status.to_string(),
+        require_lineage_for_exec: project_policy.require_lineage_for_exec,
         resolved_executable,
         resolution_status,
         status: if success {
@@ -1237,6 +1295,78 @@ fn read_harness_project_mode(project_root: &Path) -> HarnessProjectDefaultMode {
         },
         forge_first,
     }
+}
+
+#[derive(Debug, Clone)]
+struct HarnessProjectExecPolicy {
+    path: PathBuf,
+    status: &'static str,
+    require_lineage_for_exec: bool,
+}
+
+fn read_harness_project_exec_policy(project_root: &Path) -> HarnessProjectExecPolicy {
+    let path = project_root.join(".forge/harness.json");
+    let Ok(content) = fs::read_to_string(&path) else {
+        return HarnessProjectExecPolicy {
+            path,
+            status: "missing",
+            require_lineage_for_exec: false,
+        };
+    };
+    let Ok(config) = serde_json::from_str::<Value>(&content) else {
+        return HarnessProjectExecPolicy {
+            path,
+            status: "invalid_json",
+            require_lineage_for_exec: false,
+        };
+    };
+    let require_lineage_for_exec = config
+        .get("require_lineage_for_exec")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    HarnessProjectExecPolicy {
+        path,
+        status: if config.get("require_lineage_for_exec").is_some() {
+            "loaded"
+        } else {
+            "missing_require_lineage_for_exec"
+        },
+        require_lineage_for_exec,
+    }
+}
+
+fn harness_project_exec_policy_status(
+    policy: &HarnessProjectExecPolicy,
+    dry_run: bool,
+    workflow_id: Option<&str>,
+    task_id: Option<&str>,
+    run_id: Option<&str>,
+) -> &'static str {
+    if !policy.require_lineage_for_exec {
+        return match policy.status {
+            "missing" => "missing",
+            "invalid_json" => "invalid_json",
+            _ => "lineage_not_required",
+        };
+    }
+    if dry_run {
+        return "lineage_required_dry_run";
+    }
+    if harness_exec_has_required_lineage(workflow_id, task_id, run_id) {
+        "lineage_required_satisfied"
+    } else {
+        "lineage_required_missing"
+    }
+}
+
+fn harness_exec_has_required_lineage(
+    workflow_id: Option<&str>,
+    task_id: Option<&str>,
+    run_id: Option<&str>,
+) -> bool {
+    [workflow_id, task_id, run_id]
+        .into_iter()
+        .all(|value| value.is_some_and(|value| !value.trim().is_empty()))
 }
 
 fn harness_effective_mode(forge_first: bool) -> &'static str {
@@ -1699,6 +1829,9 @@ struct CliExecReceiptInput {
     dry_run: bool,
     allow_exec: bool,
     execution_mode: String,
+    project_policy_path: String,
+    project_policy_status: String,
+    require_lineage_for_exec: bool,
     resolved_executable: Option<String>,
     resolution_status: String,
     status: String,
@@ -1737,6 +1870,9 @@ fn exec_receipt(input: CliExecReceiptInput) -> CliHarnessExecReceipt {
         dry_run: input.dry_run,
         allow_exec: input.allow_exec,
         execution_mode: input.execution_mode,
+        project_policy_path: input.project_policy_path,
+        project_policy_status: input.project_policy_status,
+        require_lineage_for_exec: input.require_lineage_for_exec,
         resolved_executable: input.resolved_executable,
         resolution_status: input.resolution_status,
         wrapper_plan: input.wrapper_plan,

@@ -830,6 +830,157 @@ done
     );
 }
 
+#[test]
+fn harness_exec_enforces_project_lineage_policy_before_real_brain_execution() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let forge_dir = temp.path().join(".forge");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(
+        forge_dir.join("harness.json"),
+        r#"{"default_mode":"forge_first","require_lineage_for_exec":true}"#,
+    )
+    .unwrap();
+    write_fake_executor(
+        &bin_dir,
+        "forge-policy-cli",
+        r#"#!/bin/sh
+printf 'policy-exec-ok:%s\n' "$FORGE_WORKFLOW_ID"
+"#,
+    );
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let blocked = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "exec",
+            "--executor",
+            "codex",
+            "--execute",
+            "--allow-exec",
+            "--cwd",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+            "--",
+            "forge-policy-cli",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let blocked_json: Value = serde_json::from_slice(&blocked).unwrap();
+    assert_eq!(
+        blocked_json["status"],
+        "harness_exec_blocked_by_project_policy"
+    );
+    assert_eq!(blocked_json["executed"], false);
+    assert_eq!(
+        blocked_json["project_policy_status"],
+        "lineage_required_missing"
+    );
+    assert_eq!(blocked_json["require_lineage_for_exec"], true);
+    assert!(blocked_json["safety_checks"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("project_require_lineage_for_exec")));
+    assert!(blocked_json["notes"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "Project harness policy requires workflow, task and run lineage before real execution."
+        )));
+
+    let allowed = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "exec",
+            "--executor",
+            "codex",
+            "--forge-first",
+            "--workflow",
+            "wf_policy",
+            "--task",
+            "task-policy",
+            "--run",
+            "run-policy",
+            "--execute",
+            "--allow-exec",
+            "--cwd",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+            "--",
+            "forge-policy-cli",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let allowed_json: Value = serde_json::from_slice(&allowed).unwrap();
+    assert_eq!(allowed_json["status"], "harness_exec_completed");
+    assert_eq!(allowed_json["executed"], true);
+    assert_eq!(
+        allowed_json["project_policy_status"],
+        "lineage_required_satisfied"
+    );
+    assert_eq!(allowed_json["event_recorded"], true);
+    assert!(allowed_json["stdout_excerpt"]
+        .as_str()
+        .unwrap()
+        .contains("policy-exec-ok:wf_policy"));
+
+    let mcp_input = serde_json::json!({
+        "executor": "codex",
+        "command": ["forge-policy-cli"],
+        "dry_run": false,
+        "allow_exec": true,
+        "cwd": temp.path().display().to_string()
+    });
+    let mcp_blocked = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.exec",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_blocked).unwrap();
+    assert_eq!(
+        mcp_json["result"]["status"],
+        "harness_exec_blocked_by_project_policy"
+    );
+    assert_eq!(mcp_json["result"]["executed"], false);
+    assert_eq!(
+        mcp_json["result"]["project_policy_status"],
+        "lineage_required_missing"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn harness_install_shims_writes_forge_first_cli_wrapper_without_overwriting_real_cli() {
@@ -1812,6 +1963,10 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .as_str()
         .unwrap()
         .contains("forge milestone cli-demo"));
+    assert!(replacement_cli["evidence"]
+        .as_str()
+        .unwrap()
+        .contains("require_lineage_for_exec"));
     assert!(replacement_cli["gap_before_promotion"]
         .as_str()
         .unwrap()
