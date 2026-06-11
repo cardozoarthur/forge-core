@@ -227,6 +227,11 @@ pub struct HarnessAdoptionStep {
     pub title: String,
     pub status: String,
     pub command_key: String,
+    pub risk_level: String,
+    pub mutates_state: bool,
+    pub executes_child: bool,
+    pub requires_approval: bool,
+    pub approval_reason: String,
     pub rationale: String,
 }
 
@@ -1221,64 +1226,94 @@ pub fn build_harness_adoption_plan(
         executes_child: false,
         recommended_project_config,
         adoption_steps: vec![
-            harness_adoption_step(
-                "write_project_harness_config",
-                "Write project harness policy",
-                if mode.project_config_status == "loaded" {
+            harness_adoption_step(HarnessAdoptionStepInput {
+                id: "write_project_harness_config",
+                title: "Write project harness policy",
+                status: if mode.project_config_status == "loaded" {
                     "already_configured"
                 } else {
                     "recommended"
                 },
-                "write_project_harness_config",
-                "Project policy makes Forge-first, headroom and lineage requirements explicit instead of relying on operator memory.",
-            ),
-            harness_adoption_step(
-                "inspect_headroom_plan",
-                "Inspect headroom and wrapper policy",
-                "ready",
-                "headroom_plan",
-                "Headroom planning keeps large logs and child output bounded while preserving reversible retrieval refs.",
-            ),
-            harness_adoption_step(
-                "install_forge_first_shims",
-                "Install Forge-first shims",
-                if doctor.shim_ready {
+                command_key: "write_project_harness_config",
+                risk_level: "medium",
+                mutates_state: true,
+                executes_child: false,
+                requires_approval: true,
+                approval_reason: "Project harness config changes Forge-first, token-headroom and lineage policy for future CLI execution.",
+                rationale: "Project policy makes Forge-first, headroom and lineage requirements explicit instead of relying on operator memory.",
+            }),
+            harness_adoption_step(HarnessAdoptionStepInput {
+                id: "inspect_headroom_plan",
+                title: "Inspect headroom and wrapper policy",
+                status: "ready",
+                command_key: "headroom_plan",
+                risk_level: "low",
+                mutates_state: false,
+                executes_child: false,
+                requires_approval: false,
+                approval_reason: "",
+                rationale: "Headroom planning keeps large logs and child output bounded while preserving reversible retrieval refs.",
+            }),
+            harness_adoption_step(HarnessAdoptionStepInput {
+                id: "install_forge_first_shims",
+                title: "Install Forge-first shims",
+                status: if doctor.shim_ready {
                     "already_ready"
                 } else {
                     "recommended"
                 },
-                "install_shims",
-                "Shims make the selected CLI enter through Forge harness controls without replacing the native executable.",
-            ),
-            harness_adoption_step(
-                "sync_executor_inventory",
-                "Sync executor inventory",
-                "ready",
-                "sync_executors",
-                "Executor sync projects shim readiness into brains, sessions and shell launch plans.",
-            ),
-            harness_adoption_step(
-                "verify_harness_doctor",
-                "Verify harness doctor",
-                if doctor.status == "harness_doctor_ready" {
+                command_key: "install_shims",
+                risk_level: "medium",
+                mutates_state: true,
+                executes_child: false,
+                requires_approval: true,
+                approval_reason: "PATH shims alter how selected CLIs enter Forge infrastructure and must be approved before writing files.",
+                rationale: "Shims make the selected CLI enter through Forge harness controls without replacing the native executable.",
+            }),
+            harness_adoption_step(HarnessAdoptionStepInput {
+                id: "sync_executor_inventory",
+                title: "Sync executor inventory",
+                status: "ready",
+                command_key: "sync_executors",
+                risk_level: "low",
+                mutates_state: true,
+                executes_child: false,
+                requires_approval: false,
+                approval_reason: "",
+                rationale: "Executor sync projects shim readiness into brains, sessions and shell launch plans.",
+            }),
+            harness_adoption_step(HarnessAdoptionStepInput {
+                id: "verify_harness_doctor",
+                title: "Verify harness doctor",
+                status: if doctor.status == "harness_doctor_ready" {
                     "already_ready"
                 } else {
                     "recommended"
                 },
-                "doctor",
-                "Doctor confirms Forge-first, shim, token-headroom and lineage readiness before real handoff.",
-            ),
-            harness_adoption_step(
-                "use_harness_exec_with_lineage",
-                "Use harness exec with workflow lineage",
-                if doctor.lineage_policy_ready {
+                command_key: "doctor",
+                risk_level: "low",
+                mutates_state: false,
+                executes_child: false,
+                requires_approval: false,
+                approval_reason: "",
+                rationale: "Doctor confirms Forge-first, shim, token-headroom and lineage readiness before real handoff.",
+            }),
+            harness_adoption_step(HarnessAdoptionStepInput {
+                id: "use_harness_exec_with_lineage",
+                title: "Use harness exec with workflow lineage",
+                status: if doctor.lineage_policy_ready {
                     "ready"
                 } else {
                     "blocked_until_lineage"
                 },
-                "exec_with_lineage",
-                "Lineage binds child CLI work to workflow, task and run records before execution.",
-            ),
+                command_key: "exec_with_lineage",
+                risk_level: "high",
+                mutates_state: true,
+                executes_child: true,
+                requires_approval: true,
+                approval_reason: "Real harness exec starts an external child process and must be explicitly allowed with workflow/task/run lineage.",
+                rationale: "Lineage binds child CLI work to workflow, task and run records before execution.",
+            }),
         ],
         commands,
         mcp_tools: vec![
@@ -1300,19 +1335,31 @@ pub fn build_harness_adoption_plan(
     })
 }
 
-fn harness_adoption_step(
-    id: &str,
-    title: &str,
-    status: &str,
-    command_key: &str,
-    rationale: &str,
-) -> HarnessAdoptionStep {
+struct HarnessAdoptionStepInput<'a> {
+    id: &'a str,
+    title: &'a str,
+    status: &'a str,
+    command_key: &'a str,
+    risk_level: &'a str,
+    mutates_state: bool,
+    executes_child: bool,
+    requires_approval: bool,
+    approval_reason: &'a str,
+    rationale: &'a str,
+}
+
+fn harness_adoption_step(input: HarnessAdoptionStepInput<'_>) -> HarnessAdoptionStep {
     HarnessAdoptionStep {
-        id: id.to_string(),
-        title: title.to_string(),
-        status: status.to_string(),
-        command_key: command_key.to_string(),
-        rationale: rationale.to_string(),
+        id: input.id.to_string(),
+        title: input.title.to_string(),
+        status: input.status.to_string(),
+        command_key: input.command_key.to_string(),
+        risk_level: input.risk_level.to_string(),
+        mutates_state: input.mutates_state,
+        executes_child: input.executes_child,
+        requires_approval: input.requires_approval,
+        approval_reason: input.approval_reason.to_string(),
+        rationale: input.rationale.to_string(),
     }
 }
 

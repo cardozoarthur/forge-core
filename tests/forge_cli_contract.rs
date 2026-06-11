@@ -1328,6 +1328,30 @@ fn harness_adoption_plan_models_forge_first_headroom_for_cli_mcp_and_skill() {
         .unwrap()
         .iter()
         .any(|step| step["id"] == "verify_harness_doctor"));
+    let install_step = json["adoption_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "install_forge_first_shims")
+        .unwrap();
+    assert_eq!(install_step["risk_level"], "medium");
+    assert_eq!(install_step["mutates_state"], true);
+    assert_eq!(install_step["executes_child"], false);
+    assert_eq!(install_step["requires_approval"], true);
+    assert!(install_step["approval_reason"]
+        .as_str()
+        .unwrap()
+        .contains("PATH shims"));
+    let exec_step = json["adoption_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "use_harness_exec_with_lineage")
+        .unwrap();
+    assert_eq!(exec_step["risk_level"], "high");
+    assert_eq!(exec_step["mutates_state"], true);
+    assert_eq!(exec_step["executes_child"], true);
+    assert_eq!(exec_step["requires_approval"], true);
     assert!(json["commands"]["install_shims"]
         .as_array()
         .unwrap()
