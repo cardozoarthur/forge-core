@@ -64,9 +64,9 @@ use forge_core::handoff::build_task_handoff;
 use forge_core::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, build_harness_mode_report,
     inspect_cli_harness_shim_status, install_cli_harness_shim, persist_token_headroom_report,
-    resolve_harness_forge_first_source, retrieve_headroom_blob, run_cli_harness_exec,
-    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
-    HarnessModeOptions,
+    resolve_harness_forge_first_source, resolve_harness_forge_first_source_for_project,
+    retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
+    CliShimStatusOptions, CliWrapperPlanOptions, HarnessModeOptions,
 };
 use forge_core::identity::{
     audit_tenant_index, ensure_operating_context_policy, ensure_workflow_policy,
@@ -662,6 +662,8 @@ enum HarnessCommands {
         context_budget: usize,
         #[arg(long = "token-headroom", default_value_t = true)]
         token_headroom: bool,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -5316,10 +5318,15 @@ fn run() -> Result<i32> {
                 run_id,
                 context_budget,
                 token_headroom,
+                project_root,
                 output,
             } => {
                 let (forge_first, forge_first_source) =
-                    resolve_harness_forge_first_source(forge_first, observe_only);
+                    resolve_harness_forge_first_source_for_project(
+                        forge_first,
+                        observe_only,
+                        project_root.as_deref(),
+                    );
                 let report = build_cli_wrapper_plan(CliWrapperPlanOptions {
                     executor: &executor,
                     command: &command,

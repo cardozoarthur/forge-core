@@ -51,8 +51,9 @@ use crate::handoff::build_task_handoff;
 use crate::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, build_harness_mode_report,
     inspect_cli_harness_shim_status, install_cli_harness_shim, persist_token_headroom_report,
-    retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
-    CliShimStatusOptions, CliWrapperPlanOptions, HarnessModeOptions,
+    resolve_harness_forge_first_source_for_project, retrieve_headroom_blob, run_cli_harness_exec,
+    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
+    HarnessModeOptions,
 };
 use crate::identity::{
     audit_tenant_index, ensure_workflow_policy, evaluate_tenant_policy_for_action,
@@ -432,6 +433,7 @@ struct HarnessWrapPlanInput {
     command: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
     forge_first: Option<bool>,
+    project_root: Option<String>,
     workflow: Option<String>,
     workflow_id: Option<String>,
     task: Option<String>,
@@ -4911,6 +4913,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("executor", "string", "codex|claude|gemini|opencode"),
                     ("command", "array", "command argv to launch under the harness"),
                     ("forge_first", "boolean", "prefer Forge context routing before native CLI defaults"),
+                    ("project_root", "string", "optional project root containing .forge/harness.json"),
                     ("workflow_id", "string", "optional workflow lineage"),
                     ("task_id", "string", "optional task/node lineage"),
                     ("run_id", "string", "optional async run lineage"),
@@ -7517,11 +7520,16 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let workflow_id = input.workflow_id.or(input.workflow);
             let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
-            let forge_first = input.forge_first.unwrap_or(true);
-            let forge_first_source = if input.forge_first.is_some() {
-                "mcp_input"
+            let (forge_first, forge_first_source) = if let Some(forge_first) = input.forge_first {
+                (forge_first, "mcp_input")
+            } else if let Some(project_root) = input.project_root.as_deref() {
+                resolve_harness_forge_first_source_for_project(
+                    false,
+                    false,
+                    Some(std::path::Path::new(project_root)),
+                )
             } else {
-                "mcp_default"
+                (true, "mcp_default")
             };
             serde_json::to_value(build_cli_wrapper_plan(CliWrapperPlanOptions {
                 executor: &input.executor,

@@ -539,6 +539,95 @@ fn harness_cli_honors_project_forge_first_default_mode_config() {
 }
 
 #[test]
+fn harness_wrap_plan_can_use_explicit_project_root_default_mode_for_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("remote-project");
+    let forge_dir = project.join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("harness.json"),
+        r#"{"default_mode":"forge_first"}"#,
+    )
+    .unwrap();
+
+    let cli_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "harness",
+            "wrap-plan",
+            "--executor",
+            "codex",
+            "--cmd",
+            "codex",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cli_plan: Value = serde_json::from_slice(&cli_output).unwrap();
+    assert_eq!(cli_plan["forge_first"], true);
+    assert_eq!(cli_plan["forge_first_source"], "project_config");
+    assert!(cli_plan["launch_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("--forge-first".to_string())));
+
+    let mcp_tools_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_tools: Value = serde_json::from_slice(&mcp_tools_output).unwrap();
+    let mcp_wrap_plan_tool = find_mcp_tool(&mcp_tools, "forge.harness.wrap_plan");
+    assert_eq!(
+        mcp_wrap_plan_tool["input_schema"]["properties"]["project_root"]["type"],
+        "string"
+    );
+
+    let input = serde_json::json!({
+        "executor": "codex",
+        "command": ["codex"],
+        "project_root": project.display().to_string()
+    });
+    let mcp_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.wrap_plan",
+            "--input",
+            &input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_plan: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp_plan["result"]["forge_first"], true);
+    assert_eq!(mcp_plan["result"]["forge_first_source"], "project_config");
+}
+
+#[test]
 fn harness_mode_reports_effective_default_source_and_project_config_precedence() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -2078,6 +2167,10 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .as_str()
         .unwrap()
         .contains("--project-root"));
+    assert!(replacement_cli["evidence"]
+        .as_str()
+        .unwrap()
+        .contains("wrap-plan --project-root"));
     assert!(replacement_cli["gap_before_promotion"]
         .as_str()
         .unwrap()

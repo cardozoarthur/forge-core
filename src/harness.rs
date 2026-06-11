@@ -499,7 +499,15 @@ pub fn resolve_harness_forge_first_source(
     flag_forge_first: bool,
     flag_observe_only: bool,
 ) -> (bool, &'static str) {
-    let mode = resolve_harness_forge_first(flag_forge_first, flag_observe_only, None);
+    resolve_harness_forge_first_source_for_project(flag_forge_first, flag_observe_only, None)
+}
+
+pub fn resolve_harness_forge_first_source_for_project(
+    flag_forge_first: bool,
+    flag_observe_only: bool,
+    project_root: Option<&Path>,
+) -> (bool, &'static str) {
+    let mode = resolve_harness_forge_first(flag_forge_first, flag_observe_only, project_root);
     (mode.forge_first, mode.source)
 }
 
