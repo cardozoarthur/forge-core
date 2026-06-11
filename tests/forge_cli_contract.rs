@@ -4855,10 +4855,11 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
     assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
 
     let flows = json["flows"].as_array().unwrap();
-    assert_eq!(flows.len(), 4);
+    assert_eq!(flows.len(), 5);
     for kind in [
         "coding_task",
         "harness_control",
+        "executor_project",
         "research_artifact",
         "long_running_async",
     ] {
@@ -5022,6 +5023,72 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
         .unwrap()
         .contains(&serde_json::json!(
             "forge interactive harness --workflow <workflow-id> --task <task-id> --token-headroom --output json"
+        )));
+
+    let executor_project = flows
+        .iter()
+        .find(|flow| flow["kind"] == "executor_project")
+        .unwrap();
+    assert_eq!(
+        executor_project["executor_project"]["schema_version"],
+        "forge.milestone.executor_project_demo.v1"
+    );
+    assert_eq!(
+        executor_project["executor_project"]["status"],
+        "executor_project_demo_completed"
+    );
+    assert_eq!(
+        executor_project["executor_project"]["bootstrap_status"],
+        "harness_bootstrap_applied"
+    );
+    assert_eq!(
+        executor_project["executor_project"]["exec_status"],
+        "harness_exec_completed"
+    );
+    assert_eq!(
+        executor_project["executor_project"]["project_policy_status"],
+        "lineage_required_satisfied"
+    );
+    assert_eq!(
+        executor_project["executor_project"]["exec_event_recorded"],
+        true
+    );
+    assert_eq!(
+        executor_project["executor_project"]["stdout_headroom_status"],
+        "token_headroom_ready"
+    );
+    assert_eq!(
+        executor_project["executor_project"]["external_resources_mutated"],
+        false
+    );
+    assert_eq!(
+        executor_project["executor_project"]["target_path"],
+        "src/executor-output.txt"
+    );
+    assert!(
+        executor_project["executor_project"]["target_sha256"]
+            .as_str()
+            .unwrap()
+            .len()
+            == 64
+    );
+    assert!(executor_project["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "executor_mutated_isolated_project_under_harness"
+        )));
+    assert!(executor_project["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge harness bootstrap --executor sh --shim-dir <project-root>/.forge/shims --project-root <project-root> --apply --approved-by forge_cli_demo --output json"
+        )));
+    assert!(executor_project["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge harness exec --executor sh --project-root <project-root> --workflow <workflow-id> --task <task-id> --run <run-id> --forge-first --execute --allow-exec -- /bin/sh -c <project-edit-script>"
         )));
 }
 
