@@ -14250,6 +14250,114 @@ fn shells_launch_plan_selects_forge_first_entrypoint_without_running_brain() {
         mcp_json["result"]["launch_plans"][0]["handoff_command"],
         contextual_plan["handoff_command"]
     );
+
+    let receipt_output = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "shells",
+            "--executor",
+            "codex",
+            "--workflow",
+            "wf_shell_plan",
+            "--task",
+            "task-shell",
+            "--run",
+            "run_shell_plan",
+            "--context-budget",
+            "900",
+            "--ttl-seconds",
+            "600",
+            "--record-session",
+            "--origin",
+            "contract-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let receipt_json: Value = serde_json::from_slice(&receipt_output).unwrap();
+    assert_eq!(
+        receipt_json["schema_version"],
+        "forge.shell_session_receipt.v1"
+    );
+    assert_eq!(receipt_json["status"], "shell_session_plan_recorded");
+    assert_eq!(receipt_json["source"], "forge_shell");
+    assert_eq!(receipt_json["kind"], "shell_launch_planned");
+    assert_eq!(receipt_json["origin"], "contract-test");
+    assert_eq!(receipt_json["workflow_id"], "wf_shell_plan");
+    assert_eq!(receipt_json["task_id"], "task-shell");
+    assert_eq!(receipt_json["run_id"], "run_shell_plan");
+    assert!(receipt_json["global_event_id"].as_i64().unwrap() > 0);
+    assert_eq!(
+        receipt_json["launch_plan"]["launch_plans"][0]["heartbeat_command"],
+        contextual_plan["heartbeat_command"]
+    );
+
+    let timeline_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "timeline",
+            "--workflow",
+            "wf_shell_plan",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let timeline_json: Value = serde_json::from_slice(&timeline_output).unwrap();
+    let shell_event = timeline_json["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["kind"] == "shell_launch_planned")
+        .unwrap();
+    assert_eq!(shell_event["source"], "forge_shell");
+    assert_eq!(shell_event["correlation"]["run_id"], "run_shell_plan");
+    assert_eq!(shell_event["correlation"]["task_id"], "task-shell");
+    assert_eq!(
+        shell_event["data"]["launch_plan"]["schema_version"],
+        "forge.shell_launch_plan.v1"
+    );
+
+    let mcp_record_manifest_tool = find_mcp_tool(&manifest_json, "forge.shell.record_plan");
+    assert_eq!(
+        mcp_record_manifest_tool["output_schema"],
+        "forge.shell_session_receipt.v1"
+    );
+    assert_eq!(mcp_record_manifest_tool["async_safe"], true);
+    assert_eq!(mcp_record_manifest_tool["mutates_workflow"], true);
+
+    let mcp_receipt_output = forge()
+        .env("PATH", &path)
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.shell.record_plan"])
+        .args([
+            "--input",
+            r#"{"executor":"codex","workflow_id":"wf_shell_plan","task_id":"task-shell","run_id":"run_shell_plan","context_budget":900,"ttl_seconds":600,"origin":"mcp-contract-test"}"#,
+        ])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_receipt_json: Value = serde_json::from_slice(&mcp_receipt_output).unwrap();
+    assert_eq!(
+        mcp_receipt_json["result"]["schema_version"],
+        "forge.shell_session_receipt.v1"
+    );
+    assert_eq!(mcp_receipt_json["result"]["origin"], "mcp-contract-test");
 }
 
 #[test]

@@ -42,7 +42,9 @@ use crate::event::{
     run_event_worker_service, run_inbound_event_worker_loop, scan_inbound_event_inbox,
     EventEgressEmitInput, InboundEventIngestInput,
 };
-use crate::executor::{build_shell_launch_plan, load_executors, ShellLaunchPlanOptions};
+use crate::executor::{
+    build_shell_launch_plan, load_executors, record_shell_session_plan, ShellLaunchPlanOptions,
+};
 use crate::handoff::build_task_handoff;
 use crate::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, inspect_cli_harness_shim_status,
@@ -474,6 +476,7 @@ struct ShellLaunchPlanInput {
     run_id: Option<String>,
     context_budget: Option<usize>,
     ttl_seconds: Option<u64>,
+    origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2615,6 +2618,27 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.shell_launch_plan.v1",
                 &["forge", "shells", "--executor", "<executor>", "--output", "json"],
                 ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.shell.record_plan",
+                "Record Brain Shell Launch Plan",
+                "Record a Forge-controlled shell launch plan in the global event ledger without starting a child process.",
+                object_schema(
+                    &[
+                        ("executor", "string", "optional execution brain id such as codex|opencode|gemini|claude"),
+                        ("brain", "string", "optional alias for executor"),
+                        ("workflow_id", "string", "optional workflow id used to build concrete context and handoff commands"),
+                        ("task_id", "string", "optional task id used with workflow_id for context and handoff commands"),
+                        ("run_id", "string", "optional run id used to build a heartbeat command"),
+                        ("context_budget", "integer", "optional context budget for context and handoff commands"),
+                        ("ttl_seconds", "integer", "optional handoff lease and heartbeat TTL"),
+                        ("origin", "string", "optional audit origin for the recorded event"),
+                    ],
+                    &[],
+                ),
+                "forge.shell_session_receipt.v1",
+                &["forge", "shells", "--record-session", "--executor", "<executor>", "--output", "json"],
+                ToolFlags::new(true, true),
             ),
             tool(
                 "forge.addons.installed",
@@ -5993,6 +6017,28 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     ttl_seconds: input.ttl_seconds,
                 },
             ))?
+        }
+        "forge.shell.record_plan" => {
+            let input: ShellLaunchPlanInput = parse_input(input)?;
+            let executor = input.executor.or(input.brain);
+            let workflow_id = input.workflow_id.or(input.workflow);
+            let task_id = input.task_id.or(input.task);
+            let run_id = input.run_id.or(input.run);
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            let report = load_executors(store)?;
+            serde_json::to_value(record_shell_session_plan(
+                store,
+                &report.brain_router,
+                ShellLaunchPlanOptions {
+                    executor_filter: executor,
+                    workflow_id,
+                    task_id,
+                    run_id,
+                    context_budget: input.context_budget,
+                    ttl_seconds: input.ttl_seconds,
+                },
+                &origin,
+            )?)?
         }
         "forge.addons.installed" => serde_json::to_value(list_installed_addons(store)?)?,
         "forge.addons.capabilities" => {

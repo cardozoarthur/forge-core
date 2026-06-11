@@ -54,8 +54,8 @@ use forge_core::event::{
 };
 use forge_core::execution::run_simulated;
 use forge_core::executor::{
-    build_shell_launch_plan, load_executors, sync_executors, ExecutorQuotaObservation,
-    ExecutorSyncOptions, ShellLaunchPlanOptions,
+    build_shell_launch_plan, load_executors, record_shell_session_plan, sync_executors,
+    ExecutorQuotaObservation, ExecutorSyncOptions, ShellLaunchPlanOptions,
 };
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff;
@@ -286,6 +286,10 @@ enum Commands {
         context_budget: usize,
         #[arg(long = "ttl-seconds", default_value_t = 900)]
         ttl_seconds: u64,
+        #[arg(long = "record-session", default_value_t = false)]
+        record_session: bool,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -5620,22 +5624,28 @@ fn run() -> Result<i32> {
             run_id,
             context_budget,
             ttl_seconds,
+            record_session,
+            origin,
             output,
         } => {
             let store = ForgeStore::open(cli.store)?;
             let report = load_executors(&store)?;
-            let launch_plan = build_shell_launch_plan(
-                &report.brain_router,
-                ShellLaunchPlanOptions {
-                    executor_filter: executor,
-                    workflow_id: workflow,
-                    task_id: task,
-                    run_id,
-                    context_budget: Some(context_budget),
-                    ttl_seconds: Some(ttl_seconds),
-                },
-            );
-            print_response(output, &launch_plan)?;
+            let options = ShellLaunchPlanOptions {
+                executor_filter: executor,
+                workflow_id: workflow,
+                task_id: task,
+                run_id,
+                context_budget: Some(context_budget),
+                ttl_seconds: Some(ttl_seconds),
+            };
+            if record_session {
+                let receipt =
+                    record_shell_session_plan(&store, &report.brain_router, options, &origin)?;
+                print_response(output, &receipt)?;
+            } else {
+                let launch_plan = build_shell_launch_plan(&report.brain_router, options);
+                print_response(output, &launch_plan)?;
+            }
             Ok(0)
         }
         Commands::ExecutorQuota { command } => match command {

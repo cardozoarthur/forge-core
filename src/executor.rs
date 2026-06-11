@@ -1,4 +1,6 @@
+use crate::artifact::hex_sha256;
 use crate::harness::{inspect_cli_harness_shim_status, CliShimStatusOptions};
+use crate::intent::OperatingContextSpec;
 use crate::storage::ForgeStore;
 use anyhow::Result;
 use chrono::Utc;
@@ -187,6 +189,22 @@ pub struct ShellLaunchPlanOptions {
     pub run_id: Option<String>,
     pub context_budget: Option<usize>,
     pub ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ShellSessionReceipt {
+    pub schema_version: String,
+    pub status: String,
+    pub source: String,
+    pub source_id: String,
+    pub global_event_id: i64,
+    pub kind: String,
+    pub origin: String,
+    pub workflow_id: Option<String>,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub executor_filter: Option<String>,
+    pub launch_plan: ShellLaunchPlanReport,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1149,6 +1167,67 @@ pub fn build_shell_launch_plan(
                 .to_string(),
         ],
     }
+}
+
+pub fn record_shell_session_plan(
+    store: &ForgeStore,
+    router: &BrainRouterReport,
+    options: ShellLaunchPlanOptions,
+    origin: &str,
+) -> Result<ShellSessionReceipt> {
+    let launch_plan = build_shell_launch_plan(router, options);
+    let data = serde_json::json!({
+        "schema_version": "forge.shell_session_event.v1",
+        "status": "shell_session_plan_recorded",
+        "run_id": launch_plan.run_id,
+        "task_id": launch_plan.task_id,
+        "executor_filter": launch_plan.executor_filter,
+        "context_budget": launch_plan.context_budget,
+        "ttl_seconds": launch_plan.ttl_seconds,
+        "launch_plan": launch_plan,
+    });
+    let source_id = format!(
+        "shell_{}",
+        &hex_sha256(serde_json::to_string(&data)?.as_bytes())[..16]
+    );
+    let tenant_context = shell_session_tenant_context(store, launch_plan.workflow_id.as_deref())?;
+    let global_event_id = store.record_global_event(
+        "forge_shell",
+        &source_id,
+        launch_plan.workflow_id.as_deref(),
+        "shell_launch_planned",
+        origin,
+        "planned",
+        &data,
+        &tenant_context,
+    )?;
+
+    Ok(ShellSessionReceipt {
+        schema_version: "forge.shell_session_receipt.v1".to_string(),
+        status: "shell_session_plan_recorded".to_string(),
+        source: "forge_shell".to_string(),
+        source_id,
+        global_event_id,
+        kind: "shell_launch_planned".to_string(),
+        origin: origin.to_string(),
+        workflow_id: launch_plan.workflow_id.clone(),
+        task_id: launch_plan.task_id.clone(),
+        run_id: launch_plan.run_id.clone(),
+        executor_filter: launch_plan.executor_filter.clone(),
+        launch_plan,
+    })
+}
+
+fn shell_session_tenant_context(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+) -> Result<serde_json::Value> {
+    if let Some(workflow_id) = workflow_id {
+        if let Ok(workflow) = store.load_workflow(workflow_id) {
+            return Ok(serde_json::to_value(&workflow.intent.operating_context)?);
+        }
+    }
+    Ok(serde_json::to_value(OperatingContextSpec::default())?)
 }
 
 fn shell_session_readiness(
