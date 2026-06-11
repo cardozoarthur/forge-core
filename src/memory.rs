@@ -428,6 +428,11 @@ pub struct MemorySearchGovernance {
     pub internal_audience_rule: String,
     pub private_audience_rule: String,
     pub memory_level_rule: String,
+    pub project_governance_status: String,
+    pub project_governance_config_path: String,
+    pub memory_level_source: String,
+    pub requested_scopes_source: String,
+    pub audience_source: String,
     pub denied_result_count: usize,
     pub workflow_binding: Option<MemoryWorkflowBinding>,
     pub temporary_memory_rule: String,
@@ -1010,6 +1015,24 @@ pub fn search_memory(
     } else {
         normalized_input_scopes
     };
+    let requested_scopes_source = if explicit_scopes {
+        "explicit"
+    } else if has_project_governance {
+        "project_governance"
+    } else if workflow_binding.is_some() {
+        "workflow_binding"
+    } else {
+        "default"
+    }
+    .to_string();
+    let memory_level_source = if options.memory_level.is_some() {
+        "explicit"
+    } else if has_project_governance {
+        "project_governance"
+    } else {
+        "default"
+    }
+    .to_string();
     let memory_level = options
         .memory_level
         .as_deref()
@@ -1021,6 +1044,14 @@ pub fn search_memory(
                 normalize_memory_level(None)
             }
         });
+    let audience_source = if options.audience.is_some() {
+        "explicit"
+    } else if has_project_governance {
+        "project_governance"
+    } else {
+        "default"
+    }
+    .to_string();
     let audience = match options.audience.as_deref() {
         Some(value) => normalize_default_audience(value)?,
         None if has_project_governance => project_governance.default_audience.clone(),
@@ -1144,6 +1175,11 @@ pub fn search_memory(
             memory_level_rule:
                 "memory_level reduces effective scopes before file reads; MEMORY_NONE disables retrieval, MEMORY_SESSION limits to processing memory, MEMORY_SHORT_TERM allows processing/project memory, and standard/full/admin can inspect all configured scopes subject to audience visibility gates"
                     .to_string(),
+            project_governance_status: project_governance.status,
+            project_governance_config_path: project_governance.config_path,
+            memory_level_source,
+            requested_scopes_source,
+            audience_source,
             denied_result_count,
             workflow_binding,
             temporary_memory_rule:

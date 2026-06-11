@@ -14543,6 +14543,22 @@ Cliente enviou detalhes privados sobre agenda pública de manicure e serviços r
     assert_eq!(governed_search_json["result_count"], 1);
     assert_eq!(governed_search_json["results"][0]["scope"], "project");
     assert_eq!(governed_search_json["governance"]["denied_result_count"], 1);
+    assert_eq!(
+        governed_search_json["governance"]["project_governance_status"],
+        "configured"
+    );
+    assert_eq!(
+        governed_search_json["governance"]["memory_level_source"],
+        "project_governance"
+    );
+    assert_eq!(
+        governed_search_json["governance"]["requested_scopes_source"],
+        "project_governance"
+    );
+    assert_eq!(
+        governed_search_json["governance"]["audience_source"],
+        "project_governance"
+    );
 
     let mcp_tools = forge()
         .args([
