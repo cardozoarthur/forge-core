@@ -52,6 +52,7 @@ const INTERACTIVE_SESSIONS_SCHEMA_VERSION: &str = "forge.interactive.sessions.v1
 const INTERACTIVE_COMMAND_PALETTE_SCHEMA_VERSION: &str = "forge.interactive.command_palette.v1";
 const INTERACTIVE_COMMAND_PALETTE_ACTION_PLAN_SCHEMA_VERSION: &str =
     "forge.interactive.command_palette_action_plan.v1";
+const INTERACTIVE_ACTION_REGISTRY_SCHEMA_VERSION: &str = "forge.interactive.action_registry.v1";
 const INTERACTIVE_AUTOCOMPLETE_SCHEMA_VERSION: &str = "forge.interactive.autocomplete.v1";
 const INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION: &str = "forge.interactive.patch_workbench.v1";
 const INTERACTIVE_ADDON_ACTION_CONTRACT_SCHEMA_VERSION: &str =
@@ -100,6 +101,7 @@ pub struct InteractiveDashboard {
     pub harness_panel: InteractiveHarnessPanel,
     pub sessions_panel: InteractiveSessionsPanel,
     pub command_palette_panel: InteractiveCommandPalettePanel,
+    pub action_registry_panel: InteractiveActionRegistryPanel,
     pub autocomplete_panel: InteractiveAutocompletePanel,
     pub harness_mode_panel: HarnessModeReport,
     pub harness_doctor_panel: HarnessDoctorReport,
@@ -288,6 +290,55 @@ pub struct InteractiveCommandPaletteActionPlan {
     pub diagnostic_only: bool,
     pub blocked_reason: String,
     pub next_commands: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveActionRegistryPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub query: String,
+    pub action_count: usize,
+    pub enabled_action_count: usize,
+    pub blocked_action_count: usize,
+    pub diagnostic_action_count: usize,
+    pub mutation_action_count: usize,
+    pub approval_action_count: usize,
+    pub group_count: usize,
+    pub groups: Vec<InteractiveActionRegistryGroup>,
+    pub actions: Vec<InteractiveCommandPaletteEntry>,
+    pub commands: InteractiveActionRegistryCommands,
+    pub navigation: Vec<InteractiveKeyBinding>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveActionRegistryGroup {
+    pub group_id: String,
+    pub title: String,
+    pub action_count: usize,
+    pub enabled_action_count: usize,
+    pub blocked_action_count: usize,
+    pub diagnostic_action_count: usize,
+    pub mutation_action_count: usize,
+    pub approval_action_count: usize,
+    pub actions: Vec<InteractiveCommandPaletteEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveActionRegistryCommands {
+    pub action_registry: Vec<String>,
+    pub command_palette: Vec<String>,
+    pub autocomplete: Vec<String>,
+    pub inspect_addons: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct InteractiveActionRegistryCounts {
+    action_count: usize,
+    enabled_action_count: usize,
+    blocked_action_count: usize,
+    diagnostic_action_count: usize,
+    mutation_action_count: usize,
+    approval_action_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1147,6 +1198,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
     )?;
     let sessions_panel = build_interactive_sessions(store, InteractiveSessionsOptions::default())?;
     let command_palette_panel = build_interactive_command_palette(store, None)?;
+    let action_registry_panel = build_action_registry_from_palette(&command_palette_panel);
     let autocomplete_panel = build_interactive_autocomplete(store, "")?;
     let harness_mode_panel = harness_panel.mode.clone();
     let harness_doctor_panel = harness_panel.doctor.clone();
@@ -1351,6 +1403,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             harness_panel,
             sessions_panel,
             command_palette_panel,
+            action_registry_panel,
             autocomplete_panel,
             harness_mode_panel,
             harness_doctor_panel,
@@ -1382,6 +1435,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 "forge schedule worker-status".to_string(),
                 "forge interactive harness --output json".to_string(),
                 "forge interactive sessions --output json".to_string(),
+                "forge interactive action-registry --output json".to_string(),
                 "forge interactive patch-workbench --output json".to_string(),
                 "forge interactive permissions --output json".to_string(),
             ],
@@ -1705,6 +1759,186 @@ pub fn build_interactive_command_palette(
             ),
         ],
     })
+}
+
+pub fn build_interactive_action_registry(
+    store: &ForgeStore,
+    query: Option<&str>,
+) -> Result<InteractiveActionRegistryPanel> {
+    let palette = build_interactive_command_palette(store, None)?;
+    Ok(build_action_registry_from_palette_with_query(
+        &palette,
+        query.unwrap_or_default(),
+    ))
+}
+
+fn build_action_registry_from_palette(
+    palette: &InteractiveCommandPalettePanel,
+) -> InteractiveActionRegistryPanel {
+    build_action_registry_from_palette_with_query(palette, &palette.query)
+}
+
+fn build_action_registry_from_palette_with_query(
+    palette: &InteractiveCommandPalettePanel,
+    query: &str,
+) -> InteractiveActionRegistryPanel {
+    let query = query.trim().to_string();
+    let actions = palette
+        .entries
+        .iter()
+        .filter(|entry| action_registry_entry_matches(entry, &query))
+        .cloned()
+        .collect::<Vec<_>>();
+    let counts = action_registry_counts(&actions);
+    let groups = command_palette_groups(&actions)
+        .iter()
+        .map(|group| action_registry_group(&group.group_id, &group.title, group.entries.clone()))
+        .collect::<Vec<_>>();
+
+    InteractiveActionRegistryPanel {
+        schema_version: INTERACTIVE_ACTION_REGISTRY_SCHEMA_VERSION.to_string(),
+        status: "action_registry_ready".to_string(),
+        query,
+        action_count: counts.action_count,
+        enabled_action_count: counts.enabled_action_count,
+        blocked_action_count: counts.blocked_action_count,
+        diagnostic_action_count: counts.diagnostic_action_count,
+        mutation_action_count: counts.mutation_action_count,
+        approval_action_count: counts.approval_action_count,
+        group_count: groups.len(),
+        groups,
+        actions,
+        commands: InteractiveActionRegistryCommands {
+            action_registry: vec![
+                "interactive".to_string(),
+                "action-registry".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            command_palette: vec![
+                "interactive".to_string(),
+                "command-palette".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            autocomplete: vec![
+                "interactive".to_string(),
+                "autocomplete".to_string(),
+                "--input".to_string(),
+                "<input>".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            inspect_addons: vec![
+                "addons".to_string(),
+                "views".to_string(),
+                "--surface".to_string(),
+                "tui".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        },
+        navigation: vec![
+            navigation_key(
+                "enter",
+                "execute_or_inspect_action",
+                "action",
+                "Run ready action or inspect blocked action",
+            ),
+            navigation_key(
+                "tab",
+                "focus_next_action_group",
+                "action_registry",
+                "Move to the next action group",
+            ),
+            navigation_key(
+                "/",
+                "filter_action_registry",
+                "action_registry",
+                "Filter actions by title, command, Addon or keyword",
+            ),
+            navigation_key(
+                "esc",
+                "close_action_registry",
+                "action_registry",
+                "Close the action registry",
+            ),
+        ],
+    }
+}
+
+fn action_registry_entry_matches(entry: &InteractiveCommandPaletteEntry, query: &str) -> bool {
+    let terms = query
+        .split_whitespace()
+        .map(|term| term.trim().to_ascii_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        return true;
+    }
+
+    let haystack = format!(
+        "{} {} {} {} {} {}",
+        entry.action_id,
+        entry.group_id,
+        entry.title,
+        entry.description,
+        entry.source_panel,
+        entry
+            .commands
+            .iter()
+            .chain(entry.keywords.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+    .to_ascii_lowercase();
+    terms.iter().all(|term| haystack.contains(term))
+}
+
+fn action_registry_group(
+    group_id: &str,
+    title: &str,
+    actions: Vec<InteractiveCommandPaletteEntry>,
+) -> InteractiveActionRegistryGroup {
+    let counts = action_registry_counts(&actions);
+    InteractiveActionRegistryGroup {
+        group_id: group_id.to_string(),
+        title: title.to_string(),
+        action_count: counts.action_count,
+        enabled_action_count: counts.enabled_action_count,
+        blocked_action_count: counts.blocked_action_count,
+        diagnostic_action_count: counts.diagnostic_action_count,
+        mutation_action_count: counts.mutation_action_count,
+        approval_action_count: counts.approval_action_count,
+        actions,
+    }
+}
+
+fn action_registry_counts(
+    actions: &[InteractiveCommandPaletteEntry],
+) -> InteractiveActionRegistryCounts {
+    let mut counts = InteractiveActionRegistryCounts {
+        action_count: actions.len(),
+        ..InteractiveActionRegistryCounts::default()
+    };
+    for action in actions {
+        if action.enabled {
+            counts.enabled_action_count += 1;
+        } else {
+            counts.blocked_action_count += 1;
+        }
+        if action.operation_plan.diagnostic_only {
+            counts.diagnostic_action_count += 1;
+        }
+        if action.mutates_workflow {
+            counts.mutation_action_count += 1;
+        }
+        if action.requires_approval {
+            counts.approval_action_count += 1;
+        }
+    }
+    counts
 }
 
 fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
@@ -4829,6 +5063,25 @@ pub fn render_interactive_command_palette(panel: &InteractiveCommandPalettePanel
     )
 }
 
+pub fn render_interactive_action_registry(panel: &InteractiveActionRegistryPanel) -> String {
+    let query = if panel.query.is_empty() {
+        "none"
+    } else {
+        panel.query.as_str()
+    };
+    format!(
+        "Action registry: {status}; query {query}, groups {group_count}, actions {action_count}, enabled {enabled_action_count}, blocked {blocked_action_count}, diagnostic {diagnostic_action_count}\nActions: {actions}\n",
+        status = panel.status,
+        query = query,
+        group_count = panel.group_count,
+        action_count = panel.action_count,
+        enabled_action_count = panel.enabled_action_count,
+        blocked_action_count = panel.blocked_action_count,
+        diagnostic_action_count = panel.diagnostic_action_count,
+        actions = render_action_registry_action_summary(panel),
+    )
+}
+
 pub fn render_interactive_autocomplete(panel: &InteractiveAutocompletePanel) -> String {
     let input = if panel.input.is_empty() {
         "none"
@@ -5238,6 +5491,15 @@ fn build_ui_composition_panel(
                     vec!["forge interactive command-palette --output json".to_string()],
                 ),
                 core_ui_widget(
+                    "action_registry_panel",
+                    "Action registry",
+                    "action_registry_panel",
+                    "action_registry_renderer",
+                    "compact",
+                    "full",
+                    vec!["forge interactive action-registry --output json".to_string()],
+                ),
+                core_ui_widget(
                     "autocomplete_panel",
                     "Autocomplete",
                     "autocomplete_panel",
@@ -5542,6 +5804,34 @@ fn render_command_palette_entry_summary(panel: &InteractiveCommandPalettePanel) 
                 workflow,
                 entry.mutates_workflow,
                 entry.requires_approval
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn render_action_registry_action_summary(panel: &InteractiveActionRegistryPanel) -> String {
+    if panel.actions.is_empty() {
+        return "none".to_string();
+    }
+
+    panel
+        .actions
+        .iter()
+        .take(12)
+        .map(|action| {
+            format!(
+                "{} [{}] enabled={} plan={} next={}",
+                action.action_id,
+                action.source_panel,
+                action.enabled,
+                action.operation_plan.status,
+                action
+                    .operation_plan
+                    .next_commands
+                    .first()
+                    .map(|command| command.join(" "))
+                    .unwrap_or_else(|| "none".to_string())
             )
         })
         .collect::<Vec<_>>()

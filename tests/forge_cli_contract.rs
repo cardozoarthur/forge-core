@@ -36953,6 +36953,258 @@ fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
 }
 
 #[test]
+fn interactive_action_registry_projects_palette_actions_for_tui_and_agents() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let addon_dir = temp.path().join(".forge/addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        addon_dir.join("zzdemo.yaml"),
+        r#"
+id: forge.addon.zzdemo_ops
+name: ZzDemo Ops Addon
+version: 0.1.0
+description: Demonstrates action registry projection for TUI clients.
+lifecycle: enabled
+capabilities:
+  - id: zzdemo_ops
+    title: ZzDemo operations
+    description: ZzDemo operational controls.
+views:
+  - id: zzdemo.ops_panel
+    title: ZzDemo Ops Panel
+    surface: tui
+    type: dashboard
+    component: forge.zzdemo.ops_panel
+    route: /zzdemo/ops
+    layout:
+      zone: main
+      order: 41
+      width: full
+      height: auto
+      density: dense
+    data_bindings:
+      - id: zzdemo_state
+        source: forge.zzdemo.state
+        query: zzdemo.state
+        scope: workflow
+        required_capability: zzdemo_ops
+    actions:
+      - id: zzdemo.ready
+        label: Ready zzdemo action
+        description: Should be executable by command palette and action registry.
+        palette_group: zzdemo
+        source_panel: zzdemo_ops_panel
+        type: command
+        method: CLI
+        target: forge zzdemo ready
+        command_template:
+          - zzdemo
+          - ready
+        keywords:
+          - zzdemo
+          - ready
+      - id: zzdemo.blocked
+        label: Blocked zzdemo action
+        description: Should be visible but not executable until the permission contract is valid.
+        palette_group: zzdemo
+        source_panel: zzdemo_ops_panel
+        type: command
+        method: CLI
+        target: forge zzdemo blocked
+        permission: zzdemo.missing_permission
+        command_template:
+          - zzdemo
+          - blocked
+        keywords:
+          - zzdemo
+          - blocked
+"#,
+    )
+    .unwrap();
+
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-registry",
+            "--query",
+            "zzdemo",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.interactive.action_registry.v1"
+    );
+    assert_eq!(json["status"], "action_registry_ready");
+    assert_eq!(json["query"], "zzdemo");
+    assert_eq!(json["action_count"], 2);
+    assert_eq!(json["enabled_action_count"], 1);
+    assert_eq!(json["blocked_action_count"], 1);
+    assert_eq!(json["diagnostic_action_count"], 1);
+    assert_eq!(json["mutation_action_count"], 0);
+    assert_eq!(json["approval_action_count"], 0);
+    assert!(json["groups"].as_array().unwrap().iter().any(|group| {
+        group["group_id"] == "zzdemo"
+            && group["action_count"] == 2
+            && group["enabled_action_count"] == 1
+            && group["blocked_action_count"] == 1
+            && group["diagnostic_action_count"] == 1
+    }));
+    let ready = json["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["action_id"] == "zzdemo.ready")
+        .expect("ready Addon action should be in registry");
+    assert_eq!(ready["enabled"], true);
+    assert_eq!(ready["operation_plan"]["status"], "ready");
+    assert_eq!(
+        ready["operation_plan"]["recommended_action"],
+        "execute_command"
+    );
+    assert_eq!(ready["operation_plan"]["diagnostic_only"], false);
+    assert_eq!(ready["commands"], serde_json::json!(["zzdemo", "ready"]));
+    assert!(ready["operation_plan"]["next_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(["zzdemo", "ready"])));
+
+    let blocked = json["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["action_id"] == "zzdemo.blocked")
+        .expect("blocked Addon action should remain diagnosable in registry");
+    assert_eq!(blocked["enabled"], false);
+    assert_eq!(
+        blocked["blocked_reason"],
+        "permission_gate_undeclared_permission"
+    );
+    assert_eq!(blocked["commands"], serde_json::json!([]));
+    assert_eq!(blocked["operation_plan"]["status"], "blocked");
+    assert_eq!(
+        blocked["operation_plan"]["recommended_action"],
+        "inspect_addon_permission_gate"
+    );
+    assert!(blocked["operation_plan"]["next_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!([
+            "addons",
+            "views",
+            "--addon",
+            "forge.addon.zzdemo_ops",
+            "--surface",
+            "tui",
+            "--output",
+            "json"
+        ])));
+
+    let text_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-registry",
+            "--query",
+            "zzdemo",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Action registry"));
+    assert!(text.contains("zzdemo.ready"));
+    assert!(text.contains("zzdemo.blocked"));
+
+    let home_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["action_registry_panel"]["schema_version"],
+        "forge.interactive.action_registry.v1"
+    );
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |region| region["widgets"].as_array().unwrap().iter().any(|widget| {
+                widget["widget_id"] == "action_registry_panel"
+                    && widget["commands"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!(
+                            "forge interactive action-registry --output json"
+                        ))
+            })
+        ));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.action_registry");
+    assert_eq!(
+        tool["output_schema"],
+        "forge.interactive.action_registry.v1"
+    );
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .current_dir(temp.path())
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.action_registry"])
+        .arg("--input")
+        .arg(r#"{"query":"zzdemo"}"#)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.action_registry.v1"
+    );
+    assert_eq!(mcp_json["result"]["action_count"], 2);
+    assert_eq!(mcp_json["result"]["blocked_action_count"], 1);
+}
+
+#[test]
 fn interactive_command_palette_surfaces_contextual_actions_for_replacement_cli() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

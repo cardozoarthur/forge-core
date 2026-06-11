@@ -81,11 +81,12 @@ use crate::interaction::{
     expire_human_interaction, list_human_interactions, CreateChoiceInteractionRequest,
 };
 use crate::interactive::{
-    build_interactive_autocomplete, build_interactive_command_palette, build_interactive_harness,
-    build_interactive_home, build_interactive_patch_workbench, build_interactive_permissions,
-    build_interactive_readiness, build_interactive_sessions, build_interactive_structured_logs,
-    build_interactive_task_board, build_interactive_workflow_dag, route_interactive_input,
-    slash_command_catalog, InteractiveHarnessOptions, InteractiveSessionsOptions,
+    build_interactive_action_registry, build_interactive_autocomplete,
+    build_interactive_command_palette, build_interactive_harness, build_interactive_home,
+    build_interactive_patch_workbench, build_interactive_permissions, build_interactive_readiness,
+    build_interactive_sessions, build_interactive_structured_logs, build_interactive_task_board,
+    build_interactive_workflow_dag, route_interactive_input, slash_command_catalog,
+    InteractiveHarnessOptions, InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -2876,6 +2877,17 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &[]),
                 "forge.interactive.command_palette.v1",
                 &["forge", "interactive", "command-palette", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.action_registry",
+                "Inspect Interactive Action Registry",
+                "Return a read-only action registry derived from the command palette for TUI, web and agent clients, including readiness counts, Addon lineage and operation plans without mutating state.",
+                object_schema(&[
+                    ("query", "string", "optional search query used to filter non-workflow actions"),
+                ], &[]),
+                "forge.interactive.action_registry.v1",
+                &["forge", "interactive", "action-registry", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -6682,6 +6694,17 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 parse_input(input)?
             };
             serde_json::to_value(build_interactive_command_palette(
+                store,
+                input.query.as_deref(),
+            )?)?
+        }
+        "forge.interactive.action_registry" => {
+            let input: InteractiveCommandPaletteInput = if input.is_null() {
+                InteractiveCommandPaletteInput::default()
+            } else {
+                parse_input(input)?
+            };
+            serde_json::to_value(build_interactive_action_registry(
                 store,
                 input.query.as_deref(),
             )?)?
