@@ -43,9 +43,10 @@ use crate::event::{
     EventEgressEmitInput, InboundEventIngestInput,
 };
 use crate::executor::{
-    build_brain_sessions_report_with_options, build_shell_launch_plan, load_executors,
-    record_brain_session_lifecycle, record_shell_session_plan, BrainSessionLifecycleOptions,
-    BrainSessionsReportOptions, ShellLaunchPlanOptions,
+    build_brain_session_history_report, build_brain_sessions_report_with_options,
+    build_shell_launch_plan, load_executors, record_brain_session_lifecycle,
+    record_shell_session_plan, BrainSessionLifecycleOptions, BrainSessionsReportOptions,
+    ShellLaunchPlanOptions,
 };
 use crate::handoff::build_task_handoff;
 use crate::harness::{
@@ -512,6 +513,12 @@ struct BrainSessionsInput {
     state: Option<String>,
     lifecycle_state: Option<String>,
     readiness: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrainSessionHistoryInput {
+    session: Option<String>,
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2710,6 +2717,18 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ),
                 "forge.brain_sessions.v1",
                 &["forge", "sessions", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.session.history",
+                "Inspect Brain Session History",
+                "Return the Forge-owned chronological audit history for one brain shell session, including planned shell events, lifecycle transitions, current lifecycle policy and next commands without starting child processes.",
+                object_schema(
+                    &[("session_id", "string", "required shell session id such as codex-shell")],
+                    &["session_id"],
+                ),
+                "forge.brain_session_history.v1",
+                &["forge", "sessions", "history", "--session", "<session-id>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -6251,6 +6270,19 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     lifecycle_state: input.lifecycle_state.or(input.state),
                     readiness: input.readiness,
                 },
+            )?)?
+        }
+        "forge.session.history" => {
+            let input: BrainSessionHistoryInput = parse_input(input)?;
+            let session_id = input
+                .session_id
+                .or(input.session)
+                .ok_or_else(|| anyhow::anyhow!("forge.session.history requires session_id"))?;
+            let report = load_executors(store)?;
+            serde_json::to_value(build_brain_session_history_report(
+                store,
+                &report.brain_router,
+                &session_id,
             )?)?
         }
         "forge.session.lifecycle" => {

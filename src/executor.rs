@@ -327,14 +327,39 @@ pub struct BrainSessionEventSummary {
     pub kind: String,
     pub origin: String,
     pub status: String,
+    pub provider_id: Option<String>,
     pub workflow_id: Option<String>,
     pub task_id: Option<String>,
     pub run_id: Option<String>,
     pub executor_filter: Option<String>,
     pub session_ids: Vec<String>,
+    pub previous_state: Option<String>,
     pub lifecycle_state: Option<String>,
+    pub lifecycle_sequence: Option<usize>,
+    pub transition_kind: Option<String>,
     pub note: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainSessionHistoryReport {
+    pub schema_version: String,
+    pub status: String,
+    pub controller: String,
+    pub session_id: String,
+    pub provider_id: String,
+    pub provider_kind: String,
+    pub readiness: String,
+    pub current_state: String,
+    pub lifecycle_policy: BrainSessionLifecyclePolicy,
+    pub planned_event_count: usize,
+    pub lifecycle_event_count: usize,
+    pub event_count: usize,
+    pub planned_events: Vec<BrainSessionEventSummary>,
+    pub lifecycle_events: Vec<BrainSessionEventSummary>,
+    pub events: Vec<BrainSessionEventSummary>,
+    pub safety_gates: Vec<String>,
+    pub next_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1575,6 +1600,77 @@ pub fn build_brain_sessions_report_with_options(
     })
 }
 
+pub fn build_brain_session_history_report(
+    store: &ForgeStore,
+    router: &BrainRouterReport,
+    session_id: &str,
+) -> Result<BrainSessionHistoryReport> {
+    let session = router
+        .shell_sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown Forge shell session: {session_id}"))?;
+    let brain = router
+        .brains
+        .iter()
+        .find(|candidate| candidate.id == session.brain_id);
+    let mut events = store
+        .load_global_events()?
+        .into_iter()
+        .filter(|event| {
+            (event.source == "forge_shell" && event.kind == "shell_launch_planned")
+                || (event.source == "forge_session" && event.kind == "brain_session_lifecycle")
+        })
+        .map(brain_session_event_summary)
+        .filter(|event| event.session_ids.iter().any(|id| id == session_id))
+        .collect::<Vec<_>>();
+    events.sort_by(|left, right| left.global_event_id.cmp(&right.global_event_id));
+    let planned_events = events
+        .iter()
+        .filter(|event| event.kind == "shell_launch_planned")
+        .cloned()
+        .collect::<Vec<_>>();
+    let lifecycle_events = events
+        .iter()
+        .filter(|event| event.kind == "brain_session_lifecycle")
+        .cloned()
+        .collect::<Vec<_>>();
+    let current_state = lifecycle_events
+        .last()
+        .and_then(|event| event.lifecycle_state.clone())
+        .unwrap_or_else(|| "untracked".to_string());
+    let status = if events.is_empty() { "empty" } else { "loaded" };
+
+    Ok(BrainSessionHistoryReport {
+        schema_version: "forge.brain_session_history.v1".to_string(),
+        status: status.to_string(),
+        controller: router.controller.clone(),
+        session_id: session.id.clone(),
+        provider_id: session.brain_id.clone(),
+        provider_kind: brain
+            .map(|candidate| candidate.execution_mode.clone())
+            .unwrap_or_else(|| "forge_control_plane".to_string()),
+        readiness: shell_session_readiness(session, brain).to_string(),
+        current_state: current_state.clone(),
+        lifecycle_policy: brain_session_lifecycle_policy(&session.id, &current_state),
+        planned_event_count: planned_events.len(),
+        lifecycle_event_count: lifecycle_events.len(),
+        event_count: events.len(),
+        planned_events,
+        lifecycle_events,
+        events,
+        safety_gates: router.safety_gates.clone(),
+        next_actions: vec![
+            "Use lifecycle_policy.next_lifecycle_commands for the next audited state change."
+                .to_string(),
+            "Use forge sessions --provider <id> --state <state> when an operator needs a lane view."
+                .to_string(),
+            "Use forge shells --record-session before handing a fresh shell to an external brain."
+                .to_string(),
+        ],
+    })
+}
+
 fn brain_session_event_summary(
     event: crate::storage::StoredGlobalEventRecord,
 ) -> BrainSessionEventSummary {
@@ -1603,12 +1699,22 @@ fn brain_session_event_summary(
         kind: event.kind,
         origin: event.origin,
         status: event.status,
+        provider_id: event.data["provider_id"].as_str().map(str::to_string),
         workflow_id: event.workflow_id,
         task_id: event.data["task_id"].as_str().map(str::to_string),
         run_id: event.data["run_id"].as_str().map(str::to_string),
         executor_filter: event.data["executor_filter"].as_str().map(str::to_string),
         session_ids,
+        previous_state: event.data["previous_state"].as_str().map(str::to_string),
         lifecycle_state: event.data["state"].as_str().map(str::to_string),
+        lifecycle_sequence: event
+            .data
+            .get("lifecycle_sequence")
+            .and_then(|value| value.as_u64())
+            .and_then(|value| usize::try_from(value).ok()),
+        transition_kind: event.data["transition"]["transition_kind"]
+            .as_str()
+            .map(str::to_string),
         note: event.data["note"].as_str().map(str::to_string),
         created_at: event.created_at,
     }

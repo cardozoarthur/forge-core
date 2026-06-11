@@ -54,10 +54,11 @@ use forge_core::event::{
 };
 use forge_core::execution::run_simulated;
 use forge_core::executor::{
-    build_brain_sessions_report_with_options, build_shell_launch_plan, load_executors,
-    record_brain_session_lifecycle, record_shell_session_plan, sync_executors,
-    BrainSessionLifecycleOptions, BrainSessionsReportOptions, ExecutorQuotaObservation,
-    ExecutorSyncOptions, ShellLaunchPlanOptions,
+    build_brain_session_history_report, build_brain_sessions_report_with_options,
+    build_shell_launch_plan, load_executors, record_brain_session_lifecycle,
+    record_shell_session_plan, sync_executors, BrainSessionLifecycleOptions,
+    BrainSessionsReportOptions, ExecutorQuotaObservation, ExecutorSyncOptions,
+    ShellLaunchPlanOptions,
 };
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff;
@@ -395,6 +396,12 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum SessionCommands {
+    History {
+        #[arg(long = "session")]
+        session_id: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
     Lifecycle {
         #[arg(long = "session")]
         session_id: String,
@@ -5820,6 +5827,14 @@ fn run() -> Result<i32> {
             let store = ForgeStore::open(cli.store)?;
             let report = load_executors(&store)?;
             match command {
+                Some(SessionCommands::History { session_id, output }) => {
+                    let history = build_brain_session_history_report(
+                        &store,
+                        &report.brain_router,
+                        &session_id,
+                    )?;
+                    print_response(output, &history)?;
+                }
                 Some(SessionCommands::Lifecycle {
                     session_id,
                     state,

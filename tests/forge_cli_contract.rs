@@ -16786,6 +16786,13 @@ fn brain_session_lifecycle_records_auditable_state_without_launching_child() {
     assert_eq!(tool["output_schema"], "forge.brain_session_lifecycle.v1");
     assert_eq!(tool["async_safe"], true);
     assert_eq!(tool["mutates_workflow"], true);
+    let history_tool = find_mcp_tool(&manifest_json, "forge.session.history");
+    assert_eq!(
+        history_tool["output_schema"],
+        "forge.brain_session_history.v1"
+    );
+    assert_eq!(history_tool["async_safe"], true);
+    assert_eq!(history_tool["mutates_workflow"], false);
 
     let repeated_transition = forge()
         .env("PATH", &path)
@@ -16865,6 +16872,80 @@ fn brain_session_lifecycle_records_auditable_state_without_launching_child() {
         "forge.brain_session_lifecycle.v1"
     );
     assert_eq!(mcp_json["result"]["state"], "closed");
+
+    let history_output = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sessions",
+            "history",
+            "--session",
+            "codex-shell",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let history_json: Value = serde_json::from_slice(&history_output).unwrap();
+    assert_eq!(
+        history_json["schema_version"],
+        "forge.brain_session_history.v1"
+    );
+    assert_eq!(history_json["session_id"], "codex-shell");
+    assert_eq!(history_json["provider_id"], "codex");
+    assert_eq!(history_json["current_state"], "closed");
+    assert_eq!(history_json["planned_event_count"], 1);
+    assert_eq!(history_json["lifecycle_event_count"], 3);
+    assert_eq!(history_json["event_count"], 4);
+    assert_eq!(history_json["lifecycle_policy"]["current_state"], "closed");
+    assert!(history_json["lifecycle_policy"]["allowed_next_states"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("opened")));
+    let lifecycle_events = history_json["lifecycle_events"].as_array().unwrap();
+    assert_eq!(lifecycle_events[0]["lifecycle_sequence"], 1);
+    assert_eq!(lifecycle_events[0]["previous_state"], "untracked");
+    assert_eq!(lifecycle_events[0]["lifecycle_state"], "opened");
+    assert_eq!(lifecycle_events[0]["transition_kind"], "bootstrap");
+    assert_eq!(lifecycle_events[1]["lifecycle_sequence"], 2);
+    assert_eq!(lifecycle_events[1]["previous_state"], "opened");
+    assert_eq!(lifecycle_events[1]["lifecycle_state"], "opened");
+    assert_eq!(lifecycle_events[1]["transition_kind"], "idempotent");
+    assert_eq!(lifecycle_events[2]["lifecycle_sequence"], 3);
+    assert_eq!(lifecycle_events[2]["previous_state"], "opened");
+    assert_eq!(lifecycle_events[2]["lifecycle_state"], "closed");
+    assert_eq!(lifecycle_events[2]["transition_kind"], "state_change");
+    assert_eq!(
+        history_json["planned_events"][0]["kind"],
+        "shell_launch_planned"
+    );
+
+    let mcp_history = forge()
+        .env("PATH", &path)
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.session.history"])
+        .arg("--input")
+        .arg(serde_json::json!({"session_id": "codex-shell"}).to_string())
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_history_json: Value = serde_json::from_slice(&mcp_history).unwrap();
+    assert_eq!(
+        mcp_history_json["result"]["schema_version"],
+        "forge.brain_session_history.v1"
+    );
+    assert_eq!(
+        mcp_history_json["result"]["current_state"],
+        history_json["current_state"]
+    );
 }
 
 #[test]
