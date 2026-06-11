@@ -1559,6 +1559,22 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/sessions history",
+            "Session History",
+            "Inspect one Forge-controlled shell session's chronological launch and lifecycle audit.",
+            &[
+                "forge",
+                "sessions",
+                "history",
+                "--session",
+                "<session-id>",
+                "--output",
+                "json",
+            ],
+            false,
+            "low",
+        ),
+        slash(
             "/sessions lifecycle",
             "Session Lifecycle",
             "Record an auditable lifecycle state for a Forge-controlled shell session.",
@@ -2823,6 +2839,30 @@ mod tests {
                 "<session-id>".to_string(),
                 "--state".to_string(),
                 "opened".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn slash_sessions_history_is_recognized_as_read_only_audit_view() {
+        let report = route_slash_command("/sessions history --session codex-shell");
+        assert_eq!(report.input_kind, "slash_command");
+        assert_eq!(report.routing_decision, "slash_command");
+        let route = report.slash_command.unwrap();
+        assert_eq!(route.name, "/sessions history");
+        assert!(route.recognized);
+        assert!(!route.mutates_workflow);
+        assert_eq!(route.risk_level, "low");
+        assert_eq!(
+            route.equivalent_command,
+            vec![
+                "forge".to_string(),
+                "sessions".to_string(),
+                "history".to_string(),
+                "--session".to_string(),
+                "<session-id>".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
             ]
         );
     }
