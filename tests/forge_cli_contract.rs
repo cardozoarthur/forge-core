@@ -3408,6 +3408,10 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
     assert!(replacement_cli["evidence"]
         .as_str()
         .unwrap()
+        .contains("connected_external_brain_provider"));
+    assert!(replacement_cli["evidence"]
+        .as_str()
+        .unwrap()
         .contains("exec --project-root"));
     assert!(replacement_cli["gap_before_promotion"]
         .as_str()
@@ -5672,10 +5676,72 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
         connected_external_brain["external_brain"]["validation_status"],
         "validated"
     );
+    assert_eq!(
+        connected_external_brain["external_brain"]["provider_contract"]["schema_version"],
+        "forge.milestone.connected_external_brain_provider.v1"
+    );
+    assert_eq!(
+        connected_external_brain["external_brain"]["provider_contract"]["status"],
+        "connected_external_brain_provider_contract_validated"
+    );
+    assert_eq!(
+        connected_external_brain["external_brain"]["provider_contract"]["provider_id"],
+        "codex-compatible-stub"
+    );
+    assert_eq!(
+        connected_external_brain["external_brain"]["provider_contract"]["output_schema_valid"],
+        true
+    );
+    assert_eq!(
+        connected_external_brain["external_brain"]["provider_contract"]["output_quality_score"],
+        "0.92"
+    );
+    assert_eq!(
+        connected_external_brain["external_brain"]["provider_contract"]["output_latency_ms"],
+        "9"
+    );
+    assert_eq!(
+        connected_external_brain["external_brain"]["provider_contract"]
+            ["provider_declared_model_execution"],
+        false
+    );
+    assert_eq!(
+        connected_external_brain["external_brain"]["provider_contract"]
+            ["real_provider_execution_performed"],
+        false
+    );
+    assert_eq!(
+        connected_external_brain["external_brain"]["provider_contract"]["promotion_ready"],
+        false
+    );
+    assert!(
+        connected_external_brain["external_brain"]["provider_contract"]["command_sha256"]
+            .as_str()
+            .unwrap()
+            .len()
+            == 64
+    );
+    assert!(
+        connected_external_brain["external_brain"]["provider_contract"]["stdout_sha256"]
+            .as_str()
+            .unwrap()
+            .len()
+            == 64
+    );
+    assert!(
+        connected_external_brain["external_brain"]["provider_contract"]["validation_evidence"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("real_provider_execution_not_performed"))
+    );
     assert!(connected_external_brain["external_brain"]["target_paths"]
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("brain-output/plan.json")));
+    assert!(connected_external_brain["external_brain"]["target_paths"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("brain-output/provider-output.json")));
     assert!(connected_external_brain["external_brain"]["target_paths"]
         .as_array()
         .unwrap()
@@ -5689,6 +5755,12 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
         .unwrap()
         .contains(&serde_json::json!(
             "connected_external_brain_executed_under_harness"
+        )));
+    assert!(connected_external_brain["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "connected_external_brain_provider_contract_validated"
         )));
     assert!(connected_external_brain["validation_evidence"]
         .as_array()
@@ -5838,6 +5910,11 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.milestone.connected_external_brain_demo.v1"),
         "the packaged Forge skill should mention the connected external brain demo receipt"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD
+            .contains("forge.milestone.connected_external_brain_provider.v1"),
+        "the packaged Forge skill should mention the connected external brain provider contract receipt"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge interactive command-palette"),

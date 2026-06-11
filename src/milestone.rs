@@ -377,6 +377,8 @@ const REAL_PROJECT_WORKFLOW_DEMO_SCHEMA_VERSION: &str =
     "forge.milestone.real_project_workflow_demo.v1";
 const CONNECTED_EXTERNAL_BRAIN_DEMO_SCHEMA_VERSION: &str =
     "forge.milestone.connected_external_brain_demo.v1";
+const CONNECTED_EXTERNAL_BRAIN_PROVIDER_SCHEMA_VERSION: &str =
+    "forge.milestone.connected_external_brain_provider.v1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MilestoneCliDemoReport {
@@ -528,6 +530,7 @@ pub struct MilestoneConnectedExternalBrainDemo {
     pub routing_default_brain: String,
     pub model_execution_performed: bool,
     pub external_brain_process_executed: bool,
+    pub provider_contract: MilestoneConnectedExternalBrainProviderContract,
     pub handoff_status: String,
     pub handoff_ready: bool,
     pub harness_exec_status: String,
@@ -542,6 +545,24 @@ pub struct MilestoneConnectedExternalBrainDemo {
     pub external_resources_mutated: bool,
     pub lineage: Vec<String>,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneConnectedExternalBrainProviderContract {
+    pub schema_version: String,
+    pub status: String,
+    pub provider_id: String,
+    pub execution_mode: String,
+    pub command_sha256: String,
+    pub stdout_sha256: Option<String>,
+    pub stderr_sha256: Option<String>,
+    pub output_schema_valid: bool,
+    pub output_quality_score: String,
+    pub output_latency_ms: String,
+    pub provider_declared_model_execution: bool,
+    pub real_provider_execution_performed: bool,
+    pub promotion_ready: bool,
+    pub validation_evidence: Vec<String>,
 }
 
 pub fn build_milestone_export_demo(
@@ -1468,6 +1489,9 @@ mkdir -p brain-output
 cat > brain-output/plan.json <<EOF
 {"schema_version":"forge.connected_external_brain_stub.v1","workflow_id":"$FORGE_WORKFLOW_ID","task_id":"$FORGE_TASK_ID","run_id":"$FORGE_RUN_ID","brain_id":"codex-compatible-stub","model_execution_performed":false}
 EOF
+cat > brain-output/provider-output.json <<EOF
+{"schema_version":"forge.connected_external_brain.provider_output.v1","provider_id":"codex-compatible-stub","quality_score":0.92,"latency_ms":9,"model_execution_performed":false,"real_provider_execution_performed":false}
+EOF
 cat > brain-output/research.md <<EOF
 # Connected external brain adapter fixture
 
@@ -1482,6 +1506,7 @@ pub fn connected_external_brain_marker() -> &'static str {
 }
 RS
 grep -q 'codex-compatible-stub' brain-output/plan.json
+grep -q 'forge.connected_external_brain.provider_output.v1' brain-output/provider-output.json
 grep -q "$FORGE_WORKFLOW_ID" brain-output/research.md
 grep -q 'connected_external_brain_marker' brain-output/code.rs
 printf 'connected_external_brain_stub_ok\n'
@@ -1513,6 +1538,7 @@ printf 'connected_external_brain_stub_ok\n'
 
     let target_paths = vec![
         "brain-output/plan.json".to_string(),
+        "brain-output/provider-output.json".to_string(),
         "brain-output/research.md".to_string(),
         "brain-output/code.rs".to_string(),
     ];
@@ -1528,12 +1554,72 @@ printf 'connected_external_brain_stub_ok\n'
     }
 
     let external_brain_process_executed = receipt.executed && receipt.success == Some(true);
-    let validation_status = if external_brain_process_executed && all_targets_exist {
-        "validated"
-    } else {
-        "failed"
-    }
-    .to_string();
+    let provider_output_path = project_root.join("brain-output/provider-output.json");
+    let provider_output = fs::read_to_string(&provider_output_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    let output_schema_valid = provider_output.as_ref().is_some_and(|output| {
+        output["schema_version"] == "forge.connected_external_brain.provider_output.v1"
+            && output["provider_id"] == brain_id
+    });
+    let output_quality_score = provider_output
+        .as_ref()
+        .and_then(|output| output["quality_score"].as_f64())
+        .map(|score| format!("{score:.2}"))
+        .unwrap_or_else(|| "not_recorded".to_string());
+    let output_latency_ms = provider_output
+        .as_ref()
+        .and_then(|output| output["latency_ms"].as_i64())
+        .map(|latency| latency.to_string())
+        .unwrap_or_else(|| "not_recorded".to_string());
+    let provider_declared_model_execution = provider_output
+        .as_ref()
+        .and_then(|output| output["model_execution_performed"].as_bool())
+        .unwrap_or(false);
+    let real_provider_execution_performed = provider_output
+        .as_ref()
+        .and_then(|output| output["real_provider_execution_performed"].as_bool())
+        .unwrap_or(false);
+    let provider_contract_valid = external_brain_process_executed
+        && output_schema_valid
+        && !provider_declared_model_execution
+        && !real_provider_execution_performed
+        && receipt.stdout_sha256.is_some();
+    let provider_contract = MilestoneConnectedExternalBrainProviderContract {
+        schema_version: CONNECTED_EXTERNAL_BRAIN_PROVIDER_SCHEMA_VERSION.to_string(),
+        status: if provider_contract_valid {
+            "connected_external_brain_provider_contract_validated"
+        } else {
+            "connected_external_brain_provider_contract_invalid"
+        }
+        .to_string(),
+        provider_id: brain_id.to_string(),
+        execution_mode: receipt.execution_mode.clone(),
+        command_sha256: receipt.command_sha256.clone(),
+        stdout_sha256: receipt.stdout_sha256.clone(),
+        stderr_sha256: receipt.stderr_sha256.clone(),
+        output_schema_valid,
+        output_quality_score,
+        output_latency_ms,
+        provider_declared_model_execution,
+        real_provider_execution_performed,
+        promotion_ready: false,
+        validation_evidence: vec![
+            "provider_process_ran_under_forge_harness".to_string(),
+            "provider_command_hash_recorded".to_string(),
+            "provider_stdout_hash_recorded".to_string(),
+            "provider_output_schema_validated".to_string(),
+            "provider_declared_no_model_execution".to_string(),
+            "real_provider_execution_not_performed".to_string(),
+        ],
+    };
+    let validation_status =
+        if external_brain_process_executed && all_targets_exist && provider_contract_valid {
+            "validated"
+        } else {
+            "failed"
+        }
+        .to_string();
     let stdout_headroom_status = receipt
         .stdout_headroom
         .as_ref()
@@ -1568,6 +1654,7 @@ printf 'connected_external_brain_stub_ok\n'
         routing_default_brain,
         model_execution_performed: false,
         external_brain_process_executed,
+        provider_contract,
         handoff_status: handoff.status.clone(),
         handoff_ready: handoff.context.handoff_ready,
         harness_exec_status: receipt.status.clone(),
@@ -1616,6 +1703,7 @@ printf 'connected_external_brain_stub_ok\n'
             "connected_external_brain_executed_under_harness".to_string(),
             "harness_exec_event_recorded".to_string(),
             "adapter_outputs_validated".to_string(),
+            "connected_external_brain_provider_contract_validated".to_string(),
             "model_execution_not_performed".to_string(),
             "external_resources_untouched".to_string(),
         ],
@@ -2248,8 +2336,8 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
             "replacement_grade_cli",
             "Replacement-grade Forge CLI",
             "groundwork",
-            "0.4.x validates the no-argument interactive home, slash commands, conversational routing, human decisions, async run handoff and observability surfaces. 0.4.144 adds `forge milestone cli-demo` and MCP tool `forge.milestone.cli_demo`, which generate deterministic Forge-first demo evidence for coding, harness/headroom/session lifecycle control, research/artifact and long-running async flows, including `forge.milestone.patch_lifecycle_demo.v1` with plan/review/diff/apply/revert/restore artifact lineage in an isolated fixture repo. 0.4.145 adds executor-aware, runtime-aware and cost-sensitive routing classification to the interactive conversational router, plus creative artifact and design token dependency fields to `forge inspect` output. 0.4.146 adds registry-level run health summaries so `forge list` and `forge inspect` expose running, stale and missing-heartbeat runs even when `active_run_count` is zero. 0.4.148 adds process-liveness-aware run activity so a recorded live executor PID keeps long-running handoffs active after heartbeat TTL expiry instead of forcing stale recovery. 0.4.150 adds `forge patch plan` and MCP tool `forge.patch.plan` as a plan-only file-editing contract with repo-relative permission gates, file snapshots, diff-review commands, validation commands and workflow artifact lineage. 0.4.151 adds apply artifacts and guarded revert proposals so rollback intent is recorded without silently executing destructive file restores. 0.4.152 adds in-TUI `/patch plan`, `/patch apply` and `/patch revert` slash commands to the interactive REPL with human approval prompts before execution, plus two-token slash command routing support. 0.4.153 adds in-TUI `/context` and `/handoff` commands so operators can inspect bounded context routes and explicitly approve executor handoff lease acquisition from inside `forge`. 0.4.154 exposes `forge.interactive.home`, `forge.interactive.slash_commands` and `forge.interactive.route` through MCP so agents can inspect and use the same interactive command/chat routing model without taking over orchestration. The patch lifecycle now includes `forge patch review`, MCP `forge.patch.review` and `/patch review`, which persist `forge.patch_review.v1` evidence with Git diff/status/check summaries before apply approval while keeping source files unchanged, `forge patch diff`, MCP `forge.patch.diff` and `/patch diff`, which persist `forge.patch_diff.v1` evidence for read-only multi-file diff navigation, and `forge patch restore`, MCP `forge.patch.restore` and `/patch restore`, which persist `forge.patch_restore.v1` evidence for explicit, approved repo-local file restoration from a revert artifact. The interactive home now carries `forge.interactive.ui_composition.v1` with ordered regions, Core widgets, safe Addon widgets and refresh/inspection commands for TUI/web/agent dashboard composition, plus `forge.interactive.structured_logs.v1` with recent event sequence, workflow, category, severity, origin, correlation, observability and payload preview for timeline drill-downs; the dedicated `forge interactive readiness`/`forge.interactive.readiness` surface exposes executor, runtime, brain, shell, Forge-controlled surface and harness readiness with corrective commands before shell or handoff without loading the full home, the dedicated `forge interactive harness`/`forge.interactive.harness` surface exposes a consolidated harness center with mode, doctor, shim status, wrap-plan, `headroom_plan`, `session_lifecycle_plan` and token-headroom preview without loading the full home or executing child CLIs, the dedicated `forge interactive sessions`/`forge.interactive.sessions` surface exposes provider/session readiness, lifecycle state, per-session `operation_plan`, shell history commands and next lifecycle controls without opening or attaching shells, the dedicated `forge interactive command-palette`/`forge.interactive.command_palette` surface exposes grouped contextual navigation, workflow, patch, permission, harness, session and observability actions with mutation and approval flags without mutating state, `forge interactive action-registry`/`forge.interactive.action_registry` plus `/actions [query]` expose a strict action registry for TUI/web/agent clients, `forge interactive action-invocation`/`forge.interactive.action_invocation` plus `/action <action-id>` resolve one selected action into a non-executing invocation plan, the dedicated `forge interactive autocomplete`/`forge.interactive.autocomplete` surface exposes read-only slash-command, command-palette and `/action <partial>` action-id suggestions for partial operator input with score, source panel, mutation and approval flags, the dedicated `forge interactive patch-workbench`/`forge.interactive.patch_workbench` surface exposes Git status, file lanes, bounded inline `diff_preview`, multi-file `diff_review_queue`, `forge.interactive.patch_edit_intake.v1` required inputs and form readiness, diff stat/check, explicit `approval_flow` review/approval/rollback gates and permission-gated patch lifecycle commands for native file-editing and rich diff-review UI without mutating files, the dedicated `forge interactive permissions`/`forge.interactive.permissions` surface exposes tenant memberships, Addon permission authorizations, pending/timed-out human approvals and granular next-action commands without mutating state, the dedicated `forge interactive workflow-dag`/`forge.interactive.workflow_dag` surface exposes dependency nodes, edges, readiness, human waits and drill-down commands without loading the full home, the dedicated `forge interactive structured-logs`/`forge.interactive.structured_logs` surface exposes the same log contract without loading the full home, and the home plus dedicated `forge interactive task-board`/`forge.interactive.task_board` surface also carry `forge.interactive.task_board.v1`, giving TUI/web/agent dashboards workflow lanes, operable per-task cards, ready handoffs, checkpoint resume candidates, human waits, artifacts and direct next-action commands. The harness also emits guarded CLI execution receipts with Forge-first wrapper env, workflow/task/run lineage, non-destructive PATH shim installation, automatic native CLI discovery that excludes the shim directory, read-only shim status audits for PATH precedence/ownership/recursion, executor-sync projection of Forge-first shim readiness into brain/shell entrypoints, plan-only `forge shells` / MCP `forge.shell.launch_plan` launch reports with readiness/preflight/context/handoff/heartbeat gates, `forge.shell.record_plan` receipts that write `shell_launch_planned` global events, `forge sessions` / MCP `forge.sessions` reports with session lifecycle state, `forge.brain_session_operation_plan.v1` recommendations, `forge sessions lifecycle` / MCP `forge.session.lifecycle` audit-only lifecycle receipts, ordered transition policy with `previous_state`, `lifecycle_sequence`, invalid transition rejection, `lifecycle_policy.allowed_next_states`, next lifecycle commands and provider/state/readiness filters in `forge sessions` plus MCP `forge.sessions`, and `forge sessions history`, MCP `forge.session.history` and `/sessions history` for per-session chronological audit history, `forge.harness.exec_event.v1` global events for guarded CLI receipts with task/node correlation, output hashes/excerpts and reversible stdout/stderr token-headroom reports for authorized real child execution, project `.forge/harness.json` `require_lineage_for_exec` policy that returns `harness_exec_blocked_by_project_policy` when real child execution lacks workflow/task/run lineage, `forge harness doctor` plus MCP `forge.harness.doctor` consolidated readiness audits and the interactive home `harness_doctor_panel`, `forge harness mode --project-root` plus MCP `forge.harness.mode` `project_root` diagnostics for auditing another project before launching a brain CLI, and `forge harness wrap-plan --project-root` plus MCP `forge.harness.wrap_plan` `project_root` support so wrapper planning respects a remote project's Forge-first defaults before shell execution, and `forge harness install-shims --project-root` plus MCP `forge.harness.install_shims` `project_root` support so shim installation uses the same remote project defaults, and `forge harness exec --project-root` plus MCP `forge.harness.exec` `project_root` support so execution uses remote defaults and policy without changing child `cwd`. The `forge milestone cli-demo` output now also includes `forge.milestone.executor_project_demo.v1`, proving a deterministic executor can mutate an isolated project only after governed harness bootstrap, lineage-required execution, event recording and stdout token-headroom retrieval, and `forge.milestone.brain_handoff_demo.v1`, proving Forge-owned context, node-brain routing, task handoff, plan-only shell launch and audit-only session lifecycle for Codex without child CLI/model execution. This is enabling groundwork, not proof that `forge` can replace Codex/OpenCode for daily permission-gated shell work and end-to-end coding/research workflows.",
-            "Continue from deterministic `forge.milestone.real_project_workflow_demo.v1` and connected `forge.milestone.connected_external_brain_demo.v1` adapter evidence into real external model/provider execution on broader project coding/research workflows, and continue hardening terminal file editing UX before promoting this beyond groundwork.",
+            "0.4.x validates the no-argument interactive home, slash commands, conversational routing, human decisions, async run handoff and observability surfaces. 0.4.144 adds `forge milestone cli-demo` and MCP tool `forge.milestone.cli_demo`, which generate deterministic Forge-first demo evidence for coding, harness/headroom/session lifecycle control, research/artifact and long-running async flows, including `forge.milestone.patch_lifecycle_demo.v1` with plan/review/diff/apply/revert/restore artifact lineage in an isolated fixture repo. 0.4.145 adds executor-aware, runtime-aware and cost-sensitive routing classification to the interactive conversational router, plus creative artifact and design token dependency fields to `forge inspect` output. 0.4.146 adds registry-level run health summaries so `forge list` and `forge inspect` expose running, stale and missing-heartbeat runs even when `active_run_count` is zero. 0.4.148 adds process-liveness-aware run activity so a recorded live executor PID keeps long-running handoffs active after heartbeat TTL expiry instead of forcing stale recovery. 0.4.150 adds `forge patch plan` and MCP tool `forge.patch.plan` as a plan-only file-editing contract with repo-relative permission gates, file snapshots, diff-review commands, validation commands and workflow artifact lineage. 0.4.151 adds apply artifacts and guarded revert proposals so rollback intent is recorded without silently executing destructive file restores. 0.4.152 adds in-TUI `/patch plan`, `/patch apply` and `/patch revert` slash commands to the interactive REPL with human approval prompts before execution, plus two-token slash command routing support. 0.4.153 adds in-TUI `/context` and `/handoff` commands so operators can inspect bounded context routes and explicitly approve executor handoff lease acquisition from inside `forge`. 0.4.154 exposes `forge.interactive.home`, `forge.interactive.slash_commands` and `forge.interactive.route` through MCP so agents can inspect and use the same interactive command/chat routing model without taking over orchestration. The patch lifecycle now includes `forge patch review`, MCP `forge.patch.review` and `/patch review`, which persist `forge.patch_review.v1` evidence with Git diff/status/check summaries before apply approval while keeping source files unchanged, `forge patch diff`, MCP `forge.patch.diff` and `/patch diff`, which persist `forge.patch_diff.v1` evidence for read-only multi-file diff navigation, and `forge patch restore`, MCP `forge.patch.restore` and `/patch restore`, which persist `forge.patch_restore.v1` evidence for explicit, approved repo-local file restoration from a revert artifact. The interactive home now carries `forge.interactive.ui_composition.v1` with ordered regions, Core widgets, safe Addon widgets and refresh/inspection commands for TUI/web/agent dashboard composition, plus `forge.interactive.structured_logs.v1` with recent event sequence, workflow, category, severity, origin, correlation, observability and payload preview for timeline drill-downs; the dedicated `forge interactive readiness`/`forge.interactive.readiness` surface exposes executor, runtime, brain, shell, Forge-controlled surface and harness readiness with corrective commands before shell or handoff without loading the full home, the dedicated `forge interactive harness`/`forge.interactive.harness` surface exposes a consolidated harness center with mode, doctor, shim status, wrap-plan, `headroom_plan`, `session_lifecycle_plan` and token-headroom preview without loading the full home or executing child CLIs, the dedicated `forge interactive sessions`/`forge.interactive.sessions` surface exposes provider/session readiness, lifecycle state, per-session `operation_plan`, shell history commands and next lifecycle controls without opening or attaching shells, the dedicated `forge interactive command-palette`/`forge.interactive.command_palette` surface exposes grouped contextual navigation, workflow, patch, permission, harness, session and observability actions with mutation and approval flags without mutating state, `forge interactive action-registry`/`forge.interactive.action_registry` plus `/actions [query]` expose a strict action registry for TUI/web/agent clients, `forge interactive action-invocation`/`forge.interactive.action_invocation` plus `/action <action-id>` resolve one selected action into a non-executing invocation plan, the dedicated `forge interactive autocomplete`/`forge.interactive.autocomplete` surface exposes read-only slash-command, command-palette and `/action <partial>` action-id suggestions for partial operator input with score, source panel, mutation and approval flags, the dedicated `forge interactive patch-workbench`/`forge.interactive.patch_workbench` surface exposes Git status, file lanes, bounded inline `diff_preview`, multi-file `diff_review_queue`, `forge.interactive.patch_edit_intake.v1` required inputs and form readiness, diff stat/check, explicit `approval_flow` review/approval/rollback gates and permission-gated patch lifecycle commands for native file-editing and rich diff-review UI without mutating files, the dedicated `forge interactive permissions`/`forge.interactive.permissions` surface exposes tenant memberships, Addon permission authorizations, pending/timed-out human approvals and granular next-action commands without mutating state, the dedicated `forge interactive workflow-dag`/`forge.interactive.workflow_dag` surface exposes dependency nodes, edges, readiness, human waits and drill-down commands without loading the full home, the dedicated `forge interactive structured-logs`/`forge.interactive.structured_logs` surface exposes the same log contract without loading the full home, and the home plus dedicated `forge interactive task-board`/`forge.interactive.task_board` surface also carry `forge.interactive.task_board.v1`, giving TUI/web/agent dashboards workflow lanes, operable per-task cards, ready handoffs, checkpoint resume candidates, human waits, artifacts and direct next-action commands. The harness also emits guarded CLI execution receipts with Forge-first wrapper env, workflow/task/run lineage, non-destructive PATH shim installation, automatic native CLI discovery that excludes the shim directory, read-only shim status audits for PATH precedence/ownership/recursion, executor-sync projection of Forge-first shim readiness into brain/shell entrypoints, plan-only `forge shells` / MCP `forge.shell.launch_plan` launch reports with readiness/preflight/context/handoff/heartbeat gates, `forge.shell.record_plan` receipts that write `shell_launch_planned` global events, `forge sessions` / MCP `forge.sessions` reports with session lifecycle state, `forge.brain_session_operation_plan.v1` recommendations, `forge sessions lifecycle` / MCP `forge.session.lifecycle` audit-only lifecycle receipts, ordered transition policy with `previous_state`, `lifecycle_sequence`, invalid transition rejection, `lifecycle_policy.allowed_next_states`, next lifecycle commands and provider/state/readiness filters in `forge sessions` plus MCP `forge.sessions`, and `forge sessions history`, MCP `forge.session.history` and `/sessions history` for per-session chronological audit history, `forge.harness.exec_event.v1` global events for guarded CLI receipts with task/node correlation, output hashes/excerpts and reversible stdout/stderr token-headroom reports for authorized real child execution, project `.forge/harness.json` `require_lineage_for_exec` policy that returns `harness_exec_blocked_by_project_policy` when real child execution lacks workflow/task/run lineage, `forge harness doctor` plus MCP `forge.harness.doctor` consolidated readiness audits and the interactive home `harness_doctor_panel`, `forge harness mode --project-root` plus MCP `forge.harness.mode` `project_root` diagnostics for auditing another project before launching a brain CLI, and `forge harness wrap-plan --project-root` plus MCP `forge.harness.wrap_plan` `project_root` support so wrapper planning respects a remote project's Forge-first defaults before shell execution, and `forge harness install-shims --project-root` plus MCP `forge.harness.install_shims` `project_root` support so shim installation uses the same remote project defaults, and `forge harness exec --project-root` plus MCP `forge.harness.exec` `project_root` support so execution uses remote defaults and policy without changing child `cwd`. The `forge milestone cli-demo` output now also includes `forge.milestone.executor_project_demo.v1`, proving a deterministic executor can mutate an isolated project only after governed harness bootstrap, lineage-required execution, event recording and stdout token-headroom retrieval, and `forge.milestone.brain_handoff_demo.v1`, proving Forge-owned context, node-brain routing, task handoff, plan-only shell launch and audit-only session lifecycle for Codex without child CLI/model execution, plus `forge.milestone.connected_external_brain_provider.v1`, proving provider-output schema validation, command/stdout hashes and explicit no-real-provider-execution evidence for the connected external brain adapter. This is enabling groundwork, not proof that `forge` can replace Codex/OpenCode for daily permission-gated shell work and end-to-end coding/research workflows.",
+            "Continue from deterministic `forge.milestone.real_project_workflow_demo.v1`, connected `forge.milestone.connected_external_brain_demo.v1` adapter evidence and `forge.milestone.connected_external_brain_provider.v1` provider-contract validation into real external model/provider execution on broader project coding/research workflows, and continue hardening terminal file editing UX before promoting this beyond groundwork.",
         ),
         capability(
             "experimental_multimodal_runtime",
