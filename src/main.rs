@@ -597,7 +597,7 @@ enum HarnessCommands {
         #[arg(long)]
         executor: String,
         #[arg(long = "real-cmd")]
-        real_cmd: String,
+        real_cmd: Option<String>,
         #[arg(long = "forge-first")]
         forge_first: bool,
         #[arg(long = "workflow")]
@@ -5161,7 +5161,7 @@ fn run() -> Result<i32> {
                 let report = install_cli_harness_shim(CliShimInstallOptions {
                     shim_dir: &shim_dir,
                     executor: &executor,
-                    real_cmd: &real_cmd,
+                    real_cmd: real_cmd.as_deref(),
                     store_path: Some(cli.store.as_path()),
                     forge_first,
                     workflow_id: workflow_id.as_deref(),

@@ -598,6 +598,141 @@ printf 'argc:%s env:%s args:%s\n' "$#" "$FORGE_HARNESS" "$*"
 }
 
 #[cfg(unix)]
+#[test]
+fn harness_install_shims_resolves_native_cli_from_path_without_recursing_through_shim() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let real_dir = temp.path().join("real");
+    let shim_dir = temp.path().join("shims");
+    fs::create_dir_all(&real_dir).unwrap();
+    fs::create_dir_all(&shim_dir).unwrap();
+    write_fake_executor(
+        &real_dir,
+        "codex",
+        r#"#!/bin/sh
+printf 'native:%s env:%s args:%s\n' "$0" "$FORGE_HARNESS" "$*"
+"#,
+    );
+    let stale_forge_shim = shim_dir.join("codex");
+    fs::write(
+        &stale_forge_shim,
+        "#!/bin/sh\n# forge-harness-shim:v1\nexit 99\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&stale_forge_shim).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&stale_forge_shim, perms).unwrap();
+    let path = format!(
+        "{}:{}:{}",
+        shim_dir.display(),
+        real_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let output = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "install-shims",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--forge-first",
+            "--workflow",
+            "wf_auto_shim",
+            "--run",
+            "run_auto_shim",
+            "--context-budget",
+            "512",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(report["schema_version"], "forge.harness.shim_install.v1");
+    assert_eq!(report["status"], "shim_install_ready");
+    assert_eq!(report["updated_count"], 1);
+    assert_eq!(report["blocked_count"], 0);
+    assert_eq!(report["shims"][0]["executor"], "codex");
+    assert_eq!(report["shims"][0]["status"], "updated");
+    assert_eq!(report["shims"][0]["real_command_source"], "path_discovery");
+    assert_eq!(
+        report["shims"][0]["real_command_resolution_status"],
+        "resolved_from_path_excluding_shim_dir"
+    );
+    let resolved_real = report["shims"][0]["real_command"].as_str().unwrap();
+    assert!(resolved_real.ends_with("/real/codex"));
+    assert!(!resolved_real.contains("/shims/codex"));
+    let script = fs::read_to_string(&stale_forge_shim).unwrap();
+    assert!(script.contains(resolved_real));
+    assert!(script.contains("--store"));
+    assert!(script.contains(store.to_str().unwrap()));
+
+    let shim_output = std::process::Command::new(&stale_forge_shim)
+        .args(["one", "two"])
+        .output()
+        .unwrap();
+    assert!(shim_output.status.success());
+    let receipt: Value = serde_json::from_slice(&shim_output.stdout).unwrap();
+    assert_eq!(receipt["status"], "harness_exec_completed");
+    assert_eq!(receipt["executed"], true);
+    assert_eq!(receipt["command"][0], resolved_real);
+    assert_eq!(receipt["command"][1], "one");
+    assert_eq!(receipt["command"][2], "two");
+    assert!(receipt["stdout_excerpt"]
+        .as_str()
+        .unwrap()
+        .contains("env:enabled args:one two"));
+
+    let mcp_input = serde_json::json!({
+        "shim_dir": shim_dir,
+        "executor": "codex",
+        "forge_first": true,
+        "workflow_id": "wf_mcp_auto",
+        "run_id": "run_mcp_auto",
+        "context_budget": 256
+    });
+    let mcp_output = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.install_shims",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.harness.shim_install.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["shims"][0]["real_command_source"],
+        "path_discovery"
+    );
+    assert_eq!(
+        mcp_json["result"]["shims"][0]["real_command_resolution_status"],
+        "resolved_from_path_excluding_shim_dir"
+    );
+}
+
+#[cfg(unix)]
 fn write_fake_executor(bin_dir: &Path, name: &str, body: &str) {
     let executor_path = bin_dir.join(name);
     fs::write(&executor_path, body).unwrap();

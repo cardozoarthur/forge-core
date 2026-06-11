@@ -118,6 +118,8 @@ pub struct CliShimReport {
     pub executor: String,
     pub shim_path: String,
     pub real_command: String,
+    pub real_command_source: String,
+    pub real_command_resolution_status: String,
     pub store_path: Option<String>,
     pub forge_binary: String,
     pub forge_first: bool,
@@ -134,7 +136,7 @@ pub struct CliShimReport {
 pub struct CliShimInstallOptions<'a> {
     pub shim_dir: &'a Path,
     pub executor: &'a str,
-    pub real_cmd: &'a str,
+    pub real_cmd: Option<&'a str>,
     pub store_path: Option<&'a Path>,
     pub forge_first: bool,
     pub workflow_id: Option<&'a str>,
@@ -456,15 +458,12 @@ pub fn install_cli_harness_shim(
         force,
     } = options;
     let executor = normalize_executor(executor);
-    let real_cmd = real_cmd.trim();
-    if real_cmd.is_empty() {
-        bail!("real CLI command cannot be empty");
-    }
     fs::create_dir_all(shim_dir)
         .with_context(|| format!("failed to create shim dir `{}`", shim_dir.display()))?;
     let shim_dir = shim_dir
         .canonicalize()
         .unwrap_or_else(|_| shim_dir.to_path_buf());
+    let real_command = resolve_real_command_for_shim(&executor, real_cmd, &shim_dir)?;
     let current_exe = env::current_exe().context("failed to resolve current forge binary")?;
     let forge_binary = current_exe
         .canonicalize()
@@ -475,7 +474,7 @@ pub fn install_cli_harness_shim(
     let script = build_cli_shim_script(CliShimScriptOptions {
         forge_binary: &forge_binary,
         executor: &executor,
-        real_cmd,
+        real_cmd: &real_command.command,
         store_path,
         forge_first,
         workflow_id,
@@ -514,7 +513,9 @@ pub fn install_cli_harness_shim(
     let shim = CliShimReport {
         executor,
         shim_path: shim_path.display().to_string(),
-        real_command: real_cmd.to_string(),
+        real_command: real_command.command,
+        real_command_source: real_command.source,
+        real_command_resolution_status: real_command.status,
         store_path: store_path.map(|path| path.display().to_string()),
         forge_binary: forge_binary.clone(),
         forge_first,
@@ -810,6 +811,57 @@ fn build_cli_shim_script(options: CliShimScriptOptions<'_>) -> String {
 
 fn shim_binary_name(executor: &str) -> String {
     normalize_executor(executor)
+}
+
+struct RealCommandResolution {
+    command: String,
+    source: String,
+    status: String,
+}
+
+fn resolve_real_command_for_shim(
+    executor: &str,
+    explicit_real_cmd: Option<&str>,
+    shim_dir: &Path,
+) -> Result<RealCommandResolution> {
+    if let Some(real_cmd) = explicit_real_cmd
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(RealCommandResolution {
+            command: real_cmd.to_string(),
+            source: "explicit".to_string(),
+            status: "explicit_real_command".to_string(),
+        });
+    }
+
+    let binary_name = shim_binary_name(executor);
+    let Some(path_var) = env::var_os("PATH") else {
+        bail!("real CLI command was not provided and PATH is not available");
+    };
+    for dir in env::split_paths(&path_var) {
+        if same_path(&dir, shim_dir) {
+            continue;
+        }
+        let candidate = dir.join(&binary_name);
+        if candidate.is_file() {
+            return Ok(RealCommandResolution {
+                command: canonical_or_display(candidate),
+                source: "path_discovery".to_string(),
+                status: "resolved_from_path_excluding_shim_dir".to_string(),
+            });
+        }
+    }
+    bail!(
+        "real CLI command was not provided and `{binary_name}` was not found in PATH outside `{}`",
+        shim_dir.display()
+    );
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    left == right
 }
 
 fn shell_quote(value: &str) -> String {

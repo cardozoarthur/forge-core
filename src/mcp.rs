@@ -4738,16 +4738,16 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[
                     ("shim_dir", "string", "directory where Forge-owned shims will be written"),
                     ("executor", "string", "codex|claude|gemini|opencode"),
-                    ("real_cmd", "string", "resolved native CLI command/path captured before shim PATH precedence"),
+                    ("real_cmd", "string", "optional resolved native CLI command/path; omitted values are discovered from PATH outside shim_dir"),
                     ("forge_first", "boolean", "prefer Forge context routing before native CLI defaults"),
                     ("workflow_id", "string", "optional workflow lineage"),
                     ("run_id", "string", "optional async run lineage"),
                     ("context_budget", "integer", "context byte budget"),
                     ("token_headroom", "boolean", "enable token-headroom env"),
                     ("force", "boolean", "allow replacing an existing file"),
-                ], &["shim_dir", "executor", "real_cmd"]),
+                ], &["shim_dir", "executor"]),
                 "forge.harness.shim_install.v1",
-                &["forge", "harness", "install-shims", "--shim-dir", "<dir>", "--executor", "<executor>", "--real-cmd", "<path>", "--output", "json"],
+                &["forge", "harness", "install-shims", "--shim-dir", "<dir>", "--executor", "<executor>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -7165,14 +7165,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let real_cmd = input
                 .real_cmd
                 .or(input.real_command)
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| anyhow::anyhow!("real_cmd is required"))?;
+                .filter(|value| !value.trim().is_empty());
             let workflow_id = input.workflow_id.or(input.workflow);
             let run_id = input.run_id.or(input.run);
             serde_json::to_value(install_cli_harness_shim(CliShimInstallOptions {
                 shim_dir: std::path::Path::new(&input.shim_dir),
                 executor: &input.executor,
-                real_cmd: &real_cmd,
+                real_cmd: real_cmd.as_deref(),
                 store_path: Some(store.path()),
                 forge_first: input.forge_first.unwrap_or(true),
                 workflow_id: workflow_id.as_deref(),
