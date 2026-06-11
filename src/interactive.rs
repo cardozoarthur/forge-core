@@ -1,4 +1,7 @@
-use crate::addon::{default_addon_dirs, list_addon_views, load_addon_catalog_from_store};
+use crate::addon::{
+    default_addon_dirs, list_addon_permission_authorizations, list_addon_views,
+    load_addon_catalog_from_store,
+};
 use crate::checkpoint::TaskCheckpoint;
 use crate::cost::build_cost_ledger;
 use crate::event::{build_global_event_timeline, GlobalEventTimelineReport, WorkflowEventEnvelope};
@@ -8,6 +11,8 @@ use crate::harness::{
     build_harness_doctor_report, build_harness_mode_report, HarnessDoctorOptions,
     HarnessDoctorReport, HarnessModeOptions, HarnessModeReport,
 };
+use crate::identity::list_identity_memberships;
+use crate::interaction::list_human_interactions;
 use crate::memory::memory_policy_report;
 use crate::ops::{
     build_addon_view_renderer_report, build_operational_digital_twin, load_modifier_lane,
@@ -35,6 +40,7 @@ const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_boar
 const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
 const INTERACTIVE_READINESS_SCHEMA_VERSION: &str = "forge.interactive.readiness.v1";
 const INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION: &str = "forge.interactive.patch_workbench.v1";
+const INTERACTIVE_PERMISSIONS_SCHEMA_VERSION: &str = "forge.interactive.permissions.v1";
 const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
 const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
 const INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION: &str = "forge.interactive.structured_logs.v1";
@@ -82,6 +88,7 @@ pub struct InteractiveDashboard {
     pub navigation_panel: InteractiveNavigationPanel,
     pub ui_composition_panel: InteractiveUiCompositionPanel,
     pub patch_workbench_panel: InteractivePatchWorkbenchPanel,
+    pub permissions_panel: InteractivePermissionsPanel,
     pub dag_panel: InteractiveWorkflowDagPanel,
     pub task_board_panel: InteractiveTaskBoardPanel,
     pub schedule_panel: InteractiveSchedulePanel,
@@ -252,6 +259,101 @@ pub struct InteractivePatchWorkbenchCommands {
     pub apply: Vec<String>,
     pub revert: Vec<String>,
     pub restore: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePermissionsPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub membership_count: usize,
+    pub active_membership_count: usize,
+    pub expired_membership_count: usize,
+    pub not_yet_valid_membership_count: usize,
+    pub addon_authorization_count: usize,
+    pub approved_addon_permission_count: usize,
+    pub revoked_addon_permission_count: usize,
+    pub pending_human_approval_count: usize,
+    pub timed_out_human_approval_count: usize,
+    pub memberships: Vec<InteractivePermissionMembership>,
+    pub addon_permissions: Vec<InteractiveAddonPermissionAuthorization>,
+    pub approval_items: Vec<InteractiveApprovalItem>,
+    pub commands: InteractivePermissionsCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePermissionMembership {
+    pub subject_scope: String,
+    pub subject_id: String,
+    pub tenant_path: String,
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    pub role: String,
+    pub status: String,
+    pub permission_count: usize,
+    pub permissions: Vec<String>,
+    pub permission_grants: Vec<String>,
+    pub permission_denies: Vec<String>,
+    pub expired: bool,
+    pub not_yet_valid: bool,
+    pub commands: InteractivePermissionMembershipCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePermissionMembershipCommands {
+    pub list: Vec<String>,
+    pub update: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveAddonPermissionAuthorization {
+    pub addon_id: String,
+    pub permission_id: String,
+    pub status: String,
+    pub risk: String,
+    pub approved_by: String,
+    pub source: String,
+    pub granted_at: String,
+    pub commands: InteractiveAddonPermissionCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveAddonPermissionCommands {
+    pub list: Vec<String>,
+    pub authorize: Vec<String>,
+    pub revoke: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveApprovalItem {
+    pub source: String,
+    pub workflow_id: String,
+    pub task_id: String,
+    pub task_title: String,
+    pub interaction_id: String,
+    pub kind: String,
+    pub state: String,
+    pub prompt: String,
+    pub required: bool,
+    pub commands: InteractiveApprovalCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveApprovalCommands {
+    pub list: Vec<String>,
+    pub answer: Vec<String>,
+    pub expire: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePermissionsCommands {
+    pub refresh: Vec<String>,
+    pub list_memberships: Vec<String>,
+    pub update_membership: Vec<String>,
+    pub list_addon_permissions: Vec<String>,
+    pub authorize_addon_permission: Vec<String>,
+    pub revoke_addon_permission: Vec<String>,
+    pub list_interactions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -807,6 +909,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
         });
     let addon_renderer_panel = build_interactive_addon_renderer_panel(&addon_renderer_report);
     let patch_workbench_panel = build_interactive_patch_workbench(store)?;
+    let permissions_panel = build_interactive_permissions(store)?;
     let ui_composition_panel = build_ui_composition_panel(&addon_renderer_report);
 
     Ok(InteractiveHomeReport {
@@ -842,6 +945,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             navigation_panel: build_navigation_panel(),
             ui_composition_panel,
             patch_workbench_panel,
+            permissions_panel,
             dag_panel,
             task_board_panel,
             schedule_panel,
@@ -859,6 +963,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 "forge schedule list".to_string(),
                 "forge schedule worker-status".to_string(),
                 "forge interactive patch-workbench --output json".to_string(),
+                "forge interactive permissions --output json".to_string(),
             ],
             quick_actions: vec![
                 "/status".to_string(),
@@ -1037,6 +1142,124 @@ pub fn build_interactive_patch_workbench(
         diff_stat,
         files,
         commands: patch_workbench_commands(),
+    })
+}
+
+pub fn build_interactive_permissions(store: &ForgeStore) -> Result<InteractivePermissionsPanel> {
+    let memberships_report = list_identity_memberships(store, None, None, None, None, None, None)?;
+    let addon_permissions_report = list_addon_permission_authorizations(store, None, None, None)?;
+    let human_interactions_report = list_human_interactions(store)?;
+
+    let memberships = memberships_report
+        .memberships
+        .into_iter()
+        .map(|membership| {
+            let tenant_path = format!(
+                "{}/{}/{}",
+                membership.organization_id, membership.brand_id, membership.product_id
+            );
+            InteractivePermissionMembership {
+                commands: permission_membership_commands(&membership),
+                permission_count: membership.permissions.len(),
+                subject_scope: membership.subject_scope,
+                subject_id: membership.subject_id,
+                tenant_path,
+                organization_id: membership.organization_id,
+                brand_id: membership.brand_id,
+                product_id: membership.product_id,
+                role: membership.role,
+                status: membership.status,
+                permissions: membership.permissions,
+                permission_grants: membership.permission_grants,
+                permission_denies: membership.permission_denies,
+                expired: membership.expired,
+                not_yet_valid: membership.not_yet_valid,
+            }
+        })
+        .collect::<Vec<_>>();
+    let active_membership_count = memberships
+        .iter()
+        .filter(|membership| {
+            membership.status == "active" && !membership.expired && !membership.not_yet_valid
+        })
+        .count();
+    let expired_membership_count = memberships
+        .iter()
+        .filter(|membership| membership.expired)
+        .count();
+    let not_yet_valid_membership_count = memberships
+        .iter()
+        .filter(|membership| membership.not_yet_valid)
+        .count();
+
+    let addon_permissions = addon_permissions_report
+        .authorizations
+        .into_iter()
+        .map(|authorization| InteractiveAddonPermissionAuthorization {
+            commands: addon_permission_commands(
+                &authorization.addon_id,
+                &authorization.permission_id,
+            ),
+            addon_id: authorization.addon_id,
+            permission_id: authorization.permission_id,
+            status: authorization.status,
+            risk: authorization.risk,
+            approved_by: authorization.approved_by,
+            source: authorization.source,
+            granted_at: authorization.granted_at,
+        })
+        .collect::<Vec<_>>();
+    let approved_addon_permission_count = addon_permissions
+        .iter()
+        .filter(|authorization| authorization.status == "approved")
+        .count();
+    let revoked_addon_permission_count = addon_permissions
+        .iter()
+        .filter(|authorization| authorization.status == "revoked")
+        .count();
+
+    let approval_items = human_interactions_report
+        .interactions
+        .into_iter()
+        .filter(|item| matches!(item.interaction.state.as_str(), "pending" | "timed_out"))
+        .map(|item| InteractiveApprovalItem {
+            commands: approval_item_commands(&item.workflow_id, &item.task_id),
+            source: "human_interaction".to_string(),
+            workflow_id: item.workflow_id,
+            task_id: item.task_id,
+            task_title: item.task_title,
+            interaction_id: item.interaction.interaction_id,
+            kind: item.interaction.kind,
+            state: item.interaction.state,
+            prompt: item.interaction.prompt,
+            required: item.interaction.required,
+        })
+        .collect::<Vec<_>>();
+    let pending_human_approval_count = approval_items
+        .iter()
+        .filter(|item| item.state == "pending")
+        .count();
+    let timed_out_human_approval_count = approval_items
+        .iter()
+        .filter(|item| item.state == "timed_out")
+        .count();
+
+    Ok(InteractivePermissionsPanel {
+        schema_version: INTERACTIVE_PERMISSIONS_SCHEMA_VERSION.to_string(),
+        status: "interactive_permissions_ready".to_string(),
+        membership_count: memberships.len(),
+        active_membership_count,
+        expired_membership_count,
+        not_yet_valid_membership_count,
+        addon_authorization_count: addon_permissions.len(),
+        approved_addon_permission_count,
+        revoked_addon_permission_count,
+        pending_human_approval_count,
+        timed_out_human_approval_count,
+        memberships,
+        addon_permissions,
+        approval_items,
+        commands: permissions_commands(),
     })
 }
 
@@ -1315,6 +1538,197 @@ fn patch_workbench_file_commands(path: &str) -> InteractivePatchWorkbenchFileCom
             "0".to_string(),
             "--hunk-index".to_string(),
             "0".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
+fn permissions_commands() -> InteractivePermissionsCommands {
+    InteractivePermissionsCommands {
+        refresh: vec![
+            "interactive".to_string(),
+            "permissions".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        list_memberships: vec![
+            "identity".to_string(),
+            "memberships".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        update_membership: vec![
+            "identity".to_string(),
+            "membership-update".to_string(),
+            "--subject".to_string(),
+            "<user-id>".to_string(),
+            "--organization".to_string(),
+            "<organization-id>".to_string(),
+            "--brand".to_string(),
+            "<brand-id>".to_string(),
+            "--product".to_string(),
+            "<product-id>".to_string(),
+            "--grant".to_string(),
+            "<permission>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        list_addon_permissions: vec![
+            "addons".to_string(),
+            "permissions".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        authorize_addon_permission: vec![
+            "addons".to_string(),
+            "authorize-permission".to_string(),
+            "--addon".to_string(),
+            "<addon-id>".to_string(),
+            "--permission".to_string(),
+            "<permission-id>".to_string(),
+            "--approved-by".to_string(),
+            "<operator>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        revoke_addon_permission: vec![
+            "addons".to_string(),
+            "revoke-permission".to_string(),
+            "--addon".to_string(),
+            "<addon-id>".to_string(),
+            "--permission".to_string(),
+            "<permission-id>".to_string(),
+            "--approved-by".to_string(),
+            "<operator>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        list_interactions: vec![
+            "interaction".to_string(),
+            "list".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
+fn permission_membership_commands(
+    membership: &crate::identity::IdentityMembershipView,
+) -> InteractivePermissionMembershipCommands {
+    InteractivePermissionMembershipCommands {
+        list: vec![
+            "identity".to_string(),
+            "memberships".to_string(),
+            "--subject-scope".to_string(),
+            membership.subject_scope.clone(),
+            "--subject".to_string(),
+            membership.subject_id.clone(),
+            "--organization".to_string(),
+            membership.organization_id.clone(),
+            "--brand".to_string(),
+            membership.brand_id.clone(),
+            "--product".to_string(),
+            membership.product_id.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        update: vec![
+            "identity".to_string(),
+            "membership-update".to_string(),
+            "--subject-scope".to_string(),
+            membership.subject_scope.clone(),
+            "--subject".to_string(),
+            membership.subject_id.clone(),
+            "--organization".to_string(),
+            membership.organization_id.clone(),
+            "--brand".to_string(),
+            membership.brand_id.clone(),
+            "--product".to_string(),
+            membership.product_id.clone(),
+            "--grant".to_string(),
+            "<permission>".to_string(),
+            "--source".to_string(),
+            "forge_cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
+fn addon_permission_commands(
+    addon_id: &str,
+    permission_id: &str,
+) -> InteractiveAddonPermissionCommands {
+    InteractiveAddonPermissionCommands {
+        list: vec![
+            "addons".to_string(),
+            "permissions".to_string(),
+            "--addon".to_string(),
+            addon_id.to_string(),
+            "--permission".to_string(),
+            permission_id.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        authorize: vec![
+            "addons".to_string(),
+            "authorize-permission".to_string(),
+            "--addon".to_string(),
+            addon_id.to_string(),
+            "--permission".to_string(),
+            permission_id.to_string(),
+            "--approved-by".to_string(),
+            "<operator>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        revoke: vec![
+            "addons".to_string(),
+            "revoke-permission".to_string(),
+            "--addon".to_string(),
+            addon_id.to_string(),
+            "--permission".to_string(),
+            permission_id.to_string(),
+            "--approved-by".to_string(),
+            "<operator>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
+fn approval_item_commands(workflow_id: &str, task_id: &str) -> InteractiveApprovalCommands {
+    InteractiveApprovalCommands {
+        list: vec![
+            "interaction".to_string(),
+            "list".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        answer: vec![
+            "interaction".to_string(),
+            "answer".to_string(),
+            "--workflow".to_string(),
+            workflow_id.to_string(),
+            "--task".to_string(),
+            task_id.to_string(),
+            "--selected".to_string(),
+            "<choice-id>".to_string(),
+            "--origin".to_string(),
+            "forge_cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        expire: vec![
+            "interaction".to_string(),
+            "expire".to_string(),
+            "--workflow".to_string(),
+            workflow_id.to_string(),
+            "--task".to_string(),
+            task_id.to_string(),
+            "--origin".to_string(),
+            "forge_cli".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -1613,6 +2027,8 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     let navigation_keys = render_navigation_keybindings(&d.navigation_panel);
     let ui_composition_regions = render_ui_composition_region_summary(&d.ui_composition_panel);
     let patch_workbench_files = render_patch_workbench_file_summary(&d.patch_workbench_panel);
+    let permission_memberships = render_permission_membership_summary(&d.permissions_panel);
+    let permission_approvals = render_permission_approval_summary(&d.permissions_panel);
     let task_board_lanes = render_task_board_lane_summary(&d.task_board_panel);
     let dag_workflows = render_workflow_dag_summary(&d.dag_panel);
     let digital_twin_workflows = if d.digital_twin_panel.workflows.is_empty() {
@@ -1675,6 +2091,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Navigation panel: {navigation_status}; default {navigation_default_mode}, theme {navigation_theme}, modes {navigation_modes}, keys {navigation_keys}\n\
          UI composition: {ui_composition_status}; layout {ui_composition_layout}, regions {ui_composition_regions_count}, widgets {ui_composition_widgets} ({ui_composition_core_widgets} core, {ui_composition_addon_widgets} addon); {ui_composition_regions}\n\
          Patch workbench: {patch_workbench_status}; clean {patch_workbench_clean}, files {patch_workbench_files_count}, staged {patch_workbench_staged}, unstaged {patch_workbench_unstaged}, untracked {patch_workbench_untracked}, diff {patch_workbench_diff_present}, check {patch_workbench_diff_check}; {patch_workbench_files}\n\
+         Permission center: {permissions_status}; memberships {permissions_memberships}, active {permissions_active}, addon permissions {permissions_addons}, approved {permissions_approved_addons}, pending approvals {permissions_pending}, timed out {permissions_timed_out}; memberships {permission_memberships}; approvals {permission_approvals}\n\
          Operational digital twin: {digital_twin_status}; workflows {digital_twin_workflows_count}, happening {digital_twin_happening}, done {digital_twin_done}, remaining {digital_twin_remaining}, validated {digital_twin_validated}, rejected {digital_twin_rejected}, approvals {digital_twin_approvals}; {digital_twin_workflows}\n\
          DAG panel: {dag_status}; workflows {dag_workflows_count}, nodes {dag_nodes}, edges {dag_edges}, running {dag_running}, blocked {dag_blocked}, waits {dag_waits}, human waits {dag_human_waits}; {dag_workflows}\n\
          Task board: {task_board_status}; workflows {task_board_workflows}, tasks {task_board_tasks}, ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, checkpoints {task_board_checkpoints}, artifacts {task_board_artifacts}; lanes {task_board_lanes}\n\
@@ -1738,6 +2155,15 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         patch_workbench_diff_present = d.patch_workbench_panel.diff_present,
         patch_workbench_diff_check = d.patch_workbench_panel.diff_check_status,
         patch_workbench_files = patch_workbench_files,
+        permissions_status = d.permissions_panel.status,
+        permissions_memberships = d.permissions_panel.membership_count,
+        permissions_active = d.permissions_panel.active_membership_count,
+        permissions_addons = d.permissions_panel.addon_authorization_count,
+        permissions_approved_addons = d.permissions_panel.approved_addon_permission_count,
+        permissions_pending = d.permissions_panel.pending_human_approval_count,
+        permissions_timed_out = d.permissions_panel.timed_out_human_approval_count,
+        permission_memberships = permission_memberships,
+        permission_approvals = permission_approvals,
         digital_twin_status = d.digital_twin_panel.schema_version,
         digital_twin_workflows_count = d.digital_twin_panel.workflow_count,
         digital_twin_happening = d.digital_twin_panel.global_counts.happening_now_count,
@@ -1840,6 +2266,22 @@ pub fn render_interactive_patch_workbench(panel: &InteractivePatchWorkbenchPanel
     )
 }
 
+pub fn render_interactive_permissions(panel: &InteractivePermissionsPanel) -> String {
+    format!(
+        "Permission center: {status}; memberships {membership_count}, active {active_membership_count}, addon permissions {addon_authorization_count}, approved {approved_addon_permission_count}, pending approvals {pending_human_approval_count}, timed out {timed_out_human_approval_count}\nMemberships: {memberships}\nAddon permissions: {addon_permissions}\nApprovals: {approvals}\n",
+        status = panel.status,
+        membership_count = panel.membership_count,
+        active_membership_count = panel.active_membership_count,
+        addon_authorization_count = panel.addon_authorization_count,
+        approved_addon_permission_count = panel.approved_addon_permission_count,
+        pending_human_approval_count = panel.pending_human_approval_count,
+        timed_out_human_approval_count = panel.timed_out_human_approval_count,
+        memberships = render_permission_membership_summary(panel),
+        addon_permissions = render_addon_permission_summary(panel),
+        approvals = render_permission_approval_summary(panel),
+    )
+}
+
 pub fn render_interactive_readiness(panel: &InteractiveReadinessPanel) -> String {
     let usable_executors = if panel.usable_executors.is_empty() {
         "none".to_string()
@@ -1876,6 +2318,70 @@ fn render_patch_workbench_file_summary(panel: &InteractivePatchWorkbenchPanel) -
             .iter()
             .take(12)
             .map(|file| format!("{} ({})", file.path, file.status_label))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+}
+
+fn render_permission_membership_summary(panel: &InteractivePermissionsPanel) -> String {
+    if panel.memberships.is_empty() {
+        "none".to_string()
+    } else {
+        panel
+            .memberships
+            .iter()
+            .take(8)
+            .map(|membership| {
+                format!(
+                    "{}:{}@{} ({}, {} permissions)",
+                    membership.subject_scope,
+                    membership.subject_id,
+                    membership.tenant_path,
+                    membership.role,
+                    membership.permission_count
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+}
+
+fn render_addon_permission_summary(panel: &InteractivePermissionsPanel) -> String {
+    if panel.addon_permissions.is_empty() {
+        "none".to_string()
+    } else {
+        panel
+            .addon_permissions
+            .iter()
+            .take(8)
+            .map(|authorization| {
+                format!(
+                    "{}:{} ({}, {})",
+                    authorization.addon_id,
+                    authorization.permission_id,
+                    authorization.status,
+                    authorization.risk
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+}
+
+fn render_permission_approval_summary(panel: &InteractivePermissionsPanel) -> String {
+    if panel.approval_items.is_empty() {
+        "none".to_string()
+    } else {
+        panel
+            .approval_items
+            .iter()
+            .take(8)
+            .map(|item| {
+                format!(
+                    "{}:{} {} ({})",
+                    item.workflow_id, item.task_id, item.kind, item.state
+                )
+            })
             .collect::<Vec<_>>()
             .join(" | ")
     }
@@ -2261,6 +2767,15 @@ fn build_ui_composition_panel(
                     "standard",
                     "half",
                     vec!["forge memory policy --output json".to_string()],
+                ),
+                core_ui_widget(
+                    "permissions_panel",
+                    "Permission center",
+                    "permissions_panel",
+                    "permission_center_renderer",
+                    "standard",
+                    "half",
+                    vec!["forge interactive permissions --output json".to_string()],
                 ),
             ],
         ),

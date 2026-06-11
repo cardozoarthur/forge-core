@@ -36443,6 +36443,268 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
 }
 
 #[test]
+fn interactive_permissions_command_and_mcp_surface_are_dedicated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("tenant-project");
+    fs::create_dir_all(project_root.join(".forge")).unwrap();
+    fs::write(
+        project_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: digital-directive
+  label: Digital Directive
+brand:
+  scope: brand
+  id: forge
+  label: Forge
+product:
+  scope: product
+  id: core
+  label: Forge Core
+user:
+  scope: user
+  id: operator-1
+  label: Operator One
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let planned = forge()
+        .current_dir(&project_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Prepare a multi-tenant operation that needs human approval before an external action",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let task = find_task(
+        planned_json["tasks"].as_array().unwrap(),
+        "Extract requirements",
+    );
+    let task_id = task["id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "membership-update",
+            "--subject",
+            "operator-1",
+            "--organization",
+            "digital-directive",
+            "--brand",
+            "forge",
+            "--product",
+            "core",
+            "--role",
+            "operator",
+            "--grant",
+            "workflow:mutate",
+            "--status",
+            "active",
+            "--source",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "authorize-permission",
+            "--addon",
+            "telegram",
+            "--permission",
+            "egress:send_document",
+            "--risk",
+            "high",
+            "--approved-by",
+            "operator-1",
+            "--source",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interaction",
+            "create-choice",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--kind",
+            "approve_reject_refine_combine",
+            "--prompt",
+            "Approve the external action before execution continues",
+            "--choice",
+            "approve=Approve",
+            "--choice",
+            "reject=Reject",
+            "--timeout-seconds",
+            "3600",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "permissions",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.interactive.permissions.v1");
+    assert_eq!(json["status"], "interactive_permissions_ready");
+    assert_eq!(json["membership_count"], 1);
+    assert_eq!(json["active_membership_count"], 1);
+    assert_eq!(json["addon_authorization_count"], 1);
+    assert_eq!(json["approved_addon_permission_count"], 1);
+    assert_eq!(json["pending_human_approval_count"], 1);
+    assert!(json["memberships"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|membership| {
+            membership["subject_id"] == "operator-1"
+                && membership["permission_count"].as_u64().unwrap() >= 1
+                && membership["commands"]["update"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("membership-update"))
+        }));
+    assert!(json["addon_permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|authorization| {
+            authorization["addon_id"] == "telegram"
+                && authorization["permission_id"] == "egress:send_document"
+                && authorization["status"] == "approved"
+                && authorization["commands"]["revoke"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("revoke-permission"))
+        }));
+    assert!(json["approval_items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| {
+            item["source"] == "human_interaction"
+                && item["workflow_id"] == workflow_id
+                && item["task_id"] == task_id
+                && item["commands"]["answer"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("answer"))
+        }));
+    assert!(json["commands"]["list_interactions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("interaction")));
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "permissions",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Permission center"));
+    assert!(text.contains("operator-1"));
+    assert!(text.contains("telegram:egress:send_document"));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.permissions");
+    assert_eq!(tool["output_schema"], "forge.interactive.permissions.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.permissions"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.permissions.v1"
+    );
+    assert_eq!(mcp_json["result"]["pending_human_approval_count"], 1);
+}
+
+#[test]
 fn interactive_task_board_lanes_include_operable_task_cards() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -37309,6 +37571,14 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge interactive patch-workbench"),
         "the packaged Forge skill should include the patch workbench CLI command"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.permissions"),
+        "the packaged Forge skill should expose the dedicated permission center through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge interactive permissions"),
+        "the packaged Forge skill should include the permission center CLI command"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("ui_composition_panel"),

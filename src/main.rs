@@ -96,12 +96,13 @@ use forge_core::interaction::{
     CreateChoiceInteractionRequest,
 };
 use forge_core::interactive::{
-    build_interactive_home, build_interactive_patch_workbench, build_interactive_readiness,
-    build_interactive_structured_logs, build_interactive_task_board,
+    build_interactive_home, build_interactive_patch_workbench, build_interactive_permissions,
+    build_interactive_readiness, build_interactive_structured_logs, build_interactive_task_board,
     build_interactive_workflow_dag, render_interactive_home, render_interactive_patch_workbench,
-    render_interactive_readiness, render_interactive_structured_logs,
-    render_interactive_task_board, render_interactive_workflow_dag, route_interactive_input,
-    run_interactive_repl, slash_command_catalog,
+    render_interactive_permissions, render_interactive_readiness,
+    render_interactive_structured_logs, render_interactive_task_board,
+    render_interactive_workflow_dag, route_interactive_input, run_interactive_repl,
+    slash_command_catalog,
 };
 use forge_core::ir::{CreativeArtifact, TokenCollection};
 use forge_core::lease::{acquire_task_lease, release_task_lease};
@@ -3058,6 +3059,10 @@ enum InteractiveCommands {
         output: OutputFormat,
     },
     PatchWorkbench {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Permissions {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -7278,6 +7283,15 @@ fn run() -> Result<i32> {
                     OutputFormat::Human => {
                         println!("{}", render_interactive_patch_workbench(&report))
                     }
+                }
+                Ok(0)
+            }
+            InteractiveCommands::Permissions { output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_interactive_permissions(&store)?;
+                match output {
+                    OutputFormat::Json => print_response(output, &report)?,
+                    OutputFormat::Human => println!("{}", render_interactive_permissions(&report)),
                 }
                 Ok(0)
             }
