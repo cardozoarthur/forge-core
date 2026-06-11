@@ -9755,7 +9755,10 @@ event_adapters:
         "logistics.route_event.v1"
     );
     assert_eq!(report["events"][0]["event"]["data"]["transport"], "webhook");
-    assert!(report["events"][0]["route"]["workflow_id"].is_string());
+    let workflow_id = report["events"][0]["route"]["workflow_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let inbox_output = forge()
         .args([
@@ -9777,6 +9780,71 @@ event_adapters:
     assert_eq!(inbox_json["event_count"], 1);
     assert_eq!(inbox_json["events"][0]["origin"], "logistics_partner_api");
     assert_eq!(inbox_json["events"][0]["action"], "start_workflow");
+
+    let timeline_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "timeline",
+            "--workflow",
+            workflow_id.as_str(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let timeline_json: Value = serde_json::from_slice(&timeline_output).unwrap();
+    let inbound_event = timeline_json["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["kind"] == "inbound_event_routed")
+        .unwrap();
+    assert_eq!(
+        inbound_event["observability"]["addon_id"],
+        "forge.addon.logistics_webhook"
+    );
+    assert_eq!(inbound_event["data"]["direction"], "ingress");
+    assert_eq!(
+        inbound_event["data"]["adapter_policy"]["matched_adapter"]["adapter"]["id"],
+        "logistics.webhook_ingress"
+    );
+
+    let observability_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "observability",
+            "--addon",
+            "forge.addon.logistics_webhook",
+            "--addon-dir",
+            addon_dir.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let observability_json: Value = serde_json::from_slice(&observability_output).unwrap();
+    let event_flow = &observability_json["addons"][0]["event_flow"];
+    assert_eq!(event_flow["runtime_event_count"], 1);
+    assert_eq!(event_flow["runtime_consumed_event_count"], 1);
+    assert_eq!(event_flow["runtime_emitted_event_count"], 0);
+    assert!(event_flow["runtime_event_types"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("logistics.route_event.v1".to_string())));
+    assert!(event_flow["runtime_transports"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("webhook".to_string())));
 }
 
 #[test]

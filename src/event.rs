@@ -6987,18 +6987,7 @@ fn route_start_workflow(
     ));
     workflow.status = "planned".to_string();
     store.save_workflow(&workflow)?;
-    store.record_event(
-        &workflow.id,
-        "inbound_event_routed",
-        &json!({
-            "event_id": event.id.clone(),
-            "origin": event.origin.clone(),
-            "action": event.action.clone(),
-            "workflow_id": workflow.id.clone(),
-            "goal": goal,
-            "source": "event_inbox"
-        }),
-    )?;
+    record_inbound_event_routed(store, &workflow, &event, &adapter_policy, "start_workflow")?;
 
     let routed_data = enrich_event_data(
         event.data.clone(),
@@ -7037,6 +7026,8 @@ fn route_modify_workflow(
     let origin = format!("event_inbox:{}", event.origin);
     let update = update_workflow_goal(store, &workflow_id, &new_goal, &origin)?;
     let workflow = store.load_workflow(&workflow_id)?;
+    let route_decision = format!("modify_workflow revision {}", update.revision);
+    record_inbound_event_routed(store, &workflow, &event, &adapter_policy, &route_decision)?;
     let routed_data = enrich_event_data(
         event.data.clone(),
         &workflow.id,
@@ -7053,7 +7044,7 @@ fn route_modify_workflow(
         action: routed_event.action.clone(),
         origin: routed_event.origin.clone(),
         adapter_policy,
-        route_decision: format!("modify_workflow revision {}", update.revision),
+        route_decision,
         workflow_id: Some(workflow.id.clone()),
         workflow_goal: Some(workflow.goal.clone()),
         created_workflow: Some(workflow),
@@ -7089,6 +7080,8 @@ fn route_continue_workflow(
             )
         })?;
     let workflow = store.load_workflow(&workflow_id)?;
+    let route_decision = format!("continue_workflow:{continue_action}");
+    record_inbound_event_routed(store, &workflow, &event, &adapter_policy, &route_decision)?;
     let routed_data = enrich_event_data(
         event.data.clone(),
         &workflow.id,
@@ -7105,7 +7098,7 @@ fn route_continue_workflow(
         action: routed_event.action.clone(),
         origin: routed_event.origin.clone(),
         adapter_policy,
-        route_decision: format!("continue_workflow:{continue_action}"),
+        route_decision,
         workflow_id: Some(workflow.id.clone()),
         workflow_goal: Some(workflow.goal.clone()),
         created_workflow: Some(workflow),
@@ -7130,6 +7123,8 @@ fn route_status_workflow(
         other => bail!("unsupported status workflow route: {other}"),
     };
     let workflow = store.load_workflow(&workflow_id)?;
+    let route_decision = format!("{route_decision} revision {}", status_report.revision);
+    record_inbound_event_routed(store, &workflow, &event, &adapter_policy, &route_decision)?;
     let routed_data = enrich_event_data(
         event.data.clone(),
         &workflow.id,
@@ -7146,7 +7141,7 @@ fn route_status_workflow(
         action: routed_event.action.clone(),
         origin: routed_event.origin.clone(),
         adapter_policy,
-        route_decision: format!("{route_decision} revision {}", status_report.revision),
+        route_decision,
         workflow_id: Some(workflow.id.clone()),
         workflow_goal: Some(workflow.goal.clone()),
         created_workflow: Some(workflow),
@@ -7317,6 +7312,57 @@ fn enrich_event_data(
             "workflow_goal": workflow_goal,
         }),
     }
+}
+
+fn record_inbound_event_routed(
+    store: &ForgeStore,
+    workflow: &Workflow,
+    event: &InboundEventRecord,
+    adapter_policy: &InboundEventAdapterPolicyReport,
+    route_decision: &str,
+) -> Result<()> {
+    let data = inbound_event_routed_runtime_data(workflow, event, adapter_policy, route_decision);
+    store.record_event(&workflow.id, "inbound_event_routed", &data)?;
+    Ok(())
+}
+
+fn inbound_event_routed_runtime_data(
+    workflow: &Workflow,
+    event: &InboundEventRecord,
+    adapter_policy: &InboundEventAdapterPolicyReport,
+    route_decision: &str,
+) -> Value {
+    let matched_adapter = adapter_policy.matched_adapter.as_ref();
+    let addon_id = matched_adapter.map(|adapter| adapter.addon_id.clone());
+    let adapter_id = matched_adapter.map(|adapter| adapter.adapter.id.clone());
+    let direction = matched_adapter
+        .map(|adapter| adapter.adapter.direction.clone())
+        .filter(|direction| !direction.trim().is_empty())
+        .unwrap_or_else(|| "ingress".to_string());
+    let transport = adapter_policy.transport.clone().or_else(|| {
+        matched_adapter
+            .map(|adapter| adapter.adapter.transport.clone())
+            .filter(|transport| !transport.trim().is_empty())
+    });
+    let event_type = adapter_policy.schema.clone().or_else(|| {
+        matched_adapter.and_then(|adapter| adapter.adapter.event_types.first().cloned())
+    });
+    json!({
+        "event_id": event.id,
+        "origin": event.origin,
+        "action": event.action,
+        "workflow_id": workflow.id,
+        "goal": workflow.goal,
+        "source": "event_inbox",
+        "route_decision": route_decision,
+        "addon_id": addon_id,
+        "adapter_id": adapter_id,
+        "direction": direction,
+        "transport": transport,
+        "event_type": event_type,
+        "schema": adapter_policy.schema,
+        "adapter_policy": adapter_policy,
+    })
 }
 
 fn extract_goal(data: &Value) -> Option<String> {
