@@ -16607,7 +16607,28 @@ fn brain_session_lifecycle_records_auditable_state_without_launching_child() {
         "forge.brain_session_lifecycle.v1"
     );
     assert_eq!(lifecycle_json["session_id"], "codex-shell");
+    assert_eq!(lifecycle_json["previous_state"], "untracked");
     assert_eq!(lifecycle_json["state"], "opened");
+    assert_eq!(lifecycle_json["lifecycle_sequence"], 1);
+    assert_eq!(
+        lifecycle_json["transition"]["schema_version"],
+        "forge.brain_session_transition_policy.v1"
+    );
+    assert_eq!(lifecycle_json["transition"]["allowed"], true);
+    assert_eq!(lifecycle_json["transition"]["previous_state"], "untracked");
+    assert_eq!(lifecycle_json["transition"]["next_state"], "opened");
+    assert!(lifecycle_json["transition"]["allowed_next_states"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("attached")));
+    assert!(lifecycle_json["transition"]["next_lifecycle_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("attached"))));
     assert_eq!(lifecycle_json["event_recorded"], true);
     assert!(lifecycle_json["global_event_id"].as_i64().unwrap() > 0);
 
@@ -16636,6 +16657,23 @@ fn brain_session_lifecycle_records_auditable_state_without_launching_child() {
     assert_eq!(session["lifecycle_event_count"], 1);
     assert_eq!(session["last_lifecycle_origin"], "contract-test");
     assert_eq!(session["last_lifecycle_note"], "operator opened the shell");
+    assert_eq!(
+        session["lifecycle_policy"]["schema_version"],
+        "forge.brain_session_transition_policy.v1"
+    );
+    assert_eq!(session["lifecycle_policy"]["current_state"], "opened");
+    assert!(session["lifecycle_policy"]["allowed_next_states"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("attached")));
+    assert!(session["lifecycle_policy"]["next_lifecycle_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("closed"))));
     assert!(sessions_json["recent_events"]
         .as_array()
         .unwrap()
@@ -16658,6 +16696,54 @@ fn brain_session_lifecycle_records_auditable_state_without_launching_child() {
     assert_eq!(tool["output_schema"], "forge.brain_session_lifecycle.v1");
     assert_eq!(tool["async_safe"], true);
     assert_eq!(tool["mutates_workflow"], true);
+
+    let repeated_transition = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sessions",
+            "lifecycle",
+            "--session",
+            "codex-shell",
+            "--state",
+            "opened",
+            "--origin",
+            "contract-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let repeated_json: Value = serde_json::from_slice(&repeated_transition).unwrap();
+    assert_eq!(repeated_json["transition"]["transition_kind"], "idempotent");
+
+    let rejected = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sessions",
+            "lifecycle",
+            "--session",
+            "codex-shell",
+            "--state",
+            "detached",
+            "--origin",
+            "contract-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let rejected_stderr = String::from_utf8_lossy(&rejected);
+    assert!(rejected_stderr.contains("invalid brain session lifecycle transition"));
 
     let mcp_output = forge()
         .env("PATH", &path)

@@ -229,7 +229,10 @@ pub struct BrainSessionLifecycleReceipt {
     pub origin: String,
     pub session_id: String,
     pub provider_id: String,
+    pub previous_state: String,
     pub state: String,
+    pub lifecycle_sequence: usize,
+    pub transition: BrainSessionLifecycleTransition,
     pub workflow_id: Option<String>,
     pub task_id: Option<String>,
     pub run_id: Option<String>,
@@ -286,6 +289,7 @@ pub struct BrainSessionState {
     pub launch_mode: String,
     pub forge_first_ready: bool,
     pub state_boundary: String,
+    pub lifecycle_policy: BrainSessionLifecyclePolicy,
     pub recorded_plan_count: usize,
     pub lifecycle_state: String,
     pub lifecycle_event_count: usize,
@@ -314,6 +318,30 @@ pub struct BrainSessionEventSummary {
     pub lifecycle_state: Option<String>,
     pub note: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainSessionLifecycleTransition {
+    pub schema_version: String,
+    pub previous_state: String,
+    pub next_state: String,
+    pub transition_kind: String,
+    pub allowed: bool,
+    pub reason: String,
+    pub allowed_next_states: Vec<String>,
+    pub next_lifecycle_commands: Vec<Vec<String>>,
+    pub policy: String,
+    pub execution: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainSessionLifecyclePolicy {
+    pub schema_version: String,
+    pub current_state: String,
+    pub allowed_next_states: Vec<String>,
+    pub next_lifecycle_commands: Vec<Vec<String>>,
+    pub policy: String,
+    pub execution: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1338,12 +1366,32 @@ pub fn record_brain_session_lifecycle(
         .iter()
         .find(|session| session.id == options.session_id)
         .ok_or_else(|| anyhow::anyhow!("unknown Forge shell session: {}", options.session_id))?;
+    let previous_events = brain_session_lifecycle_events(store, &session.id)?;
+    let previous_state = previous_events
+        .first()
+        .and_then(|event| event.lifecycle_state.clone())
+        .unwrap_or_else(|| "untracked".to_string());
+    let transition =
+        brain_session_lifecycle_transition(&session.id, &previous_state, normalized_state);
+    if !transition.allowed {
+        anyhow::bail!(
+            "invalid brain session lifecycle transition for {}: {} -> {}; allowed next states: {}",
+            session.id,
+            previous_state,
+            normalized_state,
+            transition.allowed_next_states.join(", ")
+        );
+    }
+    let lifecycle_sequence = previous_events.len() + 1;
     let data = serde_json::json!({
         "schema_version": "forge.brain_session_lifecycle_event.v1",
         "status": "brain_session_lifecycle_recorded",
         "session_id": session.id,
         "provider_id": session.brain_id,
+        "previous_state": previous_state,
         "state": normalized_state,
+        "lifecycle_sequence": lifecycle_sequence,
+        "transition": transition,
         "workflow_id": options.workflow_id,
         "task_id": options.task_id,
         "run_id": options.run_id,
@@ -1377,7 +1425,10 @@ pub fn record_brain_session_lifecycle(
         origin: options.origin.to_string(),
         session_id: session.id.clone(),
         provider_id: session.brain_id.clone(),
+        previous_state,
         state: normalized_state.to_string(),
+        lifecycle_sequence,
+        transition,
         workflow_id: options.workflow_id.map(str::to_string),
         task_id: options.task_id.map(str::to_string),
         run_id: options.run_id.map(str::to_string),
@@ -1512,6 +1563,113 @@ fn normalize_brain_session_lifecycle_state(state: &str) -> Result<&'static str> 
     }
 }
 
+fn brain_session_lifecycle_events(
+    store: &ForgeStore,
+    session_id: &str,
+) -> Result<Vec<BrainSessionEventSummary>> {
+    let mut events = store
+        .load_global_events()?
+        .into_iter()
+        .filter(|event| event.source == "forge_session" && event.kind == "brain_session_lifecycle")
+        .map(brain_session_event_summary)
+        .filter(|event| event.session_ids.iter().any(|id| id == session_id))
+        .collect::<Vec<_>>();
+    events.sort_by(|left, right| right.global_event_id.cmp(&left.global_event_id));
+    Ok(events)
+}
+
+fn brain_session_lifecycle_transition(
+    session_id: &str,
+    previous_state: &str,
+    next_state: &str,
+) -> BrainSessionLifecycleTransition {
+    let allowed_next_states = allowed_brain_session_next_states(previous_state)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let idempotent = previous_state == next_state;
+    let allowed = idempotent || allowed_next_states.iter().any(|state| state == next_state);
+    let transition_kind = if idempotent {
+        "idempotent"
+    } else if previous_state == "untracked" {
+        "bootstrap"
+    } else {
+        "state_change"
+    };
+    let reason = if allowed {
+        if idempotent {
+            format!("session {session_id} already reports lifecycle state {next_state}")
+        } else {
+            format!("session {session_id} can transition from {previous_state} to {next_state}")
+        }
+    } else {
+        format!("session {session_id} cannot transition from {previous_state} to {next_state}")
+    };
+
+    BrainSessionLifecycleTransition {
+        schema_version: "forge.brain_session_transition_policy.v1".to_string(),
+        previous_state: previous_state.to_string(),
+        next_state: next_state.to_string(),
+        transition_kind: transition_kind.to_string(),
+        allowed,
+        reason,
+        next_lifecycle_commands: lifecycle_transition_commands(session_id, &allowed_next_states),
+        allowed_next_states,
+        policy: "forge_owned_ordered_shell_lifecycle".to_string(),
+        execution: "audit_only_no_child_process".to_string(),
+    }
+}
+
+fn brain_session_lifecycle_policy(
+    session_id: &str,
+    current_state: &str,
+) -> BrainSessionLifecyclePolicy {
+    let allowed_next_states = allowed_brain_session_next_states(current_state)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    BrainSessionLifecyclePolicy {
+        schema_version: "forge.brain_session_transition_policy.v1".to_string(),
+        current_state: current_state.to_string(),
+        next_lifecycle_commands: lifecycle_transition_commands(session_id, &allowed_next_states),
+        allowed_next_states,
+        policy: "forge_owned_ordered_shell_lifecycle".to_string(),
+        execution: "audit_only_no_child_process".to_string(),
+    }
+}
+
+fn allowed_brain_session_next_states(current_state: &str) -> Vec<&'static str> {
+    match current_state {
+        "untracked" => vec!["opened", "attached", "failed", "abandoned"],
+        "opened" => vec!["attached", "closed", "failed", "abandoned"],
+        "attached" => vec!["detached", "closed", "failed", "abandoned"],
+        "detached" => vec!["attached", "closed", "failed", "abandoned"],
+        "closed" => vec!["opened"],
+        "failed" => vec!["opened", "abandoned"],
+        "abandoned" => vec!["opened"],
+        _ => vec!["opened"],
+    }
+}
+
+fn lifecycle_transition_commands(session_id: &str, states: &[String]) -> Vec<Vec<String>> {
+    states
+        .iter()
+        .map(|state| {
+            vec![
+                "forge".to_string(),
+                "sessions".to_string(),
+                "lifecycle".to_string(),
+                "--session".to_string(),
+                session_id.to_string(),
+                "--state".to_string(),
+                state.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]
+        })
+        .collect()
+}
+
 fn brain_session_state(
     session: &BrainShellSessionSpec,
     brain: Option<&BrainCandidate>,
@@ -1533,6 +1691,9 @@ fn brain_session_state(
         .collect::<Vec<_>>();
     let last_event = planned_events.first().copied();
     let last_lifecycle_event = lifecycle_events.first().copied();
+    let lifecycle_state = last_lifecycle_event
+        .and_then(|event| event.lifecycle_state.clone())
+        .unwrap_or_else(|| "untracked".to_string());
     BrainSessionState {
         session_id: session.id.clone(),
         provider_id: session.brain_id.clone(),
@@ -1545,10 +1706,9 @@ fn brain_session_state(
         launch_mode: session.launch_mode.clone(),
         forge_first_ready: session.forge_first_ready,
         state_boundary: session.state_boundary.clone(),
+        lifecycle_policy: brain_session_lifecycle_policy(&session.id, &lifecycle_state),
         recorded_plan_count: planned_events.len(),
-        lifecycle_state: last_lifecycle_event
-            .and_then(|event| event.lifecycle_state.clone())
-            .unwrap_or_else(|| "untracked".to_string()),
+        lifecycle_state,
         lifecycle_event_count: lifecycle_events.len(),
         last_planned_at: last_event.map(|event| event.created_at.clone()),
         last_origin: last_event.map(|event| event.origin.clone()),

@@ -2698,7 +2698,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.session.lifecycle",
                 "Record Brain Session Lifecycle",
-                "Record an auditable Forge-owned lifecycle state for a known brain shell session without starting child processes.",
+                "Record an auditable Forge-owned lifecycle state for a known brain shell session without starting child processes, enforcing ordered transition policy and returning previous state, sequence and next lifecycle commands.",
                 object_schema(
                     &[
                         ("session_id", "string", "required shell session id such as codex-shell"),
