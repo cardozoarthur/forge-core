@@ -36302,6 +36302,188 @@ fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
 }
 
 #[test]
+fn interactive_harness_command_and_mcp_surface_are_dedicated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("project");
+    let shim_dir = temp.path().join("shims");
+    fs::create_dir_all(project_root.join(".forge")).unwrap();
+    fs::write(
+        project_root.join(".forge/harness.json"),
+        r#"{
+  "default_mode": "forge_first",
+  "default_context_budget": 900,
+  "default_token_headroom": true,
+  "require_token_headroom_for_forge_first": true
+}"#,
+    )
+    .unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "harness",
+            "--executor",
+            "codex",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--context-budget",
+            "900",
+            "--token-headroom",
+            "--forge-first",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.interactive.harness.v1");
+    assert_eq!(json["status"], "interactive_harness_ready");
+    assert_eq!(json["executor"], "codex");
+    assert_eq!(json["project_root"], project_root.display().to_string());
+    assert_eq!(json["shim_dir"], shim_dir.display().to_string());
+    assert_eq!(json["mode"]["schema_version"], "forge.harness.mode.v1");
+    assert_eq!(json["doctor"]["schema_version"], "forge.harness.doctor.v1");
+    assert_eq!(
+        json["shim_status"]["schema_version"],
+        "forge.harness.shim_status.v1"
+    );
+    assert_eq!(
+        json["wrapper_plan"]["schema_version"],
+        "forge.harness.cli_wrapper_plan.v1"
+    );
+    assert_eq!(
+        json["headroom_preview"]["schema_version"],
+        "forge.harness.token_headroom.v1"
+    );
+    assert_eq!(json["wrapper_plan"]["forge_first"], true);
+    assert_eq!(json["wrapper_plan"]["token_headroom_enabled"], true);
+    assert!(json["commands"]["doctor"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("doctor")));
+    assert!(json["commands"]["wrap_plan"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("wrap-plan")));
+    assert!(json["commands"]["install_shims"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("install-shims")));
+    assert!(json["commands"]["exec"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("exec")));
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "harness",
+            "--executor",
+            "codex",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--token-headroom",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Harness center"));
+    assert!(text.contains("codex"));
+    assert!(text.contains("wrap-plan"));
+
+    let home_output = forge()
+        .current_dir(&project_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["harness_panel"]["schema_version"],
+        "forge.interactive.harness.v1"
+    );
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |region| region["widgets"].as_array().unwrap().iter().any(|widget| {
+                widget["widget_id"] == "harness_panel"
+                    && widget["commands"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!(
+                            "forge interactive harness --output json"
+                        ))
+            })
+        ));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.harness");
+    assert_eq!(tool["output_schema"], "forge.interactive.harness.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_input = serde_json::json!({
+        "executor": "codex",
+        "shim_dir": shim_dir,
+        "project_root": project_root,
+        "forge_first": true,
+        "context_budget": 900,
+        "token_headroom": true
+    });
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.harness"])
+        .arg("--input")
+        .arg(mcp_input.to_string())
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.harness.v1"
+    );
+    assert_eq!(mcp_json["result"]["wrapper_plan"]["forge_first"], true);
+}
+
+#[test]
 fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -37563,6 +37745,14 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge interactive readiness"),
         "the packaged Forge skill should include the readiness CLI command"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.harness"),
+        "the packaged Forge skill should expose the dedicated harness center through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge interactive harness"),
+        "the packaged Forge skill should include the harness center CLI command"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.patch_workbench"),

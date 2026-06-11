@@ -96,13 +96,13 @@ use forge_core::interaction::{
     CreateChoiceInteractionRequest,
 };
 use forge_core::interactive::{
-    build_interactive_home, build_interactive_patch_workbench, build_interactive_permissions,
-    build_interactive_readiness, build_interactive_structured_logs, build_interactive_task_board,
-    build_interactive_workflow_dag, render_interactive_home, render_interactive_patch_workbench,
-    render_interactive_permissions, render_interactive_readiness,
-    render_interactive_structured_logs, render_interactive_task_board,
-    render_interactive_workflow_dag, route_interactive_input, run_interactive_repl,
-    slash_command_catalog,
+    build_interactive_harness, build_interactive_home, build_interactive_patch_workbench,
+    build_interactive_permissions, build_interactive_readiness, build_interactive_structured_logs,
+    build_interactive_task_board, build_interactive_workflow_dag, render_interactive_harness,
+    render_interactive_home, render_interactive_patch_workbench, render_interactive_permissions,
+    render_interactive_readiness, render_interactive_structured_logs,
+    render_interactive_task_board, render_interactive_workflow_dag, route_interactive_input,
+    run_interactive_repl, slash_command_catalog, InteractiveHarnessOptions,
 };
 use forge_core::ir::{CreativeArtifact, TokenCollection};
 use forge_core::lease::{acquire_task_lease, release_task_lease};
@@ -3055,6 +3055,30 @@ enum InteractiveCommands {
         output: OutputFormat,
     },
     Readiness {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Harness {
+        #[arg(long, default_value = "codex")]
+        executor: String,
+        #[arg(long = "shim-dir")]
+        shim_dir: Option<PathBuf>,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
+        #[arg(long = "forge-first")]
+        forge_first: bool,
+        #[arg(long = "observe-only")]
+        observe_only: bool,
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
+        #[arg(long = "task")]
+        task_id: Option<String>,
+        #[arg(long = "run")]
+        run_id: Option<String>,
+        #[arg(long = "context-budget")]
+        context_budget: Option<usize>,
+        #[arg(long = "token-headroom")]
+        token_headroom: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -7272,6 +7296,42 @@ fn run() -> Result<i32> {
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => println!("{}", render_interactive_readiness(&report)),
+                }
+                Ok(0)
+            }
+            InteractiveCommands::Harness {
+                executor,
+                shim_dir,
+                project_root,
+                forge_first,
+                observe_only,
+                workflow_id,
+                task_id,
+                run_id,
+                context_budget,
+                token_headroom,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let mut options = InteractiveHarnessOptions::default_for_current_dir();
+                options.executor = executor;
+                if let Some(shim_dir) = shim_dir {
+                    options.shim_dir = shim_dir;
+                }
+                if let Some(project_root) = project_root {
+                    options.project_root = Some(project_root);
+                }
+                options.forge_first = forge_first;
+                options.observe_only = observe_only;
+                options.workflow_id = workflow_id;
+                options.task_id = task_id;
+                options.run_id = run_id;
+                options.context_budget = context_budget;
+                options.token_headroom = token_headroom.then_some(true);
+                let report = build_interactive_harness(&store, options)?;
+                match output {
+                    OutputFormat::Json => print_response(output, &report)?,
+                    OutputFormat::Human => println!("{}", render_interactive_harness(&report)),
                 }
                 Ok(0)
             }

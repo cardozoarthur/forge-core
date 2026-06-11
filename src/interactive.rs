@@ -8,8 +8,12 @@ use crate::event::{build_global_event_timeline, GlobalEventTimelineReport, Workf
 use crate::executor::load_executors;
 use crate::graph::{AtomicTask, ExecutorKind, TaskStatus};
 use crate::harness::{
-    build_harness_doctor_report, build_harness_mode_report, HarnessDoctorOptions,
-    HarnessDoctorReport, HarnessModeOptions, HarnessModeReport,
+    analyze_token_headroom, build_cli_wrapper_plan, build_harness_doctor_report,
+    build_harness_mode_report, inspect_cli_harness_shim_status,
+    resolve_harness_forge_first_source_for_project, resolve_harness_runtime_policy,
+    CliShimStatusOptions, CliShimStatusReport, CliWrapperPlanOptions, CliWrapperPlanReport,
+    HarnessDoctorOptions, HarnessDoctorReport, HarnessModeOptions, HarnessModeReport,
+    HarnessRuntimePolicyOptions, TokenHeadroomReport,
 };
 use crate::identity::list_identity_memberships;
 use crate::interaction::list_human_interactions;
@@ -39,6 +43,7 @@ const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
 const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_board.v1";
 const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
 const INTERACTIVE_READINESS_SCHEMA_VERSION: &str = "forge.interactive.readiness.v1";
+const INTERACTIVE_HARNESS_SCHEMA_VERSION: &str = "forge.interactive.harness.v1";
 const INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION: &str = "forge.interactive.patch_workbench.v1";
 const INTERACTIVE_PERMISSIONS_SCHEMA_VERSION: &str = "forge.interactive.permissions.v1";
 const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
@@ -78,6 +83,7 @@ pub struct InteractiveDashboard {
     pub brain_router: String,
     pub forge_controlled_surfaces: Vec<String>,
     pub shell_entrypoints: Vec<String>,
+    pub harness_panel: InteractiveHarnessPanel,
     pub harness_mode_panel: HarnessModeReport,
     pub harness_doctor_panel: HarnessDoctorReport,
     pub runtime_node_status: String,
@@ -211,6 +217,71 @@ pub struct InteractiveReadinessCommands {
     pub shells: Vec<String>,
     pub harness_mode: Vec<String>,
     pub harness_doctor: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InteractiveHarnessOptions {
+    pub executor: String,
+    pub shim_dir: PathBuf,
+    pub project_root: Option<PathBuf>,
+    pub forge_first: bool,
+    pub observe_only: bool,
+    pub workflow_id: Option<String>,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub context_budget: Option<usize>,
+    pub token_headroom: Option<bool>,
+}
+
+impl InteractiveHarnessOptions {
+    pub fn default_for_current_dir() -> Self {
+        Self {
+            executor: "codex".to_string(),
+            shim_dir: default_interactive_harness_shim_dir(),
+            project_root: Some(env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+            forge_first: false,
+            observe_only: false,
+            workflow_id: None,
+            task_id: None,
+            run_id: None,
+            context_budget: None,
+            token_headroom: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveHarnessPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub executor: String,
+    pub project_root: String,
+    pub shim_dir: String,
+    pub forge_first_ready: bool,
+    pub token_headroom_ready: bool,
+    pub shim_ready: bool,
+    pub lineage_policy_ready: bool,
+    pub mode: HarnessModeReport,
+    pub doctor: HarnessDoctorReport,
+    pub shim_status: CliShimStatusReport,
+    pub wrapper_plan: CliWrapperPlanReport,
+    pub headroom_preview: TokenHeadroomReport,
+    pub next_actions: Vec<String>,
+    pub notes: Vec<String>,
+    pub commands: InteractiveHarnessCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveHarnessCommands {
+    pub refresh: Vec<String>,
+    pub mode: Vec<String>,
+    pub doctor: Vec<String>,
+    pub shim_status: Vec<String>,
+    pub wrap_plan: Vec<String>,
+    pub install_shims: Vec<String>,
+    pub exec: Vec<String>,
+    pub sessions: Vec<String>,
+    pub sync: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -713,28 +784,25 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             )
         })
         .collect::<Vec<_>>();
-    let harness_mode_panel = build_harness_mode_report(HarnessModeOptions {
-        forge_first: false,
-        observe_only: false,
-        project_root: None,
-    });
     let repository_context_path = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let harness_shim_dir = default_interactive_harness_shim_dir();
-    let harness_doctor_panel = build_harness_doctor_report(HarnessDoctorOptions {
-        shim_dir: &harness_shim_dir,
-        executor: "codex",
-        forge_first: false,
-        observe_only: false,
-        project_root: Some(&repository_context_path),
-        workflow_id: None,
-        task_id: None,
-        run_id: None,
-        context_budget: 1200,
-        context_budget_source: "interactive_default",
-        token_headroom: true,
-        token_headroom_source: "interactive_default",
-        require_token_headroom_for_forge_first: false,
-    })?;
+    let harness_panel = build_interactive_harness(
+        store,
+        InteractiveHarnessOptions {
+            executor: "codex".to_string(),
+            shim_dir: harness_shim_dir,
+            project_root: Some(repository_context_path.clone()),
+            forge_first: false,
+            observe_only: false,
+            workflow_id: None,
+            task_id: None,
+            run_id: None,
+            context_budget: None,
+            token_headroom: None,
+        },
+    )?;
+    let harness_mode_panel = harness_panel.mode.clone();
+    let harness_doctor_panel = harness_panel.doctor.clone();
     let runtime_node_status = if runtimes.usable.is_empty() {
         "no allowed async run substrates".to_string()
     } else {
@@ -934,6 +1002,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             brain_router,
             forge_controlled_surfaces,
             shell_entrypoints,
+            harness_panel,
             harness_mode_panel,
             harness_doctor_panel,
             runtime_node_status,
@@ -962,6 +1031,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 "forge request list".to_string(),
                 "forge schedule list".to_string(),
                 "forge schedule worker-status".to_string(),
+                "forge interactive harness --output json".to_string(),
                 "forge interactive patch-workbench --output json".to_string(),
                 "forge interactive permissions --output json".to_string(),
             ],
@@ -997,6 +1067,115 @@ pub fn slash_command_catalog() -> SlashCommandCatalogReport {
         schema_version: SLASH_COMMANDS_SCHEMA_VERSION.to_string(),
         commands: slash_commands(),
     }
+}
+
+pub fn build_interactive_harness(
+    _store: &ForgeStore,
+    options: InteractiveHarnessOptions,
+) -> Result<InteractiveHarnessPanel> {
+    let project_root = options
+        .project_root
+        .clone()
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let (effective_forge_first, forge_first_source) =
+        resolve_harness_forge_first_source_for_project(
+            options.forge_first,
+            options.observe_only,
+            Some(&project_root),
+        );
+    let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+        project_root: Some(&project_root),
+        context_budget: options.context_budget,
+        context_budget_source: "interactive_input",
+        token_headroom: options.token_headroom,
+        token_headroom_source: "interactive_input",
+        forge_first: effective_forge_first,
+        default_context_budget: 1200,
+    });
+    let mode = build_harness_mode_report(HarnessModeOptions {
+        forge_first: options.forge_first,
+        observe_only: options.observe_only,
+        project_root: Some(&project_root),
+    });
+    let doctor = build_harness_doctor_report(HarnessDoctorOptions {
+        shim_dir: &options.shim_dir,
+        executor: &options.executor,
+        forge_first: options.forge_first,
+        observe_only: options.observe_only,
+        project_root: Some(&project_root),
+        workflow_id: options.workflow_id.as_deref(),
+        task_id: options.task_id.as_deref(),
+        run_id: options.run_id.as_deref(),
+        context_budget: runtime_policy.context_budget,
+        context_budget_source: &runtime_policy.context_budget_source,
+        token_headroom: runtime_policy.token_headroom,
+        token_headroom_source: &runtime_policy.token_headroom_source,
+        require_token_headroom_for_forge_first: runtime_policy
+            .require_token_headroom_for_forge_first,
+    })?;
+    let shim_status = inspect_cli_harness_shim_status(CliShimStatusOptions {
+        shim_dir: &options.shim_dir,
+        executor: &options.executor,
+    })?;
+    let command = vec![options.executor.clone()];
+    let wrapper_plan = build_cli_wrapper_plan(CliWrapperPlanOptions {
+        executor: &options.executor,
+        command: &command,
+        forge_first: mode.forge_first,
+        forge_first_source: &mode.forge_first_source,
+        workflow_id: options.workflow_id.as_deref(),
+        task_id: options.task_id.as_deref(),
+        run_id: options.run_id.as_deref(),
+        context_budget: runtime_policy.context_budget,
+        context_budget_source: &runtime_policy.context_budget_source,
+        token_headroom: runtime_policy.token_headroom,
+        token_headroom_source: &runtime_policy.token_headroom_source,
+        require_token_headroom_for_forge_first: runtime_policy
+            .require_token_headroom_for_forge_first,
+    });
+    let headroom_preview = analyze_token_headroom(
+        "Forge harness preview: route bounded context, shell receipts, logs, tool output and CLI stdout through local token headroom while preserving retrieval references.",
+        Some("text"),
+        runtime_policy.context_budget,
+        "interactive_harness_preview",
+        true,
+    );
+    let commands = interactive_harness_commands(
+        &options.executor,
+        &options.shim_dir,
+        &project_root,
+        runtime_policy.context_budget,
+        runtime_policy.token_headroom,
+    );
+    let mut next_actions = doctor.next_actions.clone();
+    next_actions.push("forge interactive readiness --output json".to_string());
+    next_actions.push("forge interactive home --output json".to_string());
+
+    Ok(InteractiveHarnessPanel {
+        schema_version: INTERACTIVE_HARNESS_SCHEMA_VERSION.to_string(),
+        status: "interactive_harness_ready".to_string(),
+        executor: options.executor,
+        project_root: project_root.display().to_string(),
+        shim_dir: options.shim_dir.display().to_string(),
+        forge_first_ready: doctor.forge_first_ready,
+        token_headroom_ready: doctor.token_headroom_ready,
+        shim_ready: doctor.shim_ready,
+        lineage_policy_ready: doctor.lineage_policy_ready,
+        mode,
+        doctor,
+        shim_status,
+        wrapper_plan,
+        headroom_preview,
+        next_actions,
+        notes: vec![
+            format!("Forge-first source: {forge_first_source}"),
+            "This panel is read-only: it does not install shims or launch child CLIs."
+                .to_string(),
+            "Use wrap-plan before a Forge-controlled brain shell and exec only through guarded harness receipts."
+                .to_string(),
+        ],
+        commands,
+    })
 }
 
 pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveReadinessPanel> {
@@ -1793,6 +1972,118 @@ fn readiness_next_actions(
     actions
 }
 
+fn interactive_harness_commands(
+    executor: &str,
+    shim_dir: &Path,
+    project_root: &Path,
+    context_budget: usize,
+    token_headroom: bool,
+) -> InteractiveHarnessCommands {
+    let shim_dir = shim_dir.display().to_string();
+    let project_root = project_root.display().to_string();
+    let mut refresh = vec![
+        "interactive".to_string(),
+        "harness".to_string(),
+        "--executor".to_string(),
+        executor.to_string(),
+        "--shim-dir".to_string(),
+        shim_dir.clone(),
+        "--project-root".to_string(),
+        project_root.clone(),
+        "--output".to_string(),
+        "json".to_string(),
+    ];
+    if token_headroom {
+        refresh.push("--token-headroom".to_string());
+    }
+    InteractiveHarnessCommands {
+        refresh,
+        mode: vec![
+            "harness".to_string(),
+            "mode".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        doctor: vec![
+            "harness".to_string(),
+            "doctor".to_string(),
+            "--executor".to_string(),
+            executor.to_string(),
+            "--shim-dir".to_string(),
+            shim_dir.clone(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        shim_status: vec![
+            "harness".to_string(),
+            "shim-status".to_string(),
+            "--executor".to_string(),
+            executor.to_string(),
+            "--shim-dir".to_string(),
+            shim_dir.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        wrap_plan: vec![
+            "harness".to_string(),
+            "wrap-plan".to_string(),
+            "--executor".to_string(),
+            executor.to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--context-budget".to_string(),
+            context_budget.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        install_shims: vec![
+            "harness".to_string(),
+            "install-shims".to_string(),
+            "--executor".to_string(),
+            executor.to_string(),
+            "--shim-dir".to_string(),
+            shim_dir.clone(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        exec: vec![
+            "harness".to_string(),
+            "exec".to_string(),
+            "--executor".to_string(),
+            executor.to_string(),
+            "--project-root".to_string(),
+            project_root,
+            "--context-budget".to_string(),
+            context_budget.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+            "--".to_string(),
+            executor.to_string(),
+        ],
+        sessions: vec![
+            "sessions".to_string(),
+            "--provider".to_string(),
+            executor.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        sync: vec![
+            "sync".to_string(),
+            "executors".to_string(),
+            "--shim-dir".to_string(),
+            shim_dir,
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
 fn readiness_commands() -> InteractiveReadinessCommands {
     InteractiveReadinessCommands {
         sync: vec![
@@ -2083,6 +2374,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Brain router: {brain_router}\n\
          Forge-controlled surfaces: {forge_controlled_surfaces}\n\
          Shell entrypoints: {shell_entrypoints}\n\
+         Harness center: {harness_center_status}; executor {harness_center_executor}; forge-first {harness_center_forge_first}; token headroom {harness_center_token_headroom}; shim {harness_center_shim}; action {harness_center_command}\n\
          Harness mode: {harness_effective_mode} from {harness_source}; project config {harness_project_status}; audit {harness_audit_command}\n\
          Harness doctor: {harness_doctor_status} for {harness_doctor_executor}; shim {harness_doctor_shim_dir}; checks {harness_doctor_checks}; audit {harness_doctor_command}\n\
          Runtime/node status: {runtime_node_status}\n\
@@ -2122,6 +2414,12 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         brain_router = d.brain_router,
         forge_controlled_surfaces = forge_controlled_surfaces,
         shell_entrypoints = shell_entrypoints,
+        harness_center_status = d.harness_panel.status,
+        harness_center_executor = d.harness_panel.executor,
+        harness_center_forge_first = d.harness_panel.forge_first_ready,
+        harness_center_token_headroom = d.harness_panel.token_headroom_ready,
+        harness_center_shim = d.harness_panel.shim_status.status,
+        harness_center_command = "forge interactive harness --output json",
         harness_effective_mode = d.harness_mode_panel.effective_mode,
         harness_source = d.harness_mode_panel.forge_first_source,
         harness_project_status = d.harness_mode_panel.project_config_status,
@@ -2305,6 +2603,26 @@ pub fn render_interactive_readiness(panel: &InteractiveReadinessPanel) -> String
         harness_mode = panel.harness_mode.status,
         harness_doctor = panel.harness_doctor.status,
         usable_executors = usable_executors,
+        next_actions = next_actions,
+    )
+}
+
+pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
+    let next_actions = if panel.next_actions.is_empty() {
+        "none".to_string()
+    } else {
+        panel.next_actions.join(" | ")
+    };
+    format!(
+        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | install-shims | exec\nNext actions: {next_actions}\n",
+        status = panel.status,
+        executor = panel.executor,
+        mode = panel.mode.effective_mode,
+        doctor = panel.doctor.status,
+        shim = panel.shim_status.status,
+        headroom = panel.headroom_preview.status,
+        project_root = panel.project_root,
+        shim_dir = panel.shim_dir,
         next_actions = next_actions,
     )
 }
@@ -2649,6 +2967,15 @@ fn build_ui_composition_panel(
                     "compact",
                     "full",
                     vec!["forge interactive home --output json".to_string()],
+                ),
+                core_ui_widget(
+                    "harness_panel",
+                    "Harness center",
+                    "harness_panel",
+                    "status_renderer",
+                    "standard",
+                    "full",
+                    vec!["forge interactive harness --output json".to_string()],
                 ),
                 core_ui_widget(
                     "harness_mode_panel",

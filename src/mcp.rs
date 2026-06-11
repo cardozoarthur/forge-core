@@ -80,9 +80,10 @@ use crate::interaction::{
     expire_human_interaction, list_human_interactions, CreateChoiceInteractionRequest,
 };
 use crate::interactive::{
-    build_interactive_home, build_interactive_patch_workbench, build_interactive_permissions,
-    build_interactive_readiness, build_interactive_structured_logs, build_interactive_task_board,
-    build_interactive_workflow_dag, route_interactive_input, slash_command_catalog,
+    build_interactive_harness, build_interactive_home, build_interactive_patch_workbench,
+    build_interactive_permissions, build_interactive_readiness, build_interactive_structured_logs,
+    build_interactive_task_board, build_interactive_workflow_dag, route_interactive_input,
+    slash_command_catalog, InteractiveHarnessOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -461,6 +462,23 @@ struct HarnessModeInput {
 struct HarnessDoctorInput {
     shim_dir: String,
     executor: String,
+    forge_first: Option<bool>,
+    observe_only: Option<bool>,
+    project_root: Option<String>,
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    task: Option<String>,
+    task_id: Option<String>,
+    run: Option<String>,
+    run_id: Option<String>,
+    context_budget: Option<usize>,
+    token_headroom: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InteractiveHarnessInput {
+    executor: Option<String>,
+    shim_dir: Option<String>,
     forge_first: Option<bool>,
     observe_only: Option<bool>,
     project_root: Option<String>,
@@ -2765,6 +2783,26 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.readiness.v1",
                 &["forge", "interactive", "readiness", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.harness",
+                "Inspect Interactive Harness Center",
+                "Return the Forge interactive harness center for one brain CLI, combining mode, doctor, shim status, wrap-plan and token-headroom preview without installing shims or launching child processes.",
+                object_schema(&[
+                    ("executor", "string", "codex|claude|gemini|opencode"),
+                    ("shim_dir", "string", "directory where Forge-owned shims should live"),
+                    ("forge_first", "boolean", "simulate an explicit Forge-first CLI flag"),
+                    ("observe_only", "boolean", "simulate an observe-only CLI override"),
+                    ("project_root", "string", "optional project root containing .forge/harness.json"),
+                    ("workflow_id", "string", "optional workflow lineage"),
+                    ("task_id", "string", "optional task/node lineage"),
+                    ("run_id", "string", "optional async run lineage"),
+                    ("context_budget", "integer", "context byte budget"),
+                    ("token_headroom", "boolean", "enable token-headroom readiness"),
+                ], &[]),
+                "forge.interactive.harness.v1",
+                &["forge", "interactive", "harness", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -6450,6 +6488,31 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.interactive.home" => serde_json::to_value(build_interactive_home(store)?)?,
         "forge.interactive.readiness" => serde_json::to_value(build_interactive_readiness(store)?)?,
+        "forge.interactive.harness" => {
+            let input: InteractiveHarnessInput = if input.is_null() {
+                InteractiveHarnessInput::default()
+            } else {
+                parse_input(input)?
+            };
+            let mut options = InteractiveHarnessOptions::default_for_current_dir();
+            if let Some(executor) = input.executor {
+                options.executor = executor;
+            }
+            if let Some(shim_dir) = input.shim_dir {
+                options.shim_dir = PathBuf::from(shim_dir);
+            }
+            if let Some(project_root) = input.project_root {
+                options.project_root = Some(PathBuf::from(project_root));
+            }
+            options.forge_first = input.forge_first.unwrap_or(false);
+            options.observe_only = input.observe_only.unwrap_or(false);
+            options.workflow_id = input.workflow_id.or(input.workflow);
+            options.task_id = input.task_id.or(input.task);
+            options.run_id = input.run_id.or(input.run);
+            options.context_budget = input.context_budget;
+            options.token_headroom = input.token_headroom;
+            serde_json::to_value(build_interactive_harness(store, options)?)?
+        }
         "forge.interactive.patch_workbench" => {
             serde_json::to_value(build_interactive_patch_workbench(store)?)?
         }
