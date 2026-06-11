@@ -1352,7 +1352,7 @@ fn parse_renderer_event_payload(payload: Option<&str>) -> Result<Value> {
     }
 }
 
-fn build_operational_digital_twin(
+pub fn build_operational_digital_twin(
     store: &ForgeStore,
     modifier_lane: &OpsModifierLane,
 ) -> Result<OpsOperationalDigitalTwin> {

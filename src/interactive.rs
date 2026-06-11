@@ -9,7 +9,10 @@ use crate::harness::{
     HarnessDoctorReport, HarnessModeOptions, HarnessModeReport,
 };
 use crate::memory::memory_policy_report;
-use crate::ops::build_addon_view_renderer_report;
+use crate::ops::{
+    build_addon_view_renderer_report, build_operational_digital_twin, load_modifier_lane,
+    OpsOperationalDigitalTwin,
+};
 use crate::registry::{
     list_workflows_with_filters, RegistryContextActionRef, WorkflowLifecycleFilter,
     WorkflowRegistryFilters, WorkflowRegistryRow,
@@ -74,6 +77,7 @@ pub struct InteractiveDashboard {
     pub event_panel: InteractiveEventPanel,
     pub cost_panel: InteractiveCostPanel,
     pub context_memory_panel: InteractiveContextMemoryPanel,
+    pub digital_twin_panel: OpsOperationalDigitalTwin,
     pub addon_renderer_panel: InteractiveAddonRendererPanel,
     pub attention_actions: Vec<String>,
     pub useful_next_commands: Vec<String>,
@@ -461,6 +465,8 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
         })
         .collect::<Vec<_>>();
     let task_board_panel = build_task_board_panel(store, &workflows.workflows)?;
+    let modifier_lane = load_modifier_lane(store)?;
+    let digital_twin_panel = build_operational_digital_twin(store, &modifier_lane)?;
     let event_panel = build_global_event_timeline(store, None, None, None, None, Some(5), None)
         .ok()
         .map(|timeline| InteractiveEventPanel {
@@ -579,6 +585,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             event_panel,
             cost_panel,
             context_memory_panel,
+            digital_twin_panel,
             addon_renderer_panel,
             attention_actions,
             useful_next_commands: vec![
@@ -813,6 +820,26 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
             .join(" | ")
     };
     let task_board_lanes = render_task_board_lane_summary(&d.task_board_panel);
+    let digital_twin_workflows = if d.digital_twin_panel.workflows.is_empty() {
+        "none".to_string()
+    } else {
+        d.digital_twin_panel
+            .workflows
+            .iter()
+            .take(5)
+            .map(|workflow| {
+                format!(
+                    "{} {} done {}, remaining {}, approvals {}",
+                    workflow.workflow_id,
+                    workflow.live_state.what_is_happening,
+                    workflow.counts.done_count,
+                    workflow.counts.remaining_count,
+                    workflow.counts.awaiting_approval_count
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
     let latest_events = if d.event_panel.latest_events.is_empty() {
         "none".to_string()
     } else {
@@ -849,6 +876,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Runtime/node status: {runtime_node_status}\n\
          Scheduler worker status: {scheduler_worker_status}\n\
          Workflow focus: {workflow_focus}\n\
+         Operational digital twin: {digital_twin_status}; workflows {digital_twin_workflows_count}, happening {digital_twin_happening}, done {digital_twin_done}, remaining {digital_twin_remaining}, validated {digital_twin_validated}, rejected {digital_twin_rejected}, approvals {digital_twin_approvals}; {digital_twin_workflows}\n\
          Task board: {task_board_status}; workflows {task_board_workflows}, tasks {task_board_tasks}, ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, checkpoints {task_board_checkpoints}, artifacts {task_board_artifacts}; lanes {task_board_lanes}\n\
          Schedule panel: {schedule_status}; due {schedule_due}, runnable {schedule_runnable}, cron {schedule_cron}, wait_until {schedule_wait_until}, next {schedule_next}\n\
          Event timeline: {event_status}; visible {event_visible}/{event_total}; latest {latest_events}\n\
@@ -888,6 +916,15 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         runtime_node_status = d.runtime_node_status,
         scheduler_worker_status = d.scheduler_worker_status,
         workflow_focus = workflow_focus,
+        digital_twin_status = d.digital_twin_panel.schema_version,
+        digital_twin_workflows_count = d.digital_twin_panel.workflow_count,
+        digital_twin_happening = d.digital_twin_panel.global_counts.happening_now_count,
+        digital_twin_done = d.digital_twin_panel.global_counts.done_count,
+        digital_twin_remaining = d.digital_twin_panel.global_counts.remaining_count,
+        digital_twin_validated = d.digital_twin_panel.global_counts.validated_count,
+        digital_twin_rejected = d.digital_twin_panel.global_counts.rejected_count,
+        digital_twin_approvals = d.digital_twin_panel.global_counts.awaiting_approval_count,
+        digital_twin_workflows = digital_twin_workflows,
         task_board_status = d.task_board_panel.status,
         task_board_workflows = d.task_board_panel.workflow_count,
         task_board_tasks = d.task_board_panel.task_count,

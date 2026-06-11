@@ -35306,6 +35306,7 @@ fn interactive_home_renders_anvil_forge_and_operational_dashboard_sections() {
     assert!(text.contains("Runtime/node status"));
     assert!(text.contains("Scheduler worker status"));
     assert!(text.contains("Workflow focus"));
+    assert!(text.contains("Operational digital twin"));
     assert!(text.contains("Task board"));
     assert!(text.contains("Schedule panel"));
     assert!(text.contains("Event timeline"));
@@ -35572,6 +35573,30 @@ fn interactive_home_exposes_task_board_handoffs_checkpoints_and_artifacts() {
     assert!(task_board["blocked_tasks"].as_u64().unwrap() >= 1);
     assert_eq!(task_board["pending_human_interactions"], 1);
     assert_eq!(task_board["artifact_count"], 1);
+    let digital_twin = &home["dashboard"]["digital_twin_panel"];
+    assert_eq!(
+        digital_twin["schema_version"],
+        "forge.ops.operational_digital_twin.v1"
+    );
+    assert!(digital_twin["workflow_count"].as_u64().unwrap() >= 1);
+    let twin_workflow = digital_twin["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["workflow_id"] == workflow_id)
+        .unwrap();
+    assert_eq!(
+        twin_workflow["live_state"]["schema_version"],
+        "forge.ops.workflow_live_state.v1"
+    );
+    assert!(!twin_workflow["live_state"]["what_remains"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(twin_workflow["commands"]["inspect"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("inspect")));
 
     let lane = task_board["lanes"]
         .as_array()
@@ -35595,6 +35620,8 @@ fn interactive_home_exposes_task_board_handoffs_checkpoints_and_artifacts() {
         .stdout
         .clone();
     let text = String::from_utf8(text_home).unwrap();
+    assert!(text.contains("Operational digital twin"));
+    assert!(text.contains("pending_human_or_modifier_approval"));
     assert!(text.contains("Task board"));
     assert!(text.contains("human waits 1"));
     assert!(text.contains("checkpoints 1"));
