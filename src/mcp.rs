@@ -654,6 +654,8 @@ struct WorkflowEventsInput {
 struct OpsAddonRendererEventInput {
     workflow: Option<String>,
     workflow_id: Option<String>,
+    addon: Option<String>,
+    addon_id: Option<String>,
     view: Option<String>,
     view_id: Option<String>,
     event_kind: String,
@@ -1625,6 +1627,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(
                     &[
                         ("workflow_id", "string", "workflow id"),
+                        ("addon_id", "string", "optional Addon id; required when multiple Addons declare the same view id"),
                         ("view_id", "string", "Addon view id"),
                         ("event_kind", "string", "filter_changed|selection_changed|refresh_requested|hover_changed|draft_changed|submit_requested"),
                         ("actor", "string", "operator or agent id"),
@@ -1640,6 +1643,8 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "renderer-event",
                     "--workflow",
                     "<workflow-id>",
+                    "--addon",
+                    "<addon-id>",
                     "--view",
                     "<view-id>",
                     "--event-kind",
@@ -5090,6 +5095,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 .view_id
                 .or(input.view)
                 .ok_or_else(|| anyhow::anyhow!("view_id is required"))?;
+            let addon_id = input.addon_id.or(input.addon);
             let actor = input.actor.unwrap_or_else(|| "mcp".to_string());
             let payload = input.payload.as_ref().map(Value::to_string);
             let addon_dirs = input
@@ -5107,6 +5113,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 store,
                 &addon_dirs,
                 &workflow_id,
+                addon_id.as_deref(),
                 &view_id,
                 &input.event_kind,
                 &actor,

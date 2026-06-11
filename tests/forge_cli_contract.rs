@@ -23780,10 +23780,11 @@ views:
     assert!(custom_html.contains("renderer.metrics_chart"));
     assert!(custom_html.contains("renderer.settings_form"));
     assert!(custom_html.contains("/api/addon-renderer/event"));
+    assert!(custom_html.contains("name=\"addon_id\""));
     assert!(custom_html.contains("Registrar evento de renderer"));
     assert!(custom_html.contains("series.current"));
     let renderer_event_request = format!(
-        "POST /api/addon-renderer/event HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nworkflow_id={workflow_id}&view_id=renderer.metrics_chart&event_kind=hover_changed&actor=human%3Aarthur&payload=%7B%22point%22%3A%22cost_series%22%7D"
+        "POST /api/addon-renderer/event HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nworkflow_id={workflow_id}&addon_id=forge.addon.interactive_renderers&view_id=renderer.metrics_chart&event_kind=hover_changed&actor=human%3Aarthur&payload=%7B%22point%22%3A%22cost_series%22%7D"
     );
     let renderer_event_response = forge_core::ops::handle_ops_http_request_with_addon_dirs(
         &store_handle,
@@ -23875,6 +23876,8 @@ views:
             addon_dir.to_str().unwrap(),
             "--workflow",
             workflow_id,
+            "--addon",
+            "forge.addon.interactive_renderers",
             "--view",
             "renderer.metrics_chart",
             "--event-kind",
@@ -23904,6 +23907,7 @@ views:
 
     let mcp_renderer_input = serde_json::json!({
         "workflow_id": workflow_id,
+        "addon_id": "forge.addon.interactive_renderers",
         "view_id": "renderer.metrics_chart",
         "event_kind": "refresh_requested",
         "actor": "mcp:codex",
@@ -23938,6 +23942,35 @@ views:
         mcp_renderer_event_json["result"]["event_kind"],
         "refresh_requested"
     );
+    fs::write(
+        addon_dir.join("duplicate-renderer.yaml"),
+        r#"
+id: forge.addon.duplicate_renderer
+name: Duplicate Renderer
+version: 0.1.0
+lifecycle: enabled
+views:
+  - id: renderer.metrics_chart
+    title: Duplicate Metrics Chart
+    surface: ops_console
+    type: chart
+    component: forge.ops.metrics_chart
+"#,
+    )
+    .unwrap();
+    let ambiguous_renderer_event_request = format!(
+        "POST /api/addon-renderer/event HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nworkflow_id={workflow_id}&view_id=renderer.metrics_chart&event_kind=hover_changed&actor=human%3Aarthur"
+    );
+    let ambiguous_renderer_event_response =
+        forge_core::ops::handle_ops_http_request_with_addon_dirs(
+            &store_handle,
+            &ambiguous_renderer_event_request,
+            &[addon_dir.clone()],
+        );
+    assert_eq!(ambiguous_renderer_event_response.status_code, 400);
+    let ambiguous_renderer_event_body =
+        String::from_utf8(ambiguous_renderer_event_response.body).unwrap();
+    assert!(ambiguous_renderer_event_body.contains("ambiguous"));
 
     let proposed_goal = "Objetivo proposto pela lane modificadora";
     let propose_goal_request = format!(

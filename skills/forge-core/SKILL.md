@@ -88,7 +88,7 @@ forge request list --status stale --output json
 forge request recover-stale --run <run-id> --origin codex --output json
 forge ops snapshot --output json
 forge ops serve --host 127.0.0.1 --port 8765
-forge ops renderer-event --workflow <workflow-id> --view <view-id> --event-kind hover_changed --payload '{"point":"series.current"}' --output json
+forge ops renderer-event --workflow <workflow-id> --addon <addon-id> --view <view-id> --event-kind hover_changed --payload '{"point":"series.current"}' --output json
 forge mcp tools --output json
 forge credential-vault records --contract /path/to/vault.contract.yaml --data /path/to/vault.data.yaml --output json
 forge credential-vault exec --contract /path/to/vault.contract.yaml --data /path/to/vault.data.yaml --record login -- command-that-needs-secrets
@@ -101,7 +101,7 @@ forge mcp call forge.aws.inventory --input '{"regions":"us-east-1,sa-east-1"}' -
 forge mcp call forge.interactive.home --output json
 forge mcp call forge.interactive.slash_commands --output json
 forge mcp call forge.interactive.route --input '{"input":"What is the current Forge status?","origin":"codex"}' --output json
-forge mcp call forge.ops.addon_renderer_event --input '{"workflow_id":"<workflow-id>","view_id":"<view-id>","event_kind":"refresh_requested","payload":{"refresh":true}}' --output json
+forge mcp call forge.ops.addon_renderer_event --input '{"workflow_id":"<workflow-id>","addon_id":"<addon-id>","view_id":"<view-id>","event_kind":"refresh_requested","payload":{"refresh":true}}' --output json
 forge mcp call forge.run.start --input '{"goal":"Improve Forge Core","origin":"codex"}' --output json
 forge mcp call forge.run.heartbeat --input '{"run_id":"<run-id>","executor":"codex","summary":"executor alive","ttl_seconds":300,"origin":"codex"}' --output json
 forge mcp call forge.run.drive --input '{"run_id":"<run-id>","executor":"codex","ttl_seconds":300,"origin":"codex"}' --output json

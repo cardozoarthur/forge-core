@@ -997,6 +997,7 @@ pub fn record_addon_renderer_client_event(
     store: &ForgeStore,
     addon_dirs: &[PathBuf],
     workflow_id: &str,
+    addon_id: Option<&str>,
     view_id: &str,
     event_kind: &str,
     actor: &str,
@@ -1004,12 +1005,25 @@ pub fn record_addon_renderer_client_event(
 ) -> Result<OpsAddonRendererClientEventReport> {
     ensure_workflow_policy(store, workflow_id, "addon renderer client event")?;
     let snapshot = build_ops_snapshot_with_addon_dirs(store, addon_dirs)?;
-    let renderer = snapshot
+    let matching_renderers = snapshot
         .addon_view_renderers
         .renderers
         .iter()
-        .find(|renderer| renderer.view_id == view_id)
-        .with_context(|| format!("addon renderer view not found: {view_id}"))?;
+        .filter(|renderer| {
+            renderer.view_id == view_id
+                && addon_id.map_or(true, |addon_id| renderer.addon_id == addon_id)
+        })
+        .collect::<Vec<_>>();
+    if matching_renderers.is_empty() {
+        if let Some(addon_id) = addon_id {
+            bail!("addon renderer view not found: addon {addon_id} view {view_id}");
+        }
+        bail!("addon renderer view not found: {view_id}");
+    }
+    if addon_id.is_none() && matching_renderers.len() > 1 {
+        bail!("addon renderer view id is ambiguous: {view_id}; provide addon_id");
+    }
+    let renderer = matching_renderers[0];
     if !renderer.safe_renderer {
         bail!("addon renderer view is not safe to receive client events: {view_id}");
     }
@@ -1977,6 +1991,7 @@ fn route_ops_http_request(
         }
         ("POST", "/api/addon-renderer/event") => {
             let workflow_id = parsed.required("workflow_id")?;
+            let addon_id = parsed.params.get("addon_id").map(String::as_str);
             let view_id = parsed.required("view_id")?;
             let event_kind = parsed.required("event_kind")?;
             let actor = parsed
@@ -1989,6 +2004,7 @@ fn route_ops_http_request(
                 store,
                 addon_dirs,
                 workflow_id,
+                addon_id,
                 view_id,
                 event_kind,
                 actor,
@@ -2256,7 +2272,8 @@ fn render_addon_renderer_event_controls(
         .join("");
     let sample_payload = default_renderer_event_payload(&renderer.renderer_family);
     format!(
-        r#"<form method="post" action="/api/addon-renderer/event"><input type="hidden" name="view_id" value="{}"><label>Registrar evento de renderer</label><select name="workflow_id">{}</select><select name="event_kind">{}</select><input name="actor" value="ops-web"><textarea name="payload">{}</textarea><button type="submit">Registrar evento de renderer</button></form>"#,
+        r#"<form method="post" action="/api/addon-renderer/event"><input type="hidden" name="addon_id" value="{}"><input type="hidden" name="view_id" value="{}"><label>Registrar evento de renderer</label><select name="workflow_id">{}</select><select name="event_kind">{}</select><input name="actor" value="ops-web"><textarea name="payload">{}</textarea><button type="submit">Registrar evento de renderer</button></form>"#,
+        escape_html(&renderer.addon_id),
         escape_html(&renderer.view_id),
         workflow_options,
         event_options,

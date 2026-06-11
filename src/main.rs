@@ -1778,6 +1778,8 @@ enum OpsCommands {
         addon_dirs: Vec<PathBuf>,
         #[arg(long = "workflow")]
         workflow_id: String,
+        #[arg(long = "addon")]
+        addon_id: Option<String>,
         #[arg(long = "view")]
         view_id: String,
         #[arg(long = "event-kind")]
@@ -6691,6 +6693,7 @@ fn run() -> Result<i32> {
             OpsCommands::RendererEvent {
                 addon_dirs,
                 workflow_id,
+                addon_id,
                 view_id,
                 event_kind,
                 actor,
@@ -6703,6 +6706,7 @@ fn run() -> Result<i32> {
                     &store,
                     &dirs,
                     &workflow_id,
+                    addon_id.as_deref(),
                     &view_id,
                     &event_kind,
                     &actor,

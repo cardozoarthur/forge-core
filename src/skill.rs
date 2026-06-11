@@ -112,7 +112,7 @@ forge request list --status stale --output json
 forge request recover-stale --run <run-id> --origin codex --output json
 forge ops snapshot --output json
 forge ops serve --host 127.0.0.1 --port 8765
-forge ops renderer-event --workflow <workflow-id> --view <view-id> --event-kind hover_changed --payload '{"point":"series.current"}' --output json
+forge ops renderer-event --workflow <workflow-id> --addon <addon-id> --view <view-id> --event-kind hover_changed --payload '{"point":"series.current"}' --output json
 forge improve candidates --output json
 forge events improvement-policy --workflow <workflow-id> --output json
 forge improve apply-event-policy --workflow <workflow-id> --policy prefer_deterministic_node --apply --approved-by <operator> --output json
@@ -127,7 +127,7 @@ forge mcp tools --output json
 forge mcp call forge.improve.candidates --input '{"limit":10}' --output json
 forge mcp call forge.improve.benchmark_event_policy --input '{"workflow_id":"<workflow-id>","recommended_policy":"prefer_deterministic_node"}' --output json
 forge mcp call forge.improve.promote_event_policy --input '{"workflow_id":"<workflow-id>","recommended_policy":"prefer_deterministic_node","approved_by":"<operator>"}' --output json
-forge mcp call forge.ops.addon_renderer_event --input '{"workflow_id":"<workflow-id>","view_id":"<view-id>","event_kind":"refresh_requested","payload":{"refresh":true}}' --output json
+forge mcp call forge.ops.addon_renderer_event --input '{"workflow_id":"<workflow-id>","addon_id":"<addon-id>","view_id":"<view-id>","event_kind":"refresh_requested","payload":{"refresh":true}}' --output json
 forge mcp call forge.cost.incremental --input '{"after_sequence":0}' --output json
 forge mcp call forge.cost.daemon --input '{"workflow_id":"<workflow-id>","max_cycles":1,"interval_seconds":0}' --output json
 forge mcp call forge.cost.retention --input '{"organization_id":"<organization-id>","retention_days":31,"apply":true,"approved_by":"<operator>","reason":"Validated retention window.","confirm":true}' --output json
