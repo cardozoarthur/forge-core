@@ -1,6 +1,6 @@
 use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{
-    build_context_package_with_checkpoint, ContextContinuationPlan, ContextDelta,
+    build_context_package_with_checkpoint_and_project, ContextContinuationPlan, ContextDelta,
     ContextHandoffBlocker, ContextMemoryPolicy, ContextPackage, ContextPersonaSourceModelSummary,
     ContextRoutingQuality,
 };
@@ -13,6 +13,7 @@ use crate::storage::ForgeStore;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::path::Path;
 
 const EXECUTOR_HANDOFF_SCHEMA_VERSION: &str = "forge.executor_handoff.v8";
 const PERSONA_HANDOFF_SCHEMA_VERSION: &str = "forge.persona_handoff.v2";
@@ -117,6 +118,26 @@ pub fn build_task_handoff(
     budget: usize,
     ttl_seconds: u64,
 ) -> Result<TaskHandoffReport> {
+    build_task_handoff_with_project(
+        store,
+        workflow_id,
+        task_id,
+        selected_executor,
+        budget,
+        ttl_seconds,
+        None,
+    )
+}
+
+pub fn build_task_handoff_with_project(
+    store: &ForgeStore,
+    workflow_id: &str,
+    task_id: &str,
+    selected_executor: &str,
+    budget: usize,
+    ttl_seconds: u64,
+    project_root: Option<&Path>,
+) -> Result<TaskHandoffReport> {
     if selected_executor.trim().is_empty() {
         bail!("executor cannot be empty");
     }
@@ -129,8 +150,13 @@ pub fn build_task_handoff(
         .find(|candidate| candidate.id == task_id)
         .ok_or_else(|| anyhow::anyhow!("task not found in workflow {workflow_id}: {task_id}"))?;
     let latest_checkpoint = load_latest_task_checkpoint(store, workflow_id, task_id)?;
-    let context =
-        build_context_package_with_checkpoint(&workflow, task_id, budget, latest_checkpoint)?;
+    let context = build_context_package_with_checkpoint_and_project(
+        &workflow,
+        task_id,
+        budget,
+        latest_checkpoint,
+        project_root,
+    )?;
     let task_executor = executor_kind(&task.executor).to_string();
 
     if !context.handoff_ready {

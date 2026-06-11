@@ -536,6 +536,12 @@ pub fn memory_policy_report(store: &ForgeStore) -> MemoryPolicyReport {
     memory_policy_report_for_project(store, None)
 }
 
+pub fn project_memory_governance_report(
+    project_root: Option<&Path>,
+) -> ProjectMemoryGovernanceReport {
+    load_project_memory_governance(project_root)
+}
+
 pub fn memory_policy_report_for_project(
     store: &ForgeStore,
     project_root: Option<&Path>,

@@ -26,7 +26,7 @@ use crate::aws_ops::{
     run_raw as run_aws_ops_raw, AWS_OPS_COMMAND_SCHEMA,
 };
 use crate::checkpoint::load_latest_task_checkpoint;
-use crate::context::{build_context_package_with_checkpoint, DEFAULT_CONTEXT_BUDGET};
+use crate::context::{build_context_package_with_checkpoint_and_project, DEFAULT_CONTEXT_BUDGET};
 use crate::cost::{
     apply_cost_ledger_retention_for_context, build_cost_ledger_for_context,
     build_cost_ledger_history_for_context, maintain_cost_ledger_for_context,
@@ -53,7 +53,7 @@ use crate::executor::{
     record_shell_session_plan, BrainSessionLifecycleOptions, BrainSessionsReportOptions,
     ShellLaunchPlanOptions,
 };
-use crate::handoff::build_task_handoff;
+use crate::handoff::build_task_handoff_with_project;
 use crate::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, build_harness_doctor_report,
     build_harness_mode_report, inspect_cli_harness_shim_status, install_cli_harness_shim,
@@ -1511,6 +1511,7 @@ struct ContextRequestInput {
     workflow_id: String,
     task_id: String,
     budget: Option<usize>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1520,6 +1521,7 @@ struct TaskHandoffInput {
     executor: String,
     budget: Option<usize>,
     ttl_seconds: Option<u64>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4978,11 +4980,12 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.context.request",
                 "Request Bounded Context",
-                "Build the minimum correct task-local context package before executor handoff.",
+                "Build the minimum correct task-local context package before executor handoff, optionally resolving project memory governance.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                     ("task_id", "string", "task id"),
                     ("budget", "integer", "context byte budget"),
+                    ("project_root", "string", "optional project root containing .forge/memory-governance.json"),
                 ], &["workflow_id", "task_id"]),
                 "forge.context.v30",
                 &["forge", "context", "--workflow", "<workflow-id>", "--task", "<task-id>", "--output", "json"],
@@ -5126,13 +5129,14 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.task.handoff",
                 "Acquire Task Handoff",
-                "Acquire a bounded executor handoff packet for an authorized task executor.",
+                "Acquire a bounded executor handoff packet for an authorized task executor, optionally resolving project memory governance.",
                 object_schema(&[
                     ("workflow_id", "string", "workflow id"),
                     ("task_id", "string", "task id"),
                     ("executor", "string", "selected executor id"),
                     ("budget", "integer", "context byte budget"),
                     ("ttl_seconds", "integer", "lease TTL in seconds"),
+                    ("project_root", "string", "optional project root containing .forge/memory-governance.json"),
                 ], &["workflow_id", "task_id", "executor"]),
                 "forge.executor_handoff.v8",
                 &["forge", "task", "handoff", "--workflow", "<workflow-id>", "--task", "<task-id>", "--executor", "<executor>", "--output", "json"],
@@ -7691,11 +7695,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let workflow = store.load_workflow(&input.workflow_id)?;
             let latest_checkpoint =
                 load_latest_task_checkpoint(store, &input.workflow_id, &input.task_id)?;
-            serde_json::to_value(build_context_package_with_checkpoint(
+            let project_root = input.project_root.as_deref().map(PathBuf::from);
+            serde_json::to_value(build_context_package_with_checkpoint_and_project(
                 &workflow,
                 &input.task_id,
                 input.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
                 latest_checkpoint,
+                project_root.as_deref(),
             )?)?
         }
         "forge.harness.token_headroom" => {
@@ -7904,13 +7910,15 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.task.handoff" => {
             let input: TaskHandoffInput = parse_input(input)?;
-            serde_json::to_value(build_task_handoff(
+            let project_root = input.project_root.as_deref().map(PathBuf::from);
+            serde_json::to_value(build_task_handoff_with_project(
                 store,
                 &input.workflow_id,
                 &input.task_id,
                 &input.executor,
                 input.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
                 input.ttl_seconds.unwrap_or(900),
+                project_root.as_deref(),
             )?)?
         }
         "forge.patch.plan" => {

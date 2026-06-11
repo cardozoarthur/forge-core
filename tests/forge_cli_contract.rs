@@ -23295,6 +23295,200 @@ fn task_handoff_packet_carries_per_node_brain_routing_for_ai_agents() {
 }
 
 #[test]
+fn context_and_handoff_include_project_memory_governance_when_project_root_is_supplied() {
+    use forge_core::graph::{self, ExecutorKind};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("tenant-project");
+    fs::create_dir_all(project_root.join(".forge")).unwrap();
+
+    let configured = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "memory",
+            "configure",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--memory-level",
+            "MEMORY_SHORT_TERM",
+            "--default-scope",
+            "project",
+            "--default-scope",
+            "processing",
+            "--default-audience",
+            "manager",
+            "--privacy-mode",
+            "private_by_default",
+            "--retention-mode",
+            "processing_auto_archive",
+            "--approved-by",
+            "arthur",
+            "--reason",
+            "Executor context should inherit project memory governance.",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let configured_json: Value = serde_json::from_slice(&configured).unwrap();
+    assert_eq!(configured_json["memory_level"], "MEMORY_SHORT_TERM");
+
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Run tenant-aware research using project memory governance.",
+    ));
+    workflow.status = "running".to_string();
+    workflow.tasks = vec![graph::task(
+        "task-memory-aware",
+        "Memory-aware research",
+        &[],
+        &["goal", "project governance"],
+        vec![],
+        "Research report with governed memory",
+        (ExecutorKind::Ai, 0.2),
+    )];
+    store.save_workflow(&workflow).unwrap();
+    drop(store);
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "context",
+            "--workflow",
+            &workflow.id,
+            "--task",
+            "task-memory-aware",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let context_json: Value = serde_json::from_slice(&context_output).unwrap();
+    assert_eq!(
+        context_json["memory_policy"]["project_governance_status"],
+        "configured"
+    );
+    assert_eq!(context_json["memory_policy"]["memory_level"], "short_term");
+    assert_eq!(
+        context_json["memory_policy"]["memory_level_source"],
+        "project_governance"
+    );
+    assert_eq!(
+        context_json["memory_policy"]["allowed_scopes_source"],
+        "project_governance"
+    );
+    assert_eq!(
+        context_json["memory_policy"]["default_audience_source"],
+        "project_governance"
+    );
+    assert_eq!(
+        context_json["memory_policy"]["allowed_scopes"],
+        serde_json::json!(["project", "processing"])
+    );
+    assert!(context_json["memory_policy"]["default_search_command"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("--project-root")));
+
+    let handoff_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            &workflow.id,
+            "--task",
+            "task-memory-aware",
+            "--executor",
+            "codex",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff_json: Value = serde_json::from_slice(&handoff_output).unwrap();
+    assert_eq!(
+        handoff_json["packet"]["memory_policy"]["project_governance_status"],
+        "configured"
+    );
+    assert_eq!(
+        handoff_json["packet"]["memory_policy"]["default_audience"],
+        "manager"
+    );
+
+    let mcp_tools = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_tools_json: Value = serde_json::from_slice(&mcp_tools).unwrap();
+    let context_tool = find_mcp_tool(&mcp_tools_json, "forge.context.request");
+    assert_eq!(
+        context_tool["input_schema"]["properties"]["project_root"]["type"],
+        "string"
+    );
+    let handoff_tool = find_mcp_tool(&mcp_tools_json, "forge.task.handoff");
+    assert_eq!(
+        handoff_tool["input_schema"]["properties"]["project_root"]["type"],
+        "string"
+    );
+
+    let mcp_context_input = serde_json::json!({
+        "workflow_id": workflow.id,
+        "task_id": "task-memory-aware",
+        "project_root": project_root
+    });
+    let mcp_context = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.context.request",
+            "--input",
+            &mcp_context_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_context_json: Value = serde_json::from_slice(&mcp_context).unwrap();
+    assert_eq!(
+        mcp_context_json["result"]["memory_policy"]["project_governance_status"],
+        "configured"
+    );
+}
+
+#[test]
 fn workflow_update_node_brain_hot_swaps_node_routing_without_stopping_workflow() {
     use forge_core::graph::{self, ExecutorKind};
 

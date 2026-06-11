@@ -32,7 +32,9 @@ use forge_core::cluster::{
     build_cluster_task_handoff, list_cluster_node_leases, list_cluster_nodes,
     place_task_on_cluster, register_cluster_node, ClusterNodeInput,
 };
-use forge_core::context::{build_context_package_with_checkpoint, DEFAULT_CONTEXT_BUDGET};
+use forge_core::context::{
+    build_context_package_with_checkpoint_and_project, DEFAULT_CONTEXT_BUDGET,
+};
 use forge_core::cost::{
     apply_cost_ledger_retention_for_context, build_cost_ledger_for_context,
     build_cost_ledger_history_for_context, maintain_cost_ledger_for_context,
@@ -64,7 +66,7 @@ use forge_core::executor::{
     ShellLaunchPlanOptions,
 };
 use forge_core::graph::create_workflow;
-use forge_core::handoff::build_task_handoff;
+use forge_core::handoff::build_task_handoff_with_project;
 use forge_core::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, build_harness_doctor_report,
     build_harness_mode_report, inspect_cli_harness_shim_status, install_cli_harness_shim,
@@ -215,6 +217,8 @@ enum Commands {
         workflow: String,
         #[arg(long)]
         task: String,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, default_value_t = 1200)]
         budget: usize,
         #[arg(long)]
@@ -2572,6 +2576,8 @@ enum TaskCommands {
         task: String,
         #[arg(long)]
         executor: String,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, default_value_t = 1200)]
         budget: usize,
         #[arg(long, default_value_t = 900)]
@@ -3528,6 +3534,7 @@ fn run() -> Result<i32> {
         Commands::Context {
             workflow,
             task,
+            project_root,
             budget,
             strict,
             output,
@@ -3536,8 +3543,13 @@ fn run() -> Result<i32> {
             ensure_workflow_policy(&store, &workflow, "context request")?;
             let workflow = store.load_workflow(&workflow)?;
             let latest_checkpoint = load_latest_task_checkpoint(&store, &workflow.id, &task)?;
-            let context =
-                build_context_package_with_checkpoint(&workflow, &task, budget, latest_checkpoint)?;
+            let context = build_context_package_with_checkpoint_and_project(
+                &workflow,
+                &task,
+                budget,
+                latest_checkpoint,
+                project_root.as_deref(),
+            )?;
             print_response(output, &context)?;
             Ok(if strict && !context.handoff_ready {
                 1
@@ -6717,13 +6729,21 @@ fn run() -> Result<i32> {
                 workflow,
                 task,
                 executor,
+                project_root,
                 budget,
                 ttl_seconds,
                 output,
             } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report =
-                    build_task_handoff(&store, &workflow, &task, &executor, budget, ttl_seconds)?;
+                let report = build_task_handoff_with_project(
+                    &store,
+                    &workflow,
+                    &task,
+                    &executor,
+                    budget,
+                    ttl_seconds,
+                    project_root.as_deref(),
+                )?;
                 let exit_code = if report.allowed { 0 } else { 1 };
                 print_response(output, &report)?;
                 Ok(exit_code)

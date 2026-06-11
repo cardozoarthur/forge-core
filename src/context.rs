@@ -5,9 +5,11 @@ use crate::graph::{
     PersonaRoutingSpec, TaskStatus, Workflow,
 };
 use crate::intent::OperatingContextSpec;
+use crate::memory::project_memory_governance_report;
 use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
+use std::path::Path;
 
 const CONTEXT_SCHEMA_VERSION: &str = "forge.context.v30";
 const ROUTING_FINGERPRINT_SCHEMA_VERSION: &str = "forge.context.routing_fingerprint.v1";
@@ -193,8 +195,16 @@ pub struct ContextMemoryPolicy {
     pub memory_scope: String,
     pub memory_level: String,
     pub allowed_scopes: Vec<String>,
+    pub memory_level_source: String,
+    pub allowed_scopes_source: String,
     pub default_audience: String,
+    pub default_audience_source: String,
     pub default_shareability: String,
+    pub project_governance_status: String,
+    pub project_governance_project_root: String,
+    pub project_governance_config_path: String,
+    pub project_governance_privacy_mode: String,
+    pub project_governance_retention_mode: String,
     pub visibility: String,
     pub data_classification: String,
     pub sharing_policy: String,
@@ -1020,6 +1030,15 @@ pub fn build_context_package(
     build_context_package_with_checkpoint(workflow, task_id, budget, None)
 }
 
+pub fn build_context_package_with_project(
+    workflow: &Workflow,
+    task_id: &str,
+    budget: usize,
+    project_root: Option<&Path>,
+) -> Result<ContextPackage> {
+    build_context_package_with_checkpoint_and_project(workflow, task_id, budget, None, project_root)
+}
+
 pub fn build_context_handoff_summary(
     workflow: &Workflow,
     budget: usize,
@@ -1098,6 +1117,22 @@ pub fn build_context_package_with_checkpoint(
     budget: usize,
     latest_checkpoint: Option<TaskCheckpoint>,
 ) -> Result<ContextPackage> {
+    build_context_package_with_checkpoint_and_project(
+        workflow,
+        task_id,
+        budget,
+        latest_checkpoint,
+        None,
+    )
+}
+
+pub fn build_context_package_with_checkpoint_and_project(
+    workflow: &Workflow,
+    task_id: &str,
+    budget: usize,
+    latest_checkpoint: Option<TaskCheckpoint>,
+    project_root: Option<&Path>,
+) -> Result<ContextPackage> {
     let task = workflow
         .tasks
         .iter()
@@ -1127,7 +1162,8 @@ pub fn build_context_package_with_checkpoint(
         .map(|revision| revision.origin.clone())
         .collect::<Vec<_>>();
     let operating_context = workflow.intent.operating_context.clone();
-    let memory_policy = build_context_memory_policy(workflow, task, &operating_context);
+    let memory_policy =
+        build_context_memory_policy(workflow, task, &operating_context, project_root);
     let persona = task.persona.clone();
     let persona_profile = persona
         .as_ref()
@@ -3364,10 +3400,57 @@ fn build_context_memory_policy(
     workflow: &Workflow,
     task: &AtomicTask,
     context: &OperatingContextSpec,
+    project_root: Option<&Path>,
 ) -> ContextMemoryPolicy {
-    let memory_level = memory_level_for_operating_scope(&context.memory_scope);
-    let allowed_scopes = allowed_memory_scopes_for_context(&context.memory_scope, &memory_level);
-    let default_audience = default_memory_audience(context);
+    let workflow_memory_level = memory_level_for_operating_scope(&context.memory_scope);
+    let workflow_allowed_scopes =
+        allowed_memory_scopes_for_context(&context.memory_scope, &workflow_memory_level);
+    let project_governance = project_memory_governance_report(project_root);
+    let project_governance_configured = project_governance.status == "configured";
+    let (memory_level, memory_level_source) = if project_governance_configured {
+        (
+            context_memory_level_from_governance(&project_governance.memory_level),
+            "project_governance".to_string(),
+        )
+    } else {
+        (workflow_memory_level, "operating_context".to_string())
+    };
+    let (allowed_scopes, allowed_scopes_source) = if project_governance_configured {
+        let allowed_by_level =
+            allowed_memory_scopes_for_context(&context.memory_scope, &memory_level);
+        let scopes = project_governance
+            .default_scopes
+            .iter()
+            .filter(|scope| {
+                allowed_by_level
+                    .iter()
+                    .any(|allowed_scope| allowed_scope == *scope)
+                    && workflow_allowed_scopes
+                        .iter()
+                        .any(|workflow_scope| workflow_scope == *scope)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let scopes = if scopes.is_empty() {
+            allowed_by_level
+        } else {
+            scopes
+        };
+        (scopes, "project_governance".to_string())
+    } else {
+        (workflow_allowed_scopes, "operating_context".to_string())
+    };
+    let (default_audience, default_audience_source) = if project_governance_configured {
+        (
+            project_governance.default_audience.clone(),
+            "project_governance".to_string(),
+        )
+    } else {
+        (
+            default_memory_audience(context),
+            "operating_context".to_string(),
+        )
+    };
     let default_shareability = default_memory_shareability(&allowed_scopes);
     let mut default_search_command = vec![
         "forge".to_string(),
@@ -3377,19 +3460,24 @@ fn build_context_memory_policy(
         "<query>".to_string(),
         "--workflow".to_string(),
         workflow.id.clone(),
-        "--memory-level".to_string(),
-        memory_level.clone(),
     ];
-    for scope in &allowed_scopes {
-        default_search_command.push("--scope".to_string());
-        default_search_command.push(scope.clone());
+    if project_governance_configured {
+        default_search_command.push("--project-root".to_string());
+        default_search_command.push(project_governance.project_root.clone());
+    } else {
+        default_search_command.push("--memory-level".to_string());
+        default_search_command.push(memory_level.clone());
+        for scope in &allowed_scopes {
+            default_search_command.push("--scope".to_string());
+            default_search_command.push(scope.clone());
+        }
+        if allowed_scopes.iter().any(|scope| scope == "organization") {
+            default_search_command.push("--organization".to_string());
+            default_search_command.push(context.organization.id.clone());
+        }
+        default_search_command.push("--audience".to_string());
+        default_search_command.push(default_audience.clone());
     }
-    if allowed_scopes.iter().any(|scope| scope == "organization") {
-        default_search_command.push("--organization".to_string());
-        default_search_command.push(context.organization.id.clone());
-    }
-    default_search_command.push("--audience".to_string());
-    default_search_command.push(default_audience.clone());
     default_search_command.push("--output".to_string());
     default_search_command.push("json".to_string());
 
@@ -3403,8 +3491,16 @@ fn build_context_memory_policy(
         memory_scope: context.memory_scope.clone(),
         memory_level,
         allowed_scopes,
+        memory_level_source,
+        allowed_scopes_source,
         default_audience,
+        default_audience_source,
         default_shareability,
+        project_governance_status: project_governance.status,
+        project_governance_project_root: project_governance.project_root,
+        project_governance_config_path: project_governance.config_path,
+        project_governance_privacy_mode: project_governance.privacy_mode,
+        project_governance_retention_mode: project_governance.retention_mode,
         visibility: context.operating_policy.memory_visibility.clone(),
         data_classification: context.operating_policy.data_classification.clone(),
         sharing_policy: context.operating_policy.sharing_policy.clone(),
@@ -3455,6 +3551,24 @@ fn memory_level_for_operating_scope(memory_scope: &str) -> String {
         "short_term".to_string()
     } else {
         "standard".to_string()
+    }
+}
+
+fn context_memory_level_from_governance(memory_level: &str) -> String {
+    match memory_level
+        .trim()
+        .to_ascii_uppercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "MEMORY_NONE" | "NONE" => "none".to_string(),
+        "MEMORY_SESSION" | "SESSION" => "session".to_string(),
+        "MEMORY_SHORT_TERM" | "MEMORY_SHORTTERM" | "SHORT_TERM" | "SHORTTERM" => {
+            "short_term".to_string()
+        }
+        "MEMORY_FULL" | "FULL" => "full".to_string(),
+        "MEMORY_ADMIN" | "ADMIN" => "admin".to_string(),
+        _ => "standard".to_string(),
     }
 }
 
