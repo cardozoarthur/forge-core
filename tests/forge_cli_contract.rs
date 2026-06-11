@@ -5094,12 +5094,13 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
     assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
 
     let flows = json["flows"].as_array().unwrap();
-    assert_eq!(flows.len(), 6);
+    assert_eq!(flows.len(), 7);
     for kind in [
         "coding_task",
         "harness_control",
         "executor_project",
         "brain_handoff_rehearsal",
+        "real_project_coding_research",
         "research_artifact",
         "long_running_async",
     ] {
@@ -5331,6 +5332,58 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
             "forge harness exec --executor sh --project-root <project-root> --workflow <workflow-id> --task <task-id> --run <run-id> --forge-first --execute --allow-exec -- /bin/sh -c <project-edit-script>"
         )));
 
+    let real_project = flows
+        .iter()
+        .find(|flow| flow["kind"] == "real_project_coding_research")
+        .expect("replacement CLI demo should include a real project coding/research flow");
+    assert_eq!(
+        real_project["real_project"]["schema_version"],
+        "forge.milestone.real_project_workflow_demo.v1"
+    );
+    assert_eq!(
+        real_project["real_project"]["status"],
+        "real_project_workflow_demo_completed"
+    );
+    assert_eq!(real_project["real_project"]["handoff_ready"], true);
+    assert_eq!(real_project["real_project"]["selected_brain"], "codex");
+    assert_eq!(
+        real_project["real_project"]["exec_status"],
+        "harness_exec_completed"
+    );
+    assert_eq!(real_project["real_project"]["exec_event_recorded"], true);
+    assert_eq!(
+        real_project["real_project"]["validation_status"],
+        "validated"
+    );
+    assert_eq!(
+        real_project["real_project"]["external_resources_mutated"],
+        false
+    );
+    assert!(real_project["real_project"]["target_paths"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("src/lib.rs")));
+    assert!(real_project["real_project"]["target_paths"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("tests/workflow_contract.txt")));
+    assert!(real_project["real_project"]["target_paths"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("docs/research/findings.md")));
+    assert!(real_project["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "multi_file_code_and_research_artifacts_generated"
+        )));
+    assert!(real_project["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --output json"
+        )));
+
     let brain_rehearsal = flows
         .iter()
         .find(|flow| flow["kind"] == "brain_handoff_rehearsal")
@@ -5460,6 +5513,10 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.milestone.patch_lifecycle_demo.v1"),
         "the packaged Forge skill should mention the replacement CLI patch lifecycle demo receipt"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.milestone.real_project_workflow_demo.v1"),
+        "the packaged Forge skill should mention the replacement CLI real project workflow demo receipt"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge interactive command-palette"),
