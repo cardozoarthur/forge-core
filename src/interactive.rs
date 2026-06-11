@@ -49,6 +49,7 @@ const INTERACTIVE_READINESS_SCHEMA_VERSION: &str = "forge.interactive.readiness.
 const INTERACTIVE_HARNESS_SCHEMA_VERSION: &str = "forge.interactive.harness.v1";
 const INTERACTIVE_SESSIONS_SCHEMA_VERSION: &str = "forge.interactive.sessions.v1";
 const INTERACTIVE_COMMAND_PALETTE_SCHEMA_VERSION: &str = "forge.interactive.command_palette.v1";
+const INTERACTIVE_AUTOCOMPLETE_SCHEMA_VERSION: &str = "forge.interactive.autocomplete.v1";
 const INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION: &str = "forge.interactive.patch_workbench.v1";
 const INTERACTIVE_PERMISSIONS_SCHEMA_VERSION: &str = "forge.interactive.permissions.v1";
 const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
@@ -91,6 +92,7 @@ pub struct InteractiveDashboard {
     pub harness_panel: InteractiveHarnessPanel,
     pub sessions_panel: InteractiveSessionsPanel,
     pub command_palette_panel: InteractiveCommandPalettePanel,
+    pub autocomplete_panel: InteractiveAutocompletePanel,
     pub harness_mode_panel: HarnessModeReport,
     pub harness_doctor_panel: HarnessDoctorReport,
     pub runtime_node_status: String,
@@ -259,6 +261,34 @@ pub struct InteractiveCommandPaletteEntry {
     pub requires_approval: bool,
     pub risk_level: String,
     pub keywords: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveAutocompletePanel {
+    pub schema_version: String,
+    pub status: String,
+    pub input: String,
+    pub normalized_query: String,
+    pub suggestion_count: usize,
+    pub suggestions: Vec<InteractiveAutocompleteSuggestion>,
+    pub navigation: Vec<InteractiveKeyBinding>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveAutocompleteSuggestion {
+    pub suggestion_id: String,
+    pub kind: String,
+    pub label: String,
+    pub insert_text: String,
+    pub description: String,
+    pub source: String,
+    pub source_panel: String,
+    pub workflow_id: Option<String>,
+    pub equivalent_command: Vec<String>,
+    pub mutates_workflow: bool,
+    pub requires_approval: bool,
+    pub risk_level: String,
+    pub score: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -905,6 +935,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
     )?;
     let sessions_panel = build_interactive_sessions(store, InteractiveSessionsOptions::default())?;
     let command_palette_panel = build_interactive_command_palette(store, None)?;
+    let autocomplete_panel = build_interactive_autocomplete(store, "")?;
     let harness_mode_panel = harness_panel.mode.clone();
     let harness_doctor_panel = harness_panel.doctor.clone();
     let runtime_node_status = if runtimes.usable.is_empty() {
@@ -1109,6 +1140,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             harness_panel,
             sessions_panel,
             command_palette_panel,
+            autocomplete_panel,
             harness_mode_panel,
             harness_doctor_panel,
             runtime_node_status,
@@ -1857,6 +1889,168 @@ fn command_palette_group_title(group_id: &str) -> &'static str {
         "observability" => "Observability",
         _ => "Other",
     }
+}
+
+pub fn build_interactive_autocomplete(
+    store: &ForgeStore,
+    input: &str,
+) -> Result<InteractiveAutocompletePanel> {
+    let input = input.to_string();
+    let normalized_query = normalize_autocomplete_query(&input);
+    let palette_query = autocomplete_palette_query(&normalized_query);
+    let palette = build_interactive_command_palette(store, Some(&palette_query))?;
+    let mut suggestions = slash_autocomplete_suggestions(&normalized_query);
+    suggestions.extend(command_palette_autocomplete_suggestions(
+        &palette.entries,
+        &normalized_query,
+    ));
+    suggestions.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    suggestions.truncate(20);
+
+    Ok(InteractiveAutocompletePanel {
+        schema_version: INTERACTIVE_AUTOCOMPLETE_SCHEMA_VERSION.to_string(),
+        status: "autocomplete_ready".to_string(),
+        input,
+        normalized_query,
+        suggestion_count: suggestions.len(),
+        suggestions,
+        navigation: vec![
+            navigation_key(
+                "tab",
+                "accept_suggestion",
+                "autocomplete",
+                "Accept suggestion",
+            ),
+            navigation_key(
+                "shift-tab",
+                "previous_suggestion",
+                "autocomplete",
+                "Move to previous suggestion",
+            ),
+            navigation_key(
+                "esc",
+                "close_autocomplete",
+                "autocomplete",
+                "Close suggestions",
+            ),
+        ],
+    })
+}
+
+fn normalize_autocomplete_query(input: &str) -> String {
+    input.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn autocomplete_palette_query(normalized_query: &str) -> String {
+    normalized_query
+        .trim_start_matches('/')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn slash_autocomplete_suggestions(query: &str) -> Vec<InteractiveAutocompleteSuggestion> {
+    slash_commands()
+        .into_iter()
+        .filter_map(|command| {
+            let score = autocomplete_score(
+                &command.name,
+                &command.description,
+                &command.equivalent_command,
+                query,
+            )?;
+            Some(InteractiveAutocompleteSuggestion {
+                suggestion_id: format!("slash:{}", command.name.replace('/', "").replace(' ', "-")),
+                kind: "slash_command".to_string(),
+                label: command.name.clone(),
+                insert_text: command.name.clone(),
+                description: command.description,
+                source: "slash_command_catalog".to_string(),
+                source_panel: "slash_command_catalog".to_string(),
+                workflow_id: None,
+                equivalent_command: command.equivalent_command,
+                mutates_workflow: command.mutates_workflow,
+                requires_approval: command.risk_level == "high",
+                risk_level: command.risk_level,
+                score,
+            })
+        })
+        .collect()
+}
+
+fn command_palette_autocomplete_suggestions(
+    entries: &[InteractiveCommandPaletteEntry],
+    query: &str,
+) -> Vec<InteractiveAutocompleteSuggestion> {
+    let palette_query = autocomplete_palette_query(query);
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let score = autocomplete_score(
+                &entry.action_id,
+                &entry.description,
+                &entry.commands,
+                &palette_query,
+            )?;
+            Some(InteractiveAutocompleteSuggestion {
+                suggestion_id: format!("palette:{}", entry.action_id),
+                kind: "command_palette_action".to_string(),
+                label: entry.action_id.clone(),
+                insert_text: entry.commands.join(" "),
+                description: entry.description.clone(),
+                source: "command_palette_panel".to_string(),
+                source_panel: entry.source_panel.clone(),
+                workflow_id: entry.workflow_id.clone(),
+                equivalent_command: entry.commands.clone(),
+                mutates_workflow: entry.mutates_workflow,
+                requires_approval: entry.requires_approval,
+                risk_level: entry.risk_level.clone(),
+                score,
+            })
+        })
+        .collect()
+}
+
+fn autocomplete_score(
+    label: &str,
+    description: &str,
+    equivalent_command: &[String],
+    query: &str,
+) -> Option<i64> {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return Some(10);
+    }
+    let label_lower = label.to_ascii_lowercase();
+    let haystack = format!(
+        "{} {} {}",
+        label_lower,
+        description.to_ascii_lowercase(),
+        equivalent_command.join(" ").to_ascii_lowercase()
+    );
+    if label_lower == query {
+        return Some(120);
+    }
+    if label_lower.starts_with(&query) {
+        return Some(100 - label_lower.len().saturating_sub(query.len()) as i64);
+    }
+    if label_lower.contains(&query) {
+        return Some(80);
+    }
+    let terms = query
+        .split_whitespace()
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if !terms.is_empty() && terms.iter().all(|term| haystack.contains(term)) {
+        return Some(60 - terms.len() as i64);
+    }
+    None
 }
 
 pub fn build_interactive_patch_workbench(
@@ -3021,6 +3215,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     };
     let navigation_keys = render_navigation_keybindings(&d.navigation_panel);
     let command_palette_entries = render_command_palette_entry_summary(&d.command_palette_panel);
+    let autocomplete_suggestions = render_autocomplete_suggestion_summary(&d.autocomplete_panel);
     let ui_composition_regions = render_ui_composition_region_summary(&d.ui_composition_panel);
     let session_cards = render_session_card_summary(&d.sessions_panel);
     let patch_workbench_files = render_patch_workbench_file_summary(&d.patch_workbench_panel);
@@ -3089,6 +3284,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Workflow focus: {workflow_focus}\n\
          Navigation panel: {navigation_status}; default {navigation_default_mode}, theme {navigation_theme}, modes {navigation_modes}, keys {navigation_keys}\n\
          Command palette: {command_palette_status}; query {command_palette_query}, groups {command_palette_groups}, entries {command_palette_entry_count}; {command_palette_entries}\n\
+         Autocomplete: {autocomplete_status}; input {autocomplete_input}, suggestions {autocomplete_suggestion_count}; {autocomplete_suggestions}\n\
          UI composition: {ui_composition_status}; layout {ui_composition_layout}, regions {ui_composition_regions_count}, widgets {ui_composition_widgets} ({ui_composition_core_widgets} core, {ui_composition_addon_widgets} addon); {ui_composition_regions}\n\
          Patch workbench: {patch_workbench_status}; clean {patch_workbench_clean}, files {patch_workbench_files_count}, staged {patch_workbench_staged}, unstaged {patch_workbench_unstaged}, untracked {patch_workbench_untracked}, diff {patch_workbench_diff_present}, check {patch_workbench_diff_check}; {patch_workbench_files}\n\
          Permission center: {permissions_status}; memberships {permissions_memberships}, active {permissions_active}, addon permissions {permissions_addons}, approved {permissions_approved_addons}, pending approvals {permissions_pending}, timed out {permissions_timed_out}; memberships {permission_memberships}; approvals {permission_approvals}\n\
@@ -3160,6 +3356,14 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         command_palette_groups = d.command_palette_panel.group_count,
         command_palette_entry_count = d.command_palette_panel.entry_count,
         command_palette_entries = command_palette_entries,
+        autocomplete_status = d.autocomplete_panel.status,
+        autocomplete_input = if d.autocomplete_panel.input.is_empty() {
+            "none"
+        } else {
+            d.autocomplete_panel.input.as_str()
+        },
+        autocomplete_suggestion_count = d.autocomplete_panel.suggestion_count,
+        autocomplete_suggestions = autocomplete_suggestions,
         ui_composition_status = d.ui_composition_panel.status,
         ui_composition_layout = d.ui_composition_panel.layout_kind,
         ui_composition_regions_count = d.ui_composition_panel.region_count,
@@ -3363,6 +3567,21 @@ pub fn render_interactive_command_palette(panel: &InteractiveCommandPalettePanel
         group_count = panel.group_count,
         entry_count = panel.entry_count,
         entries = render_command_palette_entry_summary(panel),
+    )
+}
+
+pub fn render_interactive_autocomplete(panel: &InteractiveAutocompletePanel) -> String {
+    let input = if panel.input.is_empty() {
+        "none"
+    } else {
+        panel.input.as_str()
+    };
+    format!(
+        "Autocomplete: {status}; input {input}, suggestions {suggestion_count}\nSuggestions: {suggestions}\n",
+        status = panel.status,
+        input = input,
+        suggestion_count = panel.suggestion_count,
+        suggestions = render_autocomplete_suggestion_summary(panel),
     )
 }
 
@@ -3759,6 +3978,17 @@ fn build_ui_composition_panel(
                     vec!["forge interactive command-palette --output json".to_string()],
                 ),
                 core_ui_widget(
+                    "autocomplete_panel",
+                    "Autocomplete",
+                    "autocomplete_panel",
+                    "autocomplete_renderer",
+                    "compact",
+                    "full",
+                    vec![
+                        "forge interactive autocomplete --input <input> --output json".to_string(),
+                    ],
+                ),
+                core_ui_widget(
                     "harness_panel",
                     "Harness center",
                     "harness_panel",
@@ -4054,6 +4284,30 @@ fn render_command_palette_entry_summary(panel: &InteractiveCommandPalettePanel) 
                 workflow,
                 entry.mutates_workflow,
                 entry.requires_approval
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn render_autocomplete_suggestion_summary(panel: &InteractiveAutocompletePanel) -> String {
+    if panel.suggestions.is_empty() {
+        return "none".to_string();
+    }
+
+    panel
+        .suggestions
+        .iter()
+        .take(12)
+        .map(|suggestion| {
+            format!(
+                "{} [{}] {} score={} mutates={} approval={}",
+                suggestion.label,
+                suggestion.kind,
+                suggestion.source_panel,
+                suggestion.score,
+                suggestion.mutates_workflow,
+                suggestion.requires_approval
             )
         })
         .collect::<Vec<_>>()

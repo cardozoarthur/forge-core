@@ -2988,6 +2988,14 @@ fn milestone_boundary_document_matches_validated_export_demo_runtime_state() {
         docs.contains("forge.interactive.command_palette"),
         "the visible 0.5 milestone boundary should expose the MCP command palette surface"
     );
+    assert!(
+        docs.contains("forge interactive autocomplete"),
+        "the visible 0.5 milestone boundary should point to the replacement-grade autocomplete surface"
+    );
+    assert!(
+        docs.contains("forge.interactive.autocomplete"),
+        "the visible 0.5 milestone boundary should expose the MCP autocomplete surface"
+    );
 }
 
 #[test]
@@ -4186,6 +4194,14 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.command_palette"),
         "the packaged Forge skill should expose the MCP command palette tool"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge interactive autocomplete"),
+        "the packaged Forge skill should teach agents how to inspect replacement-grade autocomplete suggestions"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.autocomplete"),
+        "the packaged Forge skill should expose the MCP autocomplete tool"
     );
 
     let tools = forge()
@@ -36650,6 +36666,176 @@ fn interactive_command_palette_surfaces_contextual_actions_for_replacement_cli()
         .unwrap()
         .iter()
         .any(|entry| entry["action_id"] == "permissions.open"));
+}
+
+#[test]
+fn interactive_autocomplete_suggests_slash_and_palette_actions_for_replacement_cli() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Operate autocomplete evidence for a replacement-grade CLI workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let slash_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "autocomplete",
+            "--input",
+            "/patch r",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let slash_json: Value = serde_json::from_slice(&slash_output).unwrap();
+    assert_eq!(
+        slash_json["schema_version"],
+        "forge.interactive.autocomplete.v1"
+    );
+    assert_eq!(slash_json["status"], "autocomplete_ready");
+    assert_eq!(slash_json["input"], "/patch r");
+    assert!(slash_json["suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|suggestion| {
+            suggestion["kind"] == "slash_command"
+                && suggestion["label"] == "/patch review"
+                && suggestion["source"] == "slash_command_catalog"
+                && suggestion["mutates_workflow"] == false
+        }));
+
+    let palette_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "autocomplete",
+            "--input",
+            "patch",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let palette_json: Value = serde_json::from_slice(&palette_output).unwrap();
+    assert!(palette_json["suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|suggestion| {
+            suggestion["kind"] == "command_palette_action"
+                && suggestion["label"] == "patch.diff"
+                && suggestion["source_panel"] == "patch_workbench_panel"
+                && suggestion["requires_approval"] == false
+        }));
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "autocomplete",
+            "--input",
+            "/ha",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Autocomplete"));
+    assert!(text.contains("/harness"));
+
+    let home_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["autocomplete_panel"]["schema_version"],
+        "forge.interactive.autocomplete.v1"
+    );
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |region| region["widgets"].as_array().unwrap().iter().any(|widget| {
+                widget["widget_id"] == "autocomplete_panel"
+                    && widget["commands"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!(
+                            "forge interactive autocomplete --input <input> --output json"
+                        ))
+            })
+        ));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.autocomplete");
+    assert_eq!(tool["output_schema"], "forge.interactive.autocomplete.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.autocomplete"])
+        .arg("--input")
+        .arg(r#"{"input":"/ha"}"#)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.autocomplete.v1"
+    );
+    assert!(mcp_json["result"]["suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|suggestion| suggestion["label"] == "/harness"));
 }
 
 #[test]

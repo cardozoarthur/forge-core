@@ -80,11 +80,11 @@ use crate::interaction::{
     expire_human_interaction, list_human_interactions, CreateChoiceInteractionRequest,
 };
 use crate::interactive::{
-    build_interactive_command_palette, build_interactive_harness, build_interactive_home,
-    build_interactive_patch_workbench, build_interactive_permissions, build_interactive_readiness,
-    build_interactive_sessions, build_interactive_structured_logs, build_interactive_task_board,
-    build_interactive_workflow_dag, route_interactive_input, slash_command_catalog,
-    InteractiveHarnessOptions, InteractiveSessionsOptions,
+    build_interactive_autocomplete, build_interactive_command_palette, build_interactive_harness,
+    build_interactive_home, build_interactive_patch_workbench, build_interactive_permissions,
+    build_interactive_readiness, build_interactive_sessions, build_interactive_structured_logs,
+    build_interactive_task_board, build_interactive_workflow_dag, route_interactive_input,
+    slash_command_catalog, InteractiveHarnessOptions, InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -497,6 +497,11 @@ struct InteractiveHarnessInput {
 #[derive(Debug, Deserialize, Default)]
 struct InteractiveCommandPaletteInput {
     query: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InteractiveAutocompleteInput {
+    input: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2852,6 +2857,17 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &[]),
                 "forge.interactive.command_palette.v1",
                 &["forge", "interactive", "command-palette", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.autocomplete",
+                "Inspect Interactive Autocomplete",
+                "Return read-only slash-command and command-palette suggestions for a partial operator input without launching a TTY.",
+                object_schema(&[
+                    ("input", "string", "partial operator input such as /patch r or patch"),
+                ], &["input"]),
+                "forge.interactive.autocomplete.v1",
+                &["forge", "interactive", "autocomplete", "--input", "<input>", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -6629,6 +6645,17 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(build_interactive_command_palette(
                 store,
                 input.query.as_deref(),
+            )?)?
+        }
+        "forge.interactive.autocomplete" => {
+            let input: InteractiveAutocompleteInput = if input.is_null() {
+                InteractiveAutocompleteInput::default()
+            } else {
+                parse_input(input)?
+            };
+            serde_json::to_value(build_interactive_autocomplete(
+                store,
+                input.input.as_deref().unwrap_or_default(),
             )?)?
         }
         "forge.interactive.patch_workbench" => {
