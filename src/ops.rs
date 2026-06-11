@@ -40,6 +40,8 @@ const OPS_ACTION_SCHEMA_VERSION: &str = "forge.ops.action.v1";
 const OPS_MODIFIER_LANE_SCHEMA_VERSION: &str = "forge.ops.modifier_lane.v1";
 const OPS_MODIFIER_PROPOSAL_SCHEMA_VERSION: &str = "forge.ops.modifier_proposal.v1";
 const OPS_ADDON_VIEW_RENDERERS_SCHEMA_VERSION: &str = "forge.ops.addon_view_renderers.v1";
+const OPS_ADDON_VIEW_INTERACTION_STATE_SCHEMA_VERSION: &str =
+    "forge.ops.addon_view_interaction_state.v1";
 const OPS_MODIFIER_PROPOSAL_CREATED_EVENT: &str = "ops_modifier_proposal_created";
 const OPS_MODIFIER_PROPOSAL_APPLIED_EVENT: &str = "ops_modifier_proposal_applied";
 const MAX_HTTP_REQUEST_BYTES: usize = 1024 * 1024;
@@ -238,6 +240,7 @@ pub struct OpsAddonViewRenderer {
     pub required_capabilities: Vec<String>,
     pub data_sources: Vec<OpsAddonViewDataSource>,
     pub actions: Vec<OpsAddonViewActionRender>,
+    pub interaction_state: OpsAddonViewInteractionState,
     pub tui_affordance: String,
     pub html_anchor: String,
     pub notes: Vec<String>,
@@ -266,6 +269,95 @@ pub struct OpsAddonViewActionRender {
     pub payload_fields: Vec<String>,
     pub risk: String,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsAddonViewInteractionState {
+    pub schema_version: String,
+    pub state_key: String,
+    pub mode: String,
+    pub interactive: bool,
+    pub external_code_execution: bool,
+    pub supports_filters: bool,
+    pub supports_hover: bool,
+    pub supports_selection: bool,
+    pub supports_live_refresh: bool,
+    pub filters: Vec<OpsAddonViewFilterControl>,
+    pub allowed_client_events: Vec<String>,
+    pub state_policy: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chart: Option<OpsAddonViewChartState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub form: Option<OpsAddonViewFormState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_list: Option<OpsAddonViewDataListState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<OpsAddonViewTimelineState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canvas: Option<OpsAddonViewCanvasState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document: Option<OpsAddonViewDocumentState>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsAddonViewFilterControl {
+    pub id: String,
+    pub label: String,
+    pub control_type: String,
+    pub binding_id: String,
+    pub default_value: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsAddonViewChartState {
+    pub chart_kind: String,
+    pub hover_enabled: bool,
+    pub tooltip_policy: String,
+    pub series_bindings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsAddonViewFormState {
+    pub submit_mode: String,
+    pub requires_confirmation: bool,
+    pub fields: Vec<OpsAddonViewFormField>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsAddonViewFormField {
+    pub name: String,
+    pub field_type: String,
+    pub required: bool,
+    pub source_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsAddonViewDataListState {
+    pub row_key_policy: String,
+    pub supports_sort: bool,
+    pub supports_pagination: bool,
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsAddonViewTimelineState {
+    pub cursor_policy: String,
+    pub supports_time_window: bool,
+    pub event_bindings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsAddonViewCanvasState {
+    pub tool_palette: Vec<String>,
+    pub selection_model: String,
+    pub mutation_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpsAddonViewDocumentState {
+    pub editor_mode: String,
+    pub outline_enabled: bool,
+    pub autosave_policy: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -421,6 +513,13 @@ pub fn build_addon_view_renderer_report(
             if data_sources.is_empty() {
                 notes.push("no_data_bindings_declared".to_string());
             }
+            let interaction_state = build_addon_view_interaction_state(
+                &entry.addon_id,
+                &entry.view.id,
+                &renderer_family,
+                &data_sources,
+                &actions,
+            );
             OpsAddonViewRenderer {
                 addon_id: entry.addon_id.clone(),
                 addon_name: entry.addon_name.clone(),
@@ -439,6 +538,7 @@ pub fn build_addon_view_renderer_report(
                 required_capabilities,
                 data_sources,
                 actions,
+                interaction_state,
                 tui_affordance: format!(
                     "forge addons views --addon {} --surface {} --output json",
                     entry.addon_id,
@@ -473,6 +573,206 @@ pub fn build_addon_view_renderer_report(
         family_count: families.len(),
         families,
         renderers,
+    }
+}
+
+fn build_addon_view_interaction_state(
+    addon_id: &str,
+    view_id: &str,
+    renderer_family: &str,
+    data_sources: &[OpsAddonViewDataSource],
+    actions: &[OpsAddonViewActionRender],
+) -> OpsAddonViewInteractionState {
+    let filters = build_addon_view_filters(renderer_family, data_sources);
+    let supports_live_refresh = data_sources.iter().any(|source| source.live_refresh);
+    let supports_hover = matches!(
+        renderer_family,
+        "dashboard_renderer" | "visualization_renderer" | "timeline_renderer"
+    );
+    let supports_selection = matches!(
+        renderer_family,
+        "dashboard_renderer"
+            | "visualization_renderer"
+            | "data_list_renderer"
+            | "timeline_renderer"
+            | "canvas_renderer"
+            | "document_renderer"
+    );
+    let mut allowed_client_events = vec![
+        "filter_changed".to_string(),
+        "selection_changed".to_string(),
+        "refresh_requested".to_string(),
+    ];
+    if supports_hover {
+        allowed_client_events.push("hover_changed".to_string());
+    }
+    if renderer_family == "editor_renderer" {
+        allowed_client_events.push("draft_changed".to_string());
+        allowed_client_events.push("submit_requested".to_string());
+    }
+    let series_bindings = data_sources
+        .iter()
+        .map(|source| source.binding_id.clone())
+        .collect::<Vec<_>>();
+    let form_fields = build_addon_view_form_fields(actions);
+    let chart = matches!(
+        renderer_family,
+        "dashboard_renderer" | "visualization_renderer"
+    )
+    .then(|| OpsAddonViewChartState {
+        chart_kind: if renderer_family == "dashboard_renderer" {
+            "summary_cards_and_trends".to_string()
+        } else {
+            "time_series_or_category_chart".to_string()
+        },
+        hover_enabled: true,
+        tooltip_policy: "derive_from_bound_series".to_string(),
+        series_bindings: series_bindings.clone(),
+    });
+    let form = (renderer_family == "editor_renderer").then(|| OpsAddonViewFormState {
+        submit_mode: "explicit_action_dispatch".to_string(),
+        requires_confirmation: actions
+            .iter()
+            .any(|action| action.requires_confirmation || action.risk == "high"),
+        fields: form_fields,
+    });
+    let data_list = (renderer_family == "data_list_renderer").then(|| OpsAddonViewDataListState {
+        row_key_policy: "binding_id_plus_row_index".to_string(),
+        supports_sort: true,
+        supports_pagination: true,
+        columns: data_sources
+            .iter()
+            .map(|source| source.binding_id.clone())
+            .chain(
+                actions
+                    .iter()
+                    .flat_map(|action| action.payload_fields.clone()),
+            )
+            .collect::<Vec<_>>(),
+    });
+    let timeline = (renderer_family == "timeline_renderer").then(|| OpsAddonViewTimelineState {
+        cursor_policy: "cursor_or_time_window".to_string(),
+        supports_time_window: true,
+        event_bindings: series_bindings.clone(),
+    });
+    let canvas = (renderer_family == "canvas_renderer").then(|| OpsAddonViewCanvasState {
+        tool_palette: vec![
+            "select".to_string(),
+            "pan".to_string(),
+            "inspect".to_string(),
+            "comment".to_string(),
+        ],
+        selection_model: "single_or_multi_select_by_artifact_or_node_id".to_string(),
+        mutation_policy: "actions_only_no_external_component_code".to_string(),
+    });
+    let document = (renderer_family == "document_renderer").then(|| OpsAddonViewDocumentState {
+        editor_mode: "safe_markdown_outline".to_string(),
+        outline_enabled: true,
+        autosave_policy: "manual_apply_via_declared_action".to_string(),
+    });
+    OpsAddonViewInteractionState {
+        schema_version: OPS_ADDON_VIEW_INTERACTION_STATE_SCHEMA_VERSION.to_string(),
+        state_key: format!("addon:{addon_id}:view:{view_id}"),
+        mode: "safe_declarative_interaction".to_string(),
+        interactive: true,
+        external_code_execution: false,
+        supports_filters: !filters.is_empty(),
+        supports_hover,
+        supports_selection,
+        supports_live_refresh,
+        filters,
+        allowed_client_events,
+        state_policy: vec![
+            "state is owned by Forge and keyed by Addon/view identity".to_string(),
+            "client interactions mutate local renderer state until a declared action is invoked"
+                .to_string(),
+            "no Addon JavaScript or arbitrary component code is executed".to_string(),
+        ],
+        chart,
+        form,
+        data_list,
+        timeline,
+        canvas,
+        document,
+    }
+}
+
+fn build_addon_view_filters(
+    renderer_family: &str,
+    data_sources: &[OpsAddonViewDataSource],
+) -> Vec<OpsAddonViewFilterControl> {
+    let mut filters = data_sources
+        .iter()
+        .map(|source| OpsAddonViewFilterControl {
+            id: format!("filter_{}", slug_for_anchor(&source.binding_id)),
+            label: format!("{} filter", source.binding_id),
+            control_type: "query_filter".to_string(),
+            binding_id: source.binding_id.clone(),
+            default_value: source.query.clone(),
+        })
+        .collect::<Vec<_>>();
+    if matches!(
+        renderer_family,
+        "dashboard_renderer" | "visualization_renderer" | "timeline_renderer"
+    ) {
+        filters.push(OpsAddonViewFilterControl {
+            id: "time_window".to_string(),
+            label: "Time window".to_string(),
+            control_type: "time_range".to_string(),
+            binding_id: "all".to_string(),
+            default_value: "last_24h".to_string(),
+        });
+    }
+    if matches!(renderer_family, "data_list_renderer" | "document_renderer") {
+        filters.push(OpsAddonViewFilterControl {
+            id: "search".to_string(),
+            label: "Search".to_string(),
+            control_type: "text_search".to_string(),
+            binding_id: "all".to_string(),
+            default_value: String::new(),
+        });
+    }
+    filters
+}
+
+fn build_addon_view_form_fields(
+    actions: &[OpsAddonViewActionRender],
+) -> Vec<OpsAddonViewFormField> {
+    let mut fields = Vec::new();
+    for action in actions {
+        for field in &action.payload_fields {
+            if fields
+                .iter()
+                .any(|existing: &OpsAddonViewFormField| existing.name == *field)
+            {
+                continue;
+            }
+            fields.push(OpsAddonViewFormField {
+                name: field.clone(),
+                field_type: infer_form_field_type(field),
+                required: true,
+                source_action: action.action_id.clone(),
+            });
+        }
+    }
+    fields
+}
+
+fn infer_form_field_type(field: &str) -> String {
+    let normalized = field.to_ascii_lowercase();
+    if normalized.contains("email") {
+        "email".to_string()
+    } else if normalized.contains("count")
+        || normalized.contains("amount")
+        || normalized.contains("price")
+        || normalized.contains("total")
+        || normalized.contains("number")
+    {
+        "number".to_string()
+    } else if normalized.contains("enabled") || normalized.starts_with("is_") {
+        "boolean".to_string()
+    } else {
+        "text".to_string()
     }
 }
 
@@ -1496,6 +1796,112 @@ fn action_response<T: Serialize>(action: &str, result: &T) -> Result<OpsHttpResp
     })
 }
 
+fn render_addon_interaction_state_html(state: &OpsAddonViewInteractionState) -> String {
+    let filter_summary = if state.filters.is_empty() {
+        "<li>sem filtros declarados</li>".to_string()
+    } else {
+        state
+            .filters
+            .iter()
+            .map(|filter| {
+                format!(
+                    "<li><code>{}</code> {} <small>{}: {}</small></li>",
+                    escape_html(&filter.id),
+                    escape_html(&filter.label),
+                    escape_html(&filter.control_type),
+                    escape_html(&filter.default_value)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    };
+    let chart_summary = state.chart.as_ref().map(|chart| {
+        let bindings = if chart.series_bindings.is_empty() {
+            "sem séries".to_string()
+        } else {
+            chart.series_bindings.join(", ")
+        };
+        format!(
+            "<li>Hover reativo: {} <small>{}; {}</small></li>",
+            chart.hover_enabled,
+            escape_html(&chart.tooltip_policy),
+            escape_html(&bindings)
+        )
+    });
+    let form_summary = state.form.as_ref().map(|form| {
+        let fields = if form.fields.is_empty() {
+            "sem campos".to_string()
+        } else {
+            form.fields
+                .iter()
+                .map(|field| format!("{}:{}", field.name, field.field_type))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        format!(
+            "<li>Editor seguro: {} <small>confirmação: {}; campos: {}</small></li>",
+            escape_html(&form.submit_mode),
+            form.requires_confirmation,
+            escape_html(&fields)
+        )
+    });
+    let list_summary = state.data_list.as_ref().map(|list| {
+        format!(
+            "<li>Lista interativa <small>sort: {}; paginação: {}; chave: {}</small></li>",
+            list.supports_sort,
+            list.supports_pagination,
+            escape_html(&list.row_key_policy)
+        )
+    });
+    let timeline_summary = state.timeline.as_ref().map(|timeline| {
+        format!(
+            "<li>Timeline interativa <small>{}; janela: {}</small></li>",
+            escape_html(&timeline.cursor_policy),
+            timeline.supports_time_window
+        )
+    });
+    let canvas_summary = state.canvas.as_ref().map(|canvas| {
+        format!(
+            "<li>Canvas interativo <small>{}; ferramentas: {}</small></li>",
+            escape_html(&canvas.selection_model),
+            escape_html(&canvas.tool_palette.join(", "))
+        )
+    });
+    let document_summary = state.document.as_ref().map(|document| {
+        format!(
+            "<li>Documento editável <small>{}; outline: {}; autosave: {}</small></li>",
+            escape_html(&document.editor_mode),
+            document.outline_enabled,
+            escape_html(&document.autosave_policy)
+        )
+    });
+    let mut family_state = String::new();
+    for item in [
+        chart_summary,
+        form_summary,
+        list_summary,
+        timeline_summary,
+        canvas_summary,
+        document_summary,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        family_state.push_str(&item);
+    }
+    if family_state.is_empty() {
+        family_state.push_str("<li>Estado de card genérico sem controles especializados.</li>");
+    }
+    format!(
+        "<div class=\"visual-panels\"><div><h4>Estado interativo</h4><ul class=\"compact-list\"><li><code>{}</code> <span>externo: {}</span></li><li>eventos: {}</li>{}</ul></div><div><h4>Filtros seguros</h4><ul class=\"compact-list\">{}</ul></div></div>",
+        escape_html(&state.state_key),
+        state.external_code_execution,
+        escape_html(&state.allowed_client_events.join(", ")),
+        family_state,
+        filter_summary
+    )
+}
+
 pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
     let mut rows = String::new();
     for workflow in &snapshot.registry.workflows {
@@ -1728,8 +2134,9 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
         } else {
             renderer.notes.join("; ")
         };
+        let interaction = render_addon_interaction_state_html(&renderer.interaction_state);
         addon_renderer_cards.push_str(&format!(
-            "<section id=\"{}\" class=\"addon-view-card\"><div class=\"addon-view-head\"><div><h3>{}</h3><code>{}</code></div><span>{}</span></div><div class=\"design-strip\"><span>família: {}</span><span>componente seguro: {}</span><span>região: {}</span><span>densidade: {}</span><span>largura: {}</span><span>safe: {}</span></div><p>{}</p><div class=\"visual-panels\"><div><h4>Fontes seguras</h4><ul class=\"compact-list\">{}</ul></div><div><h4>Ações renderizáveis</h4><ul class=\"compact-list\">{}</ul></div></div><div class=\"design-strip\"><span>Permissões: {}</span><span>Capabilities: {}</span><span>TUI: {}</span></div></section>",
+            "<section id=\"{}\" class=\"addon-view-card\"><div class=\"addon-view-head\"><div><h3>{}</h3><code>{}</code></div><span>{}</span></div><div class=\"design-strip\"><span>família: {}</span><span>componente seguro: {}</span><span>região: {}</span><span>densidade: {}</span><span>largura: {}</span><span>safe: {}</span></div><p>{}</p><div class=\"visual-panels\"><div><h4>Fontes seguras</h4><ul class=\"compact-list\">{}</ul></div><div><h4>Ações renderizáveis</h4><ul class=\"compact-list\">{}</ul></div></div>{}<div class=\"design-strip\"><span>Permissões: {}</span><span>Capabilities: {}</span><span>TUI: {}</span></div></section>",
             escape_html(&renderer.html_anchor),
             escape_html(&renderer.title),
             escape_html(&renderer.view_id),
@@ -1743,6 +2150,7 @@ pub fn render_ops_html(snapshot: &OpsSnapshot) -> String {
             escape_html(&notes),
             data_sources,
             rendered_actions,
+            interaction,
             escape_html(&permission_text),
             escape_html(&capability_text),
             escape_html(&renderer.tui_affordance),

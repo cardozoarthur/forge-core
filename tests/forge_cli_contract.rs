@@ -23292,6 +23292,87 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
 fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    let addon_dir = temp.path().join("addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        addon_dir.join("interactive-renderers.yaml"),
+        r#"
+id: forge.addon.interactive_renderers
+name: Interactive Renderer Lab
+version: 0.1.0
+lifecycle: enabled
+views:
+  - id: renderer.metrics_chart
+    title: Metrics Chart
+    surface: ops_console
+    type: chart
+    component: forge.ops.metrics_chart
+    data_bindings:
+      - id: cost_series
+        source: forge.cost.history
+        query: bucket:day
+        scope: organization
+        refresh_seconds: 15
+  - id: renderer.settings_form
+    title: Settings Form
+    surface: ops_console
+    type: editor
+    component: forge.ops.settings_form
+    actions:
+      - id: renderer.save_settings
+        label: Save settings
+        type: mutation
+        target: forge.addons.dispatch_contract
+        method: MCP
+        payload_schema: [setting_name, setting_value]
+  - id: renderer.records_table
+    title: Records Table
+    surface: ops_console
+    type: table
+    component: forge.ops.records_table
+    data_bindings:
+      - id: record_rows
+        source: forge.events.observability
+        query: severity:any
+        scope: workflow
+        refresh_seconds: 20
+  - id: renderer.event_timeline
+    title: Event Timeline
+    surface: ops_console
+    type: timeline
+    component: forge.ops.event_timeline
+    data_bindings:
+      - id: timeline_events
+        source: forge.events.timeline
+        query: after:cursor
+        scope: workflow
+        refresh_seconds: 5
+  - id: renderer.workflow_canvas
+    title: Workflow Canvas
+    surface: ops_console
+    type: canvas
+    component: forge.ops.workflow_canvas
+    actions:
+      - id: renderer.select_node
+        label: Select node
+        type: command
+        target: forge.context.request
+        method: MCP
+        payload_schema: [workflow_id, task_id]
+  - id: renderer.runbook_document
+    title: Runbook Document
+    surface: ops_console
+    type: document
+    component: forge.ops.runbook_document
+    data_bindings:
+      - id: runbook_sections
+        source: forge.artifact.fetch
+        query: kind:document
+        scope: workflow
+        refresh_seconds: 0
+"#,
+    )
+    .unwrap();
 
     let started = forge()
         .args([
@@ -23381,6 +23462,8 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
             store.to_str().unwrap(),
             "ops",
             "snapshot",
+            "--addon-dir",
+            addon_dir.to_str().unwrap(),
             "--output",
             "json",
         ])
@@ -23491,6 +23574,100 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
     assert_eq!(visual_renderer["actions"][0]["risk"], "medium");
     assert_eq!(visual_renderer["actions"][0]["enabled"], true);
     assert_eq!(
+        visual_renderer["interaction_state"]["schema_version"],
+        "forge.ops.addon_view_interaction_state.v1"
+    );
+    assert_eq!(
+        visual_renderer["interaction_state"]["external_code_execution"],
+        false
+    );
+    assert_eq!(
+        visual_renderer["interaction_state"]["state_key"],
+        "addon:forge.addon.visual_workspace:view:visual.workspace"
+    );
+
+    let renderer_entries = snapshot_json["addon_view_renderers"]["renderers"]
+        .as_array()
+        .unwrap();
+    for (view_id, family) in [
+        ("renderer.metrics_chart", "visualization_renderer"),
+        ("renderer.settings_form", "editor_renderer"),
+        ("renderer.records_table", "data_list_renderer"),
+        ("renderer.event_timeline", "timeline_renderer"),
+        ("renderer.workflow_canvas", "canvas_renderer"),
+        ("renderer.runbook_document", "document_renderer"),
+    ] {
+        let renderer = renderer_entries
+            .iter()
+            .find(|entry| entry["view_id"] == view_id)
+            .unwrap();
+        assert_eq!(renderer["renderer_family"], family);
+        assert_eq!(
+            renderer["interaction_state"]["schema_version"],
+            "forge.ops.addon_view_interaction_state.v1"
+        );
+        assert_eq!(renderer["interaction_state"]["interactive"], true);
+        assert_eq!(
+            renderer["interaction_state"]["external_code_execution"],
+            false
+        );
+    }
+    let chart_renderer = renderer_entries
+        .iter()
+        .find(|entry| entry["view_id"] == "renderer.metrics_chart")
+        .unwrap();
+    assert_eq!(
+        chart_renderer["interaction_state"]["chart"]["hover_enabled"],
+        true
+    );
+    assert_eq!(
+        chart_renderer["interaction_state"]["chart"]["tooltip_policy"],
+        "derive_from_bound_series"
+    );
+    let editor_renderer = renderer_entries
+        .iter()
+        .find(|entry| entry["view_id"] == "renderer.settings_form")
+        .unwrap();
+    assert!(editor_renderer["interaction_state"]["form"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field["name"] == "setting_name"));
+    let list_renderer = renderer_entries
+        .iter()
+        .find(|entry| entry["view_id"] == "renderer.records_table")
+        .unwrap();
+    assert_eq!(
+        list_renderer["interaction_state"]["data_list"]["supports_sort"],
+        true
+    );
+    let timeline_renderer = renderer_entries
+        .iter()
+        .find(|entry| entry["view_id"] == "renderer.event_timeline")
+        .unwrap();
+    assert_eq!(
+        timeline_renderer["interaction_state"]["timeline"]["cursor_policy"],
+        "cursor_or_time_window"
+    );
+    let canvas_renderer = renderer_entries
+        .iter()
+        .find(|entry| entry["view_id"] == "renderer.workflow_canvas")
+        .unwrap();
+    assert!(
+        canvas_renderer["interaction_state"]["canvas"]["tool_palette"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("select".to_string()))
+    );
+    let document_renderer = renderer_entries
+        .iter()
+        .find(|entry| entry["view_id"] == "renderer.runbook_document")
+        .unwrap();
+    assert_eq!(
+        document_renderer["interaction_state"]["document"]["editor_mode"],
+        "safe_markdown_outline"
+    );
+    assert_eq!(
         snapshot_json["registry"]["summary"]["runtime"]["schema_version"],
         "forge.registry_workflow_runtime.v1"
     );
@@ -23582,6 +23759,15 @@ fn ops_snapshot_and_local_http_allow_assisted_workflow_operation() {
     assert!(html.contains("Criar artefato visual"));
     assert!(html.contains("Registrar colaboração"));
     assert!(html.contains("Atualizar token"));
+    let custom_snapshot =
+        forge_core::ops::build_ops_snapshot_with_addon_dirs(&store_handle, &[addon_dir]).unwrap();
+    let custom_html = forge_core::ops::render_ops_html(&custom_snapshot);
+    assert!(custom_html.contains("Estado interativo"));
+    assert!(custom_html.contains("Hover reativo"));
+    assert!(custom_html.contains("Filtros seguros"));
+    assert!(custom_html.contains("Editor seguro"));
+    assert!(custom_html.contains("renderer.metrics_chart"));
+    assert!(custom_html.contains("renderer.settings_form"));
 
     let proposed_goal = "Objetivo proposto pela lane modificadora";
     let propose_goal_request = format!(
