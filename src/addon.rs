@@ -6743,13 +6743,16 @@ fn execute_builtin_multimodal_runtime_benchmark(
     let confirm_runtime_execution =
         optional_dispatch_input_bool(&entry.input, "confirm_runtime_execution").unwrap_or(false);
     let allow_model = optional_dispatch_input_bool(&entry.input, "allow_model").unwrap_or(false);
+    let connected_runtime = optional_dispatch_input_string(&entry.input, "connected_runtime");
     let report = build_multimodal_runtime_benchmark(MultimodalRuntimeBenchmarkOptions {
         capability_id,
         fixture_id,
         enable_experimental: feature_flag.enabled,
+        project_root: project_root.as_deref(),
         approved_by,
         confirm_runtime_execution,
         allow_model,
+        connected_runtime,
     })?;
     Ok(serde_json::json!({
         "kind": "forge_multimodal_runtime_benchmark",

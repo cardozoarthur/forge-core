@@ -1,9 +1,11 @@
-use anyhow::{bail, Result};
-use serde::Serialize;
+use crate::artifact::hex_sha256;
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 const STATUS_SCHEMA_VERSION: &str = "forge.multimodal.status.v1";
@@ -16,6 +18,7 @@ const DEMO_PLAN_SCHEMA_VERSION: &str = "forge.multimodal.demo_plan.v1";
 const DEMO_RECEIPT_SCHEMA_VERSION: &str = "forge.multimodal.demo_receipt.v1";
 const GUARD_SCHEMA_VERSION: &str = "forge.multimodal.guard.v1";
 const MULTIMODAL_CONFIG_RELATIVE_PATH: &str = ".forge/multimodal.json";
+const MULTIMODAL_RUNTIMES_RELATIVE_PATH: &str = ".forge/multimodal-runtimes.json";
 
 macro_rules! capability {
     (
@@ -234,9 +237,11 @@ pub struct MultimodalRuntimeBenchmarkOptions<'a> {
     pub capability_id: &'a str,
     pub fixture_id: &'a str,
     pub enable_experimental: bool,
+    pub project_root: Option<&'a Path>,
     pub approved_by: Option<&'a str>,
     pub confirm_runtime_execution: bool,
     pub allow_model: bool,
+    pub connected_runtime: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -264,6 +269,8 @@ pub struct MultimodalRuntimeBenchmarkReport {
     pub filesystem_access_performed: bool,
     pub guard: MultimodalGuardReport,
     pub model_output: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connected_runtime: Option<MultimodalConnectedRuntimeEvidence>,
     pub promotion_ready: bool,
     pub promotion_gate: String,
     pub measurements: Vec<MultimodalBenchmarkMeasurement>,
@@ -271,6 +278,48 @@ pub struct MultimodalRuntimeBenchmarkReport {
     pub artifact_manifest: Vec<String>,
     pub evidence_manifest: Vec<String>,
     pub next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MultimodalConnectedRuntimeEvidence {
+    pub schema_version: String,
+    pub status: String,
+    pub manifest_path: String,
+    pub manifest_status: String,
+    pub runtime_id: String,
+    pub model_id: String,
+    pub capabilities: Vec<String>,
+    pub probe_command_sha256: String,
+    pub probe_exit_code: i32,
+    pub stdout_sha256: String,
+    pub stderr_sha256: String,
+    pub network_access_declared: bool,
+    pub device_access_declared: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MultimodalConnectedRuntimeManifest {
+    #[serde(default)]
+    runtimes: Vec<MultimodalConnectedRuntimeConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MultimodalConnectedRuntimeConfig {
+    id: String,
+    model_id: String,
+    #[serde(default)]
+    capabilities: Vec<String>,
+    probe_command: Vec<String>,
+    #[serde(default)]
+    network_access: bool,
+    #[serde(default)]
+    device_access: bool,
+}
+
+struct ConnectedRuntimeProbe {
+    evidence: MultimodalConnectedRuntimeEvidence,
+    model_output: Value,
+    measurements: Vec<MultimodalBenchmarkMeasurement>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -773,7 +822,99 @@ pub fn build_multimodal_runtime_benchmark(
         bail!("model runtime guard denied benchmark execution");
     }
     let approved_by = approved_by.unwrap().to_string();
-    let model_output = deterministic_fixture_model_output(&capability.id, &fixture);
+    let connected_probe = options
+        .connected_runtime
+        .filter(|runtime_id| !runtime_id.trim().is_empty())
+        .map(|runtime_id| {
+            run_connected_runtime_probe(options.project_root, runtime_id, &capability.id)
+        })
+        .transpose()?;
+    let runtime_id = connected_probe
+        .as_ref()
+        .map(|probe| probe.evidence.runtime_id.clone())
+        .unwrap_or_else(|| "forge_deterministic_fixture_runtime".to_string());
+    let model_id = connected_probe
+        .as_ref()
+        .map(|probe| probe.evidence.model_id.clone())
+        .unwrap_or_else(|| "forge_fixture_model_v1".to_string());
+    let model_output = connected_probe
+        .as_ref()
+        .map(|probe| probe.model_output.clone())
+        .unwrap_or_else(|| deterministic_fixture_model_output(&capability.id, &fixture));
+    let connected_runtime = connected_probe.as_ref().map(|probe| probe.evidence.clone());
+    let mut measurements = vec![
+        benchmark_measurement(
+            "runtime_execution_performed",
+            "true",
+            "boolean",
+            "forge_runtime_benchmark",
+        ),
+        benchmark_measurement(
+            "model_execution_performed",
+            "true",
+            "boolean",
+            "forge_runtime_benchmark",
+        ),
+        benchmark_measurement("quality_score", "1.0", "score", "deterministic_fixture"),
+        benchmark_measurement("latency_ms", "1", "ms", "deterministic_fixture"),
+        benchmark_measurement(
+            "device_access_performed",
+            "false",
+            "boolean",
+            "guard_matrix",
+        ),
+        benchmark_measurement(
+            "network_access_performed",
+            "false",
+            "boolean",
+            "guard_matrix",
+        ),
+    ];
+    if let Some(probe) = connected_probe.as_ref() {
+        measurements.extend(probe.measurements.clone());
+    }
+    let mut guard_checks = vec![
+        "experimental_opt_in_required".to_string(),
+        "human_approval_recorded".to_string(),
+        "confirm_runtime_execution_recorded".to_string(),
+        "model_guard_allowed".to_string(),
+        "no_installs_performed".to_string(),
+        "no_camera_microphone_screen_input_filesystem_access".to_string(),
+        "no_network_access".to_string(),
+    ];
+    if connected_runtime.is_some() {
+        guard_checks.push("connected_runtime_manifest_loaded".to_string());
+        guard_checks.push("connected_runtime_probe_completed".to_string());
+        guard_checks.push("connected_runtime_declares_no_network_or_device_access".to_string());
+    }
+    let mut artifact_manifest = vec![
+        "multimodal-runtime-benchmark.json".to_string(),
+        "multimodal-runtime-benchmark.md".to_string(),
+        "multimodal-runtime-guard-receipt.json".to_string(),
+    ];
+    if connected_runtime.is_some() {
+        artifact_manifest.push("multimodal-connected-runtime-probe.json".to_string());
+    }
+    let mut evidence_manifest = vec![
+        format!("capability_id={}", options.capability_id),
+        format!("fixture_id={}", options.fixture_id),
+        "experimental_opt_in=true".to_string(),
+        "human_approval_recorded=true".to_string(),
+        "confirm_runtime_execution=true".to_string(),
+        "guard_approved_model_runtime_execution=true".to_string(),
+        "runtime_execution_performed=true".to_string(),
+        "model_execution_performed=true".to_string(),
+        "installs_performed=false".to_string(),
+        "device_access_performed=false".to_string(),
+        "network_access_performed=false".to_string(),
+        "camera_microphone_screen_input_filesystem_blocked_without_guard=true".to_string(),
+    ];
+    if let Some(runtime) = connected_runtime.as_ref() {
+        evidence_manifest.push("connected_runtime_manifest_loaded=true".to_string());
+        evidence_manifest.push(format!("connected_runtime_id={}", runtime.runtime_id));
+        evidence_manifest.push(format!("connected_model_id={}", runtime.model_id));
+        evidence_manifest.push("connected_runtime_probe_completed=true".to_string());
+    }
 
     Ok(MultimodalRuntimeBenchmarkReport {
         schema_version: RUNTIME_BENCHMARK_SCHEMA_VERSION.to_string(),
@@ -785,8 +926,8 @@ pub fn build_multimodal_runtime_benchmark(
         fixture_only: false,
         approved_by,
         feature_flag_enabled: options.enable_experimental,
-        runtime_id: "forge_deterministic_fixture_runtime".to_string(),
-        model_id: "forge_fixture_model_v1".to_string(),
+        runtime_id,
+        model_id,
         runtime_execution_performed: true,
         model_execution_performed: true,
         installs_performed: false,
@@ -799,54 +940,13 @@ pub fn build_multimodal_runtime_benchmark(
         filesystem_access_performed: false,
         guard,
         model_output,
+        connected_runtime,
         promotion_ready: false,
         promotion_gate: "production_model_runtime_benchmark_required".to_string(),
-        measurements: vec![
-            benchmark_measurement(
-                "runtime_execution_performed",
-                "true",
-                "boolean",
-                "forge_runtime_benchmark",
-            ),
-            benchmark_measurement(
-                "model_execution_performed",
-                "true",
-                "boolean",
-                "forge_runtime_benchmark",
-            ),
-            benchmark_measurement("quality_score", "1.0", "score", "deterministic_fixture"),
-            benchmark_measurement("latency_ms", "1", "ms", "deterministic_fixture"),
-            benchmark_measurement("device_access_performed", "false", "boolean", "guard_matrix"),
-            benchmark_measurement("network_access_performed", "false", "boolean", "guard_matrix"),
-        ],
-        guard_checks: vec![
-            "experimental_opt_in_required".to_string(),
-            "human_approval_recorded".to_string(),
-            "confirm_runtime_execution_recorded".to_string(),
-            "model_guard_allowed".to_string(),
-            "no_installs_performed".to_string(),
-            "no_camera_microphone_screen_input_filesystem_access".to_string(),
-            "no_network_access".to_string(),
-        ],
-        artifact_manifest: vec![
-            "multimodal-runtime-benchmark.json".to_string(),
-            "multimodal-runtime-benchmark.md".to_string(),
-            "multimodal-runtime-guard-receipt.json".to_string(),
-        ],
-        evidence_manifest: vec![
-            format!("capability_id={}", options.capability_id),
-            format!("fixture_id={}", options.fixture_id),
-            "experimental_opt_in=true".to_string(),
-            "human_approval_recorded=true".to_string(),
-            "confirm_runtime_execution=true".to_string(),
-            "guard_approved_model_runtime_execution=true".to_string(),
-            "runtime_execution_performed=true".to_string(),
-            "model_execution_performed=true".to_string(),
-            "installs_performed=false".to_string(),
-            "device_access_performed=false".to_string(),
-            "network_access_performed=false".to_string(),
-            "camera_microphone_screen_input_filesystem_blocked_without_guard=true".to_string(),
-        ],
+        measurements,
+        guard_checks,
+        artifact_manifest,
+        evidence_manifest,
         next_action:
             "Use this guarded runtime benchmark as execution-path evidence, then add production model/runtime benchmarks with real installed models before promoting multimodal beyond groundwork."
                 .to_string(),
@@ -1777,6 +1877,142 @@ fn deterministic_fixture_model_output(
         "deterministic": true,
         "secret_free": fixture.secret_free,
     })
+}
+
+fn run_connected_runtime_probe(
+    project_root: Option<&Path>,
+    runtime_id: &str,
+    capability_id: &str,
+) -> Result<ConnectedRuntimeProbe> {
+    let project_root = match project_root {
+        Some(path) => path.to_path_buf(),
+        None => env::current_dir()?,
+    };
+    let manifest_path = project_root.join(MULTIMODAL_RUNTIMES_RELATIVE_PATH);
+    let manifest_bytes = fs::read(&manifest_path).with_context(|| {
+        format!(
+            "connected multimodal runtime manifest not found at {}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest: MultimodalConnectedRuntimeManifest = serde_json::from_slice(&manifest_bytes)
+        .with_context(|| {
+            format!(
+                "invalid connected multimodal runtime manifest {}",
+                manifest_path.display()
+            )
+        })?;
+    let runtime = manifest
+        .runtimes
+        .into_iter()
+        .find(|candidate| candidate.id == runtime_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "connected multimodal runtime `{}` not declared in {}",
+                runtime_id,
+                manifest_path.display()
+            )
+        })?;
+    if !runtime
+        .capabilities
+        .iter()
+        .any(|capability| capability == capability_id)
+    {
+        bail!(
+            "connected multimodal runtime `{}` does not declare capability `{}`",
+            runtime.id,
+            capability_id
+        );
+    }
+    if runtime.probe_command.is_empty() {
+        bail!(
+            "connected multimodal runtime `{}` must declare a non-empty probe_command array",
+            runtime.id
+        );
+    }
+    if runtime.network_access || runtime.device_access {
+        bail!(
+            "connected multimodal runtime `{}` declares network or device access; runtime-benchmark only allows no-network/no-device probes",
+            runtime.id
+        );
+    }
+
+    let command_sha256 = hex_sha256(serde_json::to_string(&runtime.probe_command)?.as_bytes());
+    let output = Command::new(&runtime.probe_command[0])
+        .args(&runtime.probe_command[1..])
+        .current_dir(&project_root)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to execute connected multimodal runtime probe `{}`",
+                runtime.id
+            )
+        })?;
+    let exit_code = output.status.code().unwrap_or(-1);
+    if !output.status.success() {
+        bail!(
+            "connected multimodal runtime `{}` probe exited with code {}",
+            runtime.id,
+            exit_code
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let model_output: Value = serde_json::from_str(stdout.trim()).with_context(|| {
+        format!(
+            "connected multimodal runtime `{}` probe must write JSON to stdout",
+            runtime.id
+        )
+    })?;
+    let measurements = connected_runtime_measurements(&model_output);
+
+    Ok(ConnectedRuntimeProbe {
+        evidence: MultimodalConnectedRuntimeEvidence {
+            schema_version: "forge.multimodal.connected_runtime_probe.v1".to_string(),
+            status: "connected_runtime_probe_completed".to_string(),
+            manifest_path: manifest_path.display().to_string(),
+            manifest_status: "loaded".to_string(),
+            runtime_id: runtime.id,
+            model_id: runtime.model_id,
+            capabilities: runtime.capabilities,
+            probe_command_sha256: command_sha256,
+            probe_exit_code: exit_code,
+            stdout_sha256: hex_sha256(&output.stdout),
+            stderr_sha256: hex_sha256(&output.stderr),
+            network_access_declared: runtime.network_access,
+            device_access_declared: runtime.device_access,
+        },
+        model_output,
+        measurements,
+    })
+}
+
+fn connected_runtime_measurements(model_output: &Value) -> Vec<MultimodalBenchmarkMeasurement> {
+    let mut measurements = Vec::new();
+    if let Some(value) = measurement_value(model_output.get("quality_score")) {
+        measurements.push(benchmark_measurement(
+            "quality_score",
+            &value,
+            "score",
+            "connected_runtime_probe",
+        ));
+    }
+    if let Some(value) = measurement_value(model_output.get("latency_ms")) {
+        measurements.push(benchmark_measurement(
+            "latency_ms",
+            &value,
+            "ms",
+            "connected_runtime_probe",
+        ));
+    }
+    measurements
+}
+
+fn measurement_value(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    if let Some(number) = value.as_f64() {
+        return Some(number.to_string());
+    }
+    value.as_str().map(ToString::to_string)
 }
 
 fn benchmark_measurement(

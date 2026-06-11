@@ -1698,6 +1698,7 @@ struct MultimodalRuntimeBenchmarkInput {
     approved_by: Option<String>,
     confirm_runtime_execution: Option<bool>,
     allow_model: Option<bool>,
+    connected_runtime: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5815,7 +5816,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.multimodal.runtime_benchmark",
                 "Run Guarded Multimodal Runtime Benchmark",
-                "Run an approval-gated, guard-approved deterministic local fixture runtime benchmark after experimental opt-in. This performs no installs, device access, filesystem access or network access.",
+                "Run an approval-gated, guard-approved deterministic or project-connected runtime benchmark after experimental opt-in. This performs no installs, device access or network access; connected runtimes are loaded from a project manifest and require an explicit connected_runtime id.",
                 object_schema(
                     &[
                         ("capability_id", "string", "capability id from forge.multimodal.status"),
@@ -5825,6 +5826,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         ("allow_model", "boolean", "must be true after reviewing the model runtime guard"),
                         ("enable_experimental", "boolean", "optional explicit experimental flag"),
                         ("project_root", "string", "optional project root containing .forge/multimodal.json"),
+                        ("connected_runtime", "string", "optional runtime id from .forge/multimodal-runtimes.json to probe under the same guard"),
                     ],
                     &[
                         "capability_id",
@@ -8827,9 +8829,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     capability_id: &capability,
                     fixture_id: &fixture,
                     enable_experimental: feature_flag.enabled,
+                    project_root: input.project_root.as_deref().map(std::path::Path::new),
                     approved_by: input.approved_by.as_deref(),
                     confirm_runtime_execution: input.confirm_runtime_execution.unwrap_or(false),
                     allow_model: input.allow_model.unwrap_or(false),
+                    connected_runtime: input.connected_runtime.as_deref(),
                 },
             )?)?
         }

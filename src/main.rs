@@ -3417,6 +3417,8 @@ enum MultimodalCommands {
         confirm_runtime_execution: bool,
         #[arg(long = "allow-model")]
         allow_model: bool,
+        #[arg(long = "connected-runtime")]
+        connected_runtime: Option<String>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -8056,6 +8058,7 @@ fn run() -> Result<i32> {
                 approved_by,
                 confirm_runtime_execution,
                 allow_model,
+                connected_runtime,
                 output,
             } => {
                 let feature_flag =
@@ -8065,9 +8068,11 @@ fn run() -> Result<i32> {
                         capability_id: &capability,
                         fixture_id: &fixture,
                         enable_experimental: feature_flag.enabled,
+                        project_root: project_root.as_deref(),
                         approved_by: approved_by.as_deref(),
                         confirm_runtime_execution,
                         allow_model,
+                        connected_runtime: connected_runtime.as_deref(),
                     })?;
                 print_response(output, &report)?;
                 Ok(0)

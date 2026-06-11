@@ -3431,6 +3431,14 @@ fn milestone_status_surfaces_05_boundary_and_promotion_gate() {
         .as_str()
         .unwrap()
         .contains(".forge/multimodal.json"));
+    assert!(multimodal["evidence"]
+        .as_str()
+        .unwrap()
+        .contains(".forge/multimodal-runtimes.json"));
+    assert!(multimodal["evidence"]
+        .as_str()
+        .unwrap()
+        .contains("connected_runtime"));
     assert!(multimodal["gap_before_promotion"]
         .as_str()
         .unwrap()
@@ -3782,6 +3790,14 @@ fn packaged_skill_mentions_multimodal_benchmark_and_demo_plan_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains(".forge/multimodal.json"),
         "the packaged Forge skill should teach agents where explicit multimodal feature-flag config lives"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains(".forge/multimodal-runtimes.json"),
+        "the packaged Forge skill should teach agents where connected multimodal runtime manifests live"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("--connected-runtime"),
+        "the packaged Forge skill should teach agents how to select an approved connected runtime benchmark"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("\"project_root\""),
@@ -4555,6 +4571,103 @@ fn multimodal_runtime_benchmark_requires_opt_in_and_records_guarded_model_runtim
     assert_eq!(mcp_json["result"]["capability_id"], "ocr");
     assert_eq!(mcp_json["result"]["model_execution_performed"], true);
     assert_eq!(mcp_json["result"]["network_access_performed"], false);
+}
+
+#[test]
+fn multimodal_runtime_benchmark_can_use_approved_connected_runtime_manifest() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("multimodal.json"),
+        r#"{"experimental_enabled":true,"approved_by":"contract-test","reason":"connected runtime benchmark","scope":"project"}"#,
+    )
+    .unwrap();
+    fs::write(
+        forge_dir.join("multimodal-runtimes.json"),
+        serde_json::json!({
+            "runtimes": [{
+                "id": "connected-echo-runtime",
+                "model_id": "connected-fixture-model",
+                "capabilities": ["image_understanding"],
+                "probe_command": [
+                    "/bin/sh",
+                    "-c",
+                    "printf '{\"labels\":[\"document\",\"connected-runtime\"],\"quality_score\":0.93,\"latency_ms\":7}'"
+                ],
+                "network_access": false,
+                "device_access": false
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .current_dir(temp.path())
+        .args([
+            "multimodal",
+            "runtime-benchmark",
+            "--capability",
+            "image_understanding",
+            "--fixture",
+            "static_image_labels",
+            "--connected-runtime",
+            "connected-echo-runtime",
+            "--approved-by",
+            "contract-test",
+            "--confirm-runtime-execution",
+            "--allow-model",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.multimodal.runtime_benchmark.v1"
+    );
+    assert_eq!(json["runtime_id"], "connected-echo-runtime");
+    assert_eq!(json["model_id"], "connected-fixture-model");
+    assert_eq!(
+        json["connected_runtime"]["status"],
+        "connected_runtime_probe_completed"
+    );
+    assert_eq!(json["connected_runtime"]["manifest_status"], "loaded");
+    assert_eq!(json["connected_runtime"]["probe_exit_code"], 0);
+    assert_eq!(json["connected_runtime"]["network_access_declared"], false);
+    assert_eq!(json["connected_runtime"]["device_access_declared"], false);
+    assert!(json["model_output"]["labels"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("connected-runtime")));
+    assert!(json["evidence_manifest"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("connected_runtime_manifest_loaded=true")));
+    assert!(json["evidence_manifest"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "connected_runtime_id=connected-echo-runtime"
+        )));
+    assert!(json["measurements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |measurement| measurement["source"] == "connected_runtime_probe"
+                && measurement["id"] == "quality_score"
+                && measurement["value"] == "0.93"
+        ));
 }
 
 #[test]
