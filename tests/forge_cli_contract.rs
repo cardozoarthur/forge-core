@@ -733,6 +733,179 @@ printf 'native:%s env:%s args:%s\n' "$0" "$FORGE_HARNESS" "$*"
 }
 
 #[cfg(unix)]
+#[test]
+fn harness_shim_status_reports_path_precedence_and_recursion_risk_for_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let real_dir = temp.path().join("real");
+    let shim_dir = temp.path().join("shims");
+    fs::create_dir_all(&real_dir).unwrap();
+    fs::create_dir_all(&shim_dir).unwrap();
+    write_fake_executor(
+        &real_dir,
+        "codex",
+        r#"#!/bin/sh
+printf 'native:%s\n' "$*"
+"#,
+    );
+    let path = format!(
+        "{}:{}:{}",
+        shim_dir.display(),
+        real_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "install-shims",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--forge-first",
+            "--workflow",
+            "wf_status",
+            "--run",
+            "run_status",
+            "--context-budget",
+            "768",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let status_output = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "shim-status",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: Value = serde_json::from_slice(&status_output).unwrap();
+    assert_eq!(status["schema_version"], "forge.harness.shim_status.v1");
+    assert_eq!(status["status"], "shim_status_ready");
+    assert_eq!(status["executor"], "codex");
+    assert_eq!(status["shim_exists"], true);
+    assert_eq!(status["forge_owned"], true);
+    assert_eq!(status["executable"], true);
+    assert_eq!(status["path_precedence"], "shim_first");
+    assert_eq!(status["would_recurse"], false);
+    assert_eq!(status["store_path"], store.to_str().unwrap());
+    assert_eq!(status["real_command_source"], "shim_script");
+    assert_eq!(
+        status["real_command_resolution_status"],
+        "parsed_from_forge_shim"
+    );
+    assert!(status["resolved_path_from_path"]
+        .as_str()
+        .unwrap()
+        .ends_with("/shims/codex"));
+    assert!(status["real_command"]
+        .as_str()
+        .unwrap()
+        .ends_with("/real/codex"));
+    assert!(status["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item == "PATH resolves to the Forge-owned shim"));
+
+    let manual_dir = temp.path().join("manual-shims");
+    fs::create_dir_all(&manual_dir).unwrap();
+    let manual_shim = manual_dir.join("codex");
+    fs::write(&manual_shim, "#!/bin/sh\ncodex \"$@\"\n").unwrap();
+    let mut perms = fs::metadata(&manual_shim).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&manual_shim, perms).unwrap();
+    let manual_path = format!(
+        "{}:{}:{}",
+        manual_dir.display(),
+        real_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let manual_output = forge()
+        .env("PATH", manual_path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "shim-status",
+            "--shim-dir",
+            manual_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manual_status: Value = serde_json::from_slice(&manual_output).unwrap();
+    assert_eq!(
+        manual_status["schema_version"],
+        "forge.harness.shim_status.v1"
+    );
+    assert_eq!(manual_status["status"], "shim_status_blocked");
+    assert_eq!(manual_status["forge_owned"], false);
+    assert_eq!(manual_status["path_precedence"], "manual_shim_first");
+    assert_eq!(manual_status["would_recurse"], true);
+    assert!(manual_status["instructions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item.as_str().unwrap().contains("install-shims")));
+
+    let mcp_input = serde_json::json!({
+        "shim_dir": shim_dir,
+        "executor": "codex"
+    });
+    let mcp_output = forge()
+        .env("PATH", &path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.shim_status",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_status: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_status["result"]["schema_version"],
+        "forge.harness.shim_status.v1"
+    );
+    assert_eq!(mcp_status["result"]["status"], "shim_status_ready");
+    assert_eq!(mcp_status["result"]["path_precedence"], "shim_first");
+}
+
+#[cfg(unix)]
 fn write_fake_executor(bin_dir: &Path, name: &str, body: &str) {
     let executor_path = bin_dir.join(name);
     fs::write(&executor_path, body).unwrap();

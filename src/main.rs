@@ -59,9 +59,9 @@ use forge_core::executor::{
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff;
 use forge_core::harness::{
-    analyze_token_headroom, build_cli_wrapper_plan, install_cli_harness_shim,
-    persist_token_headroom_report, retrieve_headroom_blob, run_cli_harness_exec,
-    CliHarnessExecOptions, CliShimInstallOptions,
+    analyze_token_headroom, build_cli_wrapper_plan, inspect_cli_harness_shim_status,
+    install_cli_harness_shim, persist_token_headroom_report, retrieve_headroom_blob,
+    run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions,
 };
 use forge_core::identity::{
     audit_tenant_index, ensure_operating_context_policy, ensure_workflow_policy,
@@ -610,6 +610,14 @@ enum HarnessCommands {
         token_headroom: bool,
         #[arg(long, default_value_t = false)]
         force: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ShimStatus {
+        #[arg(long = "shim-dir")]
+        shim_dir: PathBuf,
+        #[arg(long)]
+        executor: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -5169,6 +5177,18 @@ fn run() -> Result<i32> {
                     context_budget,
                     token_headroom,
                     force,
+                })?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            HarnessCommands::ShimStatus {
+                shim_dir,
+                executor,
+                output,
+            } => {
+                let report = inspect_cli_harness_shim_status(CliShimStatusOptions {
+                    shim_dir: &shim_dir,
+                    executor: &executor,
                 })?;
                 print_response(output, &report)?;
                 Ok(0)

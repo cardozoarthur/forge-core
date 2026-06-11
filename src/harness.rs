@@ -13,6 +13,7 @@ pub const CLI_WRAPPER_PLAN_SCHEMA_VERSION: &str = "forge.harness.cli_wrapper_pla
 pub const HEADROOM_RETRIEVAL_SCHEMA_VERSION: &str = "forge.harness.headroom_retrieval.v1";
 pub const CLI_HARNESS_EXEC_SCHEMA_VERSION: &str = "forge.harness.exec_receipt.v1";
 pub const CLI_SHIM_INSTALL_SCHEMA_VERSION: &str = "forge.harness.shim_install.v1";
+pub const CLI_SHIM_STATUS_SCHEMA_VERSION: &str = "forge.harness.shim_status.v1";
 const CLI_SHIM_MARKER: &str = "# forge-harness-shim:v1";
 
 #[derive(Debug, Clone, Serialize)]
@@ -132,6 +133,30 @@ pub struct CliShimReport {
     pub notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CliShimStatusReport {
+    pub schema_version: String,
+    pub status: String,
+    pub shim_dir: String,
+    pub executor: String,
+    pub shim_path: String,
+    pub shim_exists: bool,
+    pub forge_owned: bool,
+    pub executable: bool,
+    pub path_precedence: String,
+    pub path_entry_index: Option<usize>,
+    pub resolved_path_from_path: Option<String>,
+    pub real_command: Option<String>,
+    pub real_command_source: String,
+    pub real_command_resolution_status: String,
+    pub store_path: Option<String>,
+    pub forge_binary: Option<String>,
+    pub would_recurse: bool,
+    pub checks: Vec<String>,
+    pub instructions: Vec<String>,
+    pub notes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct CliShimInstallOptions<'a> {
     pub shim_dir: &'a Path,
@@ -144,6 +169,12 @@ pub struct CliShimInstallOptions<'a> {
     pub context_budget: usize,
     pub token_headroom: bool,
     pub force: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CliShimStatusOptions<'a> {
+    pub shim_dir: &'a Path,
+    pub executor: &'a str,
 }
 
 #[derive(Clone, Copy)]
@@ -563,6 +594,134 @@ pub fn install_cli_harness_shim(
     })
 }
 
+pub fn inspect_cli_harness_shim_status(
+    options: CliShimStatusOptions<'_>,
+) -> Result<CliShimStatusReport> {
+    let executor = normalize_executor(options.executor);
+    let shim_dir = options
+        .shim_dir
+        .canonicalize()
+        .unwrap_or_else(|_| options.shim_dir.to_path_buf());
+    let shim_path = shim_dir.join(shim_binary_name(&executor));
+    let shim_exists = shim_path.is_file();
+    let shim_content = if shim_exists {
+        Some(
+            fs::read_to_string(&shim_path)
+                .with_context(|| format!("failed to read shim `{}`", shim_path.display()))?,
+        )
+    } else {
+        None
+    };
+    let forge_owned = shim_content
+        .as_deref()
+        .is_some_and(|content| content.contains(CLI_SHIM_MARKER));
+    let executable = shim_exists && is_executable(&shim_path);
+    let path_entry_index = path_entry_index(&shim_dir);
+    let path_resolution = resolve_executable_from_path(&shim_binary_name(&executor));
+    let resolved_is_shim = path_resolution
+        .path
+        .as_deref()
+        .is_some_and(|path| same_path(Path::new(path), &shim_path));
+    let path_precedence = match (&path_resolution.path, path_entry_index, resolved_is_shim) {
+        (None, _, _) => "missing_from_path",
+        (Some(_), Some(_), true) if forge_owned => "shim_first",
+        (Some(_), Some(_), true) => "manual_shim_first",
+        (Some(_), Some(_), false) => "native_first",
+        (Some(_), None, _) => "shim_not_on_path",
+    }
+    .to_string();
+
+    let parsed_script = shim_content.as_deref().and_then(parse_cli_shim_script);
+    let fallback_real_command = if parsed_script
+        .as_ref()
+        .and_then(|script| script.real_command.as_ref())
+        .is_none()
+    {
+        resolve_real_command_for_status(&executor, &shim_dir)
+    } else {
+        None
+    };
+    let real_command = parsed_script
+        .as_ref()
+        .and_then(|script| script.real_command.clone())
+        .or_else(|| {
+            fallback_real_command
+                .as_ref()
+                .map(|resolution| resolution.command.clone())
+        });
+    let (real_command_source, real_command_resolution_status) = if parsed_script
+        .as_ref()
+        .and_then(|script| script.real_command.as_ref())
+        .is_some()
+    {
+        (
+            "shim_script".to_string(),
+            "parsed_from_forge_shim".to_string(),
+        )
+    } else if let Some(resolution) = &fallback_real_command {
+        (resolution.source.clone(), resolution.status.clone())
+    } else if shim_exists {
+        (
+            "unresolved".to_string(),
+            "real_command_unresolved".to_string(),
+        )
+    } else {
+        ("unresolved".to_string(), "shim_missing".to_string())
+    };
+    let real_command_is_shim = real_command
+        .as_deref()
+        .is_some_and(|command| same_path(Path::new(command), &shim_path));
+    let would_recurse = real_command_is_shim || (resolved_is_shim && !forge_owned);
+    let status = if !shim_exists {
+        "shim_status_missing"
+    } else if would_recurse {
+        "shim_status_blocked"
+    } else if forge_owned && executable && resolved_is_shim {
+        "shim_status_ready"
+    } else {
+        "shim_status_degraded"
+    };
+
+    Ok(CliShimStatusReport {
+        schema_version: CLI_SHIM_STATUS_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        shim_dir: shim_dir.display().to_string(),
+        executor: executor.clone(),
+        shim_path: shim_path.display().to_string(),
+        shim_exists,
+        forge_owned,
+        executable,
+        path_precedence,
+        path_entry_index,
+        resolved_path_from_path: path_resolution.path,
+        real_command,
+        real_command_source,
+        real_command_resolution_status,
+        store_path: parsed_script
+            .as_ref()
+            .and_then(|script| script.store_path.clone()),
+        forge_binary: parsed_script
+            .as_ref()
+            .and_then(|script| script.forge_binary.clone()),
+        would_recurse,
+        checks: shim_status_checks(
+            shim_exists,
+            forge_owned,
+            executable,
+            resolved_is_shim,
+            would_recurse,
+            path_resolution.status.as_str(),
+        ),
+        instructions: shim_status_instructions(status, &shim_dir, &executor),
+        notes: vec![
+            "Shim status is an audit report; it does not create, overwrite or execute CLI binaries."
+                .to_string(),
+            "Use this before relying on PATH precedence for Forge-first brain CLI operation."
+                .to_string(),
+        ],
+    })
+}
+
 pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHarnessExecReceipt> {
     let CliHarnessExecOptions {
         store,
@@ -819,6 +978,13 @@ struct RealCommandResolution {
     status: String,
 }
 
+#[derive(Default)]
+struct ParsedCliShimScript {
+    forge_binary: Option<String>,
+    store_path: Option<String>,
+    real_command: Option<String>,
+}
+
 fn resolve_real_command_for_shim(
     executor: &str,
     explicit_real_cmd: Option<&str>,
@@ -858,6 +1024,210 @@ fn resolve_real_command_for_shim(
     );
 }
 
+fn resolve_real_command_for_status(
+    executor: &str,
+    shim_dir: &Path,
+) -> Option<RealCommandResolution> {
+    let binary_name = shim_binary_name(executor);
+    let path_var = env::var_os("PATH")?;
+    for dir in env::split_paths(&path_var) {
+        if same_path(&dir, shim_dir) {
+            continue;
+        }
+        let candidate = dir.join(&binary_name);
+        if candidate.is_file() {
+            return Some(RealCommandResolution {
+                command: canonical_or_display(candidate),
+                source: "path_discovery".to_string(),
+                status: "resolved_from_path_excluding_shim_dir".to_string(),
+            });
+        }
+    }
+    None
+}
+
+struct PathResolution {
+    path: Option<String>,
+    status: String,
+}
+
+fn resolve_executable_from_path(binary_name: &str) -> PathResolution {
+    let Some(path_var) = env::var_os("PATH") else {
+        return PathResolution {
+            path: None,
+            status: "path_unavailable".to_string(),
+        };
+    };
+    for dir in env::split_paths(&path_var) {
+        let candidate = dir.join(binary_name);
+        if candidate.is_file() {
+            return PathResolution {
+                path: Some(canonical_or_display(candidate)),
+                status: "resolved_from_path".to_string(),
+            };
+        }
+    }
+    PathResolution {
+        path: None,
+        status: "not_found_in_path".to_string(),
+    }
+}
+
+fn path_entry_index(path: &Path) -> Option<usize> {
+    let path_var = env::var_os("PATH")?;
+    env::split_paths(&path_var)
+        .enumerate()
+        .find_map(|(index, entry)| same_path(&entry, path).then_some(index))
+}
+
+fn parse_cli_shim_script(script: &str) -> Option<ParsedCliShimScript> {
+    let exec_line = script
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("exec "))?;
+    let words = split_shell_words(exec_line);
+    if words.len() < 2 || words.first()? != "exec" {
+        return None;
+    }
+    let store_path = words
+        .windows(2)
+        .find(|window| window.first().is_some_and(|value| value == "--store"))
+        .and_then(|window| window.get(1))
+        .cloned();
+    let real_command = words
+        .iter()
+        .position(|word| word == "--")
+        .and_then(|index| words.get(index + 1))
+        .cloned();
+    Some(ParsedCliShimScript {
+        forge_binary: words.get(1).cloned(),
+        store_path,
+        real_command,
+    })
+}
+
+fn split_shell_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut in_word = false;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some('\'') => {
+                if ch == '\'' {
+                    quote = None;
+                } else {
+                    current.push(ch);
+                }
+            }
+            Some('"') => {
+                if ch == '"' {
+                    quote = None;
+                } else if ch == '\\' {
+                    if let Some(next) = chars.next() {
+                        current.push(next);
+                    }
+                } else {
+                    current.push(ch);
+                }
+            }
+            Some(_) => {}
+            None if ch.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            None if ch == '\'' || ch == '"' => {
+                quote = Some(ch);
+                in_word = true;
+            }
+            None if ch == '\\' => {
+                in_word = true;
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            None => {
+                in_word = true;
+                current.push(ch);
+            }
+        }
+    }
+    if in_word {
+        words.push(current);
+    }
+    words
+}
+
+fn shim_status_checks(
+    shim_exists: bool,
+    forge_owned: bool,
+    executable: bool,
+    resolved_is_shim: bool,
+    would_recurse: bool,
+    path_resolution_status: &str,
+) -> Vec<String> {
+    let mut checks = Vec::new();
+    checks.push(if shim_exists {
+        "shim file exists".to_string()
+    } else {
+        "shim file is missing".to_string()
+    });
+    checks.push(if forge_owned {
+        "shim has Forge ownership marker".to_string()
+    } else {
+        "shim does not have Forge ownership marker".to_string()
+    });
+    checks.push(if executable {
+        "shim file is executable".to_string()
+    } else {
+        "shim file is not executable".to_string()
+    });
+    checks.push(if resolved_is_shim && forge_owned {
+        "PATH resolves to the Forge-owned shim".to_string()
+    } else if resolved_is_shim {
+        "PATH resolves to a non-Forge shim".to_string()
+    } else {
+        format!("PATH resolution status: {path_resolution_status}")
+    });
+    checks.push(if would_recurse {
+        "recursion risk detected before execution".to_string()
+    } else {
+        "no shim recursion risk detected".to_string()
+    });
+    checks
+}
+
+fn shim_status_instructions(status: &str, shim_dir: &Path, executor: &str) -> Vec<String> {
+    match status {
+        "shim_status_ready" => vec![
+            "no action required; PATH currently prefers the Forge-owned shim".to_string(),
+            "run `forge harness exec` directly when you need a one-off guarded receipt".to_string(),
+        ],
+        "shim_status_missing" => vec![format!(
+            "run `forge harness install-shims --shim-dir {} --executor {executor}`",
+            shell_quote(&shim_dir.display().to_string())
+        )],
+        "shim_status_blocked" => vec![
+            format!(
+                "run `forge harness install-shims --shim-dir {} --executor {executor} --force` only if the existing file is disposable",
+                shell_quote(&shim_dir.display().to_string())
+            ),
+            "move the non-Forge shim later in PATH or replace it through Forge before enabling Forge-first shells".to_string(),
+        ],
+        _ => vec![
+            format!(
+                "export PATH={}:$PATH when this shell should prefer the Forge shim",
+                shell_quote(&shim_dir.display().to_string())
+            ),
+            "rerun `forge harness shim-status` after changing PATH or reinstalling the shim"
+                .to_string(),
+        ],
+    }
+}
+
 fn same_path(left: &Path, right: &Path) -> bool {
     let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
     let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
@@ -884,6 +1254,20 @@ fn make_executable(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::metadata(path)
+        .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
 }
 
 fn build_output_headroom_report(

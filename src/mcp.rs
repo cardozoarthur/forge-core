@@ -45,9 +45,9 @@ use crate::event::{
 use crate::executor::load_executors;
 use crate::handoff::build_task_handoff;
 use crate::harness::{
-    analyze_token_headroom, build_cli_wrapper_plan, install_cli_harness_shim,
-    persist_token_headroom_report, retrieve_headroom_blob, run_cli_harness_exec,
-    CliHarnessExecOptions, CliShimInstallOptions,
+    analyze_token_headroom, build_cli_wrapper_plan, inspect_cli_harness_shim_status,
+    install_cli_harness_shim, persist_token_headroom_report, retrieve_headroom_blob,
+    run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions,
 };
 use crate::identity::{
     audit_tenant_index, ensure_workflow_policy, evaluate_tenant_policy_for_action,
@@ -437,6 +437,12 @@ struct HarnessInstallShimsInput {
     context_budget: Option<usize>,
     token_headroom: Option<bool>,
     force: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HarnessShimStatusInput {
+    shim_dir: String,
+    executor: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4751,6 +4757,18 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
+                "forge.harness.shim_status",
+                "Inspect Forge-First CLI Shim Status",
+                "Audit whether a brain CLI shim exists, is Forge-owned, has PATH precedence and avoids recursion before using Forge-first shells.",
+                object_schema(&[
+                    ("shim_dir", "string", "directory where Forge-owned shims should live"),
+                    ("executor", "string", "codex|claude|gemini|opencode"),
+                ], &["shim_dir", "executor"]),
+                "forge.harness.shim_status.v1",
+                &["forge", "harness", "shim-status", "--shim-dir", "<dir>", "--executor", "<executor>", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.harness.exec",
                 "Execute Forge Harness Receipt",
                 "Return a dry-run or explicitly guarded execution receipt for a Forge-first brain CLI invocation, including executable resolution, env overlay and bounded output hashes.",
@@ -7179,6 +7197,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 context_budget: input.context_budget.unwrap_or(DEFAULT_CONTEXT_BUDGET),
                 token_headroom: input.token_headroom.unwrap_or(true),
                 force: input.force.unwrap_or(false),
+            })?)?
+        }
+        "forge.harness.shim_status" => {
+            let input: HarnessShimStatusInput = parse_input(input)?;
+            serde_json::to_value(inspect_cli_harness_shim_status(CliShimStatusOptions {
+                shim_dir: std::path::Path::new(&input.shim_dir),
+                executor: &input.executor,
             })?)?
         }
         "forge.harness.exec" => {
