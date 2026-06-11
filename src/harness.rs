@@ -17,6 +17,7 @@ pub const CLI_HARNESS_EXEC_EVENT_SCHEMA_VERSION: &str = "forge.harness.exec_even
 pub const CLI_HARNESS_MODE_SCHEMA_VERSION: &str = "forge.harness.mode.v1";
 pub const CLI_HARNESS_DOCTOR_SCHEMA_VERSION: &str = "forge.harness.doctor.v1";
 pub const CLI_HARNESS_HEADROOM_PLAN_SCHEMA_VERSION: &str = "forge.harness.headroom_plan.v1";
+pub const CLI_HARNESS_ADOPTION_PLAN_SCHEMA_VERSION: &str = "forge.harness.adoption_plan.v1";
 pub const CLI_HARNESS_SESSION_LIFECYCLE_PLAN_SCHEMA_VERSION: &str =
     "forge.harness.session_lifecycle_plan.v1";
 pub const CLI_SHIM_INSTALL_SCHEMA_VERSION: &str = "forge.harness.shim_install.v1";
@@ -188,6 +189,56 @@ pub struct HarnessHeadroomPlanReport {
     pub notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessAdoptionPlanReport {
+    pub schema_version: String,
+    pub status: String,
+    pub executor: String,
+    pub project_root: String,
+    pub shim_dir: String,
+    pub mutates_state: bool,
+    pub executes_child: bool,
+    pub recommended_project_config: HarnessRecommendedProjectConfig,
+    pub mode: HarnessModeReport,
+    pub headroom_plan: HarnessHeadroomPlanReport,
+    pub doctor: HarnessDoctorReport,
+    pub adoption_steps: Vec<HarnessAdoptionStep>,
+    pub commands: HarnessAdoptionCommands,
+    pub mcp_tools: Vec<String>,
+    pub next_action: String,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessRecommendedProjectConfig {
+    pub default_mode: String,
+    pub default_context_budget: usize,
+    pub default_token_headroom: bool,
+    pub require_token_headroom_for_forge_first: bool,
+    pub require_lineage_for_exec: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessAdoptionStep {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub command_key: String,
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessAdoptionCommands {
+    pub write_project_harness_config: Vec<String>,
+    pub mode: Vec<String>,
+    pub headroom_plan: Vec<String>,
+    pub doctor: Vec<String>,
+    pub install_shims: Vec<String>,
+    pub sync_executors: Vec<String>,
+    pub wrap_plan: Vec<String>,
+    pub exec_with_lineage: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct HarnessModeOptions<'a> {
     pub forge_first: bool,
@@ -218,6 +269,23 @@ pub struct HarnessHeadroomPlanOptions<'a> {
     pub command: &'a [String],
     pub forge_first: bool,
     pub forge_first_source: &'a str,
+    pub project_root: Option<&'a Path>,
+    pub workflow_id: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+    pub run_id: Option<&'a str>,
+    pub context_budget: usize,
+    pub context_budget_source: &'a str,
+    pub token_headroom: bool,
+    pub token_headroom_source: &'a str,
+    pub require_token_headroom_for_forge_first: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HarnessAdoptionPlanOptions<'a> {
+    pub shim_dir: &'a Path,
+    pub executor: &'a str,
+    pub forge_first: bool,
+    pub observe_only: bool,
     pub project_root: Option<&'a Path>,
     pub workflow_id: Option<&'a str>,
     pub task_id: Option<&'a str>,
@@ -913,6 +981,287 @@ pub fn build_harness_headroom_plan(
             "Headroom benchmark ideas absorbed here are local-first compression, wrapper env shaping, reversible refs and MCP-visible readiness without copying external code."
                 .to_string(),
         ],
+    }
+}
+
+pub fn build_harness_adoption_plan(
+    options: HarnessAdoptionPlanOptions<'_>,
+) -> Result<HarnessAdoptionPlanReport> {
+    let HarnessAdoptionPlanOptions {
+        shim_dir,
+        executor,
+        forge_first,
+        observe_only,
+        project_root,
+        workflow_id,
+        task_id,
+        run_id,
+        context_budget,
+        context_budget_source,
+        token_headroom,
+        token_headroom_source,
+        require_token_headroom_for_forge_first,
+    } = options;
+    let executor = normalize_executor(executor);
+    let project_root_path = project_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let mode = build_harness_mode_report(HarnessModeOptions {
+        forge_first,
+        observe_only,
+        project_root: Some(&project_root_path),
+    });
+    let headroom_plan = build_harness_headroom_plan(HarnessHeadroomPlanOptions {
+        executor: &executor,
+        command: &[],
+        forge_first: mode.forge_first,
+        forge_first_source: &mode.forge_first_source,
+        project_root: Some(&project_root_path),
+        workflow_id,
+        task_id,
+        run_id,
+        context_budget,
+        context_budget_source,
+        token_headroom,
+        token_headroom_source,
+        require_token_headroom_for_forge_first,
+    });
+    let doctor = build_harness_doctor_report(HarnessDoctorOptions {
+        shim_dir,
+        executor: &executor,
+        forge_first,
+        observe_only,
+        project_root: Some(&project_root_path),
+        workflow_id,
+        task_id,
+        run_id,
+        context_budget,
+        context_budget_source,
+        token_headroom,
+        token_headroom_source,
+        require_token_headroom_for_forge_first,
+    })?;
+
+    let project_root_display = project_root_path.display().to_string();
+    let shim_dir_display = shim_dir.display().to_string();
+    let recommended_project_config = HarnessRecommendedProjectConfig {
+        default_mode: "forge_first".to_string(),
+        default_context_budget: context_budget,
+        default_token_headroom: true,
+        require_token_headroom_for_forge_first: true,
+        require_lineage_for_exec: true,
+    };
+    let commands = HarnessAdoptionCommands {
+        write_project_harness_config: vec![
+            "mkdir".to_string(),
+            "-p".to_string(),
+            format!("{}/.forge", project_root_display),
+        ],
+        mode: vec![
+            "forge".to_string(),
+            "harness".to_string(),
+            "mode".to_string(),
+            "--project-root".to_string(),
+            project_root_display.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        headroom_plan: vec![
+            "forge".to_string(),
+            "harness".to_string(),
+            "headroom-plan".to_string(),
+            "--executor".to_string(),
+            executor.clone(),
+            "--project-root".to_string(),
+            project_root_display.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        doctor: vec![
+            "forge".to_string(),
+            "harness".to_string(),
+            "doctor".to_string(),
+            "--executor".to_string(),
+            executor.clone(),
+            "--shim-dir".to_string(),
+            shim_dir_display.clone(),
+            "--project-root".to_string(),
+            project_root_display.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        install_shims: vec![
+            "forge".to_string(),
+            "harness".to_string(),
+            "install-shims".to_string(),
+            "--shim-dir".to_string(),
+            shim_dir_display.clone(),
+            "--executor".to_string(),
+            executor.clone(),
+            "--project-root".to_string(),
+            project_root_display.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        sync_executors: vec![
+            "forge".to_string(),
+            "sync".to_string(),
+            "executors".to_string(),
+            "--shim-dir".to_string(),
+            shim_dir_display.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        wrap_plan: vec![
+            "forge".to_string(),
+            "harness".to_string(),
+            "wrap-plan".to_string(),
+            "--executor".to_string(),
+            executor.clone(),
+            "--project-root".to_string(),
+            project_root_display.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        exec_with_lineage: vec![
+            "forge".to_string(),
+            "harness".to_string(),
+            "exec".to_string(),
+            "--executor".to_string(),
+            executor.clone(),
+            "--project-root".to_string(),
+            project_root_display.clone(),
+            "--workflow".to_string(),
+            workflow_id.unwrap_or("<workflow-id>").to_string(),
+            "--task".to_string(),
+            task_id.unwrap_or("<task-id>").to_string(),
+            "--run".to_string(),
+            run_id.unwrap_or("<run-id>").to_string(),
+            "--execute".to_string(),
+            "--allow-exec".to_string(),
+            "--".to_string(),
+            executor.clone(),
+        ],
+    };
+    let next_action = if !doctor.shim_ready {
+        format!(
+            "forge harness install-shims --shim-dir {} --executor {} --project-root {} --output json",
+            shell_quote(&shim_dir_display),
+            shell_quote(&executor),
+            shell_quote(&project_root_display)
+        )
+    } else if !doctor.lineage_policy_ready {
+        "call harness exec with --workflow <workflow-id> --task <task-id> --run <run-id>"
+            .to_string()
+    } else {
+        format!(
+            "forge sync executors --shim-dir {} --output json",
+            shell_quote(&shim_dir_display)
+        )
+    };
+
+    Ok(HarnessAdoptionPlanReport {
+        schema_version: CLI_HARNESS_ADOPTION_PLAN_SCHEMA_VERSION.to_string(),
+        status: "harness_adoption_plan_ready".to_string(),
+        executor,
+        project_root: project_root_display,
+        shim_dir: shim_dir_display,
+        mutates_state: false,
+        executes_child: false,
+        recommended_project_config,
+        adoption_steps: vec![
+            harness_adoption_step(
+                "write_project_harness_config",
+                "Write project harness policy",
+                if mode.project_config_status == "loaded" {
+                    "already_configured"
+                } else {
+                    "recommended"
+                },
+                "write_project_harness_config",
+                "Project policy makes Forge-first, headroom and lineage requirements explicit instead of relying on operator memory.",
+            ),
+            harness_adoption_step(
+                "inspect_headroom_plan",
+                "Inspect headroom and wrapper policy",
+                "ready",
+                "headroom_plan",
+                "Headroom planning keeps large logs and child output bounded while preserving reversible retrieval refs.",
+            ),
+            harness_adoption_step(
+                "install_forge_first_shims",
+                "Install Forge-first shims",
+                if doctor.shim_ready {
+                    "already_ready"
+                } else {
+                    "recommended"
+                },
+                "install_shims",
+                "Shims make the selected CLI enter through Forge harness controls without replacing the native executable.",
+            ),
+            harness_adoption_step(
+                "sync_executor_inventory",
+                "Sync executor inventory",
+                "ready",
+                "sync_executors",
+                "Executor sync projects shim readiness into brains, sessions and shell launch plans.",
+            ),
+            harness_adoption_step(
+                "verify_harness_doctor",
+                "Verify harness doctor",
+                if doctor.status == "harness_doctor_ready" {
+                    "already_ready"
+                } else {
+                    "recommended"
+                },
+                "doctor",
+                "Doctor confirms Forge-first, shim, token-headroom and lineage readiness before real handoff.",
+            ),
+            harness_adoption_step(
+                "use_harness_exec_with_lineage",
+                "Use harness exec with workflow lineage",
+                if doctor.lineage_policy_ready {
+                    "ready"
+                } else {
+                    "blocked_until_lineage"
+                },
+                "exec_with_lineage",
+                "Lineage binds child CLI work to workflow, task and run records before execution.",
+            ),
+        ],
+        commands,
+        mcp_tools: vec![
+            "forge.harness.adoption_plan".to_string(),
+            "forge.harness.mode".to_string(),
+            "forge.harness.headroom_plan".to_string(),
+            "forge.harness.doctor".to_string(),
+            "forge.harness.install_shims".to_string(),
+            "forge.harness.exec".to_string(),
+        ],
+        next_action,
+        mode,
+        headroom_plan,
+        doctor,
+        notes: vec![
+            "This adoption plan is read-only: it does not write project config, install shims, sync executors or execute child CLIs.".to_string(),
+            "Use it when an operator wants Codex, Claude, Gemini or OpenCode to prefer Forge infrastructure without hiding the native CLI boundary.".to_string(),
+        ],
+    })
+}
+
+fn harness_adoption_step(
+    id: &str,
+    title: &str,
+    status: &str,
+    command_key: &str,
+    rationale: &str,
+) -> HarnessAdoptionStep {
+    HarnessAdoptionStep {
+        id: id.to_string(),
+        title: title.to_string(),
+        status: status.to_string(),
+        command_key: command_key.to_string(),
+        rationale: rationale.to_string(),
     }
 }
 

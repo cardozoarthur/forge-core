@@ -1230,6 +1230,177 @@ fn harness_headroom_plan_exposes_wrapper_policy_for_cli_mcp_and_skill() {
     );
 }
 
+#[test]
+fn harness_adoption_plan_models_forge_first_headroom_for_cli_mcp_and_skill() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let shim_dir = temp.path().join("shim-bin");
+    fs::create_dir_all(&shim_dir).unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir_all(project.join(".forge")).unwrap();
+    fs::write(
+        project.join(".forge").join("harness.json"),
+        r#"{
+            "default_mode": "forge_first",
+            "context_budget": 4096,
+            "default_token_headroom": false,
+            "require_token_headroom_for_forge_first": true,
+            "require_lineage_for_exec": true
+        }"#,
+    )
+    .unwrap();
+
+    let output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "adoption-plan",
+            "--executor",
+            "codex",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--project-root",
+            project.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.harness.adoption_plan.v1");
+    assert_eq!(json["status"], "harness_adoption_plan_ready");
+    assert_eq!(json["executor"], "codex");
+    assert_eq!(json["project_root"], project.to_str().unwrap());
+    assert_eq!(json["shim_dir"], shim_dir.to_str().unwrap());
+    assert_eq!(json["mutates_state"], false);
+    assert_eq!(json["executes_child"], false);
+    assert_eq!(
+        json["recommended_project_config"]["default_mode"],
+        "forge_first"
+    );
+    assert_eq!(
+        json["recommended_project_config"]["default_context_budget"],
+        4096
+    );
+    assert_eq!(
+        json["recommended_project_config"]["default_token_headroom"],
+        true
+    );
+    assert_eq!(
+        json["recommended_project_config"]["require_token_headroom_for_forge_first"],
+        true
+    );
+    assert_eq!(
+        json["recommended_project_config"]["require_lineage_for_exec"],
+        true
+    );
+    assert_eq!(json["mode"]["forge_first"], true);
+    assert_eq!(
+        json["headroom_plan"]["token_headroom_source"],
+        "project_policy_required_for_forge_first"
+    );
+    assert_eq!(json["doctor"]["lineage_policy_ready"], false);
+    assert_eq!(json["doctor"]["shim_ready"], false);
+    assert!(json["adoption_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|step| step["id"] == "write_project_harness_config"));
+    assert!(json["adoption_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|step| {
+            step["id"] == "write_project_harness_config" && step["status"] == "already_configured"
+        }));
+    assert!(json["adoption_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|step| step["id"] == "install_forge_first_shims"));
+    assert!(json["adoption_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|step| step["id"] == "verify_harness_doctor"));
+    assert!(json["commands"]["install_shims"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("install-shims")));
+    assert!(json["commands"]["exec_with_lineage"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("exec")));
+    assert!(json["next_action"]
+        .as_str()
+        .unwrap()
+        .contains("forge harness install-shims"));
+
+    let tools_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tools_json: Value = serde_json::from_slice(&tools_output).unwrap();
+    let tool = find_mcp_tool(&tools_json, "forge.harness.adoption_plan");
+    assert_eq!(tool["output_schema"], "forge.harness.adoption_plan.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let input = serde_json::json!({
+        "executor": "codex",
+        "shim_dir": shim_dir,
+        "project_root": project
+    });
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.adoption_plan",
+            "--input",
+            &input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.harness.adoption_plan.v1"
+    );
+    assert_eq!(mcp_json["result"]["mutates_state"], false);
+    assert_eq!(mcp_json["result"]["executes_child"], false);
+
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge harness adoption-plan"),
+        "the packaged Forge skill should include the harness adoption plan CLI command"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.harness.adoption_plan"),
+        "the packaged Forge skill should expose the harness adoption plan MCP tool"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn harness_exec_applies_headroom_to_child_output_and_persists_retrieval_refs() {

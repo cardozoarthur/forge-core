@@ -55,13 +55,13 @@ use crate::executor::{
 };
 use crate::handoff::build_task_handoff_with_project;
 use crate::harness::{
-    analyze_token_headroom, build_cli_wrapper_plan, build_harness_doctor_report,
-    build_harness_headroom_plan, build_harness_mode_report, inspect_cli_harness_shim_status,
-    install_cli_harness_shim, persist_token_headroom_report,
+    analyze_token_headroom, build_cli_wrapper_plan, build_harness_adoption_plan,
+    build_harness_doctor_report, build_harness_headroom_plan, build_harness_mode_report,
+    inspect_cli_harness_shim_status, install_cli_harness_shim, persist_token_headroom_report,
     resolve_harness_forge_first_source_for_project, resolve_harness_runtime_policy,
     retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
-    CliShimStatusOptions, CliWrapperPlanOptions, HarnessDoctorOptions, HarnessHeadroomPlanOptions,
-    HarnessModeOptions, HarnessRuntimePolicyOptions,
+    CliShimStatusOptions, CliWrapperPlanOptions, HarnessAdoptionPlanOptions, HarnessDoctorOptions,
+    HarnessHeadroomPlanOptions, HarnessModeOptions, HarnessRuntimePolicyOptions,
 };
 use crate::identity::{
     audit_tenant_index, ensure_workflow_policy, evaluate_tenant_policy_for_action,
@@ -485,6 +485,23 @@ struct HarnessHeadroomPlanInput {
     executor: String,
     command: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
+    forge_first: Option<bool>,
+    observe_only: Option<bool>,
+    project_root: Option<String>,
+    workflow: Option<String>,
+    workflow_id: Option<String>,
+    task: Option<String>,
+    task_id: Option<String>,
+    run: Option<String>,
+    run_id: Option<String>,
+    context_budget: Option<usize>,
+    token_headroom: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HarnessAdoptionPlanInput {
+    shim_dir: String,
+    executor: String,
     forge_first: Option<bool>,
     observe_only: Option<bool>,
     project_root: Option<String>,
@@ -5328,6 +5345,26 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.harness.adoption_plan",
+                "Plan Forge-First Harness Adoption",
+                "Return a read-only ordered adoption plan for making one project use Forge-first CLI harness defaults, token headroom, shims, executor sync and lineage-required execution without writing config, installing shims or launching child processes.",
+                object_schema(&[
+                    ("executor", "string", "codex|claude|gemini|opencode"),
+                    ("shim_dir", "string", "directory where Forge-owned shims should live"),
+                    ("forge_first", "boolean", "simulate an explicit Forge-first CLI flag"),
+                    ("observe_only", "boolean", "simulate an observe-only CLI override"),
+                    ("project_root", "string", "optional project root containing .forge/harness.json"),
+                    ("workflow_id", "string", "optional workflow lineage"),
+                    ("task_id", "string", "optional task/node lineage"),
+                    ("run_id", "string", "optional async run lineage"),
+                    ("context_budget", "integer", "context byte budget"),
+                    ("token_headroom", "boolean", "enable token-headroom readiness"),
+                ], &["executor", "shim_dir"]),
+                "forge.harness.adoption_plan.v1",
+                &["forge", "harness", "adoption-plan", "--executor", "<executor>", "--shim-dir", "<dir>", "--project-root", "<project-root>", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.harness.wrap_plan",
                 "Plan Forge-First CLI Wrapper",
                 "Return a non-destructive Forge-first wrapper plan for Codex, Claude, Gemini or OpenCode with context budget, token-headroom environment shaping and session lifecycle gates.",
@@ -8276,6 +8313,48 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 require_token_headroom_for_forge_first: runtime_policy
                     .require_token_headroom_for_forge_first,
             }))?
+        }
+        "forge.harness.adoption_plan" => {
+            let input: HarnessAdoptionPlanInput = parse_input(input)?;
+            let workflow_id = input.workflow_id.or(input.workflow);
+            let task_id = input.task_id.or(input.task);
+            let run_id = input.run_id.or(input.run);
+            let project_root = input.project_root.as_deref().map(std::path::Path::new);
+            let observe_only = input.observe_only.unwrap_or(false);
+            let effective_forge_first = if observe_only {
+                false
+            } else if let Some(forge_first) = input.forge_first {
+                forge_first
+            } else if let Some(project_root) = project_root {
+                resolve_harness_forge_first_source_for_project(false, false, Some(project_root)).0
+            } else {
+                true
+            };
+            let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+                project_root,
+                context_budget: input.context_budget,
+                context_budget_source: "mcp_input",
+                token_headroom: input.token_headroom,
+                token_headroom_source: "mcp_input",
+                forge_first: effective_forge_first,
+                default_context_budget: DEFAULT_CONTEXT_BUDGET,
+            });
+            serde_json::to_value(build_harness_adoption_plan(HarnessAdoptionPlanOptions {
+                shim_dir: std::path::Path::new(&input.shim_dir),
+                executor: &input.executor,
+                forge_first: input.forge_first.unwrap_or(false),
+                observe_only,
+                project_root,
+                workflow_id: workflow_id.as_deref(),
+                task_id: task_id.as_deref(),
+                run_id: run_id.as_deref(),
+                context_budget: runtime_policy.context_budget,
+                context_budget_source: &runtime_policy.context_budget_source,
+                token_headroom: runtime_policy.token_headroom,
+                token_headroom_source: &runtime_policy.token_headroom_source,
+                require_token_headroom_for_forge_first: runtime_policy
+                    .require_token_headroom_for_forge_first,
+            })?)?
         }
         "forge.harness.wrap_plan" => {
             let input: HarnessWrapPlanInput = parse_input(input)?;
