@@ -2620,6 +2620,11 @@ pub fn build_interactive_autocomplete(
     let palette_query = autocomplete_palette_query(&normalized_query);
     let palette = build_interactive_command_palette(store, Some(&palette_query))?;
     let mut suggestions = slash_autocomplete_suggestions(&normalized_query);
+    suggestions.extend(action_invocation_autocomplete_suggestions(
+        store,
+        &input,
+        &normalized_query,
+    )?);
     suggestions.extend(command_palette_autocomplete_suggestions(
         &palette.entries,
         &normalized_query,
@@ -2708,6 +2713,122 @@ fn slash_autocomplete_suggestions(query: &str) -> Vec<InteractiveAutocompleteSug
             })
         })
         .collect()
+}
+
+fn action_invocation_autocomplete_suggestions(
+    store: &ForgeStore,
+    input: &str,
+    normalized_query: &str,
+) -> Result<Vec<InteractiveAutocompleteSuggestion>> {
+    let action_context = input.trim_start().starts_with("/action ")
+        || normalized_query.trim_start().starts_with("/action ");
+    if !action_context {
+        return Ok(Vec::new());
+    }
+
+    let action_query = normalized_query
+        .trim_start()
+        .strip_prefix("/action")
+        .unwrap_or("")
+        .trim()
+        .strip_prefix("--action")
+        .map(str::trim)
+        .unwrap_or_else(|| {
+            normalized_query
+                .trim_start()
+                .strip_prefix("/action")
+                .unwrap_or("")
+                .trim()
+        });
+    let registry = build_interactive_action_registry(
+        store,
+        (!action_query.is_empty()).then_some(action_query),
+    )?;
+
+    Ok(registry
+        .actions
+        .iter()
+        .filter(|entry| action_id_autocomplete_entry_matches(entry, action_query))
+        .filter_map(|entry| {
+            let score = action_id_autocomplete_score(entry, action_query)?;
+            Some(InteractiveAutocompleteSuggestion {
+                suggestion_id: format!("action:{}", entry.action_id),
+                kind: "action_id".to_string(),
+                label: entry.action_id.clone(),
+                insert_text: format!("/action {}", entry.action_id),
+                description: format!("Plan invocation for {}", entry.description),
+                source: "action_registry".to_string(),
+                source_panel: entry.source_panel.clone(),
+                enabled: entry.enabled,
+                blocked_reason: entry.blocked_reason.clone(),
+                operation_plan: entry.operation_plan.clone(),
+                addon_contract: entry.addon_contract.clone(),
+                addon_view_id: entry.addon_view_id.clone(),
+                addon_view_action_id: entry.addon_view_action_id.clone(),
+                workflow_id: entry.workflow_id.clone(),
+                equivalent_command: vec![
+                    "interactive".to_string(),
+                    "action-invocation".to_string(),
+                    "--action".to_string(),
+                    entry.action_id.clone(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ],
+                mutates_workflow: entry.mutates_workflow,
+                requires_approval: entry.requires_approval,
+                risk_level: entry.risk_level.clone(),
+                score,
+            })
+        })
+        .collect())
+}
+
+fn action_id_autocomplete_score(
+    entry: &InteractiveCommandPaletteEntry,
+    query: &str,
+) -> Option<i64> {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return Some(30);
+    }
+
+    let action_id = entry.action_id.to_ascii_lowercase();
+    if action_id == query {
+        return Some(140);
+    }
+    if action_id.starts_with(&query) {
+        return Some(120 - action_id.len().saturating_sub(query.len()) as i64);
+    }
+    if action_id.contains(&query) {
+        return Some(100);
+    }
+
+    let haystack = entry.commands.join(" ").to_ascii_lowercase();
+    let terms = query
+        .split_whitespace()
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if !terms.is_empty() && terms.iter().all(|term| haystack.contains(term)) {
+        return Some(80 - terms.len() as i64);
+    }
+    None
+}
+
+fn action_id_autocomplete_entry_matches(
+    entry: &InteractiveCommandPaletteEntry,
+    query: &str,
+) -> bool {
+    let terms = query
+        .split_whitespace()
+        .map(|term| term.trim().to_ascii_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        return true;
+    }
+
+    let haystack = format!("{} {}", entry.action_id, entry.commands.join(" ")).to_ascii_lowercase();
+    terms.iter().all(|term| haystack.contains(term))
 }
 
 fn command_palette_autocomplete_suggestions(

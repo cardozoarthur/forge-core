@@ -4563,6 +4563,10 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
         forge_core::skill::SKILL_MD.contains("/action <action-id>"),
         "the packaged Forge skill should teach agents how to plan selected action invocation from the interactive REPL"
     );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("/action <partial>"),
+        "the packaged Forge skill should teach agents how action-id autocomplete works"
+    );
 
     let tools = forge()
         .args(["mcp", "tools", "--output", "json"])
@@ -37841,6 +37845,82 @@ fn interactive_autocomplete_suggests_slash_and_palette_actions_for_replacement_c
         .unwrap()
         .iter()
         .any(|suggestion| suggestion["label"] == "/harness"));
+}
+
+#[test]
+fn interactive_autocomplete_suggests_action_ids_for_action_invocation_slash() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Organize invoice approval workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "autocomplete",
+            "--input",
+            "/action pat",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.interactive.autocomplete.v1");
+    assert_eq!(json["status"], "autocomplete_ready");
+    assert!(json["suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|suggestion| {
+            suggestion["kind"] == "action_id"
+                && suggestion["label"] == "patch.diff"
+                && suggestion["insert_text"] == "/action patch.diff"
+                && suggestion["source"] == "action_registry"
+                && suggestion["source_panel"] == "patch_workbench_panel"
+                && suggestion["enabled"] == true
+                && suggestion["operation_plan"]["schema_version"]
+                    == "forge.interactive.command_palette_action_plan.v1"
+                && suggestion["operation_plan"]["status"] == "ready"
+                && suggestion["equivalent_command"]
+                    == serde_json::json!([
+                        "interactive",
+                        "action-invocation",
+                        "--action",
+                        "patch.diff",
+                        "--output",
+                        "json"
+                    ])
+                && suggestion["mutates_workflow"] == false
+                && suggestion["requires_approval"] == false
+        }));
+    assert!(!json["suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|suggestion| {
+            suggestion["kind"] == "action_id"
+                && suggestion["label"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("workflow.inspect.")
+        }));
 }
 
 #[test]
