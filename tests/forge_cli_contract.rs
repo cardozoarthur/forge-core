@@ -37336,6 +37336,149 @@ fn interactive_autocomplete_suggests_slash_and_palette_actions_for_replacement_c
 }
 
 #[test]
+fn interactive_addon_actions_surface_permission_readiness_for_operator_palettes() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let addon_dir = temp.path().join(".forge/addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        addon_dir.join("demo.yaml"),
+        r#"
+id: forge.addon.demo_ops
+name: Demo Ops Addon
+version: 0.1.0
+description: Demonstrates operator palette readiness for Addon actions.
+lifecycle: enabled
+capabilities:
+  - id: demo_ops
+    title: Demo operations
+    description: Demo operational controls.
+views:
+  - id: demo.ops_panel
+    title: Demo Ops Panel
+    surface: tui
+    type: dashboard
+    component: forge.demo.ops_panel
+    route: /demo/ops
+    layout:
+      zone: main
+      order: 41
+      width: full
+      height: auto
+      density: dense
+    data_bindings:
+      - id: demo_state
+        source: forge.demo.state
+        query: demo.state
+        scope: workflow
+        required_capability: demo_ops
+    actions:
+      - id: demo.blocked
+        label: Blocked demo action
+        description: Should be visible but not executable until the permission contract is valid.
+        palette_group: demo
+        source_panel: demo_ops_panel
+        type: command
+        method: CLI
+        target: forge demo blocked
+        permission: demo.missing_permission
+        command_template:
+          - demo
+          - blocked
+        keywords:
+          - demo
+          - blocked
+"#,
+    )
+    .unwrap();
+
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "command-palette",
+            "--query",
+            "demo.blocked",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let entry = json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["action_id"] == "demo.blocked")
+        .expect("blocked Addon action should remain visible for operator diagnosis");
+    assert_eq!(entry["enabled"], false);
+    assert_eq!(
+        entry["blocked_reason"],
+        "permission_gate_undeclared_permission"
+    );
+    assert_eq!(entry["commands"], serde_json::json!([]));
+    assert_eq!(
+        entry["addon_contract"]["schema_version"],
+        "forge.interactive.addon_action_contract.v1"
+    );
+    assert_eq!(
+        entry["addon_contract"]["source_addon"],
+        "forge.addon.demo_ops"
+    );
+    assert_eq!(
+        entry["addon_contract"]["permission_id"],
+        "demo.missing_permission"
+    );
+    assert_eq!(
+        entry["addon_contract"]["permission_gate_status"],
+        "undeclared_permission"
+    );
+    assert_eq!(entry["addon_contract"]["view_id"], "demo.ops_panel");
+    assert_eq!(entry["addon_contract"]["action_id"], "demo.blocked");
+
+    let autocomplete_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "autocomplete",
+            "--input",
+            "demo.blocked",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let autocomplete: Value = serde_json::from_slice(&autocomplete_output).unwrap();
+    let suggestion = autocomplete["suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|suggestion| suggestion["label"] == "demo.blocked")
+        .expect("autocomplete should keep blocked Addon action diagnosable");
+    assert_eq!(suggestion["enabled"], false);
+    assert_eq!(
+        suggestion["blocked_reason"],
+        "permission_gate_undeclared_permission"
+    );
+    assert_eq!(suggestion["insert_text"], "");
+    assert_eq!(suggestion["equivalent_command"], serde_json::json!([]));
+    assert_eq!(
+        suggestion["addon_contract"]["permission_gate_status"],
+        "undeclared_permission"
+    );
+}
+
+#[test]
 fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

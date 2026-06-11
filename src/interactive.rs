@@ -261,6 +261,8 @@ pub struct InteractiveCommandPaletteEntry {
     pub title: String,
     pub description: String,
     pub source_panel: String,
+    pub enabled: bool,
+    pub blocked_reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub addon_contract: Option<InteractiveAddonActionContract>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -295,6 +297,8 @@ pub struct InteractiveAutocompleteSuggestion {
     pub description: String,
     pub source: String,
     pub source_panel: String,
+    pub enabled: bool,
+    pub blocked_reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub addon_contract: Option<InteractiveAddonActionContract>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -485,6 +489,13 @@ pub struct InteractiveAddonActionContract {
     pub action_type: String,
     pub method: String,
     pub target: String,
+}
+
+#[derive(Debug, Clone)]
+struct InteractiveAddonActionReadiness {
+    enabled: bool,
+    blocked_reason: String,
+    permission_gate_status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1872,6 +1883,12 @@ fn addon_view_command_palette_entry(
     } else {
         action.keywords.clone()
     };
+    let readiness = addon_action_readiness(view, action);
+    let commands = if readiness.enabled {
+        addon_action_command_template(action)
+    } else {
+        Vec::new()
+    };
 
     Some(InteractiveCommandPaletteEntry {
         action_id: action.id.clone(),
@@ -1879,11 +1896,13 @@ fn addon_view_command_palette_entry(
         title,
         description,
         source_panel,
-        addon_contract: Some(addon_action_contract(view, action)),
+        enabled: readiness.enabled,
+        blocked_reason: readiness.blocked_reason.clone(),
+        addon_contract: Some(addon_action_contract(view, action, &readiness)),
         addon_view_id: Some(view.view.id.clone()),
         addon_view_action_id: Some(action.id.clone()),
         workflow_id: None,
-        commands: addon_action_command_template(action),
+        commands,
         mutates_workflow: action.mutates_workflow,
         requires_approval: action.requires_confirmation,
         risk_level,
@@ -1894,6 +1913,7 @@ fn addon_view_command_palette_entry(
 fn addon_action_contract(
     view: &AddonViewEntry,
     action: &AddonViewAction,
+    readiness: &InteractiveAddonActionReadiness,
 ) -> InteractiveAddonActionContract {
     let capability_id = view
         .view
@@ -1916,13 +1936,44 @@ fn addon_action_contract(
         addon_lifecycle: view.addon_lifecycle.clone(),
         capability_id,
         permission_id: action.permission.clone(),
-        permission_gate_status: view.permission_gate.status.clone(),
+        permission_gate_status: readiness.permission_gate_status.clone(),
         view_id: view.view.id.clone(),
         action_id: action.id.clone(),
         action_type: action.action_type.clone(),
         method: action.method.clone(),
         target: action.target.clone(),
     }
+}
+
+fn addon_action_readiness(
+    view: &AddonViewEntry,
+    action: &AddonViewAction,
+) -> InteractiveAddonActionReadiness {
+    let permission_gate_status = addon_action_permission_gate_status(view, action);
+    let enabled = permission_gate_status == "allowed";
+    let blocked_reason = if enabled {
+        "ready".to_string()
+    } else {
+        format!("permission_gate_{permission_gate_status}")
+    };
+    InteractiveAddonActionReadiness {
+        enabled,
+        blocked_reason,
+        permission_gate_status,
+    }
+}
+
+fn addon_action_permission_gate_status(view: &AddonViewEntry, action: &AddonViewAction) -> String {
+    if !action.permission.trim().is_empty()
+        && !view
+            .permission_gate
+            .declared_permissions
+            .iter()
+            .any(|permission| permission == &action.permission)
+    {
+        return "undeclared_permission".to_string();
+    }
+    view.permission_gate.status.clone()
 }
 
 fn addon_action_command_template(action: &AddonViewAction) -> Vec<String> {
@@ -1996,6 +2047,8 @@ fn command_palette_entry(
         title: title.to_string(),
         description: description.to_string(),
         source_panel: source_panel.to_string(),
+        enabled: true,
+        blocked_reason: "ready".to_string(),
         addon_contract: None,
         addon_view_id: None,
         addon_view_action_id: None,
@@ -2184,6 +2237,8 @@ fn slash_autocomplete_suggestions(query: &str) -> Vec<InteractiveAutocompleteSug
                 description: command.description,
                 source: "slash_command_catalog".to_string(),
                 source_panel: "slash_command_catalog".to_string(),
+                enabled: true,
+                blocked_reason: "ready".to_string(),
                 addon_contract: None,
                 addon_view_id: None,
                 addon_view_action_id: None,
@@ -2216,10 +2271,16 @@ fn command_palette_autocomplete_suggestions(
                 suggestion_id: format!("palette:{}", entry.action_id),
                 kind: "command_palette_action".to_string(),
                 label: entry.action_id.clone(),
-                insert_text: entry.commands.join(" "),
+                insert_text: if entry.enabled {
+                    entry.commands.join(" ")
+                } else {
+                    String::new()
+                },
                 description: entry.description.clone(),
                 source: "command_palette_panel".to_string(),
                 source_panel: entry.source_panel.clone(),
+                enabled: entry.enabled,
+                blocked_reason: entry.blocked_reason.clone(),
                 addon_contract: entry.addon_contract.clone(),
                 addon_view_id: entry.addon_view_id.clone(),
                 addon_view_action_id: entry.addon_view_action_id.clone(),
