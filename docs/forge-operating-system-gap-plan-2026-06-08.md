@@ -315,6 +315,12 @@ Estado verificado em `forge 0.4.177`, branch `main` alinhado com `origin/main`.
 - `forge multimodal status --project-root <path>` e MCP `forge.multimodal.status` com `project_root` agora leem `.forge/multimodal.json` quando o arquivo declara `experimental_enabled` e `approved_by`; a configuração habilita apenas planejamento experimental, enquanto `guard --allow` continua obrigatório para qualquer permissão sensível.
 - O gap do milestone multimodal foi reduzido: a feature flag explícita existe, mas ainda falta benchmark/demo real com runtime guard aprovado antes de promover a capacidade além de `groundwork`.
 
+### Atualização 2026-06-11 — Readiness Multimodal Sem Execução
+
+- `forge multimodal readiness --capability <id> --output json` adiciona o artifact `forge.multimodal.readiness.v1` para inspecionar candidatos de runtime e manifests de modelo sem instalar dependências, executar modelo, acessar dispositivo, usar rede ou lançar child process.
+- MCP `forge.multimodal.readiness` expõe o mesmo contrato para agentes, com `async_safe=true`, `mutates_workflow=false`, `project_root` opcional para `.forge/multimodal.json` e `.forge/multimodal-models`, além de guard embutido para deixar explícito quando a flag experimental e o allow humano ainda bloqueiam execução real.
+- O milestone 0.5 continua em `groundwork`: readiness reduz incerteza operacional, mas não substitui benchmark real de modelo/runtime com opt-in, guard e evidência de qualidade/latência.
+
 ### Atualização 2026-06-11 — Recibo de Demo Multimodal Guardado
 
 - `forge multimodal demo-receipt --demo <id> --fixture <id> --approved-by <operator> --confirm-local-fixture --allow-model --output json` adiciona o artifact `forge.multimodal.demo_receipt.v1` para evidência de demo local guardada após opt-in experimental.

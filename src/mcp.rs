@@ -102,9 +102,9 @@ use crate::milestone::{
 use crate::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
     build_multimodal_demo_plan, build_multimodal_demo_receipt, build_multimodal_install_plan,
-    build_multimodal_status_with_feature_flag, evaluate_multimodal_guard,
-    resolve_multimodal_feature_flag, MultimodalBenchmarkResultOptions,
-    MultimodalDemoReceiptOptions,
+    build_multimodal_readiness, build_multimodal_status_with_feature_flag,
+    evaluate_multimodal_guard, resolve_multimodal_feature_flag, MultimodalBenchmarkResultOptions,
+    MultimodalDemoReceiptOptions, MultimodalReadinessOptions,
 };
 use crate::ops::{
     build_ops_snapshot_with_addon_dirs_and_project, record_addon_renderer_client_event,
@@ -1624,6 +1624,15 @@ struct MultimodalInstallPlanInput {
     capability_id: Option<String>,
     enable_experimental: Option<bool>,
     project_root: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultimodalReadinessInput {
+    capability: Option<String>,
+    capability_id: Option<String>,
+    enable_experimental: Option<bool>,
+    project_root: Option<String>,
+    allow: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5627,6 +5636,28 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.multimodal.readiness",
+                "Inspect Multimodal Readiness",
+                "Inspect runtime PATH candidates and Forge model manifests for one multimodal capability without installs, model execution, device access, network access or automation.",
+                object_schema(&[
+                    ("capability_id", "string", "capability id from forge.multimodal.status"),
+                    ("enable_experimental", "boolean", "optional explicit experimental flag for readiness output only"),
+                    ("project_root", "string", "optional project root containing .forge/multimodal.json and .forge/multimodal-models"),
+                    ("allow", "boolean", "optional explicit runtime guard allow for readiness reporting only; no execution is performed"),
+                ], &["capability_id"]),
+                "forge.multimodal.readiness.v1",
+                &[
+                    "forge",
+                    "multimodal",
+                    "readiness",
+                    "--capability",
+                    "<capability-id>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.multimodal.benchmark_template",
                 "Generate Multimodal Benchmark Template",
                 "Generate a plan-only benchmark/report template for one multimodal capability. This tool performs no installs, model execution, device access or automation.",
@@ -8499,6 +8530,23 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &capability,
                 feature_flag.enabled,
             )?)?
+        }
+        "forge.multimodal.readiness" => {
+            let input: MultimodalReadinessInput = parse_input(input)?;
+            let feature_flag = resolve_multimodal_feature_flag(
+                input.enable_experimental.unwrap_or(false),
+                input.project_root.as_deref().map(std::path::Path::new),
+            );
+            let capability = input
+                .capability_id
+                .or(input.capability)
+                .ok_or_else(|| anyhow::anyhow!("capability_id is required"))?;
+            serde_json::to_value(build_multimodal_readiness(MultimodalReadinessOptions {
+                capability_id: &capability,
+                enable_experimental: feature_flag.enabled,
+                explicit_allow: input.allow.unwrap_or(false),
+                project_root: input.project_root.as_deref().map(std::path::Path::new),
+            })?)?
         }
         "forge.multimodal.benchmark_template" => {
             let input: MultimodalBenchmarkTemplateInput = parse_input(input)?;

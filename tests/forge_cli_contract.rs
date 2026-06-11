@@ -3270,6 +3270,14 @@ fn packaged_skill_mentions_multimodal_benchmark_and_demo_plan_surfaces() {
         "the packaged Forge skill should expose the MCP benchmark-template tool to agent callers"
     );
     assert!(
+        forge_core::skill::SKILL_MD.contains("forge multimodal readiness"),
+        "the packaged Forge skill should teach agents how to inspect multimodal runtime/model readiness without executing models"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.multimodal.readiness"),
+        "the packaged Forge skill should expose the MCP readiness tool to agent callers"
+    );
+    assert!(
         forge_core::skill::SKILL_MD.contains("forge multimodal benchmark-result"),
         "the packaged Forge skill should teach agents how to record approved fixture-only benchmark results"
     );
@@ -3675,6 +3683,99 @@ fn multimodal_benchmark_template_is_plan_only_and_does_not_touch_devices() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("runtime_guard_required")));
+}
+
+#[test]
+fn multimodal_readiness_inspects_candidates_without_executing_models_or_devices() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "multimodal",
+            "readiness",
+            "--capability",
+            "image_understanding",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.multimodal.readiness.v1");
+    assert_eq!(json["status"], "readiness_inspected");
+    assert_eq!(json["capability_id"], "image_understanding");
+    assert_eq!(json["feature_flag_enabled"], false);
+    assert_eq!(json["installs_performed"], false);
+    assert_eq!(json["model_execution_performed"], false);
+    assert_eq!(json["device_access_performed"], false);
+    assert_eq!(json["network_access_performed"], false);
+    assert_eq!(json["guard"]["allowed"], false);
+    assert_eq!(json["guard"]["feature_flag_enabled"], false);
+    assert_eq!(json["promotion_ready"], false);
+    assert!(json["runtime_candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|candidate| candidate["executes_probe"] == false));
+    assert!(json["model_candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|candidate| candidate["executes_probe"] == false));
+    assert!(json["runtime_candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate["id"] == "onnxruntime"));
+    assert!(json["model_candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate["id"] == "llava"));
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.multimodal.readiness"
+            && tool["output_schema"] == "forge.multimodal.readiness.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == false
+    }));
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.multimodal.readiness"])
+        .arg("--input")
+        .arg(r#"{"capability_id":"image_understanding"}"#)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp_json["status"], "ok");
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.multimodal.readiness.v1"
+    );
+    assert_eq!(mcp_json["result"]["capability_id"], "image_understanding");
+    assert_eq!(mcp_json["result"]["model_execution_performed"], false);
+    assert_eq!(mcp_json["result"]["device_access_performed"], false);
 }
 
 #[test]

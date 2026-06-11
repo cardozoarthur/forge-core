@@ -8,6 +8,7 @@ use std::{
 
 const STATUS_SCHEMA_VERSION: &str = "forge.multimodal.status.v1";
 const INSTALL_PLAN_SCHEMA_VERSION: &str = "forge.multimodal.install_plan.v1";
+const READINESS_SCHEMA_VERSION: &str = "forge.multimodal.readiness.v1";
 const BENCHMARK_TEMPLATE_SCHEMA_VERSION: &str = "forge.multimodal.benchmark_template.v1";
 const BENCHMARK_RESULT_SCHEMA_VERSION: &str = "forge.multimodal.benchmark_result.v1";
 const DEMO_PLAN_SCHEMA_VERSION: &str = "forge.multimodal.demo_plan.v1";
@@ -105,6 +106,56 @@ pub struct MultimodalInstallPlanReport {
     pub storage_policy: String,
     pub rollback_steps: Vec<String>,
     pub next_action: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MultimodalReadinessOptions<'a> {
+    pub capability_id: &'a str,
+    pub enable_experimental: bool,
+    pub explicit_allow: bool,
+    pub project_root: Option<&'a Path>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MultimodalReadinessReport {
+    pub schema_version: String,
+    pub status: String,
+    pub capability_id: String,
+    pub capability_title: String,
+    pub feature_flag_enabled: bool,
+    pub installs_performed: bool,
+    pub model_execution_performed: bool,
+    pub device_access_performed: bool,
+    pub network_access_performed: bool,
+    pub permission_scope: String,
+    pub guard: MultimodalGuardReport,
+    pub runtime_candidates: Vec<MultimodalRuntimeReadiness>,
+    pub model_candidates: Vec<MultimodalModelReadiness>,
+    pub readiness_summary: String,
+    pub promotion_ready: bool,
+    pub promotion_gate: String,
+    pub evidence_manifest: Vec<String>,
+    pub next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MultimodalRuntimeReadiness {
+    pub id: String,
+    pub source: String,
+    pub installed: bool,
+    pub status: String,
+    pub evidence: Vec<String>,
+    pub executes_probe: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MultimodalModelReadiness {
+    pub id: String,
+    pub source_candidate: String,
+    pub status: String,
+    pub manifest_path: String,
+    pub evidence: Vec<String>,
+    pub executes_probe: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -423,6 +474,70 @@ pub fn build_multimodal_install_plan(
         ],
         next_action:
             "Ask for explicit human approval before downloading models, installing runtimes or granting device access."
+                .to_string(),
+    })
+}
+
+pub fn build_multimodal_readiness(
+    options: MultimodalReadinessOptions<'_>,
+) -> Result<MultimodalReadinessReport> {
+    let capability = find_capability(options.capability_id, options.enable_experimental)?;
+    let guard = evaluate_multimodal_guard(
+        &capability.id,
+        "readiness_probe",
+        options.enable_experimental,
+        options.explicit_allow,
+    )?;
+    let runtime_candidates = capability
+        .runtime_candidates
+        .iter()
+        .map(|candidate| runtime_readiness(candidate))
+        .collect::<Vec<_>>();
+    let model_candidates = capability
+        .local_candidates
+        .iter()
+        .map(|candidate| model_readiness(candidate, options.project_root))
+        .collect::<Vec<_>>();
+    let installed_runtime_count = runtime_candidates
+        .iter()
+        .filter(|candidate| candidate.installed)
+        .count();
+    let known_model_manifest_count = model_candidates
+        .iter()
+        .filter(|candidate| candidate.status == "manifest_present")
+        .count();
+
+    Ok(MultimodalReadinessReport {
+        schema_version: READINESS_SCHEMA_VERSION.to_string(),
+        status: "readiness_inspected".to_string(),
+        capability_id: capability.id,
+        capability_title: capability.title,
+        feature_flag_enabled: options.enable_experimental,
+        installs_performed: false,
+        model_execution_performed: false,
+        device_access_performed: false,
+        network_access_performed: false,
+        permission_scope: capability.permission_scope,
+        guard,
+        runtime_candidates,
+        model_candidates,
+        readiness_summary: format!(
+            "{installed_runtime_count} runtime candidate(s) detected and {known_model_manifest_count} Forge model manifest(s) present; no model, device, network or installer execution was performed."
+        ),
+        promotion_ready: false,
+        promotion_gate: "real_guarded_model_benchmark_required".to_string(),
+        evidence_manifest: vec![
+            format!("capability_id={}", options.capability_id),
+            format!("feature_flag_enabled={}", options.enable_experimental),
+            "installs_performed=false".to_string(),
+            "model_execution_performed=false".to_string(),
+            "device_access_performed=false".to_string(),
+            "network_access_performed=false".to_string(),
+            "runtime_probe_execution=false".to_string(),
+            "model_probe_execution=false".to_string(),
+        ],
+        next_action:
+            "Use readiness to decide which runtime/model install plan and fixture benchmark to review; execute real models only after opt-in, guard allow and benchmark approval."
                 .to_string(),
     })
 }
@@ -1157,6 +1272,116 @@ fn find_benchmark_fixture(fixture_id: &str) -> Result<MultimodalBenchmarkFixture
                 "unknown multimodal benchmark fixture: {fixture_id}; run forge multimodal benchmark-template"
             )
         })
+}
+
+fn runtime_readiness(candidate: &str) -> MultimodalRuntimeReadiness {
+    let binary_names = runtime_binary_names(candidate);
+    if binary_names.is_empty() {
+        return MultimodalRuntimeReadiness {
+            id: candidate.to_string(),
+            source: "adapter_manifest".to_string(),
+            installed: false,
+            status: "manifest_probe_required".to_string(),
+            evidence: vec![
+                format!("candidate={candidate}"),
+                "No subprocess was executed; this runtime requires a Forge adapter/library manifest probe before use.".to_string(),
+            ],
+            executes_probe: false,
+        };
+    }
+
+    let found = binary_names
+        .iter()
+        .find_map(|binary| find_binary_in_path(binary).map(|path| (binary, path)));
+    match found {
+        Some((binary, path)) => MultimodalRuntimeReadiness {
+            id: candidate.to_string(),
+            source: "path".to_string(),
+            installed: true,
+            status: "binary_found_without_execution".to_string(),
+            evidence: vec![
+                format!("binary={binary}"),
+                format!("path={}", path.display()),
+                "PATH was inspected without launching the binary.".to_string(),
+            ],
+            executes_probe: false,
+        },
+        None => MultimodalRuntimeReadiness {
+            id: candidate.to_string(),
+            source: "path".to_string(),
+            installed: false,
+            status: "binary_not_found".to_string(),
+            evidence: vec![
+                format!("candidate={candidate}"),
+                format!("checked_binaries={}", binary_names.join(",")),
+                "PATH was inspected without launching any binary.".to_string(),
+            ],
+            executes_probe: false,
+        },
+    }
+}
+
+fn model_readiness(candidate: &str, project_root: Option<&Path>) -> MultimodalModelReadiness {
+    let id = model_readiness_id(candidate);
+    let root = project_root
+        .map(Path::to_path_buf)
+        .or_else(|| env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let manifest_path = root
+        .join(".forge")
+        .join("multimodal-models")
+        .join(format!("{id}.json"));
+    let manifest_present = manifest_path.is_file();
+
+    MultimodalModelReadiness {
+        id,
+        source_candidate: candidate.to_string(),
+        status: if manifest_present {
+            "manifest_present"
+        } else {
+            "manifest_missing"
+        }
+        .to_string(),
+        manifest_path: manifest_path.display().to_string(),
+        evidence: vec![
+            format!("source_candidate={candidate}"),
+            format!("manifest_present={manifest_present}"),
+            "Model manifest path was inspected without loading weights or executing inference."
+                .to_string(),
+        ],
+        executes_probe: false,
+    }
+}
+
+fn runtime_binary_names(candidate: &str) -> Vec<String> {
+    match candidate {
+        "blender" | "ffmpeg" | "openvino" | "system_screenshot" => vec![candidate.to_string()],
+        "system_binary" => vec!["tesseract".to_string(), "piper".to_string()],
+        "whisper.cpp" => vec!["whisper-cli".to_string(), "main".to_string()],
+        "llama.cpp" => vec!["llama-cli".to_string(), "llama".to_string()],
+        "xdotool_adapter" => vec!["xdotool".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+fn find_binary_in_path(binary: &str) -> Option<PathBuf> {
+    let path_var = env::var_os("PATH")?;
+    env::split_paths(&path_var)
+        .map(|entry| entry.join(binary))
+        .find(|candidate| candidate.is_file())
+}
+
+fn model_readiness_id(candidate: &str) -> String {
+    let normalized = candidate.trim().to_ascii_lowercase();
+    if normalized.starts_with("llava") {
+        "llava".to_string()
+    } else if normalized.starts_with("qwen2-vl") {
+        "qwen2-vl".to_string()
+    } else if normalized.starts_with("whisper.cpp") {
+        "whisper.cpp".to_string()
+    } else {
+        normalized
+    }
 }
 
 fn default_multimodal_feature_flag(enable_experimental: bool) -> MultimodalFeatureFlag {

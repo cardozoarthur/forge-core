@@ -126,9 +126,9 @@ use forge_core::milestone::{
 use forge_core::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
     build_multimodal_demo_plan, build_multimodal_demo_receipt, build_multimodal_install_plan,
-    build_multimodal_status_with_feature_flag, evaluate_multimodal_guard,
-    resolve_multimodal_feature_flag, MultimodalBenchmarkResultOptions,
-    MultimodalDemoReceiptOptions,
+    build_multimodal_readiness, build_multimodal_status_with_feature_flag,
+    evaluate_multimodal_guard, resolve_multimodal_feature_flag, MultimodalBenchmarkResultOptions,
+    MultimodalDemoReceiptOptions, MultimodalReadinessOptions,
 };
 use forge_core::ops::{
     build_ops_snapshot_with_addon_dirs_and_project, record_addon_renderer_client_event,
@@ -3304,6 +3304,18 @@ enum MultimodalCommands {
         enable_experimental: bool,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Readiness {
+        #[arg(long)]
+        capability: String,
+        #[arg(long = "enable-experimental")]
+        enable_experimental: bool,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
+        #[arg(long)]
+        allow: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -7807,6 +7819,24 @@ fn run() -> Result<i32> {
                 let feature_flag =
                     resolve_multimodal_feature_flag(enable_experimental, project_root.as_deref());
                 let report = build_multimodal_install_plan(&capability, feature_flag.enabled)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MultimodalCommands::Readiness {
+                capability,
+                enable_experimental,
+                project_root,
+                allow,
+                output,
+            } => {
+                let feature_flag =
+                    resolve_multimodal_feature_flag(enable_experimental, project_root.as_deref());
+                let report = build_multimodal_readiness(MultimodalReadinessOptions {
+                    capability_id: &capability,
+                    enable_experimental: feature_flag.enabled,
+                    explicit_allow: allow,
+                    project_root: project_root.as_deref(),
+                })?;
                 print_response(output, &report)?;
                 Ok(0)
             }
