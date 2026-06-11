@@ -20760,6 +20760,192 @@ tenant_policy_mode: enforce
 }
 
 #[test]
+fn cost_history_enforces_project_tenant_policy_for_global_rollups() {
+    let temp = tempdir().unwrap();
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: cost-history-org
+  label: Cost History Org
+brand:
+  scope: brand
+  id: cost-history-brand
+  label: Cost History Brand
+product:
+  scope: product
+  id: cost-history-product
+  label: Cost History Product
+user:
+  scope: user
+  id: cost-history-user
+  label: Cost History User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+
+    let store = temp.path().join("forge.sqlite");
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    {
+        let connection = Connection::open(&store).unwrap();
+        connection
+            .execute_batch(
+                r#"
+                INSERT INTO cost_ledger_index (
+                    row_key, source_kind, workflow_id, task_id, event_id,
+                    organization_id, brand_id, product_id, addon_id, executor,
+                    model_call_required, model_call_avoided,
+                    estimated_task_cost_usd, observed_event_cost_usd,
+                    tokens_in, tokens_out, data_json, created_at, updated_at
+                )
+                VALUES
+                (
+                    'planned:visible-cost-history:task-001', 'planned_task', 'wf_visible_cost_history', 'task-001', NULL,
+                    'cost-history-org', 'cost-history-brand', 'cost-history-product', 'forge.addon.visible_cost', 'codex',
+                    1, 0, 0.42, 0.0,
+                    0, 0, '{}', '2026-06-10T10:00:00Z', '2026-06-10T10:00:00Z'
+                ),
+                (
+                    'planned:hidden-cost-history:task-001', 'planned_task', 'wf_hidden_cost_history', 'task-001', NULL,
+                    'other-cost-history-org', 'other-cost-history-brand', 'other-cost-history-product', 'forge.addon.hidden_cost', 'codex',
+                    1, 0, 9.99, 0.0,
+                    0, 0, '{}', '2026-06-10T10:00:00Z', '2026-06-10T10:00:00Z'
+                );
+                "#,
+            )
+            .unwrap();
+    }
+
+    let history_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "history",
+            "--bucket",
+            "day",
+            "--group-by",
+            "tenant",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let history_json: Value = serde_json::from_slice(&history_output).unwrap();
+    assert_eq!(
+        history_json["filters"]["organization_id"],
+        "cost-history-org"
+    );
+    assert_eq!(history_json["summary"]["total_row_count"], 1);
+    assert_eq!(
+        history_json["summary"]["estimated_task_cost_total_usd"],
+        0.42
+    );
+    assert_eq!(history_json["bucket_count"], 1);
+    assert_eq!(
+        history_json["buckets"][0]["group_id"],
+        "cost-history-org|cost-history-brand|cost-history-product"
+    );
+
+    let mcp_history_input = serde_json::json!({
+        "project_root": temp.path().display().to_string(),
+        "bucket": "day",
+        "group_by": "tenant"
+    });
+    let mcp_history_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.cost.history",
+            "--input",
+            &mcp_history_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_history_json: Value = serde_json::from_slice(&mcp_history_output).unwrap();
+    assert_eq!(
+        mcp_history_json["result"]["filters"]["organization_id"],
+        "cost-history-org"
+    );
+    assert_eq!(mcp_history_json["result"]["summary"]["total_row_count"], 1);
+
+    forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "membership-update",
+            "--subject",
+            "cost-history-user",
+            "--organization",
+            "cost-history-org",
+            "--brand",
+            "cost-history-brand",
+            "--product",
+            "cost-history-product",
+            "--deny",
+            "context:read",
+            "--source",
+            "test-cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let denied_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "history",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let denied_stderr = String::from_utf8(denied_output).unwrap();
+    assert!(denied_stderr.contains("multi-tenant enforcement blocked cost history list"));
+    assert!(denied_stderr.contains("context:read"));
+}
+
+#[test]
 fn task_validate_response_rejects_completed_executor_response_without_passing_evidence() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

@@ -571,6 +571,67 @@ pub fn build_cost_ledger_history(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn build_cost_ledger_history_for_context(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    source_kind: Option<&str>,
+    addon_id: Option<&str>,
+    bucket: Option<&str>,
+    group_by: Option<&str>,
+    limit: Option<usize>,
+    operating_context: &OperatingContextSpec,
+) -> Result<CostLedgerHistoryReport> {
+    if operating_context.tenant_policy_mode != "enforce" {
+        return build_cost_ledger_history(
+            store,
+            workflow_id,
+            organization_id,
+            brand_id,
+            product_id,
+            source_kind,
+            addon_id,
+            bucket,
+            group_by,
+            limit,
+        );
+    }
+    ensure_operating_context_policy(store, operating_context, "cost history list")?;
+    let organization_id = enforce_cost_tenant_filter(
+        "cost history list",
+        "organization",
+        organization_id,
+        &operating_context.organization.id,
+    )?;
+    let brand_id = enforce_cost_tenant_filter(
+        "cost history list",
+        "brand",
+        brand_id,
+        &operating_context.brand.id,
+    )?;
+    let product_id = enforce_cost_tenant_filter(
+        "cost history list",
+        "product",
+        product_id,
+        &operating_context.product.id,
+    )?;
+    build_cost_ledger_history(
+        store,
+        workflow_id,
+        Some(&organization_id),
+        Some(&brand_id),
+        Some(&product_id),
+        source_kind,
+        addon_id,
+        bucket,
+        group_by,
+        limit,
+    )
+}
+
 pub fn maintain_cost_ledger(
     store: &ForgeStore,
     workflow_id: Option<&str>,

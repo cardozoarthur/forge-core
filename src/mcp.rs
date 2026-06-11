@@ -23,9 +23,9 @@ use crate::aws_ops::{
 use crate::checkpoint::load_latest_task_checkpoint;
 use crate::context::{build_context_package_with_checkpoint, DEFAULT_CONTEXT_BUDGET};
 use crate::cost::{
-    apply_cost_ledger_retention, build_cost_ledger_for_context, build_cost_ledger_history,
-    maintain_cost_ledger, materialize_cost_ledger_incremental, materialize_cost_ledger_index,
-    run_cost_ledger_daemon,
+    apply_cost_ledger_retention, build_cost_ledger_for_context,
+    build_cost_ledger_history_for_context, maintain_cost_ledger,
+    materialize_cost_ledger_incremental, materialize_cost_ledger_index, run_cost_ledger_daemon,
 };
 use crate::credential_vault::{
     run_describe as run_credential_vault_describe, run_records as run_credential_vault_records,
@@ -808,6 +808,7 @@ struct CostLedgerHistoryInput {
     bucket: Option<String>,
     group_by: Option<String>,
     limit: Option<usize>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2306,6 +2307,11 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         ("product_id", "string", "optional product filter"),
                         ("source_kind", "string", "planned_task|observed_event filter"),
                         ("addon_id", "string", "optional Addon id filter"),
+                        (
+                            "project_root",
+                            "string",
+                            "optional project root used for tenant-policy enforcement",
+                        ),
                         ("bucket", "string", "hour|day bucket, default day"),
                         ("group_by", "string", "none|tenant|workflow|source_kind|addon|executor"),
                         ("limit", "integer", "optional bucket limit"),
@@ -5641,7 +5647,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let brand_id = input.brand_id.or(input.brand);
             let product_id = input.product_id.or(input.product);
             let addon_id = input.addon_id.or(input.addon);
-            serde_json::to_value(build_cost_ledger_history(
+            let project_root = input
+                .project_root
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let operating_context = load_project_operating_context(&project_root)?;
+            serde_json::to_value(build_cost_ledger_history_for_context(
                 store,
                 workflow_id.as_deref(),
                 organization_id.as_deref(),
@@ -5652,6 +5663,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.bucket.as_deref(),
                 input.group_by.as_deref(),
                 input.limit,
+                &operating_context,
             )?)?
         }
         "forge.cost.maintain" => {
