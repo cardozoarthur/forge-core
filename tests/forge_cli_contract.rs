@@ -21167,6 +21167,247 @@ tenant_policy_mode: enforce
 }
 
 #[test]
+fn cost_daemon_enforces_project_tenant_policy_for_global_rollups() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let visible_root = temp.path().join("visible");
+    let hidden_root = temp.path().join("hidden");
+    fs::create_dir_all(visible_root.join(".forge")).unwrap();
+    fs::create_dir_all(hidden_root.join(".forge")).unwrap();
+    fs::write(
+        visible_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: cost-daemon-org
+  label: Cost Daemon Org
+brand:
+  scope: brand
+  id: cost-daemon-brand
+  label: Cost Daemon Brand
+product:
+  scope: product
+  id: cost-daemon-product
+  label: Cost Daemon Product
+user:
+  scope: user
+  id: cost-daemon-user
+  label: Cost Daemon User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+    fs::write(
+        hidden_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: other-cost-daemon-org
+  label: Other Cost Daemon Org
+brand:
+  scope: brand
+  id: other-cost-daemon-brand
+  label: Other Cost Daemon Brand
+product:
+  scope: product
+  id: other-cost-daemon-product
+  label: Other Cost Daemon Product
+user:
+  scope: user
+  id: other-cost-daemon-user
+  label: Other Cost Daemon User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+
+    for project_root in [&visible_root, &hidden_root] {
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "identity",
+                "sync",
+                "--project-root",
+                project_root.to_str().unwrap(),
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Visible tenant cost daemon workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    forge()
+        .current_dir(&hidden_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Hidden tenant cost daemon workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let daemon_output = forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "daemon",
+            "--bucket",
+            "day",
+            "--group-by",
+            "tenant",
+            "--max-cycles",
+            "1",
+            "--interval-seconds",
+            "0",
+            "--origin",
+            "cost-daemon-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let daemon_json: Value = serde_json::from_slice(&daemon_output).unwrap();
+    assert_eq!(daemon_json["filters"]["organization_id"], "cost-daemon-org");
+    assert_eq!(daemon_json["summary"]["workflow_count"], 1);
+    assert_eq!(
+        daemon_json["cycles"][0]["maintenance"]["filters"]["organization_id"],
+        "cost-daemon-org"
+    );
+    assert_eq!(
+        daemon_json["cycles"][0]["maintenance"]["history"]["buckets"][0]["group_id"],
+        "cost-daemon-org|cost-daemon-brand|cost-daemon-product"
+    );
+    let daemon_global_event_id = daemon_json["cycles"][0]["global_event_id"]
+        .as_i64()
+        .unwrap();
+    let daemon_event = ForgeStore::open(&store)
+        .unwrap()
+        .load_global_events()
+        .unwrap()
+        .into_iter()
+        .find(|event| event.id == daemon_global_event_id)
+        .unwrap();
+    assert_eq!(daemon_event.organization_id, "cost-daemon-org");
+    assert_eq!(daemon_event.brand_id, "cost-daemon-brand");
+    assert_eq!(daemon_event.product_id, "cost-daemon-product");
+    assert_eq!(
+        daemon_event.tenant_context["organization"]["id"],
+        "cost-daemon-org"
+    );
+
+    let mcp_daemon_input = serde_json::json!({
+        "project_root": visible_root.display().to_string(),
+        "bucket": "day",
+        "group_by": "tenant",
+        "max_cycles": 1,
+        "interval_seconds": 0,
+        "origin": "mcp-cost-daemon-test"
+    });
+    let mcp_daemon_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.cost.daemon",
+            "--input",
+            &mcp_daemon_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_daemon_json: Value = serde_json::from_slice(&mcp_daemon_output).unwrap();
+    assert_eq!(
+        mcp_daemon_json["result"]["filters"]["organization_id"],
+        "cost-daemon-org"
+    );
+    assert_eq!(mcp_daemon_json["result"]["summary"]["workflow_count"], 1);
+
+    forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "membership-update",
+            "--subject",
+            "cost-daemon-user",
+            "--organization",
+            "cost-daemon-org",
+            "--brand",
+            "cost-daemon-brand",
+            "--product",
+            "cost-daemon-product",
+            "--deny",
+            "context:read",
+            "--source",
+            "test-cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let denied_output = forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cost",
+            "daemon",
+            "--max-cycles",
+            "1",
+            "--interval-seconds",
+            "0",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let denied_stderr = String::from_utf8(denied_output).unwrap();
+    assert!(denied_stderr.contains("multi-tenant enforcement blocked cost ledger daemon"));
+    assert!(denied_stderr.contains("context:read"));
+}
+
+#[test]
 fn task_validate_response_rejects_completed_executor_response_without_passing_evidence() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
