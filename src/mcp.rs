@@ -5816,7 +5816,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.multimodal.runtime_benchmark",
                 "Run Guarded Multimodal Runtime Benchmark",
-                "Run an approval-gated, guard-approved deterministic or project-connected runtime benchmark after experimental opt-in. This performs no installs, device access or network access; connected runtimes are loaded from a project manifest and require an explicit connected_runtime id.",
+                "Run an approval-gated, guard-approved deterministic or project-connected runtime benchmark after experimental opt-in. This performs no installs, device access or network access; connected runtimes are loaded from a project manifest and require an explicit connected_runtime id. A connected runtime can declare production evidence with approval, model manifest hash, artifacts and quality/latency thresholds; Forge marks that benchmark promotion_ready only when the probe measurements satisfy the contract.",
                 object_schema(
                     &[
                         ("capability_id", "string", "capability id from forge.multimodal.status"),

@@ -4671,6 +4671,140 @@ fn multimodal_runtime_benchmark_can_use_approved_connected_runtime_manifest() {
 }
 
 #[test]
+fn multimodal_runtime_benchmark_validates_production_connected_runtime_evidence() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("multimodal.json"),
+        r#"{"experimental_enabled":true,"approved_by":"production-test","reason":"production connected runtime benchmark","scope":"project"}"#,
+    )
+    .unwrap();
+    fs::write(
+        forge_dir.join("multimodal-runtimes.json"),
+        serde_json::json!({
+            "runtimes": [{
+                "id": "production-vision-runtime",
+                "model_id": "vision-prod-model-v3",
+                "capabilities": ["image_understanding"],
+                "probe_command": [
+                    "/bin/sh",
+                    "-c",
+                    "printf '{\"labels\":[\"document\",\"production-runtime\"],\"quality_score\":0.97,\"latency_ms\":12}'"
+                ],
+                "network_access": false,
+                "device_access": false,
+                "production": {
+                    "approved_by": "production-test",
+                    "approval_ref": "prod-runtime-approval-001",
+                    "runtime_version": "vision-runtime 3.2.1",
+                    "model_manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "model_license": "internal-production-approved",
+                    "evidence_artifacts": [
+                        "benchmarks/vision-prod-2026-06-11.json",
+                        "models/vision-prod-model-v3.manifest.json"
+                    ],
+                    "min_quality_score": 0.95,
+                    "max_latency_ms": 20
+                }
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .current_dir(temp.path())
+        .args([
+            "multimodal",
+            "runtime-benchmark",
+            "--capability",
+            "image_understanding",
+            "--fixture",
+            "static_image_labels",
+            "--connected-runtime",
+            "production-vision-runtime",
+            "--approved-by",
+            "production-test",
+            "--confirm-runtime-execution",
+            "--allow-model",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.multimodal.runtime_benchmark.v1"
+    );
+    assert_eq!(json["status"], "production_runtime_benchmark_recorded");
+    assert_eq!(json["runtime_id"], "production-vision-runtime");
+    assert_eq!(json["model_id"], "vision-prod-model-v3");
+    assert_eq!(json["promotion_ready"], true);
+    assert_eq!(
+        json["promotion_gate"],
+        "production_model_runtime_benchmark_recorded"
+    );
+    assert_eq!(
+        json["production_runtime"]["schema_version"],
+        "forge.multimodal.production_runtime_evidence.v1"
+    );
+    assert_eq!(
+        json["production_runtime"]["status"],
+        "production_evidence_validated"
+    );
+    assert_eq!(
+        json["production_runtime"]["approval_ref"],
+        "prod-runtime-approval-001"
+    );
+    assert_eq!(json["production_runtime"]["quality_score_passed"], true);
+    assert_eq!(json["production_runtime"]["latency_passed"], true);
+    assert_eq!(
+        json["production_runtime"]["model_manifest_sha256"],
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    assert!(json["production_runtime"]["evidence_artifacts"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("benchmarks/vision-prod-2026-06-11.json")));
+    assert!(json["guard_checks"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "production_connected_runtime_evidence_validated"
+        )));
+    assert!(json["artifact_manifest"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "multimodal-production-runtime-evidence.json"
+        )));
+    assert!(json["evidence_manifest"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "production_connected_runtime_evidence_validated=true"
+        )));
+    assert!(json["measurements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |measurement| measurement["source"] == "production_runtime_evidence"
+                && measurement["id"] == "quality_score_passed"
+                && measurement["value"] == "true"
+        ));
+}
+
+#[test]
 fn multimodal_demo_plan_covers_safe_local_image_audio_and_blender_tracks() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

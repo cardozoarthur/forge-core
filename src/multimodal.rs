@@ -271,6 +271,8 @@ pub struct MultimodalRuntimeBenchmarkReport {
     pub model_output: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connected_runtime: Option<MultimodalConnectedRuntimeEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub production_runtime: Option<MultimodalProductionRuntimeEvidence>,
     pub promotion_ready: bool,
     pub promotion_gate: String,
     pub measurements: Vec<MultimodalBenchmarkMeasurement>,
@@ -297,6 +299,26 @@ pub struct MultimodalConnectedRuntimeEvidence {
     pub device_access_declared: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct MultimodalProductionRuntimeEvidence {
+    pub schema_version: String,
+    pub status: String,
+    pub approved_by: String,
+    pub approval_ref: String,
+    pub runtime_version: String,
+    pub model_manifest_sha256: String,
+    pub model_license: String,
+    pub evidence_artifacts: Vec<String>,
+    pub min_quality_score: f64,
+    pub observed_quality_score: Option<f64>,
+    pub quality_score_passed: bool,
+    pub max_latency_ms: f64,
+    pub observed_latency_ms: Option<f64>,
+    pub latency_passed: bool,
+    pub promotion_ready: bool,
+    pub validation_evidence: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct MultimodalConnectedRuntimeManifest {
     #[serde(default)]
@@ -314,12 +336,28 @@ struct MultimodalConnectedRuntimeConfig {
     network_access: bool,
     #[serde(default)]
     device_access: bool,
+    #[serde(default)]
+    production: Option<MultimodalConnectedRuntimeProductionConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MultimodalConnectedRuntimeProductionConfig {
+    approved_by: String,
+    approval_ref: String,
+    runtime_version: String,
+    model_manifest_sha256: String,
+    model_license: String,
+    #[serde(default)]
+    evidence_artifacts: Vec<String>,
+    min_quality_score: f64,
+    max_latency_ms: f64,
 }
 
 struct ConnectedRuntimeProbe {
     evidence: MultimodalConnectedRuntimeEvidence,
     model_output: Value,
     measurements: Vec<MultimodalBenchmarkMeasurement>,
+    production_runtime: Option<MultimodalProductionRuntimeEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -873,6 +911,15 @@ pub fn build_multimodal_runtime_benchmark(
     if let Some(probe) = connected_probe.as_ref() {
         measurements.extend(probe.measurements.clone());
     }
+    let production_runtime = connected_probe
+        .as_ref()
+        .and_then(|probe| probe.production_runtime.clone());
+    let production_ready = production_runtime
+        .as_ref()
+        .is_some_and(|evidence| evidence.promotion_ready);
+    if let Some(evidence) = production_runtime.as_ref() {
+        measurements.extend(production_runtime_measurements(evidence));
+    }
     let mut guard_checks = vec![
         "experimental_opt_in_required".to_string(),
         "human_approval_recorded".to_string(),
@@ -887,6 +934,11 @@ pub fn build_multimodal_runtime_benchmark(
         guard_checks.push("connected_runtime_probe_completed".to_string());
         guard_checks.push("connected_runtime_declares_no_network_or_device_access".to_string());
     }
+    if production_ready {
+        guard_checks.push("production_connected_runtime_evidence_validated".to_string());
+    } else if production_runtime.is_some() {
+        guard_checks.push("production_connected_runtime_evidence_incomplete".to_string());
+    }
     let mut artifact_manifest = vec![
         "multimodal-runtime-benchmark.json".to_string(),
         "multimodal-runtime-benchmark.md".to_string(),
@@ -894,6 +946,9 @@ pub fn build_multimodal_runtime_benchmark(
     ];
     if connected_runtime.is_some() {
         artifact_manifest.push("multimodal-connected-runtime-probe.json".to_string());
+    }
+    if production_runtime.is_some() {
+        artifact_manifest.push("multimodal-production-runtime-evidence.json".to_string());
     }
     let mut evidence_manifest = vec![
         format!("capability_id={}", options.capability_id),
@@ -915,10 +970,43 @@ pub fn build_multimodal_runtime_benchmark(
         evidence_manifest.push(format!("connected_model_id={}", runtime.model_id));
         evidence_manifest.push("connected_runtime_probe_completed=true".to_string());
     }
+    if let Some(evidence) = production_runtime.as_ref() {
+        evidence_manifest.push(format!(
+            "production_connected_runtime_evidence_validated={}",
+            evidence.promotion_ready
+        ));
+        evidence_manifest.push(format!(
+            "production_runtime_approval_ref={}",
+            evidence.approval_ref
+        ));
+        evidence_manifest.push(format!(
+            "production_quality_score_passed={}",
+            evidence.quality_score_passed
+        ));
+        evidence_manifest.push(format!(
+            "production_latency_passed={}",
+            evidence.latency_passed
+        ));
+    }
+    let status = if production_ready {
+        "production_runtime_benchmark_recorded"
+    } else {
+        "guarded_runtime_benchmark_recorded"
+    };
+    let promotion_gate = if production_ready {
+        "production_model_runtime_benchmark_recorded"
+    } else {
+        "production_model_runtime_benchmark_required"
+    };
+    let next_action = if production_ready {
+        "Attach this production connected-runtime benchmark to the milestone evidence bundle, then verify release gates against the complete 0.5 requirement set before promotion."
+    } else {
+        "Use this guarded runtime benchmark as execution-path evidence, then add production model/runtime benchmarks with real installed or connected models before promoting multimodal beyond groundwork."
+    };
 
     Ok(MultimodalRuntimeBenchmarkReport {
         schema_version: RUNTIME_BENCHMARK_SCHEMA_VERSION.to_string(),
-        status: "guarded_runtime_benchmark_recorded".to_string(),
+        status: status.to_string(),
         capability_id: capability.id.clone(),
         capability_title: capability.title,
         fixture_id: fixture.id.clone(),
@@ -941,15 +1029,14 @@ pub fn build_multimodal_runtime_benchmark(
         guard,
         model_output,
         connected_runtime,
-        promotion_ready: false,
-        promotion_gate: "production_model_runtime_benchmark_required".to_string(),
+        production_runtime,
+        promotion_ready: production_ready,
+        promotion_gate: promotion_gate.to_string(),
         measurements,
         guard_checks,
         artifact_manifest,
         evidence_manifest,
-        next_action:
-            "Use this guarded runtime benchmark as execution-path evidence, then add production model/runtime benchmarks with real installed models before promoting multimodal beyond groundwork."
-                .to_string(),
+        next_action: next_action.to_string(),
     })
 }
 
@@ -1964,6 +2051,10 @@ fn run_connected_runtime_probe(
         )
     })?;
     let measurements = connected_runtime_measurements(&model_output);
+    let production_runtime = runtime
+        .production
+        .as_ref()
+        .map(|production| production_runtime_evidence(production, &model_output));
 
     Ok(ConnectedRuntimeProbe {
         evidence: MultimodalConnectedRuntimeEvidence {
@@ -1983,6 +2074,7 @@ fn run_connected_runtime_probe(
         },
         model_output,
         measurements,
+        production_runtime,
     })
 }
 
@@ -2005,6 +2097,114 @@ fn connected_runtime_measurements(model_output: &Value) -> Vec<MultimodalBenchma
         ));
     }
     measurements
+}
+
+fn production_runtime_evidence(
+    production: &MultimodalConnectedRuntimeProductionConfig,
+    model_output: &Value,
+) -> MultimodalProductionRuntimeEvidence {
+    let observed_quality_score = numeric_measurement(model_output.get("quality_score"));
+    let observed_latency_ms = numeric_measurement(model_output.get("latency_ms"));
+    let quality_score_passed = observed_quality_score
+        .map(|score| score >= production.min_quality_score)
+        .unwrap_or(false);
+    let latency_passed = observed_latency_ms
+        .map(|latency| latency <= production.max_latency_ms)
+        .unwrap_or(false);
+    let model_manifest_hash_valid = production.model_manifest_sha256.len() == 64
+        && production
+            .model_manifest_sha256
+            .chars()
+            .all(|character| character.is_ascii_hexdigit());
+    let approval_recorded = !production.approved_by.trim().is_empty()
+        && !production.approval_ref.trim().is_empty()
+        && !production.runtime_version.trim().is_empty()
+        && !production.model_license.trim().is_empty();
+    let evidence_artifacts_recorded = !production.evidence_artifacts.is_empty()
+        && production
+            .evidence_artifacts
+            .iter()
+            .all(|artifact| !artifact.trim().is_empty());
+    let promotion_ready = quality_score_passed
+        && latency_passed
+        && model_manifest_hash_valid
+        && approval_recorded
+        && evidence_artifacts_recorded;
+    let status = if promotion_ready {
+        "production_evidence_validated"
+    } else {
+        "production_evidence_incomplete"
+    };
+
+    MultimodalProductionRuntimeEvidence {
+        schema_version: "forge.multimodal.production_runtime_evidence.v1".to_string(),
+        status: status.to_string(),
+        approved_by: production.approved_by.clone(),
+        approval_ref: production.approval_ref.clone(),
+        runtime_version: production.runtime_version.clone(),
+        model_manifest_sha256: production.model_manifest_sha256.clone(),
+        model_license: production.model_license.clone(),
+        evidence_artifacts: production.evidence_artifacts.clone(),
+        min_quality_score: production.min_quality_score,
+        observed_quality_score,
+        quality_score_passed,
+        max_latency_ms: production.max_latency_ms,
+        observed_latency_ms,
+        latency_passed,
+        promotion_ready,
+        validation_evidence: vec![
+            format!("approval_recorded={approval_recorded}"),
+            format!("model_manifest_hash_valid={model_manifest_hash_valid}"),
+            format!("evidence_artifacts_recorded={evidence_artifacts_recorded}"),
+            format!("quality_score_passed={quality_score_passed}"),
+            format!("latency_passed={latency_passed}"),
+        ],
+    }
+}
+
+fn production_runtime_measurements(
+    evidence: &MultimodalProductionRuntimeEvidence,
+) -> Vec<MultimodalBenchmarkMeasurement> {
+    vec![
+        benchmark_measurement(
+            "quality_score_passed",
+            if evidence.quality_score_passed {
+                "true"
+            } else {
+                "false"
+            },
+            "boolean",
+            "production_runtime_evidence",
+        ),
+        benchmark_measurement(
+            "latency_passed",
+            if evidence.latency_passed {
+                "true"
+            } else {
+                "false"
+            },
+            "boolean",
+            "production_runtime_evidence",
+        ),
+        benchmark_measurement(
+            "production_evidence_validated",
+            if evidence.promotion_ready {
+                "true"
+            } else {
+                "false"
+            },
+            "boolean",
+            "production_runtime_evidence",
+        ),
+    ]
+}
+
+fn numeric_measurement(value: Option<&Value>) -> Option<f64> {
+    let value = value?;
+    if let Some(number) = value.as_f64() {
+        return Some(number);
+    }
+    value.as_str()?.parse::<f64>().ok()
 }
 
 fn measurement_value(value: Option<&Value>) -> Option<String> {

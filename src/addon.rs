@@ -9328,7 +9328,7 @@ fn multimodal_runtime_addon() -> AddonManifest {
     capability.deliverables = vec![
         "guarded multimodal runtime benchmark receipt".to_string(),
         "model/runtime guard matrix".to_string(),
-        "promotion gate evidence for production model benchmarks".to_string(),
+        "production connected-runtime benchmark evidence".to_string(),
     ];
     capability.constraints = vec![
         "multimodal behavior is owned by this Addon, not by the universal Core kernel"
@@ -9341,7 +9341,7 @@ fn multimodal_runtime_addon() -> AddonManifest {
     capability.risks = vec![
         "model execution can access sensitive media unless scoped through Forge guard policy"
             .to_string(),
-        "production readiness requires real local model/runtime benchmark evidence before promotion"
+        "production readiness requires validated installed or connected model/runtime benchmark evidence before promotion"
             .to_string(),
     ];
     capability.unknowns = vec![
@@ -9378,7 +9378,7 @@ fn multimodal_runtime_addon() -> AddonManifest {
     runtime_benchmark.constraints = vec![
         "require approved .forge/multimodal.json or explicit experimental flag".to_string(),
         "require model guard approval before benchmark execution".to_string(),
-        "record promotion_ready=false until production model/runtime evidence exists".to_string(),
+        "record promotion_ready=true only when a connected runtime production evidence block validates approval, model manifest hash, artifacts and quality/latency thresholds".to_string(),
     ];
 
     let mut props = BTreeMap::new();
@@ -9391,6 +9391,12 @@ fn multimodal_runtime_addon() -> AddonManifest {
     props.insert(
         "promotion_gate".to_string(),
         serde_json::json!("production_model_runtime_benchmark_required"),
+    );
+    props.insert(
+        "production_connected_runtime_evidence".to_string(),
+        serde_json::json!(
+            "optional .forge/multimodal-runtimes.json production block can validate approval, model manifest hash, evidence artifacts and quality/latency thresholds"
+        ),
     );
 
     AddonManifest {
