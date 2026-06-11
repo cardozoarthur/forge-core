@@ -33,7 +33,7 @@ use crate::credential_vault::{
 };
 use crate::event::{
     build_event_improvement_policy, build_event_observability_history,
-    build_event_observability_index, build_event_service_plan,
+    build_event_observability_index_for_context, build_event_service_plan,
     build_global_event_timeline_for_context, build_workflow_event_stream, emit_event_egress,
     ingest_inbound_event, list_event_services, list_inbound_event_inbox,
     recover_stale_event_services, route_inbound_event, run_event_runtime_daemon,
@@ -696,6 +696,7 @@ struct EventObservabilityInput {
     addon_id: Option<String>,
     limit: Option<usize>,
     after_sequence: Option<i64>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1674,6 +1675,11 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         ("node_ref", "string", "optional node/task reference filter"),
                         ("addon_id", "string", "optional Addon id filter"),
                         ("limit", "integer", "optional latest event limit"),
+                        (
+                            "project_root",
+                            "string",
+                            "optional project root used for tenant-policy enforcement",
+                        ),
                         (
                             "after_sequence",
                             "integer",
@@ -5141,7 +5147,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let product_id = input.product_id.or(input.product);
             let node_ref = input.node_ref.or(input.node);
             let addon_id = input.addon_id.or(input.addon);
-            serde_json::to_value(build_event_observability_index(
+            let project_root = input
+                .project_root
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let operating_context = load_project_operating_context(&project_root)?;
+            serde_json::to_value(build_event_observability_index_for_context(
                 store,
                 workflow_id.as_deref(),
                 organization_id.as_deref(),
@@ -5151,6 +5162,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 addon_id.as_deref(),
                 input.limit,
                 input.after_sequence,
+                &operating_context,
             )?)?
         }
         "forge.events.observability_history" => {

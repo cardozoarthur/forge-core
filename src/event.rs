@@ -1244,13 +1244,23 @@ pub fn build_global_event_timeline_for_context(
     }
     ensure_operating_context_policy(store, operating_context, "events timeline list")?;
     let organization_id = enforce_timeline_tenant_filter(
+        "events timeline list",
         "organization",
         organization_id,
         &operating_context.organization.id,
     )?;
-    let brand_id = enforce_timeline_tenant_filter("brand", brand_id, &operating_context.brand.id)?;
-    let product_id =
-        enforce_timeline_tenant_filter("product", product_id, &operating_context.product.id)?;
+    let brand_id = enforce_timeline_tenant_filter(
+        "events timeline list",
+        "brand",
+        brand_id,
+        &operating_context.brand.id,
+    )?;
+    let product_id = enforce_timeline_tenant_filter(
+        "events timeline list",
+        "product",
+        product_id,
+        &operating_context.product.id,
+    )?;
     build_global_event_timeline(
         store,
         workflow_id,
@@ -1312,6 +1322,64 @@ pub fn build_event_observability_index(
         event_count: events.len(),
         events,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_event_observability_index_for_context(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    node_ref: Option<&str>,
+    addon_id: Option<&str>,
+    limit: Option<usize>,
+    after_sequence: Option<i64>,
+    operating_context: &OperatingContextSpec,
+) -> Result<EventObservabilityIndexReport> {
+    if operating_context.tenant_policy_mode != "enforce" {
+        return build_event_observability_index(
+            store,
+            workflow_id,
+            organization_id,
+            brand_id,
+            product_id,
+            node_ref,
+            addon_id,
+            limit,
+            after_sequence,
+        );
+    }
+    ensure_operating_context_policy(store, operating_context, "events observability list")?;
+    let organization_id = enforce_timeline_tenant_filter(
+        "events observability list",
+        "organization",
+        organization_id,
+        &operating_context.organization.id,
+    )?;
+    let brand_id = enforce_timeline_tenant_filter(
+        "events observability list",
+        "brand",
+        brand_id,
+        &operating_context.brand.id,
+    )?;
+    let product_id = enforce_timeline_tenant_filter(
+        "events observability list",
+        "product",
+        product_id,
+        &operating_context.product.id,
+    )?;
+    build_event_observability_index(
+        store,
+        workflow_id,
+        Some(&organization_id),
+        Some(&brand_id),
+        Some(&product_id),
+        node_ref,
+        addon_id,
+        limit,
+        after_sequence,
+    )
 }
 
 pub fn build_event_observability_history(
@@ -6470,6 +6538,7 @@ fn global_event_matches_filters(
 }
 
 fn enforce_timeline_tenant_filter(
+    action: &str,
     label: &str,
     requested: Option<&str>,
     allowed: &str,
@@ -6477,7 +6546,7 @@ fn enforce_timeline_tenant_filter(
     if let Some(requested) = normalize_text(requested) {
         if requested != allowed {
             bail!(
-                "multi-tenant enforcement blocked events timeline list: requested {label} {requested} is outside operating context {allowed}"
+                "multi-tenant enforcement blocked {action}: requested {label} {requested} is outside operating context {allowed}"
             );
         }
     }

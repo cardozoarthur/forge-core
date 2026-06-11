@@ -2866,6 +2866,213 @@ tenant_policy_mode: enforce
 }
 
 #[test]
+fn event_observability_enforces_project_tenant_policy_for_global_index_reads() {
+    let temp = tempdir().unwrap();
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: obs-org
+  label: Observability Org
+brand:
+  scope: brand
+  id: obs-brand
+  label: Observability Brand
+product:
+  scope: product
+  id: obs-product
+  label: Observability Product
+user:
+  scope: user
+  id: obs-user
+  label: Observability User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+
+    let store = temp.path().join("forge.sqlite");
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let store_handle = ForgeStore::open(&store).unwrap();
+    let tenant_context = serde_json::json!({
+        "organization": {"scope": "organization", "id": "obs-org", "label": "Observability Org"},
+        "brand": {"scope": "brand", "id": "obs-brand", "label": "Observability Brand"},
+        "product": {"scope": "product", "id": "obs-product", "label": "Observability Product"},
+        "user": {"scope": "user", "id": "obs-user", "label": "Observability User"},
+        "channel": {"scope": "channel", "id": "local_cli", "label": "Local CLI"},
+        "tenant_policy_mode": "enforce"
+    });
+    let other_tenant_context = serde_json::json!({
+        "organization": {"scope": "organization", "id": "other-obs-org", "label": "Other Observability Org"},
+        "brand": {"scope": "brand", "id": "other-obs-brand", "label": "Other Observability Brand"},
+        "product": {"scope": "product", "id": "other-obs-product", "label": "Other Observability Product"},
+        "user": {"scope": "user", "id": "other-obs-user", "label": "Other Observability User"},
+        "channel": {"scope": "channel", "id": "api", "label": "API"},
+        "tenant_policy_mode": "enforce"
+    });
+    store_handle
+        .record_global_event(
+            "obs_seed",
+            "visible",
+            None,
+            "ai_executor_completed",
+            "codex",
+            "recorded",
+            &serde_json::json!({
+                "node_id": "node-visible",
+                "addon_id": "forge.addon.visible",
+                "duration_ms": 222,
+                "message": "visible observability"
+            }),
+            &tenant_context,
+        )
+        .unwrap();
+    store_handle
+        .record_global_event(
+            "obs_seed",
+            "hidden",
+            None,
+            "ai_executor_completed",
+            "codex",
+            "recorded",
+            &serde_json::json!({
+                "node_id": "node-hidden",
+                "addon_id": "forge.addon.hidden",
+                "duration_ms": 999,
+                "message": "must not leak"
+            }),
+            &other_tenant_context,
+        )
+        .unwrap();
+
+    let observability_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "observability",
+            "--limit",
+            "10",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let observability_json: Value = serde_json::from_slice(&observability_output).unwrap();
+    assert_eq!(observability_json["filters"]["organization_id"], "obs-org");
+    assert_eq!(observability_json["event_count"], 1);
+    assert_eq!(observability_json["summary"]["total_duration_ms"], 222);
+    assert_eq!(
+        observability_json["events"][0]["organization_id"],
+        "obs-org"
+    );
+    assert_eq!(observability_json["events"][0]["node_ref"], "node-visible");
+    assert!(!observability_json["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["node_ref"] == "node-hidden"));
+
+    let mcp_observability_input = serde_json::json!({
+        "project_root": temp.path().display().to_string(),
+        "limit": 10
+    });
+    let mcp_observability_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.events.observability",
+            "--input",
+            &mcp_observability_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_observability_json: Value = serde_json::from_slice(&mcp_observability_output).unwrap();
+    assert_eq!(
+        mcp_observability_json["result"]["filters"]["organization_id"],
+        "obs-org"
+    );
+    assert_eq!(mcp_observability_json["result"]["event_count"], 1);
+
+    forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "membership-update",
+            "--subject",
+            "obs-user",
+            "--organization",
+            "obs-org",
+            "--brand",
+            "obs-brand",
+            "--product",
+            "obs-product",
+            "--deny",
+            "context:read",
+            "--source",
+            "test-cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let denied_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "observability",
+            "--limit",
+            "10",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let denied_stderr = String::from_utf8(denied_output).unwrap();
+    assert!(denied_stderr.contains("multi-tenant enforcement blocked events observability list"));
+    assert!(denied_stderr.contains("context:read"));
+}
+
+#[test]
 fn event_observability_index_backfills_existing_global_events_on_migration() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
