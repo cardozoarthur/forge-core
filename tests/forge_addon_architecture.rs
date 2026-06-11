@@ -3073,6 +3073,221 @@ tenant_policy_mode: enforce
 }
 
 #[test]
+fn event_observability_history_enforces_project_tenant_policy_for_global_rollups() {
+    let temp = tempdir().unwrap();
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: history-org
+  label: History Org
+brand:
+  scope: brand
+  id: history-brand
+  label: History Brand
+product:
+  scope: product
+  id: history-product
+  label: History Product
+user:
+  scope: user
+  id: history-user
+  label: History User
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+
+    let store = temp.path().join("forge.sqlite");
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let store_handle = ForgeStore::open(&store).unwrap();
+    let tenant_context = serde_json::json!({
+        "organization": {"scope": "organization", "id": "history-org", "label": "History Org"},
+        "brand": {"scope": "brand", "id": "history-brand", "label": "History Brand"},
+        "product": {"scope": "product", "id": "history-product", "label": "History Product"},
+        "user": {"scope": "user", "id": "history-user", "label": "History User"},
+        "channel": {"scope": "channel", "id": "local_cli", "label": "Local CLI"},
+        "tenant_policy_mode": "enforce"
+    });
+    let other_tenant_context = serde_json::json!({
+        "organization": {"scope": "organization", "id": "other-history-org", "label": "Other History Org"},
+        "brand": {"scope": "brand", "id": "other-history-brand", "label": "Other History Brand"},
+        "product": {"scope": "product", "id": "other-history-product", "label": "Other History Product"},
+        "user": {"scope": "user", "id": "other-history-user", "label": "Other History User"},
+        "channel": {"scope": "channel", "id": "api", "label": "API"},
+        "tenant_policy_mode": "enforce"
+    });
+    store_handle
+        .record_global_event(
+            "history_seed",
+            "visible",
+            None,
+            "ai_executor_completed",
+            "codex",
+            "recorded",
+            &serde_json::json!({
+                "node_id": "node-history-visible",
+                "addon_id": "forge.addon.history_visible",
+                "duration_ms": 333,
+                "retry_count": 1
+            }),
+            &tenant_context,
+        )
+        .unwrap();
+    store_handle
+        .record_global_event(
+            "history_seed",
+            "hidden",
+            None,
+            "ai_executor_completed",
+            "codex",
+            "recorded",
+            &serde_json::json!({
+                "node_id": "node-history-hidden",
+                "addon_id": "forge.addon.history_hidden",
+                "duration_ms": 999,
+                "retry_count": 9
+            }),
+            &other_tenant_context,
+        )
+        .unwrap();
+
+    let history_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "observability-history",
+            "--group-by",
+            "tenant",
+            "--bucket",
+            "day",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let history_json: Value = serde_json::from_slice(&history_output).unwrap();
+    assert_eq!(history_json["filters"]["organization_id"], "history-org");
+    assert_eq!(history_json["summary"]["total_event_count"], 1);
+    assert_eq!(history_json["summary"]["total_duration_ms"], 333);
+    assert_eq!(history_json["bucket_count"], 1);
+    assert_eq!(
+        history_json["buckets"][0]["group"]["organization_id"],
+        "history-org"
+    );
+    assert_eq!(
+        history_json["buckets"][0]["summary"]["total_retry_count"],
+        1
+    );
+
+    let mcp_history_input = serde_json::json!({
+        "project_root": temp.path().display().to_string(),
+        "group_by": "tenant",
+        "bucket": "day"
+    });
+    let mcp_history_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.events.observability_history",
+            "--input",
+            &mcp_history_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_history_json: Value = serde_json::from_slice(&mcp_history_output).unwrap();
+    assert_eq!(
+        mcp_history_json["result"]["filters"]["organization_id"],
+        "history-org"
+    );
+    assert_eq!(
+        mcp_history_json["result"]["summary"]["total_event_count"],
+        1
+    );
+
+    forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "membership-update",
+            "--subject",
+            "history-user",
+            "--organization",
+            "history-org",
+            "--brand",
+            "history-brand",
+            "--product",
+            "history-product",
+            "--deny",
+            "context:read",
+            "--source",
+            "test-cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let denied_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "observability-history",
+            "--group-by",
+            "tenant",
+            "--bucket",
+            "day",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let denied_stderr = String::from_utf8(denied_output).unwrap();
+    assert!(denied_stderr
+        .contains("multi-tenant enforcement blocked events observability history list"));
+    assert!(denied_stderr.contains("context:read"));
+}
+
+#[test]
 fn event_observability_index_backfills_existing_global_events_on_migration() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

@@ -42,7 +42,7 @@ use forge_core::credential_vault::{
     run_records as run_credential_vault_records,
 };
 use forge_core::event::{
-    build_event_improvement_policy, build_event_observability_history,
+    build_event_improvement_policy, build_event_observability_history_for_context,
     build_event_observability_index_for_context, build_event_service_plan,
     build_global_event_timeline_for_context, build_workflow_event_stream, emit_event_egress,
     ingest_inbound_event, list_event_services, list_inbound_event_inbox,
@@ -1180,6 +1180,8 @@ enum EventCommands {
         limit: Option<usize>,
         #[arg(long = "after-sequence")]
         after_sequence: Option<i64>,
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -3494,10 +3496,12 @@ fn run() -> Result<i32> {
                 group_by,
                 limit,
                 after_sequence,
+                project_root,
                 output,
             } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = build_event_observability_history(
+                let operating_context = load_project_operating_context(&project_root)?;
+                let report = build_event_observability_history_for_context(
                     &store,
                     workflow.as_deref(),
                     organization.as_deref(),
@@ -3509,6 +3513,7 @@ fn run() -> Result<i32> {
                     Some(group_by.as_str()),
                     limit,
                     after_sequence,
+                    &operating_context,
                 )?;
                 print_response(output, &report)?;
                 Ok(0)

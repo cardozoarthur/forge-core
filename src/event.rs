@@ -275,9 +275,28 @@ pub struct EventObservabilityHistoryBucket {
     pub bucket_end: String,
     pub group_by: String,
     pub group_id: String,
+    pub group: EventObservabilityHistoryGroup,
     pub summary: EventObservabilitySummary,
     pub first_event_sequence: i64,
     pub last_event_sequence: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventObservabilityHistoryGroup {
+    pub group_by: String,
+    pub group_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brand_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1440,6 +1459,74 @@ pub fn build_event_observability_history(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn build_event_observability_history_for_context(
+    store: &ForgeStore,
+    workflow_id: Option<&str>,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+    node_ref: Option<&str>,
+    addon_id: Option<&str>,
+    bucket: Option<&str>,
+    group_by: Option<&str>,
+    limit: Option<usize>,
+    after_sequence: Option<i64>,
+    operating_context: &OperatingContextSpec,
+) -> Result<EventObservabilityHistoryReport> {
+    if operating_context.tenant_policy_mode != "enforce" {
+        return build_event_observability_history(
+            store,
+            workflow_id,
+            organization_id,
+            brand_id,
+            product_id,
+            node_ref,
+            addon_id,
+            bucket,
+            group_by,
+            limit,
+            after_sequence,
+        );
+    }
+    ensure_operating_context_policy(
+        store,
+        operating_context,
+        "events observability history list",
+    )?;
+    let organization_id = enforce_timeline_tenant_filter(
+        "events observability history list",
+        "organization",
+        organization_id,
+        &operating_context.organization.id,
+    )?;
+    let brand_id = enforce_timeline_tenant_filter(
+        "events observability history list",
+        "brand",
+        brand_id,
+        &operating_context.brand.id,
+    )?;
+    let product_id = enforce_timeline_tenant_filter(
+        "events observability history list",
+        "product",
+        product_id,
+        &operating_context.product.id,
+    )?;
+    build_event_observability_history(
+        store,
+        workflow_id,
+        Some(&organization_id),
+        Some(&brand_id),
+        Some(&product_id),
+        node_ref,
+        addon_id,
+        bucket,
+        group_by,
+        limit,
+        after_sequence,
+    )
+}
+
 pub fn build_event_improvement_policy(
     store: &ForgeStore,
     workflow_id: Option<&str>,
@@ -1980,12 +2067,18 @@ fn build_event_observability_history_buckets(
                 .last()
                 .map(|record| record.store_sequence)
                 .unwrap_or_default();
+            let group = event_observability_history_group(
+                bucket.group_by.as_str(),
+                bucket.group_id.as_str(),
+                &bucket.records,
+            );
             EventObservabilityHistoryBucket {
                 bucket: bucket.bucket,
                 bucket_start: bucket.bucket_start,
                 bucket_end: bucket.bucket_end,
                 group_by: bucket.group_by,
                 group_id: bucket.group_id,
+                group,
                 summary: summarize_event_observability(&bucket.records),
                 first_event_sequence,
                 last_event_sequence,
@@ -2084,6 +2177,36 @@ fn event_observability_history_group_id(
             .clone()
             .unwrap_or_else(|| "_no_addon".to_string()),
         _ => "_all".to_string(),
+    }
+}
+
+fn event_observability_history_group(
+    group_by: &str,
+    group_id: &str,
+    records: &[EventObservabilityRecord],
+) -> EventObservabilityHistoryGroup {
+    let first = records.first();
+    EventObservabilityHistoryGroup {
+        group_by: group_by.to_string(),
+        group_id: group_id.to_string(),
+        organization_id: (group_by == "tenant")
+            .then(|| first.map(|record| record.organization_id.clone()))
+            .flatten(),
+        brand_id: (group_by == "tenant")
+            .then(|| first.map(|record| record.brand_id.clone()))
+            .flatten(),
+        product_id: (group_by == "tenant")
+            .then(|| first.map(|record| record.product_id.clone()))
+            .flatten(),
+        workflow_id: (group_by == "workflow")
+            .then(|| first.map(|record| record.workflow_id.clone()))
+            .flatten(),
+        node_ref: (group_by == "node")
+            .then(|| first.and_then(|record| record.node_ref.clone()))
+            .flatten(),
+        addon_id: (group_by == "addon")
+            .then(|| first.and_then(|record| record.addon_id.clone()))
+            .flatten(),
     }
 }
 
