@@ -2957,8 +2957,16 @@ fn milestone_boundary_document_matches_validated_export_demo_runtime_state() {
         "the visible 0.5 milestone boundary should point to approved fixture-only benchmark result evidence"
     );
     assert!(
+        docs.contains("forge multimodal demo-receipt"),
+        "the visible 0.5 milestone boundary should point to guarded demo receipt evidence"
+    );
+    assert!(
         docs.contains("forge.multimodal.benchmark_result"),
         "the visible 0.5 milestone boundary should expose the MCP benchmark result surface"
+    );
+    assert!(
+        docs.contains("forge.multimodal.demo_receipt"),
+        "the visible 0.5 milestone boundary should expose the MCP demo receipt surface"
     );
     assert!(
         docs.contains(".forge/multimodal.json"),
@@ -3035,6 +3043,14 @@ fn packaged_skill_mentions_multimodal_benchmark_and_demo_plan_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.multimodal.demo_plan"),
         "the packaged Forge skill should expose the MCP demo-plan tool to agent callers"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge multimodal demo-receipt"),
+        "the packaged Forge skill should teach agents how to record guarded multimodal demo receipts"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.multimodal.demo_receipt"),
+        "the packaged Forge skill should expose the MCP demo-receipt tool to agent callers"
     );
 }
 
@@ -3600,6 +3616,111 @@ fn multimodal_demo_plan_covers_safe_local_image_audio_and_blender_tracks() {
 }
 
 #[test]
+fn multimodal_demo_receipt_requires_opt_in_and_records_guard_matrix() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .current_dir(temp.path())
+        .args([
+            "multimodal",
+            "demo-receipt",
+            "--demo",
+            "local_image_recognition",
+            "--fixture",
+            "static_image_labels",
+            "--approved-by",
+            "contract-test",
+            "--confirm-local-fixture",
+            "--allow-model",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("experimental multimodal opt-in"));
+
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("multimodal.json"),
+        r#"{"experimental_enabled":true,"approved_by":"contract-test","reason":"guarded local fixture demo","scope":"project"}"#,
+    )
+    .unwrap();
+
+    let output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .current_dir(temp.path())
+        .args([
+            "multimodal",
+            "demo-receipt",
+            "--demo",
+            "local_image_recognition",
+            "--fixture",
+            "static_image_labels",
+            "--approved-by",
+            "contract-test",
+            "--confirm-local-fixture",
+            "--allow-model",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.multimodal.demo_receipt.v1");
+    assert_eq!(json["status"], "guarded_demo_receipt_recorded");
+    assert_eq!(json["demo_id"], "local_image_recognition");
+    assert_eq!(json["fixture_id"], "static_image_labels");
+    assert_eq!(json["approved_by"], "contract-test");
+    assert_eq!(json["feature_flag_enabled"], true);
+    assert_eq!(json["fixture_execution_performed"], true);
+    assert_eq!(json["runtime_execution_performed"], true);
+    assert_eq!(json["model_guard_allowed"], true);
+    assert_eq!(json["model_execution_performed"], false);
+    assert_eq!(json["camera_access_performed"], false);
+    assert_eq!(json["microphone_access_performed"], false);
+    assert_eq!(json["screen_access_performed"], false);
+    assert_eq!(json["input_access_performed"], false);
+    assert_eq!(json["filesystem_access_performed"], false);
+    assert_eq!(json["network_access_performed"], false);
+    assert_eq!(json["promotion_ready"], false);
+    assert!(json["guard_decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|decision| {
+            decision["scope"] == "model"
+                && decision["guard_allowed"] == true
+                && decision["access_performed"] == false
+        }));
+    for blocked_scope in ["camera", "microphone", "screen", "input", "filesystem"] {
+        assert!(json["guard_decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|decision| {
+                decision["scope"] == blocked_scope
+                    && decision["guard_allowed"] == false
+                    && decision["access_performed"] == false
+                    && decision["decision"] == "blocked_without_guard"
+            }));
+    }
+    assert!(json["evidence_manifest"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "camera_microphone_screen_input_filesystem_blocked_without_guard=true"
+        )));
+}
+
+#[test]
 fn mcp_exposes_multimodal_benchmark_template_and_demo_plan() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -3621,6 +3742,12 @@ fn mcp_exposes_multimodal_benchmark_template_and_demo_plan() {
     assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
         tool["name"] == "forge.multimodal.demo_plan"
             && tool["output_schema"] == "forge.multimodal.demo_plan.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == false
+    }));
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.multimodal.demo_receipt"
+            && tool["output_schema"] == "forge.multimodal.demo_receipt.v1"
             && tool["async_safe"] == true
             && tool["mutates_workflow"] == false
     }));
@@ -3669,6 +3796,44 @@ fn mcp_exposes_multimodal_benchmark_template_and_demo_plan() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("blender_asset_processing")));
+
+    let forge_dir = temp.path().join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("multimodal.json"),
+        r#"{"experimental_enabled":true,"approved_by":"mcp-contract-test","reason":"guarded local fixture demo","scope":"project"}"#,
+    )
+    .unwrap();
+    let receipt = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.multimodal.demo_receipt"])
+        .arg("--input")
+        .arg(
+            serde_json::json!({
+                "project_root": temp.path().display().to_string(),
+                "demo_id": "local_image_recognition",
+                "fixture_id": "static_image_labels",
+                "approved_by": "mcp-contract-test",
+                "confirm_local_fixture": true,
+                "allow_model": true
+            })
+            .to_string(),
+        )
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let receipt_json: Value = serde_json::from_slice(&receipt).unwrap();
+    assert_eq!(receipt_json["status"], "ok");
+    assert_eq!(
+        receipt_json["result"]["schema_version"],
+        "forge.multimodal.demo_receipt.v1"
+    );
+    assert_eq!(receipt_json["result"]["feature_flag_enabled"], true);
+    assert_eq!(receipt_json["result"]["camera_access_performed"], false);
 }
 
 #[test]

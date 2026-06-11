@@ -99,9 +99,10 @@ use crate::milestone::{
 };
 use crate::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
-    build_multimodal_demo_plan, build_multimodal_install_plan,
+    build_multimodal_demo_plan, build_multimodal_demo_receipt, build_multimodal_install_plan,
     build_multimodal_status_with_feature_flag, evaluate_multimodal_guard,
     resolve_multimodal_feature_flag, MultimodalBenchmarkResultOptions,
+    MultimodalDemoReceiptOptions,
 };
 use crate::ops::{
     build_ops_snapshot_with_addon_dirs_and_project, record_addon_renderer_client_event,
@@ -1615,6 +1616,24 @@ struct MultimodalDemoPlanInput {
     demo_id: Option<String>,
     enable_experimental: Option<bool>,
     project_root: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultimodalDemoReceiptInput {
+    demo: Option<String>,
+    demo_id: Option<String>,
+    fixture: Option<String>,
+    fixture_id: Option<String>,
+    enable_experimental: Option<bool>,
+    project_root: Option<String>,
+    approved_by: Option<String>,
+    confirm_local_fixture: Option<bool>,
+    allow_model: Option<bool>,
+    allow_camera: Option<bool>,
+    allow_microphone: Option<bool>,
+    allow_screen: Option<bool>,
+    allow_input: Option<bool>,
+    allow_filesystem: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5581,6 +5600,49 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.multimodal.demo_receipt",
+                "Record Multimodal Guarded Demo Receipt",
+                "Record approval-gated guarded demo evidence after experimental opt-in using a local fixture receipt and explicit guard matrix. This tool performs no installs, real model execution, device access, filesystem access or network access unless separate guard approvals are supplied and recorded.",
+                object_schema(
+                    &[
+                        ("demo_id", "string", "local_image_recognition|audio_transcription_synthesis|blender_avatar_preparation"),
+                        ("fixture_id", "string", "fixture id from forge.multimodal.benchmark_template"),
+                        ("approved_by", "string", "required human/operator approval identity"),
+                        ("confirm_local_fixture", "boolean", "must be true to confirm the receipt uses a secret-free local fixture"),
+                        ("enable_experimental", "boolean", "optional explicit experimental flag for evidence output"),
+                        ("project_root", "string", "optional project root containing .forge/multimodal.json"),
+                        ("allow_model", "boolean", "record model runtime guard approval without executing a real model"),
+                        ("allow_camera", "boolean", "record camera guard approval; omitted means blocked/no access"),
+                        ("allow_microphone", "boolean", "record microphone guard approval; omitted means blocked/no access"),
+                        ("allow_screen", "boolean", "record screen guard approval; omitted means blocked/no access"),
+                        ("allow_input", "boolean", "record input guard approval; omitted means blocked/no access"),
+                        ("allow_filesystem", "boolean", "record filesystem guard approval; omitted means blocked/no access"),
+                    ],
+                    &[
+                        "demo_id",
+                        "fixture_id",
+                        "approved_by",
+                        "confirm_local_fixture",
+                    ],
+                ),
+                "forge.multimodal.demo_receipt.v1",
+                &[
+                    "forge",
+                    "multimodal",
+                    "demo-receipt",
+                    "--demo",
+                    "<demo-id>",
+                    "--fixture",
+                    "<fixture-id>",
+                    "--approved-by",
+                    "<operator>",
+                    "--confirm-local-fixture",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.multimodal.guard",
                 "Evaluate Multimodal Runtime Guard",
                 "Evaluate whether a camera, microphone, screen, input, peripheral, model or filesystem multimodal action is allowed under Forge's experimental opt-in policy.",
@@ -8300,6 +8362,36 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 .or(input.demo)
                 .ok_or_else(|| anyhow::anyhow!("demo_id is required"))?;
             serde_json::to_value(build_multimodal_demo_plan(&demo, feature_flag.enabled)?)?
+        }
+        "forge.multimodal.demo_receipt" => {
+            let input: MultimodalDemoReceiptInput = parse_input(input)?;
+            let feature_flag = resolve_multimodal_feature_flag(
+                input.enable_experimental.unwrap_or(false),
+                input.project_root.as_deref().map(std::path::Path::new),
+            );
+            let demo = input
+                .demo_id
+                .or(input.demo)
+                .ok_or_else(|| anyhow::anyhow!("demo_id is required"))?;
+            let fixture = input
+                .fixture_id
+                .or(input.fixture)
+                .ok_or_else(|| anyhow::anyhow!("fixture_id is required"))?;
+            serde_json::to_value(build_multimodal_demo_receipt(
+                MultimodalDemoReceiptOptions {
+                    demo_id: &demo,
+                    fixture_id: &fixture,
+                    enable_experimental: feature_flag.enabled,
+                    approved_by: input.approved_by.as_deref(),
+                    confirm_local_fixture: input.confirm_local_fixture.unwrap_or(false),
+                    allow_model: input.allow_model.unwrap_or(false),
+                    allow_camera: input.allow_camera.unwrap_or(false),
+                    allow_microphone: input.allow_microphone.unwrap_or(false),
+                    allow_screen: input.allow_screen.unwrap_or(false),
+                    allow_input: input.allow_input.unwrap_or(false),
+                    allow_filesystem: input.allow_filesystem.unwrap_or(false),
+                },
+            )?)?
         }
         "forge.multimodal.guard" => {
             let input: MultimodalGuardInput = parse_input(input)?;

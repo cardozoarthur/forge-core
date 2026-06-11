@@ -11,6 +11,7 @@ const INSTALL_PLAN_SCHEMA_VERSION: &str = "forge.multimodal.install_plan.v1";
 const BENCHMARK_TEMPLATE_SCHEMA_VERSION: &str = "forge.multimodal.benchmark_template.v1";
 const BENCHMARK_RESULT_SCHEMA_VERSION: &str = "forge.multimodal.benchmark_result.v1";
 const DEMO_PLAN_SCHEMA_VERSION: &str = "forge.multimodal.demo_plan.v1";
+const DEMO_RECEIPT_SCHEMA_VERSION: &str = "forge.multimodal.demo_receipt.v1";
 const GUARD_SCHEMA_VERSION: &str = "forge.multimodal.guard.v1";
 const MULTIMODAL_CONFIG_RELATIVE_PATH: &str = ".forge/multimodal.json";
 
@@ -182,6 +183,61 @@ pub struct MultimodalBenchmarkMeasurement {
     pub value: String,
     pub unit: String,
     pub source: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MultimodalDemoReceiptOptions<'a> {
+    pub demo_id: &'a str,
+    pub fixture_id: &'a str,
+    pub enable_experimental: bool,
+    pub approved_by: Option<&'a str>,
+    pub confirm_local_fixture: bool,
+    pub allow_model: bool,
+    pub allow_camera: bool,
+    pub allow_microphone: bool,
+    pub allow_screen: bool,
+    pub allow_input: bool,
+    pub allow_filesystem: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MultimodalDemoReceiptReport {
+    pub schema_version: String,
+    pub status: String,
+    pub demo_id: String,
+    pub title: String,
+    pub fixture_id: String,
+    pub fixture_kind: String,
+    pub approved_by: String,
+    pub feature_flag_enabled: bool,
+    pub fixture_execution_performed: bool,
+    pub runtime_execution_performed: bool,
+    pub installs_performed: bool,
+    pub model_guard_allowed: bool,
+    pub model_execution_performed: bool,
+    pub camera_access_performed: bool,
+    pub microphone_access_performed: bool,
+    pub screen_access_performed: bool,
+    pub input_access_performed: bool,
+    pub filesystem_access_performed: bool,
+    pub network_access_performed: bool,
+    pub promotion_ready: bool,
+    pub promotion_gate: String,
+    pub guard_decisions: Vec<MultimodalDemoGuardDecision>,
+    pub measurements: Vec<MultimodalBenchmarkMeasurement>,
+    pub artifact_manifest: Vec<String>,
+    pub evidence_manifest: Vec<String>,
+    pub next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MultimodalDemoGuardDecision {
+    pub scope: String,
+    pub action: String,
+    pub guard_allowed: bool,
+    pub decision: String,
+    pub access_performed: bool,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -706,6 +762,112 @@ pub fn build_multimodal_demo_plan(
     })
 }
 
+pub fn build_multimodal_demo_receipt(
+    options: MultimodalDemoReceiptOptions<'_>,
+) -> Result<MultimodalDemoReceiptReport> {
+    if !options.enable_experimental {
+        bail!("experimental multimodal opt-in is required before recording guarded demo evidence");
+    }
+    let approved_by = options.approved_by.filter(|value| !value.trim().is_empty());
+    if approved_by.is_none() || !options.confirm_local_fixture {
+        bail!(
+            "multimodal demo-receipt requires --approved-by and --confirm-local-fixture before recording guarded demo evidence"
+        );
+    }
+
+    let demo_plan = build_multimodal_demo_plan(options.demo_id, options.enable_experimental)?;
+    let fixture = find_benchmark_fixture(options.fixture_id)?;
+    let approved_by = approved_by.unwrap().to_string();
+    let guard_decisions = vec![
+        demo_guard_decision("model", "execute_fixture_runtime", options.allow_model),
+        demo_guard_decision("camera", "access", options.allow_camera),
+        demo_guard_decision("microphone", "access", options.allow_microphone),
+        demo_guard_decision("screen", "access", options.allow_screen),
+        demo_guard_decision("input", "access", options.allow_input),
+        demo_guard_decision("filesystem", "access", options.allow_filesystem),
+    ];
+    let model_guard_allowed = options.allow_model;
+
+    Ok(MultimodalDemoReceiptReport {
+        schema_version: DEMO_RECEIPT_SCHEMA_VERSION.to_string(),
+        status: "guarded_demo_receipt_recorded".to_string(),
+        demo_id: demo_plan.demo_id,
+        title: demo_plan.title,
+        fixture_id: fixture.id,
+        fixture_kind: fixture.artifact_kind,
+        approved_by,
+        feature_flag_enabled: options.enable_experimental,
+        fixture_execution_performed: true,
+        runtime_execution_performed: true,
+        installs_performed: false,
+        model_guard_allowed,
+        model_execution_performed: false,
+        camera_access_performed: false,
+        microphone_access_performed: false,
+        screen_access_performed: false,
+        input_access_performed: false,
+        filesystem_access_performed: false,
+        network_access_performed: false,
+        promotion_ready: false,
+        promotion_gate: "real_model_execution_evidence_required".to_string(),
+        guard_decisions,
+        measurements: vec![
+            benchmark_measurement(
+                "local_fixture_execution",
+                "true",
+                "boolean",
+                "forge_guarded_demo_receipt",
+            ),
+            benchmark_measurement(
+                "model_guard_allowed",
+                if model_guard_allowed { "true" } else { "false" },
+                "boolean",
+                "forge_multimodal_guard_matrix",
+            ),
+            benchmark_measurement(
+                "device_access_performed",
+                "false",
+                "boolean",
+                "forge_multimodal_guard_matrix",
+            ),
+            benchmark_measurement(
+                "filesystem_access_performed",
+                "false",
+                "boolean",
+                "forge_multimodal_guard_matrix",
+            ),
+            benchmark_measurement(
+                "network_access_performed",
+                "false",
+                "boolean",
+                "forge_multimodal_guard_matrix",
+            ),
+        ],
+        artifact_manifest: vec![
+            "multimodal-guarded-demo-receipt.json".to_string(),
+            "multimodal-guard-matrix.json".to_string(),
+            "multimodal-local-fixture-evidence.md".to_string(),
+        ],
+        evidence_manifest: vec![
+            format!("demo_id={}", options.demo_id),
+            format!("fixture_id={}", options.fixture_id),
+            "experimental_opt_in=true".to_string(),
+            "human_approval_recorded=true".to_string(),
+            "confirm_local_fixture=true".to_string(),
+            format!("model_guard_allowed={model_guard_allowed}"),
+            "fixture_execution_performed=true".to_string(),
+            "runtime_execution_performed=true".to_string(),
+            "installs_performed=false".to_string(),
+            "model_execution_performed=false".to_string(),
+            "network_access_performed=false".to_string(),
+            "camera_microphone_screen_input_filesystem_blocked_without_guard=true".to_string(),
+        ],
+        next_action:
+            "Attach this guarded demo receipt to the milestone, then run a real model benchmark only after model/runtime installation and access scopes receive separate guard approval."
+                .to_string(),
+    })
+}
+
 pub fn evaluate_multimodal_guard(
     capability: &str,
     action: &str,
@@ -751,6 +913,31 @@ pub fn evaluate_multimodal_guard(
             "permission_scoped_rollback".to_string(),
         ],
     })
+}
+
+fn demo_guard_decision(
+    scope: &str,
+    action: &str,
+    guard_allowed: bool,
+) -> MultimodalDemoGuardDecision {
+    MultimodalDemoGuardDecision {
+        scope: scope.to_string(),
+        action: action.to_string(),
+        guard_allowed,
+        decision: if guard_allowed {
+            "allowed_by_guard"
+        } else {
+            "blocked_without_guard"
+        }
+        .to_string(),
+        access_performed: false,
+        reason: if guard_allowed {
+            "Guard approval is recorded for this scope, but the local fixture receipt does not perform real model or device access."
+        } else {
+            "No guard approval was supplied for this scope, so Forge records zero access performed."
+        }
+        .to_string(),
+    }
 }
 
 fn capability_inventory(enable_experimental: bool) -> Vec<MultimodalCapability> {

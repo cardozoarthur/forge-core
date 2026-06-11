@@ -308,6 +308,13 @@ Estado verificado em `forge 0.4.177`, branch `main` alinhado com `origin/main`.
 - `forge multimodal status --project-root <path>` e MCP `forge.multimodal.status` com `project_root` agora leem `.forge/multimodal.json` quando o arquivo declara `experimental_enabled` e `approved_by`; a configuração habilita apenas planejamento experimental, enquanto `guard --allow` continua obrigatório para qualquer permissão sensível.
 - O gap do milestone multimodal foi reduzido: a feature flag explícita existe, mas ainda falta benchmark/demo real com runtime guard aprovado antes de promover a capacidade além de `groundwork`.
 
+### Atualização 2026-06-11 — Recibo de Demo Multimodal Guardado
+
+- `forge multimodal demo-receipt --demo <id> --fixture <id> --approved-by <operator> --confirm-local-fixture --allow-model --output json` adiciona o artifact `forge.multimodal.demo_receipt.v1` para evidência de demo local guardada após opt-in experimental.
+- MCP `forge.multimodal.demo_receipt` expõe o mesmo contrato para agentes, com `async_safe=true`, `mutates_workflow=false`, `project_root` para `.forge/multimodal.json` e flags separadas de guard para modelo, câmera, microfone, tela, input e filesystem.
+- O recibo executa apenas o caminho determinístico de fixture local, registra `fixture_execution_performed=true` e `runtime_execution_performed=true`, mantém `installs_performed=false`, `model_execution_performed=false`, `network_access_performed=false` e prova que câmera, microfone, tela, input e filesystem ficam `blocked_without_guard` e `access_performed=false` sem aprovação separada.
+- O milestone 0.5 continua em `groundwork`: o recibo prova comportamento de guard pós opt-in, mas ainda falta benchmark real com modelo/runtime instalado e aprovado antes de promover a capacidade.
+
 ## Plano Incremental
 
 ### P0 — Contrato De Fonte Da Verdade

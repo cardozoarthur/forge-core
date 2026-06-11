@@ -121,9 +121,10 @@ use forge_core::milestone::{
 };
 use forge_core::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
-    build_multimodal_demo_plan, build_multimodal_install_plan,
+    build_multimodal_demo_plan, build_multimodal_demo_receipt, build_multimodal_install_plan,
     build_multimodal_status_with_feature_flag, evaluate_multimodal_guard,
     resolve_multimodal_feature_flag, MultimodalBenchmarkResultOptions,
+    MultimodalDemoReceiptOptions,
 };
 use forge_core::ops::{
     build_ops_snapshot_with_addon_dirs_and_project, record_addon_renderer_client_event,
@@ -3285,6 +3286,34 @@ enum MultimodalCommands {
         enable_experimental: bool,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    DemoReceipt {
+        #[arg(long)]
+        demo: String,
+        #[arg(long)]
+        fixture: String,
+        #[arg(long = "enable-experimental")]
+        enable_experimental: bool,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
+        #[arg(long = "approved-by")]
+        approved_by: Option<String>,
+        #[arg(long = "confirm-local-fixture")]
+        confirm_local_fixture: bool,
+        #[arg(long = "allow-model")]
+        allow_model: bool,
+        #[arg(long = "allow-camera")]
+        allow_camera: bool,
+        #[arg(long = "allow-microphone")]
+        allow_microphone: bool,
+        #[arg(long = "allow-screen")]
+        allow_screen: bool,
+        #[arg(long = "allow-input")]
+        allow_input: bool,
+        #[arg(long = "allow-filesystem")]
+        allow_filesystem: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -7678,6 +7707,39 @@ fn run() -> Result<i32> {
                 let feature_flag =
                     resolve_multimodal_feature_flag(enable_experimental, project_root.as_deref());
                 let report = build_multimodal_demo_plan(&demo, feature_flag.enabled)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MultimodalCommands::DemoReceipt {
+                demo,
+                fixture,
+                enable_experimental,
+                project_root,
+                approved_by,
+                confirm_local_fixture,
+                allow_model,
+                allow_camera,
+                allow_microphone,
+                allow_screen,
+                allow_input,
+                allow_filesystem,
+                output,
+            } => {
+                let feature_flag =
+                    resolve_multimodal_feature_flag(enable_experimental, project_root.as_deref());
+                let report = build_multimodal_demo_receipt(MultimodalDemoReceiptOptions {
+                    demo_id: &demo,
+                    fixture_id: &fixture,
+                    enable_experimental: feature_flag.enabled,
+                    approved_by: approved_by.as_deref(),
+                    confirm_local_fixture,
+                    allow_model,
+                    allow_camera,
+                    allow_microphone,
+                    allow_screen,
+                    allow_input,
+                    allow_filesystem,
+                })?;
                 print_response(output, &report)?;
                 Ok(0)
             }
