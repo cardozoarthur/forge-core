@@ -37519,6 +37519,42 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("diff")));
+    assert_eq!(
+        json["approval_flow"]["schema_version"],
+        "forge.interactive.patch_approval_flow.v1"
+    );
+    assert_eq!(json["approval_flow"]["status"], "patch_approval_required");
+    assert_eq!(
+        json["approval_flow"]["current_gate"],
+        "review_changed_files"
+    );
+    assert_eq!(json["approval_flow"]["requires_human_approval"], true);
+    assert_eq!(json["approval_flow"]["apply_ready"], false);
+    assert!(json["approval_flow"]["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gate| gate["gate_id"] == "diff_review_before_apply"
+            && gate["status"] == "required"
+            && gate["command"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("review"))));
+    assert!(json["approval_flow"]["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gate| gate["gate_id"] == "human_approval_before_apply"
+            && gate["requires_human_approval"] == true));
+    assert!(json["approval_flow"]["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gate| gate["gate_id"] == "rollback_restore_approval"
+            && gate["command"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("restore"))));
 
     let text_output = forge()
         .current_dir(temp.path())
@@ -37535,6 +37571,7 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         .clone();
     let text = String::from_utf8(text_output).unwrap();
     assert!(text.contains("Patch workbench"));
+    assert!(text.contains("Approval flow"));
     assert!(text.contains("sample.txt"));
     assert!(text.contains("notes.txt"));
 
@@ -37571,6 +37608,10 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
         "forge.interactive.patch_workbench.v1"
     );
     assert_eq!(mcp_json["result"]["changed_path_count"], 2);
+    assert_eq!(
+        mcp_json["result"]["approval_flow"]["schema_version"],
+        "forge.interactive.patch_approval_flow.v1"
+    );
 }
 
 #[test]

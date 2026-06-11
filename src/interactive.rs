@@ -430,7 +430,30 @@ pub struct InteractivePatchWorkbenchPanel {
     pub diff_check_status: String,
     pub diff_stat: String,
     pub files: Vec<InteractivePatchWorkbenchFile>,
+    pub approval_flow: InteractivePatchApprovalFlow,
     pub commands: InteractivePatchWorkbenchCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchApprovalFlow {
+    pub schema_version: String,
+    pub status: String,
+    pub current_gate: String,
+    pub requires_human_approval: bool,
+    pub apply_ready: bool,
+    pub gates: Vec<InteractivePatchApprovalGate>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractivePatchApprovalGate {
+    pub gate_id: String,
+    pub title: String,
+    pub status: String,
+    pub command: Vec<String>,
+    pub mutates_workflow: bool,
+    pub requires_human_approval: bool,
+    pub rationale: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2067,6 +2090,7 @@ pub fn build_interactive_patch_workbench(
 
     let status_output = git_command(&["status", "--porcelain=v1"]);
     if !status_output.success {
+        let commands = patch_workbench_commands();
         return Ok(InteractivePatchWorkbenchPanel {
             schema_version: INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION.to_string(),
             status: "patch_workbench_unavailable".to_string(),
@@ -2080,7 +2104,8 @@ pub fn build_interactive_patch_workbench(
             diff_check_status: "not_run".to_string(),
             diff_stat: status_output.stderr,
             files: Vec::new(),
-            commands: patch_workbench_commands(),
+            approval_flow: build_patch_approval_flow(true, false, "not_run", &commands),
+            commands,
         });
     }
 
@@ -2098,6 +2123,9 @@ pub fn build_interactive_patch_workbench(
     } else {
         "patch_workbench_ready"
     };
+    let commands = patch_workbench_commands();
+    let approval_flow =
+        build_patch_approval_flow(clean, diff_present, &diff_check_status, &commands);
 
     Ok(InteractivePatchWorkbenchPanel {
         schema_version: INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION.to_string(),
@@ -2112,7 +2140,8 @@ pub fn build_interactive_patch_workbench(
         diff_check_status,
         diff_stat,
         files,
-        commands: patch_workbench_commands(),
+        approval_flow,
+        commands,
     })
 }
 
@@ -2351,6 +2380,102 @@ fn patch_workbench_diff_check_status() -> String {
         "passed".to_string()
     } else {
         "failed".to_string()
+    }
+}
+
+fn build_patch_approval_flow(
+    clean: bool,
+    diff_present: bool,
+    diff_check_status: &str,
+    commands: &InteractivePatchWorkbenchCommands,
+) -> InteractivePatchApprovalFlow {
+    let status = if clean {
+        "patch_approval_idle"
+    } else if diff_check_status == "failed" {
+        "patch_approval_blocked_by_diff_check"
+    } else {
+        "patch_approval_required"
+    };
+    let current_gate = if clean {
+        "no_changes"
+    } else if diff_check_status == "failed" {
+        "fix_diff_check"
+    } else if diff_present {
+        "review_changed_files"
+    } else {
+        "classify_untracked_or_metadata_changes"
+    };
+    let review_status = if clean {
+        "idle"
+    } else if diff_check_status == "failed" {
+        "blocked"
+    } else {
+        "required"
+    };
+    let approval_status = if clean {
+        "idle"
+    } else {
+        "blocked_until_review"
+    };
+    let rollback_status = if clean {
+        "idle"
+    } else {
+        "available_after_apply"
+    };
+
+    InteractivePatchApprovalFlow {
+        schema_version: "forge.interactive.patch_approval_flow.v1".to_string(),
+        status: status.to_string(),
+        current_gate: current_gate.to_string(),
+        requires_human_approval: !clean,
+        apply_ready: false,
+        gates: vec![
+            InteractivePatchApprovalGate {
+                gate_id: "diff_navigation".to_string(),
+                title: "Navigate changed files and hunks".to_string(),
+                status: if diff_present { "available" } else { "idle" }.to_string(),
+                command: commands.diff.clone(),
+                mutates_workflow: false,
+                requires_human_approval: false,
+                rationale: "Operators need a bounded multi-file diff view before review."
+                    .to_string(),
+            },
+            InteractivePatchApprovalGate {
+                gate_id: "diff_review_before_apply".to_string(),
+                title: "Record patch review evidence".to_string(),
+                status: review_status.to_string(),
+                command: commands.review.clone(),
+                mutates_workflow: false,
+                requires_human_approval: false,
+                rationale: "Patch review persists diff/status/check evidence before approval."
+                    .to_string(),
+            },
+            InteractivePatchApprovalGate {
+                gate_id: "human_approval_before_apply".to_string(),
+                title: "Require human approval before apply".to_string(),
+                status: approval_status.to_string(),
+                command: commands.apply.clone(),
+                mutates_workflow: true,
+                requires_human_approval: true,
+                rationale: "Applying a patch records workflow artifacts and must follow review plus approval."
+                    .to_string(),
+            },
+            InteractivePatchApprovalGate {
+                gate_id: "rollback_restore_approval".to_string(),
+                title: "Keep rollback restore approval explicit".to_string(),
+                status: rollback_status.to_string(),
+                command: commands.restore.clone(),
+                mutates_workflow: true,
+                requires_human_approval: true,
+                rationale: "Restoring files is destructive and requires explicit approved-by plus confirm flags."
+                    .to_string(),
+            },
+        ],
+        notes: vec![
+            "Approval flow is read-only and never edits files by itself.".to_string(),
+            "Use review evidence before apply, and use restore only from an approved rollback artifact."
+                .to_string(),
+        ],
     }
 }
 
@@ -3477,7 +3602,7 @@ pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> Strin
 
 pub fn render_interactive_patch_workbench(panel: &InteractivePatchWorkbenchPanel) -> String {
     format!(
-        "Patch workbench: {status}; clean {clean}, files {changed_path_count}, staged {staged_path_count}, unstaged {unstaged_path_count}, untracked {untracked_path_count}, diff {diff_present}, check {diff_check_status}\nRepository: {repository_path}\nFiles: {files}\n",
+        "Patch workbench: {status}; clean {clean}, files {changed_path_count}, staged {staged_path_count}, unstaged {unstaged_path_count}, untracked {untracked_path_count}, diff {diff_present}, check {diff_check_status}\nRepository: {repository_path}\nFiles: {files}\nApproval flow: {approval_status}; gate {approval_gate}; approval {requires_human_approval}; apply ready {apply_ready}\n",
         status = panel.status,
         clean = panel.clean,
         changed_path_count = panel.changed_path_count,
@@ -3488,6 +3613,10 @@ pub fn render_interactive_patch_workbench(panel: &InteractivePatchWorkbenchPanel
         diff_check_status = panel.diff_check_status,
         repository_path = panel.repository_path,
         files = render_patch_workbench_file_summary(panel),
+        approval_status = panel.approval_flow.status,
+        approval_gate = panel.approval_flow.current_gate,
+        requires_human_approval = panel.approval_flow.requires_human_approval,
+        apply_ready = panel.approval_flow.apply_ready,
     )
 }
 
