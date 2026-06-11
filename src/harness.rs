@@ -91,7 +91,11 @@ pub struct HarnessModeReport {
     pub project_config_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_default_mode: Option<String>,
+    pub project_exec_policy_path: String,
+    pub project_exec_policy_status: String,
+    pub require_lineage_for_exec: bool,
     pub precedence: Vec<String>,
+    pub safety_checks: Vec<String>,
     pub notes: Vec<String>,
 }
 
@@ -448,6 +452,16 @@ pub fn build_harness_mode_report(options: HarnessModeOptions<'_>) -> HarnessMode
         .map(Path::to_path_buf)
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let project = read_harness_project_mode(&project_root);
+    let project_exec_policy = read_harness_project_exec_policy(&project_root);
+    let project_exec_policy_status =
+        harness_project_exec_policy_status(&project_exec_policy, false, None, None, None);
+    let mut safety_checks = vec![
+        "mode report is read-only and never launches child processes".to_string(),
+        "exec policy should be inspected before running external brain CLIs".to_string(),
+    ];
+    if project_exec_policy.require_lineage_for_exec {
+        safety_checks.push("project_require_lineage_for_exec".to_string());
+    }
     HarnessModeReport {
         schema_version: CLI_HARNESS_MODE_SCHEMA_VERSION.to_string(),
         status: "harness_mode_resolved".to_string(),
@@ -462,6 +476,9 @@ pub fn build_harness_mode_report(options: HarnessModeOptions<'_>) -> HarnessMode
             .forge_first
             .map(harness_effective_mode)
             .map(ToString::to_string),
+        project_exec_policy_path: project_exec_policy.path.display().to_string(),
+        project_exec_policy_status: project_exec_policy_status.to_string(),
+        require_lineage_for_exec: project_exec_policy.require_lineage_for_exec,
         precedence: vec![
             "observe_only_flag".to_string(),
             "explicit_flag".to_string(),
@@ -469,6 +486,7 @@ pub fn build_harness_mode_report(options: HarnessModeOptions<'_>) -> HarnessMode
             "project_config".to_string(),
             "default_observe_only".to_string(),
         ],
+        safety_checks,
         notes: vec![
             "This report is read-only and does not install shims or execute brain CLIs."
                 .to_string(),

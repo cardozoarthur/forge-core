@@ -559,7 +559,13 @@ fn harness_mode_reports_effective_default_source_and_project_config_precedence()
     assert_eq!(default_mode["forge_first_source"], "default_observe_only");
     assert_eq!(default_mode["env_default_present"], false);
     assert_eq!(default_mode["project_config_status"], "missing");
+    assert_eq!(default_mode["project_exec_policy_status"], "missing");
+    assert_eq!(default_mode["require_lineage_for_exec"], false);
     assert!(default_mode["project_config_path"]
+        .as_str()
+        .unwrap()
+        .ends_with(".forge/harness.json"));
+    assert!(default_mode["project_exec_policy_path"]
         .as_str()
         .unwrap()
         .ends_with(".forge/harness.json"));
@@ -578,7 +584,7 @@ fn harness_mode_reports_effective_default_source_and_project_config_precedence()
     fs::create_dir_all(&forge_dir).unwrap();
     fs::write(
         forge_dir.join("harness.json"),
-        r#"{"default_mode":"forge_first"}"#,
+        r#"{"default_mode":"forge_first","require_lineage_for_exec":true}"#,
     )
     .unwrap();
     let project_output = forge()
@@ -596,6 +602,15 @@ fn harness_mode_reports_effective_default_source_and_project_config_precedence()
     assert_eq!(project_mode["forge_first_source"], "project_config");
     assert_eq!(project_mode["project_config_status"], "loaded");
     assert_eq!(project_mode["project_default_mode"], "forge_first");
+    assert_eq!(
+        project_mode["project_exec_policy_status"],
+        "lineage_required_missing"
+    );
+    assert_eq!(project_mode["require_lineage_for_exec"], true);
+    assert!(project_mode["safety_checks"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("project_require_lineage_for_exec")));
 
     let mcp_tools_output = forge()
         .args([
@@ -647,6 +662,11 @@ fn harness_mode_reports_effective_default_source_and_project_config_precedence()
     assert_eq!(mcp_mode["result"]["forge_first"], true);
     assert_eq!(mcp_mode["result"]["forge_first_source"], "project_config");
     assert_eq!(mcp_mode["result"]["project_config_status"], "loaded");
+    assert_eq!(
+        mcp_mode["result"]["project_exec_policy_status"],
+        "lineage_required_missing"
+    );
+    assert_eq!(mcp_mode["result"]["require_lineage_for_exec"], true);
 
     let env_output = forge()
         .env("FORGE_HARNESS_DEFAULT_MODE", "forge_first")
