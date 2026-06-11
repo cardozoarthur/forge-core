@@ -31188,6 +31188,158 @@ fn interactive_task_board_command_and_mcp_surface_are_dedicated() {
 }
 
 #[test]
+fn interactive_task_board_lanes_include_operable_task_cards() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Operate task cards with human approval and checkpoint resume",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let blocked_task = find_task(
+        planned_json["tasks"].as_array().unwrap(),
+        "Extract requirements",
+    );
+    let blocked_task_id = blocked_task["id"].as_str().unwrap();
+    let checkpoint_task = find_task(planned_json["tasks"].as_array().unwrap(), "Validate build");
+    let checkpoint_task_id = checkpoint_task["id"].as_str().unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interaction",
+            "create-choice",
+            "--workflow",
+            workflow_id,
+            "--task",
+            blocked_task_id,
+            "--kind",
+            "approve_reject_refine_combine",
+            "--prompt",
+            "Choose whether the task board should proceed",
+            "--choice",
+            "approve=Approve",
+            "--choice",
+            "refine=Refine",
+            "--timeout-seconds",
+            "3600",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let checkpoint_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "checkpoint",
+            "--workflow",
+            workflow_id,
+            "--task",
+            checkpoint_task_id,
+            "--executor",
+            "codex",
+            "--state",
+            "paused",
+            "--summary",
+            "Paused to make the task card resumable",
+            "--context-sha256",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "--context-routing-cache-key",
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "--workflow-revision",
+            "1",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let checkpoint_json: Value = serde_json::from_slice(&checkpoint_output).unwrap();
+    let checkpoint_id = checkpoint_json["checkpoint"]["checkpoint_id"]
+        .as_str()
+        .unwrap();
+
+    let board_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "task-board",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let board: Value = serde_json::from_slice(&board_output).unwrap();
+    assert_eq!(board["schema_version"], "forge.interactive.task_board.v1");
+    let lane = board["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|lane| lane["workflow_id"] == workflow_id)
+        .unwrap();
+    let task_cards = lane["task_cards"].as_array().unwrap();
+
+    let blocked_card = task_cards
+        .iter()
+        .find(|card| card["task_id"] == blocked_task_id)
+        .unwrap();
+    assert_eq!(blocked_card["title"], "Extract requirements");
+    assert_eq!(blocked_card["status"], "blocked");
+    assert_eq!(blocked_card["human_required"], true);
+    assert_eq!(blocked_card["human_interaction_state"], "pending");
+    assert_eq!(blocked_card["next_action"], "answer_human_interaction");
+    assert!(blocked_card["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(format!(
+            "forge inspect {workflow_id} --task {blocked_task_id}"
+        ))));
+    assert!(blocked_card["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("forge interaction list")));
+
+    let checkpoint_card = task_cards
+        .iter()
+        .find(|card| card["task_id"] == checkpoint_task_id)
+        .unwrap();
+    assert_eq!(checkpoint_card["title"], "Validate build");
+    assert_eq!(checkpoint_card["checkpoint_id"], checkpoint_id);
+    assert_eq!(checkpoint_card["next_action"], "resume_from_checkpoint");
+    assert!(checkpoint_card["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(format!(
+            "forge context --workflow {workflow_id} --task {checkpoint_task_id}"
+        ))));
+}
+
+#[test]
 fn no_args_non_tty_stays_script_safe_and_does_not_open_dashboard() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

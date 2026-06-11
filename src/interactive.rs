@@ -1,12 +1,14 @@
 use crate::addon::{default_addon_dirs, list_addon_views, load_addon_catalog_from_store};
+use crate::checkpoint::TaskCheckpoint;
 use crate::cost::build_cost_ledger;
 use crate::event::build_global_event_timeline;
 use crate::executor::load_executors;
+use crate::graph::{AtomicTask, ExecutorKind, TaskStatus};
 use crate::memory::memory_policy_report;
 use crate::ops::build_addon_view_renderer_report;
 use crate::registry::{
-    list_workflows_with_filters, WorkflowLifecycleFilter, WorkflowRegistryFilters,
-    WorkflowRegistryRow,
+    list_workflows_with_filters, RegistryContextActionRef, WorkflowLifecycleFilter,
+    WorkflowRegistryFilters, WorkflowRegistryRow,
 };
 use crate::request::start_async_request;
 use crate::runtime::load_runtimes;
@@ -115,6 +117,23 @@ pub struct InteractiveTaskBoardLane {
     pub pending_human_interactions: usize,
     pub artifact_count: usize,
     pub next_actions: Vec<String>,
+    pub task_cards: Vec<InteractiveTaskBoardTaskCard>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveTaskBoardTaskCard {
+    pub task_id: String,
+    pub title: String,
+    pub status: String,
+    pub executor: String,
+    pub human_required: bool,
+    pub human_interaction_state: String,
+    pub ready_for_handoff: bool,
+    pub context_action: String,
+    pub checkpoint_id: Option<String>,
+    pub checkpoint_state: Option<String>,
+    pub next_action: String,
+    pub commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -881,11 +900,12 @@ fn render_task_board_lane_summary(panel: &InteractiveTaskBoardPanel) -> String {
         .iter()
         .map(|lane| {
             format!(
-                "{} [{}] tasks {}/{}, ready handoffs {}, human waits {}, checkpoints {}, artifacts {}",
+                "{} [{}] tasks {}/{}, cards {}, ready handoffs {}, human waits {}, checkpoints {}, artifacts {}",
                 lane.workflow_id,
                 lane.lifecycle_state,
                 lane.completed_tasks,
                 lane.total_tasks,
+                lane.task_cards.len(),
                 lane.ready_handoffs,
                 lane.pending_human_interactions,
                 lane.checkpoint_resume_candidates,
@@ -910,7 +930,7 @@ fn build_task_board_panel(
     let mut artifact_count = 0;
     let mut lanes = Vec::new();
     for row in rows {
-        let checkpoints = store.load_task_checkpoints(&row.workflow_id, None)?;
+        let checkpoints = load_task_board_checkpoints(store, &row.workflow_id)?;
         let lane_ready_handoffs = row
             .context_action_refs
             .iter()
@@ -943,6 +963,7 @@ fn build_task_board_panel(
                 pending_human_interactions: lane_pending_human_interactions,
                 artifact_count: row.artifact_count,
                 next_actions: task_board_next_actions(row, &checkpoints),
+                task_cards: build_task_board_task_cards(store, row, &checkpoints)?,
             });
         }
     }
@@ -965,7 +986,7 @@ fn build_task_board_panel(
 
 fn task_board_next_actions(
     row: &WorkflowRegistryRow,
-    checkpoints: &[serde_json::Value],
+    checkpoints: &[TaskCheckpoint],
 ) -> Vec<String> {
     let mut actions = vec![format!("forge inspect {}", row.workflow_id)];
 
@@ -981,9 +1002,8 @@ fn task_board_next_actions(
     }
 
     if let Some(task_id) = checkpoints
-        .iter()
-        .rev()
-        .find_map(|checkpoint| checkpoint["task_id"].as_str())
+        .last()
+        .map(|checkpoint| checkpoint.task_id.as_str())
     {
         actions.push(format!(
             "forge context --workflow {} --task {}",
@@ -1000,6 +1020,173 @@ fn task_board_next_actions(
     }
 
     actions
+}
+
+fn load_task_board_checkpoints(
+    store: &ForgeStore,
+    workflow_id: &str,
+) -> Result<Vec<TaskCheckpoint>> {
+    store
+        .load_task_checkpoints(workflow_id, None)?
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn build_task_board_task_cards(
+    store: &ForgeStore,
+    row: &WorkflowRegistryRow,
+    checkpoints: &[TaskCheckpoint],
+) -> Result<Vec<InteractiveTaskBoardTaskCard>> {
+    let workflow = store.load_workflow(&row.workflow_id)?;
+    Ok(workflow
+        .tasks
+        .iter()
+        .map(|task| build_task_board_task_card(row, task, checkpoints))
+        .collect())
+}
+
+fn build_task_board_task_card(
+    row: &WorkflowRegistryRow,
+    task: &AtomicTask,
+    checkpoints: &[TaskCheckpoint],
+) -> InteractiveTaskBoardTaskCard {
+    let action_ref = row
+        .context_action_refs
+        .iter()
+        .find(|action| action.task_id == task.id);
+    let checkpoint = latest_task_checkpoint(checkpoints, &task.id);
+    let human_interaction_state = task
+        .human_interaction
+        .as_ref()
+        .map(|interaction| interaction.state.clone())
+        .unwrap_or_else(|| "none".to_string());
+    let human_required = task.human_required
+        || task
+            .human_interaction
+            .as_ref()
+            .is_some_and(|interaction| interaction.required);
+    let checkpoint_id = checkpoint
+        .map(|checkpoint| checkpoint.checkpoint_id.clone())
+        .or_else(|| action_ref.and_then(|action| action.checkpoint_id.clone()));
+    let checkpoint_state = checkpoint.map(|checkpoint| checkpoint.state.clone());
+    let ready_for_handoff = action_ref.is_some_and(|action| action.ready_for_handoff);
+    let context_action = action_ref
+        .map(|action| action.action.clone())
+        .unwrap_or_else(|| "inspect_task".to_string());
+    let next_action = task_board_task_next_action(
+        human_required,
+        &human_interaction_state,
+        checkpoint_id.as_deref(),
+        action_ref,
+    );
+
+    InteractiveTaskBoardTaskCard {
+        task_id: task.id.clone(),
+        title: task.title.clone(),
+        status: task_status_label(&task.status).to_string(),
+        executor: executor_kind_label(&task.executor).to_string(),
+        human_required,
+        human_interaction_state,
+        ready_for_handoff,
+        context_action,
+        checkpoint_id,
+        checkpoint_state,
+        next_action,
+        commands: task_board_task_commands(row, task, action_ref, checkpoint),
+    }
+}
+
+fn latest_task_checkpoint<'a>(
+    checkpoints: &'a [TaskCheckpoint],
+    task_id: &str,
+) -> Option<&'a TaskCheckpoint> {
+    checkpoints
+        .iter()
+        .rev()
+        .find(|checkpoint| checkpoint.task_id == task_id)
+}
+
+fn task_board_task_next_action(
+    human_required: bool,
+    human_interaction_state: &str,
+    checkpoint_id: Option<&str>,
+    action_ref: Option<&RegistryContextActionRef>,
+) -> String {
+    if human_required && human_interaction_state == "pending" {
+        return "answer_human_interaction".to_string();
+    }
+
+    if checkpoint_id.is_some() {
+        return "resume_from_checkpoint".to_string();
+    }
+
+    action_ref
+        .map(|action| action.action.clone())
+        .unwrap_or_else(|| "inspect_task".to_string())
+}
+
+fn task_board_task_commands(
+    row: &WorkflowRegistryRow,
+    task: &AtomicTask,
+    action_ref: Option<&RegistryContextActionRef>,
+    checkpoint: Option<&TaskCheckpoint>,
+) -> Vec<String> {
+    let mut commands = vec![format!(
+        "forge inspect {} --task {}",
+        row.workflow_id, task.id
+    )];
+
+    if task
+        .human_interaction
+        .as_ref()
+        .is_some_and(|interaction| interaction.required && interaction.state == "pending")
+    {
+        commands.push("forge interaction list".to_string());
+    }
+
+    if let Some(action) = action_ref {
+        if action.ready_for_handoff {
+            commands.push(format!(
+                "forge task handoff --workflow {} --task {} --executor {}",
+                row.workflow_id, task.id, action.executor
+            ));
+        }
+    }
+
+    if checkpoint.is_some()
+        || action_ref
+            .and_then(|action| action.checkpoint_id.as_ref())
+            .is_some()
+    {
+        commands.push(format!(
+            "forge context --workflow {} --task {}",
+            row.workflow_id, task.id
+        ));
+    }
+
+    commands
+}
+
+fn task_status_label(status: &TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Pending => "pending",
+        TaskStatus::Running => "running",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Blocked => "blocked",
+        TaskStatus::Failed => "failed",
+    }
+}
+
+fn executor_kind_label(executor: &ExecutorKind) -> &'static str {
+    match executor {
+        ExecutorKind::Ai => "ai",
+        ExecutorKind::Command => "command",
+        ExecutorKind::Wait => "wait",
+        ExecutorKind::Notification => "notification",
+        ExecutorKind::Mixed => "mixed",
+    }
 }
 
 fn truncate_display(value: &str, max_chars: usize) -> String {
