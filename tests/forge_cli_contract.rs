@@ -4328,8 +4328,13 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
     assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
 
     let flows = json["flows"].as_array().unwrap();
-    assert_eq!(flows.len(), 3);
-    for kind in ["coding_task", "research_artifact", "long_running_async"] {
+    assert_eq!(flows.len(), 4);
+    for kind in [
+        "coding_task",
+        "harness_control",
+        "research_artifact",
+        "long_running_async",
+    ] {
         let flow = flows.iter().find(|flow| flow["kind"] == kind).unwrap();
         assert_eq!(flow["completed_through_forge"], true);
         assert!(flow["commands"].as_array().unwrap().len() >= 3);
@@ -4467,6 +4472,30 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
     let status_json: Value = serde_json::from_slice(&run_status).unwrap();
     assert_eq!(status_json["status"], "running");
     assert_eq!(status_json["activity"]["active"], true);
+
+    let harness = flows
+        .iter()
+        .find(|flow| flow["kind"] == "harness_control")
+        .unwrap();
+    assert_eq!(harness["run_status"], "interactive_harness_ready");
+    assert!(harness["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("headroom_plan_ready")));
+    assert!(harness["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("session_lifecycle_plan_ready")));
+    assert!(harness["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("token_headroom_enabled")));
+    assert!(harness["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge interactive harness --workflow <workflow-id> --task <task-id> --token-headroom --output json"
+        )));
 }
 
 #[test]
