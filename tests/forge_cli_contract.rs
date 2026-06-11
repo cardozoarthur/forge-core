@@ -370,6 +370,7 @@ fn harness_cli_honors_forge_first_default_mode_with_explicit_observe_only_overri
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["schema_version"], "forge.harness.cli_wrapper_plan.v1");
     assert_eq!(json["forge_first"], true);
+    assert_eq!(json["forge_first_source"], "env_default");
     assert!(json["launch_command"]
         .as_array()
         .unwrap()
@@ -378,6 +379,9 @@ fn harness_cli_honors_forge_first_default_mode_with_explicit_observe_only_overri
     assert!(env
         .iter()
         .any(|item| item["name"] == "FORGE_HARNESS_MODE" && item["value"] == "forge_first"));
+    assert!(env
+        .iter()
+        .any(|item| item["name"] == "FORGE_HARNESS_MODE_SOURCE" && item["value"] == "env_default"));
 
     let observe_only_output = forge()
         .env("FORGE_HARNESS_DEFAULT_MODE", "forge_first")
@@ -399,6 +403,7 @@ fn harness_cli_honors_forge_first_default_mode_with_explicit_observe_only_overri
         .clone();
     let observe_only: Value = serde_json::from_slice(&observe_only_output).unwrap();
     assert_eq!(observe_only["forge_first"], false);
+    assert_eq!(observe_only["forge_first_source"], "observe_only_flag");
     assert!(!observe_only["launch_command"]
         .as_array()
         .unwrap()
@@ -429,7 +434,12 @@ fn harness_cli_honors_forge_first_default_mode_with_explicit_observe_only_overri
     let exec_json: Value = serde_json::from_slice(&exec_output).unwrap();
     assert_eq!(exec_json["schema_version"], "forge.harness.exec_receipt.v1");
     assert_eq!(exec_json["forge_first"], true);
+    assert_eq!(exec_json["forge_first_source"], "env_default");
     assert_eq!(exec_json["wrapper_plan"]["forge_first"], true);
+    assert_eq!(
+        exec_json["wrapper_plan"]["forge_first_source"],
+        "env_default"
+    );
     assert!(exec_json["wrapper_plan"]["launch_command"]
         .as_array()
         .unwrap()
@@ -642,6 +652,8 @@ printf 'argc:%s env:%s args:%s\n' "$#" "$FORGE_HARNESS" "$*"
     assert_eq!(report["shims"][0]["executor"], "codex");
     assert_eq!(report["shims"][0]["status"], "installed");
     assert_eq!(report["shims"][0]["forge_first"], true);
+    assert_eq!(report["forge_first_source"], "explicit_flag");
+    assert_eq!(report["shims"][0]["forge_first_source"], "explicit_flag");
     assert_eq!(report["shims"][0]["context_budget"], 4096);
     assert_eq!(report["shims"][0]["token_headroom"], true);
     assert_eq!(report["store_path"], store.to_str().unwrap());

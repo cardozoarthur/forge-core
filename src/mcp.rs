@@ -7278,10 +7278,17 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let workflow_id = input.workflow_id.or(input.workflow);
             let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
+            let forge_first = input.forge_first.unwrap_or(true);
+            let forge_first_source = if input.forge_first.is_some() {
+                "mcp_input"
+            } else {
+                "mcp_default"
+            };
             serde_json::to_value(build_cli_wrapper_plan(CliWrapperPlanOptions {
                 executor: &input.executor,
                 command: &command,
-                forge_first: input.forge_first.unwrap_or(true),
+                forge_first,
+                forge_first_source,
                 workflow_id: workflow_id.as_deref(),
                 task_id: task_id.as_deref(),
                 run_id: run_id.as_deref(),
@@ -7298,12 +7305,19 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let workflow_id = input.workflow_id.or(input.workflow);
             let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
+            let forge_first = input.forge_first.unwrap_or(true);
+            let forge_first_source = if input.forge_first.is_some() {
+                "mcp_input"
+            } else {
+                "mcp_default"
+            };
             serde_json::to_value(install_cli_harness_shim(CliShimInstallOptions {
                 shim_dir: std::path::Path::new(&input.shim_dir),
                 executor: &input.executor,
                 real_cmd: real_cmd.as_deref(),
                 store_path: Some(store.path()),
-                forge_first: input.forge_first.unwrap_or(true),
+                forge_first,
+                forge_first_source,
                 workflow_id: workflow_id.as_deref(),
                 task_id: task_id.as_deref(),
                 run_id: run_id.as_deref(),
@@ -7326,11 +7340,18 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let task_id = input.task_id.or(input.task);
             let run_id = input.run_id.or(input.run);
             let cwd = input.cwd.as_deref().map(std::path::Path::new);
+            let forge_first = input.forge_first.unwrap_or(true);
+            let forge_first_source = if input.forge_first.is_some() {
+                "mcp_input"
+            } else {
+                "mcp_default"
+            };
             serde_json::to_value(run_cli_harness_exec(CliHarnessExecOptions {
                 store: Some(store),
                 executor: &input.executor,
                 command: &command,
-                forge_first: input.forge_first.unwrap_or(true),
+                forge_first,
+                forge_first_source,
                 workflow_id: workflow_id.as_deref(),
                 task_id: task_id.as_deref(),
                 run_id: run_id.as_deref(),

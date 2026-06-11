@@ -51,6 +51,7 @@ pub struct CliWrapperPlanReport {
     pub executor: String,
     pub command: Vec<String>,
     pub forge_first: bool,
+    pub forge_first_source: String,
     pub workflow_id: Option<String>,
     pub task_id: Option<String>,
     pub run_id: Option<String>,
@@ -67,6 +68,7 @@ pub struct CliWrapperPlanOptions<'a> {
     pub executor: &'a str,
     pub command: &'a [String],
     pub forge_first: bool,
+    pub forge_first_source: &'a str,
     pub workflow_id: Option<&'a str>,
     pub task_id: Option<&'a str>,
     pub run_id: Option<&'a str>,
@@ -93,6 +95,7 @@ pub struct CliHarnessExecReceipt {
     pub task_id: Option<String>,
     pub run_id: Option<String>,
     pub forge_first: bool,
+    pub forge_first_source: String,
     pub dry_run: bool,
     pub allow_exec: bool,
     pub execution_mode: String,
@@ -126,6 +129,7 @@ pub struct CliShimInstallReport {
     pub store_path: Option<String>,
     pub forge_binary: String,
     pub forge_first: bool,
+    pub forge_first_source: String,
     pub context_budget: usize,
     pub token_headroom: bool,
     pub force: bool,
@@ -146,6 +150,7 @@ pub struct CliShimReport {
     pub store_path: Option<String>,
     pub forge_binary: String,
     pub forge_first: bool,
+    pub forge_first_source: String,
     pub context_budget: usize,
     pub token_headroom: bool,
     pub status: String,
@@ -186,6 +191,7 @@ pub struct CliShimInstallOptions<'a> {
     pub real_cmd: Option<&'a str>,
     pub store_path: Option<&'a Path>,
     pub forge_first: bool,
+    pub forge_first_source: &'a str,
     pub workflow_id: Option<&'a str>,
     pub task_id: Option<&'a str>,
     pub run_id: Option<&'a str>,
@@ -206,6 +212,7 @@ pub struct CliHarnessExecOptions<'a> {
     pub executor: &'a str,
     pub command: &'a [String],
     pub forge_first: bool,
+    pub forge_first_source: &'a str,
     pub workflow_id: Option<&'a str>,
     pub task_id: Option<&'a str>,
     pub run_id: Option<&'a str>,
@@ -394,6 +401,7 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         executor,
         command,
         forge_first,
+        forge_first_source,
         workflow_id,
         task_id,
         run_id,
@@ -401,6 +409,7 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         token_headroom,
     } = options;
     let executor = normalize_executor(executor);
+    let forge_first_source = normalize_harness_mode_source(forge_first_source, forge_first);
     let command = if command.is_empty() {
         vec![executor.clone()]
     } else {
@@ -417,6 +426,11 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
             "FORGE_HARNESS_MODE",
             if forge_first { "forge_first" } else { "observe_only" },
             "controls whether Forge context routing is preferred before native CLI defaults",
+        ),
+        env_var(
+            "FORGE_HARNESS_MODE_SOURCE",
+            &forge_first_source,
+            "records which CLI/API input selected the harness mode",
         ),
         env_var(
             "FORGE_CONTEXT_BUDGET",
@@ -491,6 +505,7 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         executor,
         command,
         forge_first,
+        forge_first_source,
         workflow_id: normalize_optional_text(workflow_id),
         task_id: normalize_optional_text(task_id),
         run_id: normalize_optional_text(run_id),
@@ -522,6 +537,7 @@ pub fn install_cli_harness_shim(
         real_cmd,
         store_path,
         forge_first,
+        forge_first_source,
         workflow_id,
         task_id,
         run_id,
@@ -530,6 +546,7 @@ pub fn install_cli_harness_shim(
         force,
     } = options;
     let executor = normalize_executor(executor);
+    let forge_first_source = normalize_harness_mode_source(forge_first_source, forge_first);
     fs::create_dir_all(shim_dir)
         .with_context(|| format!("failed to create shim dir `{}`", shim_dir.display()))?;
     let shim_dir = shim_dir
@@ -592,6 +609,7 @@ pub fn install_cli_harness_shim(
         store_path: store_path.map(|path| path.display().to_string()),
         forge_binary: forge_binary.clone(),
         forge_first,
+        forge_first_source: forge_first_source.clone(),
         context_budget,
         token_headroom,
         status: status.to_string(),
@@ -617,6 +635,7 @@ pub fn install_cli_harness_shim(
         store_path: store_path.map(|path| path.display().to_string()),
         forge_binary,
         forge_first,
+        forge_first_source,
         context_budget,
         token_headroom,
         force,
@@ -770,6 +789,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         executor,
         command,
         forge_first,
+        forge_first_source,
         workflow_id,
         task_id,
         run_id,
@@ -783,6 +803,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         executor,
         command,
         forge_first,
+        forge_first_source,
         workflow_id,
         task_id,
         run_id,
@@ -1036,6 +1057,18 @@ fn normalize_optional_text(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+fn normalize_harness_mode_source(value: &str, forge_first: bool) -> String {
+    let value = value.trim();
+    if !value.is_empty() {
+        return value.to_string();
+    }
+    if forge_first {
+        "unspecified_forge_first".to_string()
+    } else {
+        "default_observe_only".to_string()
+    }
 }
 
 struct CliShimScriptOptions<'a> {
@@ -1517,6 +1550,7 @@ fn exec_receipt(input: CliExecReceiptInput) -> CliHarnessExecReceipt {
         task_id,
         run_id,
         forge_first: input.forge_first,
+        forge_first_source: input.wrapper_plan.forge_first_source.clone(),
         dry_run: input.dry_run,
         allow_exec: input.allow_exec,
         execution_mode: input.execution_mode,

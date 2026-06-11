@@ -5184,11 +5184,12 @@ fn run() -> Result<i32> {
                 token_headroom,
                 output,
             } => {
-                let forge_first = resolve_harness_forge_first(forge_first, observe_only);
+                let harness_mode = resolve_harness_forge_first(forge_first, observe_only);
                 let report = build_cli_wrapper_plan(CliWrapperPlanOptions {
                     executor: &executor,
                     command: &command,
-                    forge_first,
+                    forge_first: harness_mode.forge_first,
+                    forge_first_source: harness_mode.source,
                     workflow_id: workflow_id.as_deref(),
                     task_id: task_id.as_deref(),
                     run_id: run_id.as_deref(),
@@ -5212,13 +5213,14 @@ fn run() -> Result<i32> {
                 force,
                 output,
             } => {
-                let forge_first = resolve_harness_forge_first(forge_first, observe_only);
+                let harness_mode = resolve_harness_forge_first(forge_first, observe_only);
                 let report = install_cli_harness_shim(CliShimInstallOptions {
                     shim_dir: &shim_dir,
                     executor: &executor,
                     real_cmd: real_cmd.as_deref(),
                     store_path: Some(cli.store.as_path()),
-                    forge_first,
+                    forge_first: harness_mode.forge_first,
+                    forge_first_source: harness_mode.source,
                     workflow_id: workflow_id.as_deref(),
                     task_id: task_id.as_deref(),
                     run_id: run_id.as_deref(),
@@ -5256,13 +5258,14 @@ fn run() -> Result<i32> {
                 command,
                 output,
             } => {
-                let forge_first = resolve_harness_forge_first(forge_first, observe_only);
+                let harness_mode = resolve_harness_forge_first(forge_first, observe_only);
                 let store = ForgeStore::open(cli.store)?;
                 let report = run_cli_harness_exec(CliHarnessExecOptions {
                     store: Some(&store),
                     executor: &executor,
                     command: &command,
-                    forge_first,
+                    forge_first: harness_mode.forge_first,
+                    forge_first_source: harness_mode.source,
                     workflow_id: workflow_id.as_deref(),
                     task_id: task_id.as_deref(),
                     run_id: run_id.as_deref(),
@@ -7244,11 +7247,37 @@ fn print_response<T: Serialize>(format: OutputFormat, value: &T) -> Result<()> {
     Ok(())
 }
 
-fn resolve_harness_forge_first(flag_forge_first: bool, flag_observe_only: bool) -> bool {
+struct HarnessForgeFirstMode {
+    forge_first: bool,
+    source: &'static str,
+}
+
+fn resolve_harness_forge_first(
+    flag_forge_first: bool,
+    flag_observe_only: bool,
+) -> HarnessForgeFirstMode {
     if flag_observe_only {
-        return false;
+        return HarnessForgeFirstMode {
+            forge_first: false,
+            source: "observe_only_flag",
+        };
     }
-    flag_forge_first || harness_default_mode_prefers_forge_first()
+    if flag_forge_first {
+        return HarnessForgeFirstMode {
+            forge_first: true,
+            source: "explicit_flag",
+        };
+    }
+    if harness_default_mode_prefers_forge_first() {
+        return HarnessForgeFirstMode {
+            forge_first: true,
+            source: "env_default",
+        };
+    }
+    HarnessForgeFirstMode {
+        forge_first: false,
+        source: "default_observe_only",
+    }
 }
 
 fn harness_default_mode_prefers_forge_first() -> bool {
