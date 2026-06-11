@@ -258,6 +258,8 @@ pub struct InteractiveCommandPaletteEntry {
     pub title: String,
     pub description: String,
     pub source_panel: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_contract: Option<InteractivePatchAddonContract>,
     pub workflow_id: Option<String>,
     pub commands: Vec<String>,
     pub mutates_workflow: bool,
@@ -286,6 +288,8 @@ pub struct InteractiveAutocompleteSuggestion {
     pub description: String,
     pub source: String,
     pub source_panel: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_contract: Option<InteractivePatchAddonContract>,
     pub workflow_id: Option<String>,
     pub equivalent_command: Vec<String>,
     pub mutates_workflow: bool,
@@ -1716,7 +1720,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             "low",
             &["session", "shell", "provider", "brain", "history"],
         ),
-        command_palette_entry(
+        patch_command_palette_entry(command_palette_entry(
             "patch.plan",
             "patch",
             "Create patch plan",
@@ -1739,8 +1743,8 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             false,
             "medium",
             &["patch", "plan", "artifact", "edit", "bounds"],
-        ),
-        command_palette_entry(
+        )),
+        patch_command_palette_entry(command_palette_entry(
             "patch.diff",
             "patch",
             "Review patch diff",
@@ -1761,8 +1765,8 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             false,
             "low",
             &["patch", "diff", "review", "file", "hunk"],
-        ),
-        command_palette_entry(
+        )),
+        patch_command_palette_entry(command_palette_entry(
             "patch.review",
             "patch",
             "Record patch review",
@@ -1783,8 +1787,8 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             false,
             "medium",
             &["patch", "review", "evidence", "status", "diff"],
-        ),
-        command_palette_entry(
+        )),
+        patch_command_palette_entry(command_palette_entry(
             "patch.apply",
             "patch",
             "Record patch apply",
@@ -1805,8 +1809,8 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             true,
             "high",
             &["patch", "apply", "approval", "validation", "snapshot"],
-        ),
-        command_palette_entry(
+        )),
+        patch_command_palette_entry(command_palette_entry(
             "patch.restore",
             "patch",
             "Restore from approved patch rollback",
@@ -1830,7 +1834,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             true,
             "high",
             &["patch", "restore", "rollback", "approval", "file"],
-        ),
+        )),
         command_palette_entry(
             "permissions.open",
             "permissions",
@@ -1942,6 +1946,7 @@ fn command_palette_entry(
         title: title.to_string(),
         description: description.to_string(),
         source_panel: source_panel.to_string(),
+        addon_contract: None,
         workflow_id,
         commands: commands
             .iter()
@@ -1955,6 +1960,13 @@ fn command_palette_entry(
             .map(|keyword| (*keyword).to_string())
             .collect(),
     }
+}
+
+fn patch_command_palette_entry(
+    mut entry: InteractiveCommandPaletteEntry,
+) -> InteractiveCommandPaletteEntry {
+    entry.addon_contract = Some(patch_addon_contract());
+    entry
 }
 
 fn command_palette_entry_matches(entry: &InteractiveCommandPaletteEntry, query: &str) -> bool {
@@ -2127,6 +2139,7 @@ fn slash_autocomplete_suggestions(query: &str) -> Vec<InteractiveAutocompleteSug
                 description: command.description,
                 source: "slash_command_catalog".to_string(),
                 source_panel: "slash_command_catalog".to_string(),
+                addon_contract: None,
                 workflow_id: None,
                 equivalent_command: command.equivalent_command,
                 mutates_workflow: command.mutates_workflow,
@@ -2160,6 +2173,7 @@ fn command_palette_autocomplete_suggestions(
                 description: entry.description.clone(),
                 source: "command_palette_panel".to_string(),
                 source_panel: entry.source_panel.clone(),
+                addon_contract: entry.addon_contract.clone(),
                 workflow_id: entry.workflow_id.clone(),
                 equivalent_command: entry.commands.clone(),
                 mutates_workflow: entry.mutates_workflow,

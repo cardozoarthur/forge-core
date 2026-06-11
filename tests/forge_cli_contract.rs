@@ -37005,6 +37005,11 @@ fn interactive_command_palette_surfaces_contextual_actions_for_replacement_cli()
                 entry["action_id"] == "patch.diff"
                     && entry["source_panel"] == "patch_workbench_panel"
                     && entry["mutates_workflow"] == false
+                    && entry["addon_contract"]["schema_version"]
+                        == "forge.interactive.patch_addon_contract.v1"
+                    && entry["addon_contract"]["source_addon"] == "forge.addon.software_development"
+                    && entry["addon_contract"]["capability_id"] == "source_code_patch_lifecycle"
+                    && entry["addon_contract"]["permission_id"] == "source_code.patch"
             })
     }));
     assert!(json["groups"].as_array().unwrap().iter().any(|group| {
@@ -37199,6 +37204,10 @@ fn interactive_autocomplete_suggests_slash_and_palette_actions_for_replacement_c
             suggestion["kind"] == "command_palette_action"
                 && suggestion["label"] == "patch.diff"
                 && suggestion["source_panel"] == "patch_workbench_panel"
+                && suggestion["addon_contract"]["source_addon"]
+                    == "forge.addon.software_development"
+                && suggestion["addon_contract"]["capability_id"] == "source_code_patch_lifecycle"
+                && suggestion["addon_contract"]["permission_id"] == "source_code.patch"
                 && suggestion["requires_approval"] == false
         }));
 
