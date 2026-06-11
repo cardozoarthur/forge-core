@@ -18,6 +18,9 @@ pub const CLI_HARNESS_MODE_SCHEMA_VERSION: &str = "forge.harness.mode.v1";
 pub const CLI_HARNESS_DOCTOR_SCHEMA_VERSION: &str = "forge.harness.doctor.v1";
 pub const CLI_HARNESS_HEADROOM_PLAN_SCHEMA_VERSION: &str = "forge.harness.headroom_plan.v1";
 pub const CLI_HARNESS_ADOPTION_PLAN_SCHEMA_VERSION: &str = "forge.harness.adoption_plan.v1";
+pub const CLI_HARNESS_BOOTSTRAP_SCHEMA_VERSION: &str = "forge.harness.bootstrap.v1";
+pub const CLI_HARNESS_BOOTSTRAP_CONFIG_WRITE_SCHEMA_VERSION: &str =
+    "forge.harness.bootstrap_config_write.v1";
 pub const CLI_HARNESS_SESSION_LIFECYCLE_PLAN_SCHEMA_VERSION: &str =
     "forge.harness.session_lifecycle_plan.v1";
 pub const CLI_SHIM_INSTALL_SCHEMA_VERSION: &str = "forge.harness.shim_install.v1";
@@ -239,6 +242,39 @@ pub struct HarnessAdoptionCommands {
     pub exec_with_lineage: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessBootstrapReport {
+    pub schema_version: String,
+    pub status: String,
+    pub executor: String,
+    pub project_root: String,
+    pub shim_dir: String,
+    pub apply: bool,
+    pub applied: bool,
+    pub mutates_state: bool,
+    pub would_mutate_state: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approved_by: Option<String>,
+    pub config_write: HarnessBootstrapConfigWrite,
+    pub adoption_plan: HarnessAdoptionPlanReport,
+    pub shim_install: Option<CliShimInstallReport>,
+    pub next_commands: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessBootstrapConfigWrite {
+    pub schema_version: String,
+    pub status: String,
+    pub path: String,
+    pub existed_before: bool,
+    pub applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approved_by: Option<String>,
+    pub config: HarnessRecommendedProjectConfig,
+    pub notes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct HarnessModeOptions<'a> {
     pub forge_first: bool,
@@ -295,6 +331,21 @@ pub struct HarnessAdoptionPlanOptions<'a> {
     pub token_headroom: bool,
     pub token_headroom_source: &'a str,
     pub require_token_headroom_for_forge_first: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HarnessBootstrapOptions<'a> {
+    pub shim_dir: &'a Path,
+    pub executor: &'a str,
+    pub project_root: &'a Path,
+    pub store_path: Option<&'a Path>,
+    pub context_budget: usize,
+    pub context_budget_source: &'a str,
+    pub token_headroom: bool,
+    pub token_headroom_source: &'a str,
+    pub apply: bool,
+    pub approved_by: Option<&'a str>,
+    pub force: bool,
 }
 
 struct HarnessForgeFirstMode {
@@ -1262,6 +1313,259 @@ fn harness_adoption_step(
         status: status.to_string(),
         command_key: command_key.to_string(),
         rationale: rationale.to_string(),
+    }
+}
+
+pub fn build_harness_bootstrap_report(
+    options: HarnessBootstrapOptions<'_>,
+) -> Result<HarnessBootstrapReport> {
+    let HarnessBootstrapOptions {
+        shim_dir,
+        executor,
+        project_root,
+        store_path,
+        context_budget,
+        context_budget_source,
+        token_headroom,
+        token_headroom_source,
+        apply,
+        approved_by,
+        force,
+    } = options;
+    let executor = normalize_executor(executor);
+    let project_root_path = project_root.to_path_buf();
+    let shim_dir_path = shim_dir.to_path_buf();
+    let project_root_display = project_root_path.display().to_string();
+    let shim_dir_display = shim_dir_path.display().to_string();
+    let recommended_project_config = HarnessRecommendedProjectConfig {
+        default_mode: "forge_first".to_string(),
+        default_context_budget: context_budget,
+        default_token_headroom: true,
+        require_token_headroom_for_forge_first: true,
+        require_lineage_for_exec: true,
+    };
+    let adoption_plan = build_harness_adoption_plan(HarnessAdoptionPlanOptions {
+        shim_dir: &shim_dir_path,
+        executor: &executor,
+        forge_first: true,
+        observe_only: false,
+        project_root: Some(&project_root_path),
+        workflow_id: None,
+        task_id: None,
+        run_id: None,
+        context_budget,
+        context_budget_source,
+        token_headroom,
+        token_headroom_source,
+        require_token_headroom_for_forge_first: true,
+    })?;
+    let config_path = project_root_path.join(".forge/harness.json");
+    let existed_before = config_path.exists();
+    let approved_by = approved_by
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+
+    if apply && approved_by.is_none() {
+        return Ok(HarnessBootstrapReport {
+            schema_version: CLI_HARNESS_BOOTSTRAP_SCHEMA_VERSION.to_string(),
+            status: "harness_bootstrap_blocked_missing_approval".to_string(),
+            executor,
+            project_root: project_root_display,
+            shim_dir: shim_dir_display,
+            apply,
+            applied: false,
+            mutates_state: false,
+            would_mutate_state: true,
+            approved_by,
+            config_write: bootstrap_config_write_report(
+                "blocked_missing_approval",
+                &config_path,
+                existed_before,
+                false,
+                None,
+                recommended_project_config.clone(),
+            ),
+            adoption_plan,
+            shim_install: None,
+            next_commands: vec![
+                "rerun with --apply --approved-by <operator> after reviewing the adoption plan"
+                    .to_string(),
+            ],
+            notes: vec![
+                "Bootstrap does not mutate project files or shims unless an approver is recorded."
+                    .to_string(),
+            ],
+        });
+    }
+
+    if !apply {
+        return Ok(HarnessBootstrapReport {
+            schema_version: CLI_HARNESS_BOOTSTRAP_SCHEMA_VERSION.to_string(),
+            status: "harness_bootstrap_planned".to_string(),
+            executor,
+            project_root: project_root_display,
+            shim_dir: shim_dir_display,
+            apply,
+            applied: false,
+            mutates_state: false,
+            would_mutate_state: true,
+            approved_by,
+            config_write: bootstrap_config_write_report(
+                "planned",
+                &config_path,
+                existed_before,
+                false,
+                None,
+                recommended_project_config,
+            ),
+            adoption_plan,
+            shim_install: None,
+            next_commands: vec![
+                "review adoption_plan before applying".to_string(),
+                "forge harness bootstrap --executor <executor> --shim-dir <dir> --project-root <project-root> --apply --approved-by <operator> --output json".to_string(),
+            ],
+            notes: vec![
+                "Dry-run is the default; no project config, shim or executor state is changed."
+                    .to_string(),
+            ],
+        });
+    }
+
+    let config_write = write_harness_bootstrap_project_config(
+        &project_root_path,
+        &recommended_project_config,
+        approved_by.as_deref(),
+    )?;
+    let shim_install = install_cli_harness_shim(CliShimInstallOptions {
+        shim_dir: &shim_dir_path,
+        executor: &executor,
+        real_cmd: None,
+        store_path,
+        forge_first: true,
+        forge_first_source: "bootstrap_default",
+        workflow_id: None,
+        task_id: None,
+        run_id: None,
+        context_budget,
+        token_headroom,
+        force,
+    })?;
+    let status = if shim_install.blocked_count > 0 {
+        "harness_bootstrap_partially_applied"
+    } else {
+        "harness_bootstrap_applied"
+    };
+    Ok(HarnessBootstrapReport {
+        schema_version: CLI_HARNESS_BOOTSTRAP_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        executor,
+        project_root: project_root_display,
+        shim_dir: shim_dir_display.clone(),
+        apply,
+        applied: shim_install.blocked_count == 0,
+        mutates_state: true,
+        would_mutate_state: true,
+        approved_by,
+        config_write,
+        adoption_plan,
+        shim_install: Some(shim_install),
+        next_commands: vec![
+            format!("export PATH={}:$PATH", shell_quote(&shim_dir_display)),
+            format!(
+                "forge sync executors --shim-dir {} --output json",
+                shell_quote(&shim_dir_display)
+            ),
+            "forge harness doctor --executor <executor> --shim-dir <dir> --project-root <project-root> --output json".to_string(),
+        ],
+        notes: vec![
+            "Bootstrap wrote the project harness policy before installing Forge-owned shims."
+                .to_string(),
+            "The native CLI remains the executable behind the shim; Forge only controls entry, context, lineage and headroom policy.".to_string(),
+        ],
+    })
+}
+
+fn write_harness_bootstrap_project_config(
+    project_root: &Path,
+    config: &HarnessRecommendedProjectConfig,
+    approved_by: Option<&str>,
+) -> Result<HarnessBootstrapConfigWrite> {
+    let forge_dir = project_root.join(".forge");
+    fs::create_dir_all(&forge_dir).with_context(|| {
+        format!(
+            "failed to create Forge project dir `{}`",
+            forge_dir.display()
+        )
+    })?;
+    let path = forge_dir.join("harness.json");
+    let existed_before = path.exists();
+    let mut existing = if existed_before {
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read harness config `{}`", path.display()))?;
+        serde_json::from_str::<serde_json::Map<String, Value>>(&content)
+            .with_context(|| format!("failed to parse harness config `{}`", path.display()))?
+    } else {
+        serde_json::Map::new()
+    };
+    existing.insert(
+        "default_mode".to_string(),
+        Value::String(config.default_mode.clone()),
+    );
+    existing.insert(
+        "default_context_budget".to_string(),
+        json!(config.default_context_budget),
+    );
+    existing.insert(
+        "default_token_headroom".to_string(),
+        json!(config.default_token_headroom),
+    );
+    existing.insert(
+        "require_token_headroom_for_forge_first".to_string(),
+        json!(config.require_token_headroom_for_forge_first),
+    );
+    existing.insert(
+        "require_lineage_for_exec".to_string(),
+        json!(config.require_lineage_for_exec),
+    );
+    let content = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&Value::Object(existing))?
+    );
+    fs::write(&path, content)
+        .with_context(|| format!("failed to write harness config `{}`", path.display()))?;
+    Ok(bootstrap_config_write_report(
+        "written",
+        &path,
+        existed_before,
+        true,
+        approved_by,
+        config.clone(),
+    ))
+}
+
+fn bootstrap_config_write_report(
+    status: &str,
+    path: &Path,
+    existed_before: bool,
+    applied: bool,
+    approved_by: Option<&str>,
+    config: HarnessRecommendedProjectConfig,
+) -> HarnessBootstrapConfigWrite {
+    HarnessBootstrapConfigWrite {
+        schema_version: CLI_HARNESS_BOOTSTRAP_CONFIG_WRITE_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        path: path.display().to_string(),
+        existed_before,
+        applied,
+        approved_by: approved_by.map(ToString::to_string),
+        config,
+        notes: vec![
+            "Project harness config controls Forge-first defaults, token headroom and lineage policy."
+                .to_string(),
+            "Bootstrap preserves unrelated JSON keys when updating an existing harness config."
+                .to_string(),
+        ],
     }
 }
 

@@ -69,11 +69,12 @@ use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff_with_project;
 use forge_core::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, build_harness_adoption_plan,
-    build_harness_doctor_report, build_harness_headroom_plan, build_harness_mode_report,
-    inspect_cli_harness_shim_status, install_cli_harness_shim, persist_token_headroom_report,
-    resolve_harness_forge_first_source_for_project, resolve_harness_runtime_policy,
-    retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
-    CliShimStatusOptions, CliWrapperPlanOptions, HarnessAdoptionPlanOptions, HarnessDoctorOptions,
+    build_harness_bootstrap_report, build_harness_doctor_report, build_harness_headroom_plan,
+    build_harness_mode_report, inspect_cli_harness_shim_status, install_cli_harness_shim,
+    persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
+    resolve_harness_runtime_policy, retrieve_headroom_blob, run_cli_harness_exec,
+    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
+    HarnessAdoptionPlanOptions, HarnessBootstrapOptions, HarnessDoctorOptions,
     HarnessHeadroomPlanOptions, HarnessModeOptions, HarnessRuntimePolicyOptions,
 };
 use forge_core::identity::{
@@ -778,6 +779,28 @@ enum HarnessCommands {
         no_token_headroom: bool,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    Bootstrap {
+        #[arg(long)]
+        executor: String,
+        #[arg(long = "shim-dir")]
+        shim_dir: PathBuf,
+        #[arg(long = "project-root")]
+        project_root: PathBuf,
+        #[arg(long = "context-budget")]
+        context_budget: Option<usize>,
+        #[arg(long = "token-headroom")]
+        token_headroom: bool,
+        #[arg(long = "no-token-headroom", conflicts_with = "token_headroom")]
+        no_token_headroom: bool,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long = "approved-by")]
+        approved_by: Option<String>,
+        #[arg(long, default_value_t = false)]
+        force: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -5798,6 +5821,45 @@ fn run() -> Result<i32> {
                     require_token_headroom_for_forge_first: runtime_policy
                         .require_token_headroom_for_forge_first,
                 });
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            HarnessCommands::Bootstrap {
+                executor,
+                shim_dir,
+                project_root,
+                context_budget,
+                token_headroom,
+                no_token_headroom,
+                apply,
+                approved_by,
+                force,
+                output,
+            } => {
+                let (token_headroom_input, token_headroom_source) =
+                    harness_cli_token_headroom_input(token_headroom, no_token_headroom);
+                let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+                    project_root: Some(project_root.as_path()),
+                    context_budget,
+                    context_budget_source: "explicit_flag",
+                    token_headroom: token_headroom_input,
+                    token_headroom_source,
+                    forge_first: true,
+                    default_context_budget: DEFAULT_CONTEXT_BUDGET,
+                });
+                let report = build_harness_bootstrap_report(HarnessBootstrapOptions {
+                    shim_dir: &shim_dir,
+                    executor: &executor,
+                    project_root: &project_root,
+                    store_path: Some(cli.store.as_path()),
+                    context_budget: runtime_policy.context_budget,
+                    context_budget_source: &runtime_policy.context_budget_source,
+                    token_headroom: runtime_policy.token_headroom,
+                    token_headroom_source: &runtime_policy.token_headroom_source,
+                    apply,
+                    approved_by: approved_by.as_deref(),
+                    force,
+                })?;
                 print_response(output, &report)?;
                 Ok(0)
             }
