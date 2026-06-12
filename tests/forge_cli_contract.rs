@@ -24632,6 +24632,169 @@ event_adapters:
 }
 
 #[test]
+fn addon_event_adapters_project_declared_event_triggers_listeners_and_channels() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let addon_dir = temp.path().join(".forge/addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        addon_dir.join("event-extension-demo.yaml"),
+        r#"
+id: forge.addon.event_extension_demo
+name: Event Extension Demo Addon
+version: 0.1.0
+description: Demonstrates declarative Event Extension registry entries.
+lifecycle: enabled
+permissions:
+  - id: demo.event.consume
+    description: Consume demo inbox events.
+    risk: medium
+    actions:
+      - start_workflow
+      - continue_workflow
+capabilities:
+  - id: demo_event_operations
+    title: Demo event operations
+    description: Operate workflows from generic demo events.
+    event_triggers:
+      - demo.message.received
+workflows:
+  - id: demo_event_workflow
+    kind: dynamic_workflow_strategy
+    description: Plan work from demo events.
+event_types:
+  - id: demo.message
+    title: Demo message
+    transport: demo
+event_channels:
+  - id: demo.inbox
+    title: Demo inbox
+    transport: demo
+    direction: ingress
+    origins:
+      - demo
+    event_types:
+      - demo.message
+    actions:
+      - start_workflow
+    auth: forge_policy
+    permissions:
+      - demo.event.consume
+event_triggers:
+  - id: demo.message.received
+    title: Demo message received
+    event_type: demo.message
+    channel: demo.inbox
+    adapter_id: demo.start
+    workflow_extension_id: demo_event_workflow
+    capability_id: demo_event_operations
+    actions:
+      - start_workflow
+    conditions:
+      - payload.goal present
+    permissions:
+      - demo.event.consume
+event_listeners:
+  - id: demo.message.listener
+    title: Demo message listener
+    event_type: demo.message
+    channel: demo.inbox
+    adapter_id: demo.start
+    workflow_extension_id: demo_event_workflow
+    capability_id: demo_event_operations
+    handler: forge.event_inbox.route
+    actions:
+      - start_workflow
+    permissions:
+      - demo.event.consume
+event_adapters:
+  - id: demo.start
+    title: Demo start adapter
+    transport: demo
+    direction: ingress
+    origins:
+      - demo
+    actions:
+      - start_workflow
+    event_types:
+      - demo.message
+    schema: demo.message
+    auth: forge_policy
+    permissions:
+      - demo.event.consume
+"#,
+    )
+    .unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "adapters",
+            "--addon-dir",
+            addon_dir.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["event_extension_registry"]["schema_version"],
+        "forge.addon_event_extensions.v1"
+    );
+    assert_eq!(json["event_extension_registry"]["trigger_count"], 1);
+    assert_eq!(json["event_extension_registry"]["listener_count"], 1);
+    assert_eq!(json["event_extension_registry"]["channel_count"], 1);
+    assert_eq!(
+        json["event_extension_registry"]["triggers"][0]["trigger"]["id"],
+        "demo.message.received"
+    );
+    assert_eq!(
+        json["event_extension_registry"]["triggers"][0]["permission_gate"]["status"],
+        "allowed"
+    );
+    assert_eq!(
+        json["event_extension_registry"]["listeners"][0]["listener"]["handler"],
+        "forge.event_inbox.route"
+    );
+    assert_eq!(
+        json["event_extension_registry"]["channels"][0]["channel"]["transport"],
+        "demo"
+    );
+
+    let input = serde_json::json!({
+        "addon_dirs": [addon_dir.to_str().unwrap()],
+        "addon_id": "forge.addon.event_extension_demo"
+    });
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.events.adapters"])
+        .arg("--input")
+        .arg(input.to_string())
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["event_extension_registry"]["schema_version"],
+        "forge.addon_event_extensions.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["event_extension_registry"]["triggers"][0]["trigger"]["id"],
+        "demo.message.received"
+    );
+}
+
+#[test]
 fn request_status_reflects_current_workflow_mutations_for_async_callers() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

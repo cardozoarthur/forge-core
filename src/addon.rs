@@ -40,6 +40,7 @@ pub const INSTALLED_ADDONS_SCHEMA_VERSION: &str = "forge.installed_addons.v1";
 pub const ADDON_LIFECYCLE_SCHEMA_VERSION: &str = "forge.addon_lifecycle.v1";
 pub const ADDON_CAPABILITY_INDEX_SCHEMA_VERSION: &str = "forge.addon_capability_index.v1";
 pub const ADDON_EVENT_ADAPTERS_SCHEMA_VERSION: &str = "forge.addon_event_adapters.v1";
+pub const ADDON_EVENT_EXTENSIONS_SCHEMA_VERSION: &str = "forge.addon_event_extensions.v1";
 pub const ADDON_OBSERVABILITY_SCHEMA_VERSION: &str = "forge.addon_observability.v1";
 pub const ADDON_RUNTIME_CONTRACTS_SCHEMA_VERSION: &str = "forge.addon_runtime_contracts.v1";
 pub const ADDON_PLANNER_REGISTRY_SCHEMA_VERSION: &str = "forge.addon_planner_registry.v1";
@@ -362,6 +363,12 @@ pub struct AddonManifest {
     pub artifact_types: Vec<ArtifactTypeDeclaration>,
     #[serde(default)]
     pub event_types: Vec<EventTypeDeclaration>,
+    #[serde(default)]
+    pub event_channels: Vec<EventChannelDeclaration>,
+    #[serde(default)]
+    pub event_triggers: Vec<EventTriggerDeclaration>,
+    #[serde(default)]
+    pub event_listeners: Vec<EventListenerDeclaration>,
     #[serde(default)]
     pub event_adapters: Vec<EventAdapterDeclaration>,
     #[serde(default)]
@@ -949,6 +956,77 @@ pub struct EventTypeDeclaration {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventChannelDeclaration {
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub transport: String,
+    #[serde(default)]
+    pub direction: String,
+    #[serde(default)]
+    pub origins: Vec<String>,
+    #[serde(default)]
+    pub actions: Vec<String>,
+    #[serde(default)]
+    pub event_types: Vec<String>,
+    #[serde(default)]
+    pub schema: String,
+    #[serde(default)]
+    pub auth: String,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventTriggerDeclaration {
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub event_type: String,
+    #[serde(default)]
+    pub channel: String,
+    #[serde(default)]
+    pub adapter_id: String,
+    #[serde(default)]
+    pub workflow_extension_id: String,
+    #[serde(default)]
+    pub capability_id: String,
+    #[serde(default)]
+    pub actions: Vec<String>,
+    #[serde(default)]
+    pub conditions: Vec<String>,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventListenerDeclaration {
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub event_type: String,
+    #[serde(default)]
+    pub channel: String,
+    #[serde(default)]
+    pub adapter_id: String,
+    #[serde(default)]
+    pub workflow_extension_id: String,
+    #[serde(default)]
+    pub capability_id: String,
+    #[serde(default)]
+    pub handler: String,
+    #[serde(default)]
+    pub runtime_contract_id: String,
+    #[serde(default)]
+    pub actions: Vec<String>,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventAdapterDeclaration {
     pub id: String,
     #[serde(default)]
@@ -1004,6 +1082,7 @@ pub struct AddonEventAdapterReport {
     pub schema_version: String,
     pub status: String,
     pub adapter_count: usize,
+    pub event_extension_registry: AddonEventExtensionRegistry,
     pub filters: AddonEventAdapterFilters,
     pub adapters: Vec<AddonEventAdapterView>,
 }
@@ -1026,6 +1105,59 @@ pub struct AddonEventAdapterView {
     pub addon_lifecycle: String,
     pub permission_gate: AddonPermissionGate,
     pub adapter: EventAdapterDeclaration,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddonEventExtensionRegistry {
+    pub schema_version: String,
+    pub status: String,
+    pub event_type_count: usize,
+    pub trigger_count: usize,
+    pub listener_count: usize,
+    pub channel_count: usize,
+    pub event_types: Vec<AddonEventTypeView>,
+    pub triggers: Vec<AddonEventTriggerView>,
+    pub listeners: Vec<AddonEventListenerView>,
+    pub channels: Vec<AddonEventChannelView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddonEventTypeView {
+    pub addon_id: String,
+    pub addon_name: String,
+    pub addon_version: String,
+    pub addon_lifecycle: String,
+    pub event_type: EventTypeDeclaration,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddonEventTriggerView {
+    pub addon_id: String,
+    pub addon_name: String,
+    pub addon_version: String,
+    pub addon_lifecycle: String,
+    pub permission_gate: AddonPermissionGate,
+    pub trigger: EventTriggerDeclaration,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddonEventListenerView {
+    pub addon_id: String,
+    pub addon_name: String,
+    pub addon_version: String,
+    pub addon_lifecycle: String,
+    pub permission_gate: AddonPermissionGate,
+    pub listener: EventListenerDeclaration,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddonEventChannelView {
+    pub addon_id: String,
+    pub addon_name: String,
+    pub addon_version: String,
+    pub addon_lifecycle: String,
+    pub permission_gate: AddonPermissionGate,
+    pub channel: EventChannelDeclaration,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2066,6 +2198,12 @@ pub fn list_addon_event_adapters(
     let addon_filter = normalize_filter(addon_id);
     let transport_filter = normalize_filter(transport);
     let direction_filter = normalize_filter(direction);
+    let event_extension_registry = addon_event_extension_registry(
+        catalog,
+        addon_filter.as_deref(),
+        transport_filter.as_deref(),
+        direction_filter.as_deref(),
+    );
     let adapters = catalog
         .addons
         .iter()
@@ -2100,12 +2238,97 @@ pub fn list_addon_event_adapters(
         schema_version: addon_event_adapters_schema_version(),
         status: "addon_event_adapters_loaded".to_string(),
         adapter_count: adapters.len(),
+        event_extension_registry,
         filters: AddonEventAdapterFilters {
             addon_id: addon_filter,
             transport: transport_filter,
             direction: direction_filter,
         },
         adapters,
+    }
+}
+
+fn addon_event_extension_registry(
+    catalog: &AddonCatalog,
+    addon_filter: Option<&str>,
+    transport_filter: Option<&str>,
+    direction_filter: Option<&str>,
+) -> AddonEventExtensionRegistry {
+    let mut event_types = Vec::new();
+    let mut triggers = Vec::new();
+    let mut listeners = Vec::new();
+    let mut channels = Vec::new();
+
+    for addon in catalog.addons.iter().filter(|addon| {
+        addon_filter
+            .map(|filter| addon.id == filter)
+            .unwrap_or(true)
+    }) {
+        event_types.extend(
+            addon
+                .event_types
+                .iter()
+                .filter(|event_type| filter_matches(transport_filter, &event_type.transport))
+                .cloned()
+                .map(|event_type| AddonEventTypeView {
+                    addon_id: addon.id.clone(),
+                    addon_name: addon.name.clone(),
+                    addon_version: addon.version.clone(),
+                    addon_lifecycle: addon.lifecycle.clone(),
+                    event_type,
+                }),
+        );
+        channels.extend(
+            addon
+                .event_channels
+                .iter()
+                .filter(|channel| {
+                    filter_matches(transport_filter, &channel.transport)
+                        && filter_matches(direction_filter, &channel.direction)
+                })
+                .cloned()
+                .map(|channel| AddonEventChannelView {
+                    addon_id: addon.id.clone(),
+                    addon_name: addon.name.clone(),
+                    addon_version: addon.version.clone(),
+                    addon_lifecycle: addon.lifecycle.clone(),
+                    permission_gate: addon_permission_gate(addon, &channel.permissions),
+                    channel,
+                }),
+        );
+        triggers.extend(addon.event_triggers.iter().cloned().map(|trigger| {
+            AddonEventTriggerView {
+                addon_id: addon.id.clone(),
+                addon_name: addon.name.clone(),
+                addon_version: addon.version.clone(),
+                addon_lifecycle: addon.lifecycle.clone(),
+                permission_gate: addon_permission_gate(addon, &trigger.permissions),
+                trigger,
+            }
+        }));
+        listeners.extend(addon.event_listeners.iter().cloned().map(|listener| {
+            AddonEventListenerView {
+                addon_id: addon.id.clone(),
+                addon_name: addon.name.clone(),
+                addon_version: addon.version.clone(),
+                addon_lifecycle: addon.lifecycle.clone(),
+                permission_gate: addon_permission_gate(addon, &listener.permissions),
+                listener,
+            }
+        }));
+    }
+
+    AddonEventExtensionRegistry {
+        schema_version: addon_event_extensions_schema_version(),
+        status: "addon_event_extensions_loaded".to_string(),
+        event_type_count: event_types.len(),
+        trigger_count: triggers.len(),
+        listener_count: listeners.len(),
+        channel_count: channels.len(),
+        event_types,
+        triggers,
+        listeners,
+        channels,
     }
 }
 
@@ -10320,6 +10543,9 @@ fn core_kernel_addon() -> AddonManifest {
         views: Vec::new(),
         artifact_types: Vec::new(),
         event_types: Vec::new(),
+        event_channels: Vec::new(),
+        event_triggers: Vec::new(),
+        event_listeners: Vec::new(),
         event_adapters: vec![event_adapter(
             "forge.core.event_inbox",
             "forge_inbox",
@@ -10419,6 +10645,9 @@ fn workflow_automation_addon() -> AddonManifest {
         views: Vec::new(),
         artifact_types: Vec::new(),
         event_types: Vec::new(),
+        event_channels: Vec::new(),
+        event_triggers: Vec::new(),
+        event_listeners: Vec::new(),
         event_adapters: Vec::new(),
         context_providers: Vec::new(),
         memory_providers: Vec::new(),
@@ -10522,6 +10751,9 @@ fn visual_workspace_addon() -> AddonManifest {
             artifact_type("design_tokens"),
         ],
         event_types: vec![event_type("visual.collaboration_event", "local")],
+        event_channels: Vec::new(),
+        event_triggers: Vec::new(),
+        event_listeners: Vec::new(),
         event_adapters: Vec::new(),
         context_providers: Vec::new(),
         memory_providers: Vec::new(),
@@ -10814,6 +11046,9 @@ fn software_development_addon() -> AddonManifest {
             event_type("source_code.patch_applied", "local"),
             event_type("source_code.patch_restored", "local"),
         ],
+        event_channels: Vec::new(),
+        event_triggers: Vec::new(),
+        event_listeners: Vec::new(),
         event_adapters: Vec::new(),
         context_providers: Vec::new(),
         memory_providers: Vec::new(),
@@ -11091,6 +11326,9 @@ fn multimodal_runtime_addon() -> AddonManifest {
             event_type("multimodal.runtime_benchmark_recorded", "local"),
             event_type("multimodal.guard_evaluated", "local"),
         ],
+        event_channels: Vec::new(),
+        event_triggers: Vec::new(),
+        event_listeners: Vec::new(),
         event_adapters: Vec::new(),
         context_providers: Vec::new(),
         memory_providers: Vec::new(),
@@ -11214,6 +11452,9 @@ fn hackathon_factory_addon() -> AddonManifest {
             artifact_type("pitch_package"),
         ],
         event_types: Vec::new(),
+        event_channels: Vec::new(),
+        event_triggers: Vec::new(),
+        event_listeners: Vec::new(),
         event_adapters: Vec::new(),
         context_providers: Vec::new(),
         memory_providers: Vec::new(),
@@ -11280,6 +11521,9 @@ fn daily_goal_research_addon() -> AddonManifest {
         views: Vec::new(),
         artifact_types: vec![artifact_type("research_report")],
         event_types: vec![event_type("cron.daily_goal_research", "cron")],
+        event_channels: Vec::new(),
+        event_triggers: Vec::new(),
+        event_listeners: Vec::new(),
         event_adapters: Vec::new(),
         context_providers: Vec::new(),
         memory_providers: Vec::new(),
@@ -11378,6 +11622,9 @@ fn notification_addon() -> AddonManifest {
             event_type("telegram.document", "telegram"),
             event_type("telegram.report", "telegram"),
         ],
+        event_channels: Vec::new(),
+        event_triggers: Vec::new(),
+        event_listeners: Vec::new(),
         event_adapters: vec![
             telegram_updates_adapter,
             telegram_message_egress,
@@ -11437,6 +11684,9 @@ fn async_runtime_addon() -> AddonManifest {
         views: Vec::new(),
         artifact_types: Vec::new(),
         event_types: Vec::new(),
+        event_channels: Vec::new(),
+        event_triggers: Vec::new(),
+        event_listeners: Vec::new(),
         event_adapters: Vec::new(),
         context_providers: Vec::new(),
         memory_providers: Vec::new(),
@@ -11627,6 +11877,10 @@ fn addon_capability_index_schema_version() -> String {
 
 fn addon_event_adapters_schema_version() -> String {
     ADDON_EVENT_ADAPTERS_SCHEMA_VERSION.to_string()
+}
+
+fn addon_event_extensions_schema_version() -> String {
+    ADDON_EVENT_EXTENSIONS_SCHEMA_VERSION.to_string()
 }
 
 fn addon_observability_schema_version() -> String {

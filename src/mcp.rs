@@ -2637,7 +2637,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.events.adapters",
                 "List Event Adapters",
-                "Return declarative Addon event adapters by Addon, transport or direction so agents can discover ingress/egress contracts without channel-specific code.",
+                "Return declarative Addon event adapters plus Event Extension triggers, listeners and channels by Addon, transport or direction so agents can discover ingress/egress contracts without channel-specific code.",
                 object_schema(
                     &[
                         ("addon_id", "string", "optional Addon id filter"),
