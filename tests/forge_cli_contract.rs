@@ -1935,6 +1935,91 @@ done
 }
 
 #[test]
+fn harness_exec_receipt_surfaces_runtime_policy_sources_for_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("project");
+    fs::create_dir_all(project.join(".forge")).unwrap();
+    fs::write(
+        project.join(".forge/harness.json"),
+        r#"{"default_mode":"forge_first","default_context_budget":333,"default_token_headroom":false}"#,
+    )
+    .unwrap();
+
+    let cli_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "exec",
+            "--executor",
+            "codex",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--output",
+            "json",
+            "--",
+            "codex",
+            "--version",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cli_receipt: Value = serde_json::from_slice(&cli_output).unwrap();
+    assert_eq!(cli_receipt["status"], "harness_exec_dry_run");
+    assert_eq!(cli_receipt["context_budget"], 333);
+    assert_eq!(cli_receipt["context_budget_source"], "project_config");
+    assert_eq!(cli_receipt["output_headroom_enabled"], false);
+    assert_eq!(cli_receipt["token_headroom_source"], "project_config");
+    assert_eq!(cli_receipt["require_token_headroom_for_forge_first"], false);
+    assert_eq!(
+        cli_receipt["wrapper_plan"]["context_budget_source"],
+        cli_receipt["context_budget_source"]
+    );
+    assert_eq!(
+        cli_receipt["wrapper_plan"]["token_headroom_source"],
+        cli_receipt["token_headroom_source"]
+    );
+
+    let mcp_input = serde_json::json!({
+        "executor": "opencode",
+        "command": ["opencode", "--version"],
+        "project_root": project.display().to_string(),
+        "context_budget": 444,
+        "token_headroom": true,
+        "dry_run": true
+    });
+    let mcp_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.exec",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    let mcp_receipt = &mcp_json["result"];
+    assert_eq!(mcp_receipt["status"], "harness_exec_dry_run");
+    assert_eq!(mcp_receipt["context_budget"], 444);
+    assert_eq!(mcp_receipt["context_budget_source"], "mcp_input");
+    assert_eq!(mcp_receipt["output_headroom_enabled"], true);
+    assert_eq!(mcp_receipt["token_headroom_source"], "mcp_input");
+}
+
+#[test]
 fn harness_exec_enforces_project_lineage_policy_before_real_brain_execution() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

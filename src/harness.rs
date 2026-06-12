@@ -404,6 +404,10 @@ pub struct CliHarnessExecReceipt {
     pub run_id: Option<String>,
     pub forge_first: bool,
     pub forge_first_source: String,
+    pub context_budget: usize,
+    pub context_budget_source: String,
+    pub token_headroom_source: String,
+    pub require_token_headroom_for_forge_first: bool,
     pub dry_run: bool,
     pub allow_exec: bool,
     pub execution_mode: String,
@@ -3298,6 +3302,12 @@ fn exec_receipt(input: CliExecReceiptInput) -> CliHarnessExecReceipt {
         run_id,
         forge_first: input.forge_first,
         forge_first_source: input.wrapper_plan.forge_first_source.clone(),
+        context_budget: input.wrapper_plan.context_budget,
+        context_budget_source: input.wrapper_plan.context_budget_source.clone(),
+        token_headroom_source: input.wrapper_plan.token_headroom_source.clone(),
+        require_token_headroom_for_forge_first: input
+            .wrapper_plan
+            .require_token_headroom_for_forge_first,
         dry_run: input.dry_run,
         allow_exec: input.allow_exec,
         execution_mode: input.execution_mode,
