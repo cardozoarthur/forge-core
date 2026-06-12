@@ -24632,6 +24632,221 @@ event_adapters:
 }
 
 #[test]
+fn inbound_event_route_projects_matching_addon_event_extensions() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("event-extension-route-project");
+    let addon_dir = project_root.join(".forge/addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        project_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: digital-directive
+  label: Digital Directive
+brand:
+  scope: brand
+  id: forge
+  label: Forge
+product:
+  scope: product
+  id: core
+  label: Forge Core
+user:
+  scope: user
+  id: operator
+  label: Operator
+channel:
+  scope: channel
+  id: demo_inbox
+  label: Demo Inbox
+tenant_policy_mode: audit
+"#,
+    )
+    .unwrap();
+    fs::write(
+        addon_dir.join("event-extension-route-demo.yaml"),
+        r#"
+id: forge.addon.event_extension_route_demo
+name: Event Extension Route Demo Addon
+version: 0.1.0
+description: Demonstrates event extension activation during inbound routing.
+lifecycle: enabled
+permissions:
+  - id: demo.event.consume
+    description: Consume demo event extension routes.
+    risk: medium
+    actions:
+      - start_workflow
+capabilities:
+  - id: demo_event_route_operations
+    title: Demo event route operations
+    description: Start workflows from generic event extension matches.
+    event_triggers:
+      - demo.message.received
+workflows:
+  - id: demo_event_route_workflow
+    kind: dynamic_workflow_strategy
+    description: Plan work from demo event extension matches.
+event_types:
+  - id: demo.message
+    title: Demo message
+    transport: demo
+event_channels:
+  - id: demo.inbox
+    title: Demo inbox
+    transport: demo
+    direction: ingress
+    origins:
+      - demo
+    event_types:
+      - demo.message
+    actions:
+      - start_workflow
+    schema: demo.message
+    auth: forge_policy
+    permissions:
+      - demo.event.consume
+event_triggers:
+  - id: demo.message.received
+    title: Demo message received
+    event_type: demo.message
+    channel: demo.inbox
+    adapter_id: demo.start
+    workflow_extension_id: demo_event_route_workflow
+    capability_id: demo_event_route_operations
+    actions:
+      - start_workflow
+    conditions:
+      - payload.goal present
+    permissions:
+      - demo.event.consume
+event_listeners:
+  - id: demo.message.listener
+    title: Demo message listener
+    event_type: demo.message
+    channel: demo.inbox
+    adapter_id: demo.start
+    workflow_extension_id: demo_event_route_workflow
+    capability_id: demo_event_route_operations
+    handler: forge.event_inbox.route
+    actions:
+      - start_workflow
+    permissions:
+      - demo.event.consume
+event_adapters:
+  - id: demo.start
+    title: Demo start adapter
+    transport: demo
+    direction: ingress
+    origins:
+      - demo
+    actions:
+      - start_workflow
+    event_types:
+      - demo.message
+    schema: demo.message
+    auth: forge_policy
+    permissions:
+      - demo.event.consume
+"#,
+    )
+    .unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let ingest_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "ingest",
+            "--origin",
+            "demo",
+            "--action",
+            "start_workflow",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--input",
+            r#"{"goal":"Run a workflow from matched Event Extensions","transport":"demo","event_type":"demo.message","auth_verified":true}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ingest: Value = serde_json::from_slice(&ingest_output).unwrap();
+    let event_id = ingest["event"]["id"].as_str().unwrap();
+
+    let route_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "route",
+            "--event",
+            event_id,
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let route: Value = serde_json::from_slice(&route_output).unwrap();
+    assert_eq!(route["status"], "event_routed");
+    assert_eq!(
+        route["addon_event_adapter_plan"]["event_extension_matches"]["schema_version"],
+        "forge.event_extension_matches.v1"
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["event_extension_matches"]["matched_trigger_count"],
+        1
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["event_extension_matches"]["matched_listener_count"],
+        1
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["event_extension_matches"]["matched_channel_count"],
+        1
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["event_extension_matches"]["triggers"][0]["trigger"]
+            ["id"],
+        "demo.message.received"
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["event_extension_matches"]["listeners"][0]["listener"]
+            ["handler"],
+        "forge.event_inbox.route"
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["event_extension_matches"]["channels"][0]["channel"]
+            ["id"],
+        "demo.inbox"
+    );
+}
+
+#[test]
 fn addon_event_adapters_project_declared_event_triggers_listeners_and_channels() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

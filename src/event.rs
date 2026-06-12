@@ -1,6 +1,8 @@
 use crate::addon::{
     list_addon_event_adapters, load_addon_catalog_from_store, AddonCatalog, AddonEventAdapterView,
-    AddonPermissionGate, EventAdapterCredentialVaultRef, EventAdapterDeclaration,
+    AddonEventChannelView, AddonEventExtensionRegistry, AddonEventListenerView,
+    AddonEventTriggerView, AddonPermissionGate, EventAdapterCredentialVaultRef,
+    EventAdapterDeclaration,
 };
 use crate::artifact::hex_sha256;
 use crate::checkpoint::{record_task_checkpoint, TaskCheckpointRequest};
@@ -74,6 +76,7 @@ pub const EVENT_WEBHOOK_INGRESS_RESPONSE_SCHEMA_VERSION: &str =
     "forge.event_webhook_ingress.response.v1";
 pub const EVENT_ADAPTER_POLICY_SCHEMA_VERSION: &str = "forge.event_adapter_policy.v1";
 pub const EVENT_ADDON_ADAPTER_PLAN_SCHEMA_VERSION: &str = "forge.event_addon_adapter_plan.v1";
+pub const EVENT_EXTENSION_MATCHES_SCHEMA_VERSION: &str = "forge.event_extension_matches.v1";
 pub const EVENT_EGRESS_EMIT_SCHEMA_VERSION: &str = "forge.event_egress_emit.v1";
 pub const EVENT_EGRESS_REQUEST_SCHEMA_VERSION: &str = "forge.event_egress_request.v1";
 pub const EVENT_EGRESS_DELIVERY_EVIDENCE_SCHEMA_VERSION: &str =
@@ -1005,8 +1008,22 @@ pub struct InboundEventAddonAdapterPlan {
     pub matched_count: usize,
     pub allowed_count: usize,
     pub blocked_count: usize,
+    pub event_extension_matches: InboundEventExtensionMatches,
     pub adapters: Vec<InboundEventAddonAdapterPlanEntry>,
     pub next_commands: Vec<Vec<String>>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InboundEventExtensionMatches {
+    pub schema_version: String,
+    pub status: String,
+    pub matched_trigger_count: usize,
+    pub matched_listener_count: usize,
+    pub matched_channel_count: usize,
+    pub triggers: Vec<AddonEventTriggerView>,
+    pub listeners: Vec<AddonEventListenerView>,
+    pub channels: Vec<AddonEventChannelView>,
     pub notes: Vec<String>,
 }
 
@@ -7216,6 +7233,7 @@ fn build_inbound_addon_event_adapter_plan(
     adapter_policy: &InboundEventAdapterPolicyReport,
 ) -> InboundEventAddonAdapterPlan {
     let adapter_report = list_addon_event_adapters(catalog, None, None, Some("ingress"));
+    let event_extension_registry = adapter_report.event_extension_registry;
     let mut adapters = adapter_report
         .adapters
         .into_iter()
@@ -7230,6 +7248,12 @@ fn build_inbound_addon_event_adapter_plan(
             .then_with(|| left.adapter_id.cmp(&right.adapter_id))
             .then_with(|| left.addon_id.cmp(&right.addon_id))
     });
+    let event_extension_matches = build_inbound_event_extension_matches(
+        &event_extension_registry,
+        event,
+        adapter_policy,
+        &adapters,
+    );
 
     let matched_count = adapters
         .iter()
@@ -7259,10 +7283,240 @@ fn build_inbound_addon_event_adapter_plan(
         matched_count,
         allowed_count,
         blocked_count,
+        event_extension_matches,
         next_commands: inbound_event_addon_adapter_next_commands(event, &adapters),
         notes: inbound_event_addon_adapter_plan_notes(adapter_policy, matched_count, &adapters),
         adapters,
     }
+}
+
+fn build_inbound_event_extension_matches(
+    registry: &AddonEventExtensionRegistry,
+    event: &InboundEventRecord,
+    adapter_policy: &InboundEventAdapterPolicyReport,
+    adapters: &[InboundEventAddonAdapterPlanEntry],
+) -> InboundEventExtensionMatches {
+    let event_type_candidates = inbound_event_type_candidates(event, adapter_policy, adapters);
+    let matched_adapter_ids = adapters
+        .iter()
+        .filter(|adapter| adapter.status == "matched")
+        .map(|adapter| adapter.adapter_id.clone())
+        .collect::<BTreeSet<_>>();
+    let matched_channels = registry
+        .channels
+        .iter()
+        .filter(|channel| {
+            event_channel_matches(channel, event, adapter_policy, &event_type_candidates)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let matched_channel_ids = matched_channels
+        .iter()
+        .map(|channel| channel.channel.id.clone())
+        .collect::<BTreeSet<_>>();
+    let matched_triggers = registry
+        .triggers
+        .iter()
+        .filter(|trigger| {
+            event_trigger_matches(
+                trigger,
+                event,
+                adapter_policy,
+                &event_type_candidates,
+                &matched_channel_ids,
+                &matched_adapter_ids,
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let matched_listeners = registry
+        .listeners
+        .iter()
+        .filter(|listener| {
+            event_listener_matches(
+                listener,
+                event,
+                adapter_policy,
+                &event_type_candidates,
+                &matched_channel_ids,
+                &matched_adapter_ids,
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let status = if matched_triggers.is_empty()
+        && matched_listeners.is_empty()
+        && matched_channels.is_empty()
+    {
+        "event_extensions_unmatched"
+    } else {
+        "event_extensions_matched"
+    };
+    let notes = if status == "event_extensions_matched" {
+        vec![
+            "Addon Event Extensions matched the inbound event without executing handlers."
+                .to_string(),
+        ]
+    } else {
+        vec![
+            "No Addon Event Extension trigger, listener or channel matched the inbound event."
+                .to_string(),
+        ]
+    };
+
+    InboundEventExtensionMatches {
+        schema_version: EVENT_EXTENSION_MATCHES_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        matched_trigger_count: matched_triggers.len(),
+        matched_listener_count: matched_listeners.len(),
+        matched_channel_count: matched_channels.len(),
+        triggers: matched_triggers,
+        listeners: matched_listeners,
+        channels: matched_channels,
+        notes,
+    }
+}
+
+fn inbound_event_type_candidates(
+    event: &InboundEventRecord,
+    adapter_policy: &InboundEventAdapterPolicyReport,
+    adapters: &[InboundEventAddonAdapterPlanEntry],
+) -> BTreeSet<String> {
+    let mut candidates = BTreeSet::new();
+    if let Some(schema) = adapter_policy.schema.as_deref() {
+        insert_normalized_candidate(&mut candidates, schema);
+    }
+    for key in ["schema", "event_schema", "event_type"] {
+        if let Some(value) = extract_string(&event.data, &[key]) {
+            insert_normalized_candidate(&mut candidates, &value);
+        }
+    }
+    for adapter in adapters
+        .iter()
+        .filter(|adapter| adapter.status == "matched")
+    {
+        if let Some(schema) = adapter.schema.as_deref() {
+            insert_normalized_candidate(&mut candidates, schema);
+        }
+        for event_type in &adapter.event_types {
+            insert_normalized_candidate(&mut candidates, event_type);
+        }
+    }
+    candidates
+}
+
+fn insert_normalized_candidate(candidates: &mut BTreeSet<String>, value: &str) {
+    let value = value.trim();
+    if !value.is_empty() {
+        candidates.insert(value.to_ascii_lowercase());
+    }
+}
+
+fn event_channel_matches(
+    channel: &AddonEventChannelView,
+    event: &InboundEventRecord,
+    adapter_policy: &InboundEventAdapterPolicyReport,
+    event_type_candidates: &BTreeSet<String>,
+) -> bool {
+    let channel = &channel.channel;
+    let direction_matches = channel.direction.trim().is_empty()
+        || text_matches(&channel.direction, "ingress")
+        || text_matches(&channel.direction, "bidirectional");
+    let origin_matches = string_list_matches(&channel.origins, &event.origin);
+    let transport_matches = adapter_policy
+        .transport
+        .as_deref()
+        .map(|transport| {
+            channel.transport.trim().is_empty() || text_matches(&channel.transport, transport)
+        })
+        .unwrap_or(true);
+    direction_matches
+        && origin_matches
+        && transport_matches
+        && event_extension_actions_match(
+            &channel.actions,
+            &event.action,
+            &adapter_policy.normalized_action,
+        )
+        && event_extension_type_matches(&channel.event_types, event_type_candidates)
+        && event_extension_schema_matches(&channel.schema, event_type_candidates)
+}
+
+fn event_trigger_matches(
+    trigger: &AddonEventTriggerView,
+    event: &InboundEventRecord,
+    adapter_policy: &InboundEventAdapterPolicyReport,
+    event_type_candidates: &BTreeSet<String>,
+    matched_channel_ids: &BTreeSet<String>,
+    matched_adapter_ids: &BTreeSet<String>,
+) -> bool {
+    let trigger = &trigger.trigger;
+    event_extension_single_type_matches(&trigger.event_type, event_type_candidates)
+        && event_extension_reference_matches(&trigger.channel, matched_channel_ids)
+        && event_extension_reference_matches(&trigger.adapter_id, matched_adapter_ids)
+        && event_extension_actions_match(
+            &trigger.actions,
+            &event.action,
+            &adapter_policy.normalized_action,
+        )
+}
+
+fn event_listener_matches(
+    listener: &AddonEventListenerView,
+    event: &InboundEventRecord,
+    adapter_policy: &InboundEventAdapterPolicyReport,
+    event_type_candidates: &BTreeSet<String>,
+    matched_channel_ids: &BTreeSet<String>,
+    matched_adapter_ids: &BTreeSet<String>,
+) -> bool {
+    let listener = &listener.listener;
+    event_extension_single_type_matches(&listener.event_type, event_type_candidates)
+        && event_extension_reference_matches(&listener.channel, matched_channel_ids)
+        && event_extension_reference_matches(&listener.adapter_id, matched_adapter_ids)
+        && event_extension_actions_match(
+            &listener.actions,
+            &event.action,
+            &adapter_policy.normalized_action,
+        )
+}
+
+fn event_extension_actions_match(
+    actions: &[String],
+    raw_action: &str,
+    normalized_action: &str,
+) -> bool {
+    actions.is_empty()
+        || actions.iter().any(|action| {
+            text_matches(action, raw_action) || text_matches(action, normalized_action)
+        })
+}
+
+fn event_extension_type_matches(event_types: &[String], candidates: &BTreeSet<String>) -> bool {
+    event_types.is_empty()
+        || candidates.is_empty()
+        || event_types
+            .iter()
+            .any(|event_type| candidate_matches(event_type, candidates))
+}
+
+fn event_extension_single_type_matches(event_type: &str, candidates: &BTreeSet<String>) -> bool {
+    event_type.trim().is_empty()
+        || candidates.is_empty()
+        || candidate_matches(event_type, candidates)
+}
+
+fn event_extension_schema_matches(schema: &str, candidates: &BTreeSet<String>) -> bool {
+    schema.trim().is_empty() || candidates.is_empty() || candidate_matches(schema, candidates)
+}
+
+fn event_extension_reference_matches(reference: &str, matches: &BTreeSet<String>) -> bool {
+    let reference = reference.trim();
+    reference.is_empty() || matches.contains(reference)
+}
+
+fn candidate_matches(expected: &str, candidates: &BTreeSet<String>) -> bool {
+    let expected = expected.trim().to_ascii_lowercase();
+    expected == "*" || candidates.contains(&expected)
 }
 
 fn inbound_event_addon_adapter_plan_entry(
