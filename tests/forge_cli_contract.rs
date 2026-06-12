@@ -49335,6 +49335,212 @@ fn interactive_retention_requires_approval_before_deleting_artifact_workflow() {
 }
 
 #[test]
+fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Operate a replacement-grade CLI evidence workflow with patch review, harness and sessions",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "replacement-cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let panel: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        panel["schema_version"],
+        "forge.interactive.replacement_cli.v1"
+    );
+    assert_eq!(panel["capability_id"], "replacement_grade_cli");
+    assert_eq!(panel["promotion_ready"], false);
+    assert!(panel["readiness_percent"].as_u64().unwrap() >= 80);
+    assert!(panel["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|blocker| blocker
+            .as_str()
+            .unwrap()
+            .contains("external-brain coding/research")));
+    assert!(panel["commands"]["refresh"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("replacement-cli")));
+    assert!(panel["commands"]["cli_demo"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("cli-demo")));
+
+    let surfaces = panel["surfaces"].as_array().unwrap();
+    for surface_id in [
+        "operator_home",
+        "workflow_operations",
+        "file_editing_ux",
+        "action_discovery",
+        "brain_harness_sessions",
+        "observability_costs",
+        "human_approvals",
+        "milestone_evidence",
+    ] {
+        assert!(
+            surfaces
+                .iter()
+                .any(|surface| surface["surface_id"] == surface_id),
+            "missing replacement CLI surface {surface_id}"
+        );
+    }
+
+    let file_editing = surfaces
+        .iter()
+        .find(|surface| surface["surface_id"] == "file_editing_ux")
+        .unwrap();
+    assert_eq!(file_editing["ready"], true);
+    assert!(file_editing["source_panels"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("patch_workbench_panel")));
+    assert!(file_editing["evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "patch_edit_intake_declares_required_inputs"
+        )));
+    assert!(file_editing["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge interactive patch-workbench --output json"
+        )));
+
+    let action_discovery = surfaces
+        .iter()
+        .find(|surface| surface["surface_id"] == "action_discovery")
+        .unwrap();
+    assert_eq!(action_discovery["ready"], true);
+    assert!(action_discovery["evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "command_palette_action_registry_and_autocomplete_ready"
+        )));
+
+    let home_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["replacement_cli_panel"]["schema_version"],
+        "forge.interactive.replacement_cli.v1"
+    );
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|region| region["widgets"].as_array().unwrap().iter())
+        .any(|widget| widget["widget_id"] == "replacement_cli_panel"));
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "replacement-cli",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Replacement CLI:"));
+    assert!(text.contains("file_editing_ux[ready]"));
+    assert!(text.contains("forge milestone cli-demo"));
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    let tool = find_mcp_tool(&manifest, "forge.interactive.replacement_cli");
+    assert_eq!(
+        tool["output_schema"],
+        "forge.interactive.replacement_cli.v1"
+    );
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.replacement_cli"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp["status"], "ok");
+    assert_eq!(
+        mcp["result"]["schema_version"],
+        "forge.interactive.replacement_cli.v1"
+    );
+
+    let slash = forge()
+        .args(["interactive", "slash-commands", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let slash_json: Value = serde_json::from_slice(&slash).unwrap();
+    assert!(slash_json["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |command| command["name"] == "/replacement-cli" && command["mutates_workflow"] == false
+        ));
+}
+
+#[test]
 fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -49687,6 +49893,12 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
         forge_core::skill::SKILL_MD.contains("forge.interactive.workflow_sidebar")
             && forge_core::skill::SKILL_MD.contains("forge interactive workflow-sidebar"),
         "the packaged Forge skill should expose the dedicated workflow sidebar through MCP and CLI"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.replacement_cli")
+            && forge_core::skill::SKILL_MD.contains("forge interactive replacement-cli")
+            && forge_core::skill::SKILL_MD.contains("dashboard.replacement_cli_panel"),
+        "the packaged Forge skill should expose the dedicated replacement CLI readiness surface through MCP, CLI and home"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.workflow_dag"),

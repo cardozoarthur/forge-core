@@ -99,10 +99,11 @@ use crate::interactive::{
     build_interactive_home_with_options, build_interactive_identity,
     build_interactive_operational_cockpit, build_interactive_patch_workbench,
     build_interactive_permissions, build_interactive_readiness, build_interactive_release_gates,
-    build_interactive_schedules, build_interactive_sessions, build_interactive_structured_logs,
-    build_interactive_task_board, build_interactive_token_usage, build_interactive_workflow_dag,
-    build_interactive_workflow_sidebar, route_interactive_input, slash_command_catalog,
-    InteractiveHarnessOptions, InteractiveHomeOptions, InteractiveSessionsOptions,
+    build_interactive_replacement_cli, build_interactive_schedules, build_interactive_sessions,
+    build_interactive_structured_logs, build_interactive_task_board, build_interactive_token_usage,
+    build_interactive_workflow_dag, build_interactive_workflow_sidebar, route_interactive_input,
+    slash_command_catalog, InteractiveHarnessOptions, InteractiveHomeOptions,
+    InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -3291,6 +3292,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.task_board.v1",
                 &["forge", "interactive", "task-board", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.replacement_cli",
+                "Inspect Replacement CLI Readiness",
+                "Return the Forge replacement-grade CLI readiness panel across TUI home, workflow operations, patch UX, action discovery, harness/session controls, observability, approvals and milestone evidence without launching a TTY or mutating state.",
+                object_schema(&[], &[]),
+                "forge.interactive.replacement_cli.v1",
+                &["forge", "interactive", "replacement-cli", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7666,6 +7676,9 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.interactive.task_board" => {
             serde_json::to_value(build_interactive_task_board(store)?)?
+        }
+        "forge.interactive.replacement_cli" => {
+            serde_json::to_value(build_interactive_replacement_cli(store)?)?
         }
         "forge.interactive.workflow_sidebar" => {
             serde_json::to_value(build_interactive_workflow_sidebar(store)?)?

@@ -68,6 +68,7 @@ use std::process::Command;
 
 const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
 const INTERACTIVE_WORKFLOW_SIDEBAR_SCHEMA_VERSION: &str = "forge.interactive.workflow_sidebar.v1";
+const INTERACTIVE_REPLACEMENT_CLI_SCHEMA_VERSION: &str = "forge.interactive.replacement_cli.v1";
 const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_board.v1";
 const INTERACTIVE_ARTIFACTS_SCHEMA_VERSION: &str = "forge.interactive.artifacts.v1";
 const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
@@ -158,6 +159,7 @@ pub struct InteractiveDashboard {
     pub scheduler_worker_status: String,
     pub workflow_focus: Vec<InteractiveWorkflowCard>,
     pub workflow_sidebar_panel: InteractiveWorkflowSidebarPanel,
+    pub replacement_cli_panel: InteractiveReplacementCliPanel,
     pub navigation_panel: InteractiveNavigationPanel,
     pub ui_composition_panel: InteractiveUiCompositionPanel,
     pub patch_workbench_panel: InteractivePatchWorkbenchPanel,
@@ -470,6 +472,50 @@ pub struct InteractiveWorkflowSidebarCommands {
     pub list: Vec<String>,
     pub task_board: Vec<String>,
     pub workflow_dag: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveReplacementCliPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub milestone: String,
+    pub capability_id: String,
+    pub promotion_ready: bool,
+    pub surface_count: usize,
+    pub ready_surface_count: usize,
+    pub blocked_surface_count: usize,
+    pub readiness_percent: u64,
+    pub surfaces: Vec<InteractiveReplacementCliSurface>,
+    pub blockers: Vec<String>,
+    pub next_actions: Vec<String>,
+    pub commands: InteractiveReplacementCliCommands,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveReplacementCliSurface {
+    pub surface_id: String,
+    pub title: String,
+    pub status: String,
+    pub ready: bool,
+    pub source_panels: Vec<String>,
+    pub evidence: Vec<String>,
+    pub blockers: Vec<String>,
+    pub commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveReplacementCliCommands {
+    pub refresh: Vec<String>,
+    pub home: Vec<String>,
+    pub command_palette: Vec<String>,
+    pub action_registry: Vec<String>,
+    pub autocomplete: Vec<String>,
+    pub patch_workbench: Vec<String>,
+    pub harness: Vec<String>,
+    pub sessions: Vec<String>,
+    pub release_gates: Vec<String>,
+    pub cli_demo: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2053,6 +2099,7 @@ pub fn build_interactive_home_with_options(
     let patch_workbench_panel = build_interactive_patch_workbench(store)?;
     let permissions_panel = build_interactive_permissions(store)?;
     let identity_panel = build_interactive_identity(store, &repository_context_path)?;
+    let replacement_cli_panel = build_interactive_replacement_cli(store)?;
     let operational_cockpit_panel = build_operational_cockpit_panel(
         active_runs,
         runs_needing_attention,
@@ -2111,6 +2158,7 @@ pub fn build_interactive_home_with_options(
             scheduler_worker_status,
             workflow_focus,
             workflow_sidebar_panel,
+            replacement_cli_panel,
             navigation_panel: build_navigation_panel(),
             ui_composition_panel,
             patch_workbench_panel,
@@ -2135,6 +2183,7 @@ pub fn build_interactive_home_with_options(
                 "forge inspect <workflow-id>".to_string(),
                 "forge request list".to_string(),
                 "forge interactive workflow-sidebar --output json".to_string(),
+                "forge interactive replacement-cli --output json".to_string(),
                 "forge schedule list".to_string(),
                 "forge interactive schedules --output json".to_string(),
                 "forge schedule worker-status".to_string(),
@@ -2163,6 +2212,7 @@ pub fn build_interactive_home_with_options(
                 "/status".to_string(),
                 "/workflows".to_string(),
                 "/workflow-sidebar".to_string(),
+                "/replacement-cli".to_string(),
                 "/runs".to_string(),
                 "/artifacts".to_string(),
                 "/task-board".to_string(),
@@ -3361,6 +3411,19 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             false,
             "low",
             &["readiness", "executor", "brain", "shell", "harness"],
+        ),
+        command_palette_entry(
+            "readiness.replacement_cli",
+            "readiness",
+            "Open replacement CLI readiness",
+            "Inspect replacement-grade CLI readiness across TUI, actions, patch UX, harness, sessions and milestone evidence.",
+            "replacement_cli_panel",
+            None,
+            &["interactive", "replacement-cli", "--output", "json"],
+            false,
+            false,
+            "low",
+            &["replacement", "cli", "tui", "patch", "harness", "sessions", "milestone"],
         ),
         command_palette_entry(
             "operations.cockpit",
@@ -6074,6 +6137,375 @@ pub fn build_interactive_workflow_sidebar(
     Ok(build_workflow_sidebar_panel(&workflows.workflows))
 }
 
+pub fn build_interactive_replacement_cli(
+    store: &ForgeStore,
+) -> Result<InteractiveReplacementCliPanel> {
+    let workflows = list_workflows_with_filters(
+        store,
+        WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
+    )?;
+    let workflow_sidebar = build_workflow_sidebar_panel(&workflows.workflows);
+    let task_board = build_task_board_panel(store, &workflows.workflows)?;
+    let dag = build_workflow_dag_panel(store, &workflows.workflows)?;
+    let patch_workbench = build_interactive_patch_workbench(store)?;
+    let command_palette = build_interactive_command_palette(store, None)?;
+    let action_registry = build_interactive_action_registry(store, None)?;
+    let autocomplete = build_interactive_autocomplete(store, "/pa")?;
+    let harness =
+        build_interactive_harness(store, InteractiveHarnessOptions::default_for_current_dir())?;
+    let sessions = build_interactive_sessions(store, InteractiveSessionsOptions::default())?;
+    let release_gates = build_interactive_release_gates(store, "0.5", None)?;
+    let structured_logs = build_interactive_structured_logs(store)?;
+    let cost_ledger = build_cost_ledger(store, None, None, None, None).ok();
+    let permissions = build_interactive_permissions(store)?;
+
+    let replacement_gate = release_gates
+        .gate_cards
+        .iter()
+        .find(|gate| gate.capability_id == "replacement_grade_cli");
+    let promotion_ready = replacement_gate
+        .map(|gate| gate.promotion_ready)
+        .unwrap_or(false);
+    let mut blockers = replacement_gate
+        .map(|gate| gate.missing_attached_evidence_kinds.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|kind| format!("missing attached evidence kind: {kind}"))
+        .collect::<Vec<_>>();
+    blockers.push(
+        "external-brain coding/research workflow evidence is still required before promotion"
+            .to_string(),
+    );
+    blockers.push(
+        "terminal file-editing approval ergonomics still need broader operator evidence"
+            .to_string(),
+    );
+
+    let mut surfaces = vec![
+        replacement_cli_surface(
+            "operator_home",
+            "No-argument operator home",
+            "ready",
+            true,
+            &[
+                "navigation_panel",
+                "ui_composition_panel",
+                "release_gates_panel",
+            ],
+            &[
+                "no_argument_tui_home_available",
+                "keyboard_navigation_modes_and_themes_declared",
+                "dynamic_ui_composition_available",
+            ],
+            &[],
+            &[
+                "forge",
+                "forge interactive home --output json",
+                "forge interactive slash-commands --output json",
+            ],
+        ),
+        replacement_cli_surface(
+            "workflow_operations",
+            "Workflow operations",
+            "ready",
+            workflow_sidebar.workflow_count >= task_board.workflow_count && dag.workflow_count >= task_board.workflow_count,
+            &[
+                "workflow_sidebar_panel",
+                "task_board_panel",
+                "dag_panel",
+            ],
+            &[
+                "workflow_sidebar_groups_navigation",
+                "task_board_cards_handoffs_waits_checkpoints",
+                "workflow_dag_dependency_drilldown",
+            ],
+            &[],
+            &[
+                "forge interactive workflow-sidebar --output json",
+                "forge interactive task-board --output json",
+                "forge interactive workflow-dag --output json",
+            ],
+        ),
+        replacement_cli_surface(
+            "file_editing_ux",
+            "File editing and patch review UX",
+            &patch_workbench.status,
+            patch_workbench.edit_intake.required_input_count > 0
+                && patch_workbench.approval_flow.gates.len() >= 4
+                && patch_workbench.commands.review.contains(&"review".to_string())
+                && patch_workbench.commands.restore.contains(&"restore".to_string()),
+            &["patch_workbench_panel"],
+            &[
+                "patch_edit_intake_declares_required_inputs",
+                "diff_preview_and_review_queue_available",
+                "review_apply_revert_restore_gates_declared",
+            ],
+            &[],
+            &[
+                "forge interactive patch-workbench --output json",
+                "forge patch plan --workflow <workflow-id> --task <task-id> --intent <intent> --path <path> --output json",
+                "forge patch review --workflow <workflow-id> --task <task-id> --path <path> --output json",
+            ],
+        ),
+        replacement_cli_surface(
+            "action_discovery",
+            "Action discovery and command completion",
+            "ready",
+            command_palette.entry_count > 0
+                && action_registry.action_count > 0
+                && autocomplete.suggestion_count > 0,
+            &[
+                "command_palette_panel",
+                "action_registry_panel",
+                "autocomplete_panel",
+            ],
+            &[
+                "command_palette_action_registry_and_autocomplete_ready",
+                "actions_expose_mutation_and_approval_flags",
+                "autocomplete_returns_safe_invocation_plans",
+            ],
+            &[],
+            &[
+                "forge interactive command-palette --output json",
+                "forge interactive action-registry --output json",
+                "forge interactive autocomplete --input /pa --output json",
+            ],
+        ),
+        replacement_cli_surface(
+            "brain_harness_sessions",
+            "Brain, harness and session control",
+            &harness.status,
+            sessions.session_count > 0
+                && harness.headroom_plan.schema_version == "forge.harness.headroom_plan.v1",
+            &[
+                "harness_panel",
+                "sessions_panel",
+                "readiness_panel",
+            ],
+            &[
+                "forge_first_harness_controls_available",
+                "headroom_plan_and_stats_available",
+                "session_lifecycle_operation_plans_available",
+            ],
+            &[],
+            &[
+                "forge interactive harness --output json",
+                "forge interactive sessions --output json",
+                "forge interactive readiness --output json",
+            ],
+        ),
+        replacement_cli_surface(
+            "observability_costs",
+            "Observability, logs and costs",
+            &structured_logs.status,
+            structured_logs.schema_version == INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION
+                && cost_ledger.is_some(),
+            &[
+                "structured_logs_panel",
+                "cost_panel",
+                "event_runtime_panel",
+            ],
+            &[
+                "structured_logs_timeline_available",
+                "cost_ledger_available",
+                "event_runtime_panel_available_in_home",
+            ],
+            &[],
+            &[
+                "forge interactive structured-logs --output json",
+                "forge cost ledger --output json",
+                "forge interactive home --output json",
+            ],
+        ),
+        replacement_cli_surface(
+            "human_approvals",
+            "Human approvals and permission gates",
+            &permissions.status,
+            permissions.schema_version == INTERACTIVE_PERMISSIONS_SCHEMA_VERSION,
+            &[
+                "permissions_panel",
+                "release_gates_panel",
+                "patch_workbench_panel",
+            ],
+            &[
+                "pending_human_approvals_visible",
+                "addon_permission_authorizations_visible",
+                "patch_apply_and_restore_require_approval",
+            ],
+            &[],
+            &[
+                "forge interactive permissions --output json",
+                "forge interaction list --output json",
+                "forge interactive release-gates --output json",
+            ],
+        ),
+        replacement_cli_surface(
+            "milestone_evidence",
+            "Replacement-grade CLI milestone evidence",
+            replacement_gate
+                .map(|gate| gate.status.as_str())
+                .unwrap_or("missing"),
+            promotion_ready,
+            &["release_gates_panel"],
+            &[
+                "milestone_cli_demo_command_available",
+                "evidence_plan_lists_connected_brain_manifest",
+                "promotion_requires_attached_operator_evidence",
+            ],
+            &blockers.iter().map(String::as_str).collect::<Vec<_>>(),
+            &[
+                "forge milestone cli-demo --origin codex --output json",
+                "forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root <project-root> --connected-brain <provider-id> --output json",
+                "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root <project-root> --connected-brain <provider-id> --approved-by <operator> --origin codex --output json",
+            ],
+        ),
+    ];
+
+    let ready_surface_count = surfaces.iter().filter(|surface| surface.ready).count();
+    let surface_count = surfaces.len();
+    let blocked_surface_count = surface_count.saturating_sub(ready_surface_count);
+    let readiness_percent = if surface_count == 0 {
+        0
+    } else {
+        ((ready_surface_count * 100) / surface_count) as u64
+    };
+    let status = if promotion_ready {
+        "replacement_cli_promotion_ready"
+    } else if ready_surface_count + 1 >= surface_count {
+        "replacement_cli_operator_ready_with_milestone_gaps"
+    } else {
+        "replacement_cli_needs_attention"
+    };
+
+    for surface in &mut surfaces {
+        if !surface.ready && surface.blockers.is_empty() {
+            surface.blockers.push(
+                "surface evidence is not strong enough for replacement-grade readiness".to_string(),
+            );
+        }
+    }
+
+    Ok(InteractiveReplacementCliPanel {
+        schema_version: INTERACTIVE_REPLACEMENT_CLI_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        milestone: "0.5".to_string(),
+        capability_id: "replacement_grade_cli".to_string(),
+        promotion_ready,
+        surface_count,
+        ready_surface_count,
+        blocked_surface_count,
+        readiness_percent,
+        surfaces,
+        blockers,
+        next_actions: vec![
+            "Run forge milestone cli-demo and inspect the replacement-grade flow evidence.".to_string(),
+            "Collect operator-approved external-brain coding/research evidence from a project manifest.".to_string(),
+            "Use patch-workbench intake and approval gates as the terminal file-editing UX contract.".to_string(),
+        ],
+        commands: replacement_cli_commands(),
+        notes: vec![
+            "This panel is read-only; it aggregates replacement-grade CLI readiness without launching child CLIs or collecting evidence.".to_string(),
+            "Promotion remains false until required milestone evidence is attached and validated.".to_string(),
+        ],
+    })
+}
+
+fn replacement_cli_surface(
+    surface_id: &str,
+    title: &str,
+    status: &str,
+    ready: bool,
+    source_panels: &[&str],
+    evidence: &[&str],
+    blockers: &[&str],
+    commands: &[&str],
+) -> InteractiveReplacementCliSurface {
+    InteractiveReplacementCliSurface {
+        surface_id: surface_id.to_string(),
+        title: title.to_string(),
+        status: status.to_string(),
+        ready,
+        source_panels: source_panels
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        evidence: evidence.iter().map(|value| (*value).to_string()).collect(),
+        blockers: blockers.iter().map(|value| (*value).to_string()).collect(),
+        commands: commands.iter().map(|value| (*value).to_string()).collect(),
+    }
+}
+
+fn replacement_cli_commands() -> InteractiveReplacementCliCommands {
+    InteractiveReplacementCliCommands {
+        refresh: vec![
+            "interactive".to_string(),
+            "replacement-cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        home: vec![
+            "interactive".to_string(),
+            "home".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        command_palette: vec![
+            "interactive".to_string(),
+            "command-palette".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        action_registry: vec![
+            "interactive".to_string(),
+            "action-registry".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        autocomplete: vec![
+            "interactive".to_string(),
+            "autocomplete".to_string(),
+            "--input".to_string(),
+            "/pa".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        patch_workbench: vec![
+            "interactive".to_string(),
+            "patch-workbench".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        harness: vec![
+            "interactive".to_string(),
+            "harness".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        sessions: vec![
+            "interactive".to_string(),
+            "sessions".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        release_gates: vec![
+            "interactive".to_string(),
+            "release-gates".to_string(),
+            "--version".to_string(),
+            "0.5".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        cli_demo: vec![
+            "milestone".to_string(),
+            "cli-demo".to_string(),
+            "--origin".to_string(),
+            "codex".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
 pub fn build_interactive_token_usage(store: &ForgeStore) -> Result<InteractiveTokenUsagePanel> {
     build_token_usage_panel(store)
 }
@@ -7096,6 +7528,7 @@ fn release_gate_next_commands(capability_id: &str) -> Vec<String> {
             "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind terminal_file_editing_ux --project-root <project-root> --approved-by <operator> --origin codex --output json".to_string(),
             "forge milestone cli-demo --origin codex --output json".to_string(),
             "forge milestone attach-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --summary \"Operator-approved provider receipt.\" --artifact <path> --approved-by <operator> --output json".to_string(),
+            "forge interactive replacement-cli --output json".to_string(),
             "forge interactive harness --output json".to_string(),
             "forge interactive patch-workbench --output json".to_string(),
         ],
@@ -7362,6 +7795,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
             .join(" | ")
     };
     let workflow_sidebar = render_workflow_sidebar_summary(&d.workflow_sidebar_panel);
+    let replacement_cli_surfaces = render_replacement_cli_surface_summary(&d.replacement_cli_panel);
     let navigation_keys = render_navigation_keybindings(&d.navigation_panel);
     let command_palette_entries = render_command_palette_entry_summary(&d.command_palette_panel);
     let autocomplete_suggestions = render_autocomplete_suggestion_summary(&d.autocomplete_panel);
@@ -7457,6 +7891,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Runtime/node status: {runtime_node_status}\n\
          Scheduler worker status: {scheduler_worker_status}\n\
          Workflow sidebar: {workflow_sidebar}\n\
+         Replacement CLI: {replacement_cli_status}; readiness {replacement_cli_readiness}% ({replacement_cli_ready}/{replacement_cli_surfaces_count}); promotion_ready {replacement_cli_promotion_ready}; surfaces {replacement_cli_surfaces}\n\
          Workflow focus: {workflow_focus}\n\
          Navigation panel: {navigation_status}; default {navigation_default_mode}, theme {navigation_theme}, modes {navigation_modes}, keys {navigation_keys}\n\
          Command palette: {command_palette_status}; query {command_palette_query}, groups {command_palette_groups}, entries {command_palette_entry_count}; {command_palette_entries}\n\
@@ -7541,6 +7976,12 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         runtime_node_status = d.runtime_node_status,
         scheduler_worker_status = d.scheduler_worker_status,
         workflow_sidebar = workflow_sidebar,
+        replacement_cli_status = d.replacement_cli_panel.status,
+        replacement_cli_readiness = d.replacement_cli_panel.readiness_percent,
+        replacement_cli_ready = d.replacement_cli_panel.ready_surface_count,
+        replacement_cli_surfaces_count = d.replacement_cli_panel.surface_count,
+        replacement_cli_promotion_ready = d.replacement_cli_panel.promotion_ready,
+        replacement_cli_surfaces = replacement_cli_surfaces,
         workflow_focus = workflow_focus,
         navigation_status = d.navigation_panel.status,
         navigation_default_mode = d.navigation_panel.default_display_mode,
@@ -7826,6 +8267,47 @@ pub fn render_interactive_workflow_sidebar(panel: &InteractiveWorkflowSidebarPan
         ]
         .join(" | "),
     )
+}
+
+pub fn render_interactive_replacement_cli(panel: &InteractiveReplacementCliPanel) -> String {
+    format!(
+        "Replacement CLI: {status}; milestone {milestone}; capability {capability_id}; readiness {readiness_percent}% ({ready_surface_count}/{surface_count}); promotion_ready {promotion_ready}\nSurfaces: {surfaces}\nBlockers: {blockers}\nCommands: {commands}\n",
+        status = panel.status,
+        milestone = panel.milestone,
+        capability_id = panel.capability_id,
+        readiness_percent = panel.readiness_percent,
+        ready_surface_count = panel.ready_surface_count,
+        surface_count = panel.surface_count,
+        promotion_ready = panel.promotion_ready,
+        surfaces = render_replacement_cli_surface_summary(panel),
+        blockers = if panel.blockers.is_empty() {
+            "none".to_string()
+        } else {
+            panel.blockers.join("; ")
+        },
+        commands = [
+            format!("forge {}", panel.commands.refresh.join(" ")),
+            format!("forge {}", panel.commands.patch_workbench.join(" ")),
+            format!("forge {}", panel.commands.harness.join(" ")),
+            format!("forge {}", panel.commands.cli_demo.join(" ")),
+        ]
+        .join(" | "),
+    )
+}
+
+fn render_replacement_cli_surface_summary(panel: &InteractiveReplacementCliPanel) -> String {
+    if panel.surfaces.is_empty() {
+        return "none".to_string();
+    }
+    panel
+        .surfaces
+        .iter()
+        .map(|surface| {
+            let readiness = if surface.ready { "ready" } else { "blocked" };
+            format!("{}[{}]:{}", surface.surface_id, readiness, surface.status)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn render_workflow_sidebar_summary(panel: &InteractiveWorkflowSidebarPanel) -> String {
@@ -9915,6 +10397,15 @@ fn build_ui_composition_panel(
                     "standard",
                     "full",
                     vec!["forge interactive harness --output json".to_string()],
+                ),
+                core_ui_widget(
+                    "replacement_cli_panel",
+                    "Replacement CLI readiness",
+                    "replacement_cli_panel",
+                    "readiness_matrix_renderer",
+                    "detailed",
+                    "full",
+                    vec!["forge interactive replacement-cli --output json".to_string()],
                 ),
                 core_ui_widget(
                     "sessions_panel",
@@ -12056,6 +12547,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/replacement-cli",
+            "Replacement CLI",
+            "Show replacement-grade CLI readiness across TUI, actions, patch UX, harness, sessions and milestone evidence.",
+            &["forge", "interactive", "replacement-cli"],
+            false,
+            "low",
+        ),
+        slash(
             "/artifacts",
             "Artifacts",
             "Show workflow artifacts and evidence from the interactive panel.",
@@ -13076,6 +13575,10 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
             let panel = build_interactive_workflow_sidebar(store)?;
             Ok(render_interactive_workflow_sidebar(&panel))
         }
+        "replacement_cli_panel" => {
+            let panel = build_interactive_replacement_cli(store)?;
+            Ok(render_interactive_replacement_cli(&panel))
+        }
         "patch_workbench_panel" => {
             let panel = build_interactive_patch_workbench(store)?;
             Ok(render_interactive_patch_workbench(&panel))
@@ -13099,6 +13602,11 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
         "/workflows" | "/workflow-sidebar" | "/sidebar" => {
             let panel = build_interactive_workflow_sidebar(store)?;
             println!("{}", render_interactive_workflow_sidebar(&panel));
+            Ok(true)
+        }
+        "/replacement-cli" => {
+            let panel = build_interactive_replacement_cli(store)?;
+            println!("{}", render_interactive_replacement_cli(&panel));
             Ok(true)
         }
         "/artifacts" => {
