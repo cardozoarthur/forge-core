@@ -628,6 +628,17 @@ fn harness_headroom_stats_aggregates_persisted_blobs_for_cli_mcp_and_skill() {
     let stats: Value = serde_json::from_slice(&stats_output).unwrap();
     assert_eq!(stats["schema_version"], "forge.harness.headroom_stats.v1");
     assert_eq!(stats["status"], "headroom_stats_ready");
+    assert_eq!(
+        stats["operational_status"],
+        "headroom_budget_attention_required"
+    );
+    assert_eq!(
+        stats["recommended_action"],
+        "inspect_over_budget_headroom_blobs"
+    );
+    assert_eq!(stats["primary_savings_source"], "build-log");
+    assert_eq!(stats["primary_savings_content_kind"], "log");
+    assert!(stats["over_budget_after_headroom_count"].as_u64().unwrap() > 0);
     assert_eq!(stats["total_blobs"], 3);
     assert!(stats["total_estimated_saved_tokens"].as_u64().unwrap() > 0);
     assert!(stats["average_savings_percent"].as_f64().unwrap() >= 0.0);

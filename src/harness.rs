@@ -628,6 +628,8 @@ pub struct HeadroomStatsOptions<'a> {
 pub struct HeadroomStatsReport {
     pub schema_version: String,
     pub status: String,
+    pub operational_status: String,
+    pub recommended_action: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_filter: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -639,6 +641,11 @@ pub struct HeadroomStatsReport {
     pub total_estimated_compressed_tokens: i64,
     pub total_estimated_saved_tokens: i64,
     pub average_savings_percent: f64,
+    pub over_budget_after_headroom_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_savings_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_savings_content_kind: Option<String>,
     pub by_content_kind: Vec<HeadroomStatsContentKindBucket>,
     pub by_source: Vec<HeadroomStatsSourceBucket>,
     pub top_saved_blobs: Vec<HeadroomStatsSavedBlob>,
@@ -854,6 +861,19 @@ pub fn build_headroom_stats_report(
         .take(top_limit)
         .map(headroom_stats_saved_blob)
         .collect::<Vec<_>>();
+    let over_budget_after_headroom_count = records
+        .iter()
+        .filter(|record| record.budget_status == "still_over_budget")
+        .count();
+    let (operational_status, recommended_action) = headroom_stats_operator_decision(
+        &records,
+        total.saved_tokens,
+        over_budget_after_headroom_count,
+    );
+    let primary_savings_source = top_saved_blobs.first().map(|blob| blob.source.clone());
+    let primary_savings_content_kind = top_saved_blobs
+        .first()
+        .map(|blob| blob.content_kind.clone());
 
     let mut next_commands = vec![
         "forge harness token-headroom --content <payload> --kind log --budget-tokens <n> --persist --output json".to_string(),
@@ -873,6 +893,8 @@ pub fn build_headroom_stats_report(
         } else {
             "headroom_stats_ready".to_string()
         },
+        operational_status: operational_status.to_string(),
+        recommended_action: recommended_action.to_string(),
         source_filter,
         content_kind_filter,
         total_blobs: records.len(),
@@ -882,6 +904,9 @@ pub fn build_headroom_stats_report(
         total_estimated_compressed_tokens: total.compressed_tokens,
         total_estimated_saved_tokens: total.saved_tokens,
         average_savings_percent: headroom_savings_percent(total.original_tokens, total.saved_tokens),
+        over_budget_after_headroom_count,
+        primary_savings_source,
+        primary_savings_content_kind,
         by_content_kind: by_content_kind
             .into_iter()
             .map(|(content_kind, aggregate)| HeadroomStatsContentKindBucket {
@@ -917,6 +942,32 @@ pub fn build_headroom_stats_report(
             "Use filters to inspect noisy sources before routing large tool outputs or CLI stdout back to a brain.".to_string(),
         ],
     })
+}
+
+fn headroom_stats_operator_decision(
+    records: &[StoredHeadroomBlobRecord],
+    total_saved_tokens: i64,
+    over_budget_after_headroom_count: usize,
+) -> (&'static str, &'static str) {
+    if records.is_empty() {
+        return ("headroom_no_data", "persist_headroom_samples");
+    }
+    if over_budget_after_headroom_count > 0 {
+        return (
+            "headroom_budget_attention_required",
+            "inspect_over_budget_headroom_blobs",
+        );
+    }
+    if total_saved_tokens > 0 {
+        return (
+            "headroom_savings_available",
+            "route_large_tool_outputs_through_headroom",
+        );
+    }
+    (
+        "headroom_no_material_savings",
+        "inspect_sources_before_enforcing_headroom",
+    )
 }
 
 pub fn build_harness_mode_report(options: HarnessModeOptions<'_>) -> HarnessModeReport {
