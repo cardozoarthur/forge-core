@@ -114,6 +114,8 @@ const INTERACTIVE_OPERATIONAL_COCKPIT_SCHEMA_VERSION: &str =
 const INTERACTIVE_OPERATIONAL_MODIFIER_LANE_SCHEMA_VERSION: &str =
     "forge.interactive.operational_modifier_lane.v1";
 const INTERACTIVE_ADDON_CAPABILITY_SCHEMA_VERSION: &str = "forge.interactive.addon_capability.v1";
+const INTERACTIVE_ARCHITECTURE_COMPASS_SCHEMA_VERSION: &str =
+    "forge.interactive.architecture_compass.v1";
 const OPERATIONAL_TUI_SMOKE_SCHEMA_VERSION: &str = "forge.smoke.operational_tui.v1";
 const FORGE_FIRST_HARNESS_SMOKE_SCHEMA_VERSION: &str = "forge.smoke.forge_first_harness.v1";
 const REPLACEMENT_CLI_EVIDENCE_SMOKE_SCHEMA_VERSION: &str =
@@ -193,11 +195,59 @@ pub struct InteractiveDashboard {
     pub context_memory_panel: InteractiveContextMemoryPanel,
     pub digital_twin_panel: OpsOperationalDigitalTwin,
     pub operational_cockpit_panel: InteractiveOperationalCockpitPanel,
+    pub architecture_compass_panel: InteractiveArchitectureCompassPanel,
     pub addon_capability_panel: InteractiveAddonCapabilityPanel,
     pub addon_renderer_panel: InteractiveAddonRendererPanel,
     pub attention_actions: Vec<String>,
     pub useful_next_commands: Vec<String>,
     pub quick_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveArchitectureCompassPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub source_documents: Vec<InteractiveArchitectureSourceDocument>,
+    pub tracks: Vec<InteractiveArchitectureTrack>,
+    pub benchmark_sources: Vec<InteractiveArchitectureBenchmarkSource>,
+    pub dependencies: Vec<InteractiveArchitectureDependency>,
+    pub conflicts: Vec<String>,
+    pub reuse_opportunities: Vec<String>,
+    pub next_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveArchitectureSourceDocument {
+    pub document_id: String,
+    pub role: String,
+    pub line_count: usize,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveArchitectureTrack {
+    pub track_id: String,
+    pub title: String,
+    pub source_refs: Vec<String>,
+    pub status: String,
+    pub evidence_refs: Vec<String>,
+    pub gaps: Vec<String>,
+    pub next_increment: String,
+    pub core_boundary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveArchitectureBenchmarkSource {
+    pub source: String,
+    pub absorbed_concept: String,
+    pub forge_boundary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveArchitectureDependency {
+    pub item: String,
+    pub depends_on: Vec<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1955,6 +2005,13 @@ pub fn build_interactive_operational_cockpit(
     Ok(report.dashboard.operational_cockpit_panel)
 }
 
+pub fn build_interactive_architecture_compass(
+    store: &ForgeStore,
+) -> Result<InteractiveArchitectureCompassPanel> {
+    let report = build_interactive_home(store)?;
+    Ok(report.dashboard.architecture_compass_panel)
+}
+
 pub fn build_interactive_home_with_options(
     store: &ForgeStore,
     options: InteractiveHomeOptions,
@@ -2251,6 +2308,28 @@ pub fn build_interactive_home_with_options(
         &event_runtime_panel,
     );
     let ui_composition_panel = build_ui_composition_panel(&addon_renderer_report);
+    let architecture_compass_panel = build_architecture_compass_panel(ArchitectureCompassInputs {
+        workflows: &workflows,
+        schedule_panel: &schedule_panel,
+        event_panel: &event_panel,
+        event_runtime_panel: &event_runtime_panel,
+        structured_logs_panel: &structured_logs_panel,
+        cost_panel: &cost_panel,
+        context_memory_panel: &context_memory_panel,
+        addon_capability_panel: &addon_capability_panel,
+        ui_composition_panel: &ui_composition_panel,
+        task_board_panel: &task_board_panel,
+        dag_panel: &dag_panel,
+        artifact_panel: &artifact_panel,
+        operational_cockpit_panel: &operational_cockpit_panel,
+        harness_panel: &harness_panel,
+        release_gates_panel: &release_gates_panel,
+        identity_panel: &identity_panel,
+        permissions_panel: &permissions_panel,
+        digital_twin_panel: &digital_twin_panel,
+        replacement_cli_panel: &replacement_cli_panel,
+        multimodal_runtime_panel: &multimodal_runtime_panel,
+    });
 
     Ok(InteractiveHomeReport {
         status: "interactive_home_ready".to_string(),
@@ -2308,6 +2387,7 @@ pub fn build_interactive_home_with_options(
             context_memory_panel,
             digital_twin_panel,
             operational_cockpit_panel,
+            architecture_compass_panel,
             addon_capability_panel,
             addon_renderer_panel,
             attention_actions,
@@ -2316,6 +2396,7 @@ pub fn build_interactive_home_with_options(
                 "forge inspect <workflow-id>".to_string(),
                 "forge request list".to_string(),
                 "forge interactive workflow-sidebar --output json".to_string(),
+                "forge interactive architecture --output json".to_string(),
                 "forge interactive replacement-cli --output json".to_string(),
                 "forge interactive multimodal-runtime --project-root . --output json"
                     .to_string(),
@@ -2347,6 +2428,7 @@ pub fn build_interactive_home_with_options(
                 "/status".to_string(),
                 "/workflows".to_string(),
                 "/workflow-sidebar".to_string(),
+                "/architecture".to_string(),
                 "/replacement-cli".to_string(),
                 "/multimodal-runtime".to_string(),
                 "/runs".to_string(),
@@ -2379,6 +2461,583 @@ pub fn build_interactive_home_with_options(
         },
         slash_commands: slash_commands(),
     })
+}
+
+struct ArchitectureCompassInputs<'a> {
+    workflows: &'a crate::registry::WorkflowRegistryReport,
+    schedule_panel: &'a InteractiveSchedulePanel,
+    event_panel: &'a InteractiveEventPanel,
+    event_runtime_panel: &'a InteractiveEventRuntimePanel,
+    structured_logs_panel: &'a InteractiveStructuredLogsPanel,
+    cost_panel: &'a InteractiveCostPanel,
+    context_memory_panel: &'a InteractiveContextMemoryPanel,
+    addon_capability_panel: &'a InteractiveAddonCapabilityPanel,
+    ui_composition_panel: &'a InteractiveUiCompositionPanel,
+    task_board_panel: &'a InteractiveTaskBoardPanel,
+    dag_panel: &'a InteractiveWorkflowDagPanel,
+    artifact_panel: &'a InteractiveArtifactPanel,
+    operational_cockpit_panel: &'a InteractiveOperationalCockpitPanel,
+    harness_panel: &'a InteractiveHarnessPanel,
+    release_gates_panel: &'a InteractiveReleaseGatesPanel,
+    identity_panel: &'a InteractiveIdentityPanel,
+    permissions_panel: &'a InteractivePermissionsPanel,
+    digital_twin_panel: &'a OpsOperationalDigitalTwin,
+    replacement_cli_panel: &'a InteractiveReplacementCliPanel,
+    multimodal_runtime_panel: &'a InteractiveMultimodalRuntimePanel,
+}
+
+fn build_architecture_compass_panel(
+    inputs: ArchitectureCompassInputs<'_>,
+) -> InteractiveArchitectureCompassPanel {
+    let mut tracks = vec![
+        architecture_track(
+            "world_class_tui",
+            "TUI operacional de classe mundial",
+            &["goal1:Fase 2", "goal1:linhas 85-122"],
+            architecture_status(
+                inputs.operational_cockpit_panel.status == "operational_cockpit_ready"
+                    && inputs.task_board_panel.workflow_count > 0
+                    && inputs.ui_composition_panel.core_widget_count > 0,
+                inputs.ui_composition_panel.widget_count > 0,
+            ),
+            vec![
+                format!(
+                    "operational_cockpit:{} sections={}",
+                    inputs.operational_cockpit_panel.status,
+                    inputs.operational_cockpit_panel.sections.len()
+                ),
+                format!(
+                    "task_board:workflows={} ready_handoffs={}",
+                    inputs.task_board_panel.workflow_count, inputs.task_board_panel.ready_handoffs
+                ),
+                format!(
+                    "ui_composition:widgets={} addon_widgets={}",
+                    inputs.ui_composition_panel.widget_count,
+                    inputs.ui_composition_panel.addon_widget_count
+                ),
+            ],
+            vec![
+                "Adicionar mais interação direta nos painéis sem transformar a TUI em lógica de domínio."
+                    .to_string(),
+                "Fortalecer visualização de edição/repriorização de workflows em execução.".to_string(),
+            ],
+            "Expandir affordances operacionais por action registry e widgets compostos.",
+            "Core entrega navegação, painéis, ações e composição; UIs especializadas vêm de Addons.",
+        ),
+        architecture_track(
+            "dynamic_workflow_engine",
+            "Dynamic workflow engine",
+            &["goal1:Fase 3", "goal1:Fase 7"],
+            architecture_status(
+                inputs.dag_panel.node_count > 0
+                    && inputs.task_board_panel.checkpoint_resume_candidates > 0
+                    && inputs.workflows.summary.total > 0,
+                inputs.workflows.summary.total > 0,
+            ),
+            vec![
+                format!(
+                    "registry:workflows={} running={} non_running={}",
+                    inputs.workflows.summary.total,
+                    inputs.workflows.summary.running,
+                    inputs.workflows.summary.non_running
+                ),
+                format!(
+                    "dag:nodes={} edges={} waits={}",
+                    inputs.dag_panel.node_count,
+                    inputs.dag_panel.edge_count,
+                    inputs.dag_panel.wait_node_count
+                ),
+                format!(
+                    "task_board:checkpoints={} human_waits={}",
+                    inputs.task_board_panel.checkpoint_resume_candidates,
+                    inputs.task_board_panel.pending_human_interactions
+                ),
+            ],
+            vec![
+                "Aumentar cobertura de mutação visual de node/goal durante execução pela própria TUI."
+                    .to_string(),
+                "Evidenciar replanejamento e subworkflows dinâmicos como fluxo operacional principal."
+                    .to_string(),
+            ],
+            "Aproximar DAG, task-board e modifier lane em uma rotina de replanejamento assistido.",
+            "Core mantém grafo, estado e gates; estratégias especializadas de planejamento são Addons.",
+        ),
+        architecture_track(
+            "event_persistent_runtime",
+            "Workflows event-driven, persistentes e efêmeros",
+            &["goal1:Fase 3.6", "goal1:Fase 3.7", "goal3:Event Engine"],
+            architecture_status(
+                !inputs.schedule_panel.workflows.is_empty()
+                    && inputs.event_runtime_panel.status != "event_runtime_unavailable"
+                    && inputs.event_panel.total_event_count > 0,
+                inputs.event_runtime_panel.status != "event_runtime_unavailable"
+                    || !inputs.schedule_panel.workflows.is_empty(),
+            ),
+            vec![
+                format!(
+                    "schedules:scheduled={} due={} runnable={}",
+                    inputs.schedule_panel.workflows.len(),
+                    inputs.schedule_panel.due_workflows,
+                    inputs.schedule_panel.runnable_due_workflows
+                ),
+                format!(
+                    "events:visible={} total={}",
+                    inputs.event_panel.visible_event_count, inputs.event_panel.total_event_count
+                ),
+                format!(
+                    "event_runtime:{} pending={}",
+                    inputs.event_runtime_panel.status, inputs.event_runtime_panel.pending_event_count
+                ),
+            ],
+            vec![
+                "Consolidar runtime contínuo supervisionado como caminho de produção, não só CLI bounded."
+                    .to_string(),
+                "Ampliar adapters declarativos via Addons para canais externos sem alterar Core."
+                    .to_string(),
+            ],
+            "Usar event runtime + scheduler como base para workers persistentes e scale-to-zero.",
+            "Core só normaliza eventos/schedules; transportes e canais específicos pertencem a Addons.",
+        ),
+        architecture_track(
+            "core_addons_domain_agnostic",
+            "Core mínimo + Addons domain-agnostic",
+            &["goal1:Fase 3.5", "goal3:Addons", "goal3:linhas 358-365"],
+            architecture_status(
+                inputs.addon_capability_panel.enabled_capability_count > 0
+                    && inputs.addon_capability_panel.runtime_contract_count > 0
+                    && inputs.addon_capability_panel.view_count > 0,
+                inputs.addon_capability_panel.capability_count > 0,
+            ),
+            vec![
+                format!(
+                    "addons={} enabled={} capabilities={} contracts={} views={}",
+                    inputs.addon_capability_panel.addon_count,
+                    inputs.addon_capability_panel.enabled_addon_count,
+                    inputs.addon_capability_panel.capability_count,
+                    inputs.addon_capability_panel.runtime_contract_count,
+                    inputs.addon_capability_panel.view_count
+                ),
+                format!(
+                    "permissions={} dispatches={} queued={}",
+                    inputs.addon_capability_panel.permission_count,
+                    inputs.addon_capability_panel.dispatch_count,
+                    inputs.addon_capability_panel.queued_dispatch_count
+                ),
+            ],
+            vec![
+                "Continuar movendo capacidades específicas de domínio para manifests/workers Addon."
+                    .to_string(),
+                "Fortalecer marketplace/compatibilidade como rotina de instalação sem recompilar Core."
+                    .to_string(),
+            ],
+            "Priorizar novos domínios por capability registry e contratos Addon.",
+            "Core fornece registry, permissões, eventos e dispatch; domínio fica fora do binário base.",
+        ),
+        architecture_track(
+            "tenant_identity_personality_context",
+            "Multi-tenant, identidade, memória e personality/context routing",
+            &["goal1:Fase 5", "goal1:Fase 5.5", "goal2:Fase 5.7", "goal2:Fase 5.8"],
+            architecture_status(
+                inputs.identity_panel.context_status == "project_context_loaded"
+                    && inputs.context_memory_panel.memory_policy_status != "memory_policy_unavailable"
+                    && inputs.permissions_panel.status == "permissions_ready",
+                inputs.identity_panel.identity_count > 0
+                    || inputs.identity_panel.membership_count > 0
+                    || inputs.context_memory_panel.ready_for_handoff > 0
+                    || inputs.context_memory_panel.blocked_tasks > 0,
+            ),
+            vec![
+                format!(
+                    "identity:{} memberships={} tenant_missing={}",
+                    inputs.identity_panel.context_status,
+                    inputs.identity_panel.membership_count,
+                    inputs.identity_panel.tenant_audit_missing_count
+                ),
+                format!(
+                    "memory:{} level={} scopes={}",
+                    inputs.context_memory_panel.memory_policy_status,
+                    inputs
+                        .context_memory_panel
+                        .memory_policy
+                        .effective_defaults
+                        .memory_level
+                        .as_str(),
+                    inputs
+                        .context_memory_panel
+                        .memory_policy
+                        .effective_defaults
+                        .default_scopes
+                        .join("+")
+                ),
+                format!(
+                    "permissions:{} pending={}",
+                    inputs.permissions_panel.status,
+                    inputs.permissions_panel.pending_human_approval_count
+                ),
+            ],
+            vec![
+                "Tornar mais visível no TUI quando personalidade por node difere da personalidade do workflow."
+                    .to_string(),
+                "Adicionar mais evidência de memória organizacional isolada por empresa/marca/produto."
+                    .to_string(),
+            ],
+            "Cruzar identity, memory policy e handoff prompt-packet em um painel operacional único.",
+            "Core decide escopo/isolamento; personas, brand assets e dados de domínio ficam em contexto/Addons.",
+        ),
+        architecture_track(
+            "harness_headroom_cli_brains",
+            "Harness, headroom e CLIs como brains substituíveis",
+            &["goal1:Fase 1", "goal1:Fase 2", "headroom benchmark"],
+            architecture_status(
+                inputs.harness_panel.token_headroom_ready
+                    && inputs.harness_panel.forge_first_adoption_readiness.ready_to_use_as_default,
+                inputs.harness_panel.token_headroom_ready
+                    || inputs.replacement_cli_panel.ready_surface_count > 0,
+            ),
+            vec![
+                format!(
+                    "harness:{} headroom={} forge_first_status={}",
+                    inputs.harness_panel.status,
+                    inputs.harness_panel.token_headroom_ready,
+                    inputs.harness_panel.forge_first_adoption_readiness.status
+                ),
+                format!(
+                    "replacement_cli:ready={}/{} readiness={}%",
+                    inputs.replacement_cli_panel.ready_surface_count,
+                    inputs.replacement_cli_panel.surface_count,
+                    inputs.replacement_cli_panel.readiness_percent
+                ),
+                format!(
+                    "release_gates:{} blocked={}",
+                    inputs.release_gates_panel.status, inputs.release_gates_panel.blocked_gate_count
+                ),
+            ],
+            inputs
+                .harness_panel
+                .forge_first_adoption_readiness
+                .blocked_reasons
+                .iter()
+                .map(|reason| format!("Forge-first default blocked by {reason}."))
+                .chain(std::iter::once(
+                    "Provider/model execution evidence must remain real and approved before promotion."
+                        .to_string(),
+                ))
+                .collect(),
+            "Instalar shims aprovados e continuar usando headroom reversível sem executar CLIs externas em smokes.",
+            "Forge controla contexto, memória, permissões, custos e sessões; CLIs executam como brains substituíveis.",
+        ),
+        architecture_track(
+            "human_ai_visual_copilot",
+            "Human + AI visual copilot",
+            &["goal1:Fase 7", "goal2:Fase 7.8", "goal3:UI Composition"],
+            architecture_status(
+                inputs.digital_twin_panel.workflow_count > 0
+                    && inputs.artifact_panel.artifact_count > 0
+                    && inputs.operational_cockpit_panel.modifier_lane.pending_count
+                        + inputs.operational_cockpit_panel.modifier_lane.applied_count
+                        > 0,
+                inputs.digital_twin_panel.workflow_count > 0
+                    || inputs.artifact_panel.artifact_count > 0,
+            ),
+            vec![
+                format!(
+                    "digital_twin:workflows={} remaining={} approvals={}",
+                    inputs.digital_twin_panel.workflow_count,
+                    inputs.digital_twin_panel.global_counts.remaining_count,
+                    inputs
+                        .digital_twin_panel
+                        .global_counts
+                        .awaiting_approval_count
+                ),
+                format!(
+                    "artifacts:workflows={} artifacts={}",
+                    inputs.artifact_panel.workflow_count, inputs.artifact_panel.artifact_count
+                ),
+                format!(
+                    "modifier_lane:pending={} applied={}",
+                    inputs.operational_cockpit_panel.modifier_lane.pending_count,
+                    inputs.operational_cockpit_panel.modifier_lane.applied_count
+                ),
+            ],
+            vec![
+                "Aproximar whiteboard/design surface do fluxo principal da TUI terminal.".to_string(),
+                "Evidenciar colaboração humano+IA em tempo real nos workflows longos.".to_string(),
+            ],
+            "Conectar artifacts, digital twin e modifier lane como uma operação assistida contínua.",
+            "Core guarda artefatos e eventos; editores especializados podem ser Addons ou superfícies Ops.",
+        ),
+        architecture_track(
+            "observability_cost_validation",
+            "Observabilidade, custos e validação",
+            &["goal1:Fase 6", "goal1:Fase 4"],
+            architecture_status(
+                inputs.structured_logs_panel.total_event_count > 0
+                    && inputs.cost_panel.node_count > 0
+                    && inputs.workflows.summary.context_quality.blocked == 0,
+                inputs.structured_logs_panel.total_event_count > 0
+                    || inputs.cost_panel.node_count > 0,
+            ),
+            vec![
+                format!(
+                    "logs={} events={}",
+                    inputs.structured_logs_panel.log_count,
+                    inputs.structured_logs_panel.total_event_count
+                ),
+                format!(
+                    "cost:nodes={} ai={} deterministic={} avoided={}",
+                    inputs.cost_panel.node_count,
+                    inputs.cost_panel.ai_node_count,
+                    inputs.cost_panel.deterministic_node_count,
+                    inputs.cost_panel.model_call_avoided_node_count
+                ),
+                format!(
+                    "context_quality:passed={} warnings={} blocked={}",
+                    inputs.workflows.summary.context_quality.passed,
+                    inputs.workflows.summary.context_quality.warning,
+                    inputs.workflows.summary.context_quality.blocked
+                ),
+            ],
+            vec![
+                "Materializar mais séries históricas de custo/latência para decisões de auto-melhoria."
+                    .to_string(),
+                "Expandir validação final por outcome, não só por evidência de tarefa.".to_string(),
+            ],
+            "Ligar cost ledger, structured logs e improve candidates em recomendações acionáveis.",
+            "Core mede e valida; políticas de otimização específicas devem ser configuráveis.",
+        ),
+    ];
+
+    tracks.sort_by(|left, right| left.track_id.cmp(&right.track_id));
+    let open_gap_count = tracks.iter().map(|track| track.gaps.len()).sum::<usize>();
+    let validated_count = tracks
+        .iter()
+        .filter(|track| track.status == "validated")
+        .count();
+    let status = if open_gap_count == 0 && validated_count == tracks.len() {
+        "architecture_compass_validated"
+    } else {
+        "architecture_compass_actionable"
+    };
+
+    InteractiveArchitectureCompassPanel {
+        schema_version: INTERACTIVE_ARCHITECTURE_COMPASS_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        source_documents: vec![
+            architecture_source_document(
+                "goal1",
+                "base AI-native workflow OS vision",
+                487,
+                "8393a777f02baf5145cee3be6bd764d8b9cebb5c6a5eaa6c0b968f0e46144eea",
+            ),
+            architecture_source_document(
+                "goal2",
+                "expanded benchmark, multi-tenant and personality routing vision",
+                298,
+                "3a0a4f0d9468b8030f62137f7fd855c18443fb1ada5e9937e7e9ab898f46055c",
+            ),
+            architecture_source_document(
+                "goal3",
+                "Core + Addons domain-agnostic architecture",
+                378,
+                "f66292a967fcf8db55a19f26ec28da7c7d207f4f35940d7ff0410599521ace1f",
+            ),
+        ],
+        tracks,
+        benchmark_sources: architecture_benchmark_sources(inputs),
+        dependencies: vec![
+            architecture_dependency(
+                "Forge-first CLI adoption",
+                &["harness_headroom_cli_brains", "tenant_identity_personality_context"],
+                "CLI shims must preserve Forge-owned lineage, memory, permissions and token headroom before becoming a default entrypoint.",
+            ),
+            architecture_dependency(
+                "Persistent event runtime",
+                &["event_persistent_runtime", "core_addons_domain_agnostic"],
+                "Long-running workflows need event adapters and workers without baking channel-specific code into Core.",
+            ),
+            architecture_dependency(
+                "Human + AI visual operation",
+                &["world_class_tui", "human_ai_visual_copilot", "dynamic_workflow_engine"],
+                "Live mutation, artifacts and task state must share the same workflow graph and audit trail.",
+            ),
+            architecture_dependency(
+                "Organizational copilots",
+                &["tenant_identity_personality_context", "core_addons_domain_agnostic"],
+                "Company, brand, product and persona context must route through identity/memory before domain Addons execute.",
+            ),
+        ],
+        conflicts: vec![
+            "Do not move domain-specific behavior into Core; route it through capabilities, Addons, manifests and workers."
+                .to_string(),
+            "Do not treat Codex, Gemini, Claude or OpenCode as the orchestrator; they are replaceable execution brains."
+                .to_string(),
+            "Do not claim provider/model evidence without approved manifests and real execution receipts."
+                .to_string(),
+        ],
+        reuse_opportunities: vec![
+            "Reuse interactive home, task board, DAG, event runtime, Addon capability and cost panels as the TUI data plane."
+                .to_string(),
+            "Reuse action registry/autocomplete for all new operator actions instead of creating one-off terminal commands."
+                .to_string(),
+            "Reuse Addon runtime contracts for domain capabilities and external workers.".to_string(),
+            "Reuse harness headroom receipts for CLI wrappers and future brain output compression.".to_string(),
+        ],
+        next_commands: vec![
+            "forge interactive architecture --output json".to_string(),
+            "forge interactive home --output json".to_string(),
+            "forge interactive operational-cockpit --output json".to_string(),
+            "forge interactive addon-capabilities --output json".to_string(),
+            "forge interactive harness --output json".to_string(),
+            "forge smoke operational-tui --output json".to_string(),
+            "forge smoke forge-first-harness --output json".to_string(),
+        ],
+    }
+}
+
+fn architecture_status(validated: bool, in_progress: bool) -> String {
+    if validated {
+        "validated".to_string()
+    } else if in_progress {
+        "in_progress".to_string()
+    } else {
+        "planned".to_string()
+    }
+}
+
+fn architecture_source_document(
+    document_id: &str,
+    role: &str,
+    line_count: usize,
+    sha256: &str,
+) -> InteractiveArchitectureSourceDocument {
+    InteractiveArchitectureSourceDocument {
+        document_id: document_id.to_string(),
+        role: role.to_string(),
+        line_count,
+        sha256: sha256.to_string(),
+    }
+}
+
+fn architecture_track(
+    track_id: &str,
+    title: &str,
+    source_refs: &[&str],
+    status: String,
+    evidence_refs: Vec<String>,
+    gaps: Vec<String>,
+    next_increment: &str,
+    core_boundary: &str,
+) -> InteractiveArchitectureTrack {
+    InteractiveArchitectureTrack {
+        track_id: track_id.to_string(),
+        title: title.to_string(),
+        source_refs: source_refs.iter().map(|value| value.to_string()).collect(),
+        status,
+        evidence_refs,
+        gaps,
+        next_increment: next_increment.to_string(),
+        core_boundary: core_boundary.to_string(),
+    }
+}
+
+fn architecture_dependency(
+    item: &str,
+    depends_on: &[&str],
+    reason: &str,
+) -> InteractiveArchitectureDependency {
+    InteractiveArchitectureDependency {
+        item: item.to_string(),
+        depends_on: depends_on.iter().map(|value| value.to_string()).collect(),
+        reason: reason.to_string(),
+    }
+}
+
+fn architecture_benchmark_sources(
+    inputs: ArchitectureCompassInputs<'_>,
+) -> Vec<InteractiveArchitectureBenchmarkSource> {
+    vec![
+        architecture_benchmark_source(
+            "Gemini CLI / Codex CLI / Claude CLI / OpenCode",
+            format!(
+                "Keyboard-first operator shell, command palette, session lifecycle and replacement-grade readiness; current CLI readiness {}%.",
+                inputs.replacement_cli_panel.readiness_percent
+            ),
+            "Forge owns workflow, context, memory, permissions, costs and sessions; CLIs stay replaceable brains.",
+        ),
+        architecture_benchmark_source(
+            "OpenClaw",
+            format!(
+                "Async interface separation and operator-visible work state; current cockpit status {}.",
+                inputs.operational_cockpit_panel.status
+            ),
+            "Forge exposes durable panels and MCP contracts instead of coupling orchestration to one UI.",
+        ),
+        architecture_benchmark_source(
+            "Hermes Agents",
+            format!(
+                "File-first scoped memory and semantic retrieval boundaries; current memory policy {}.",
+                inputs.context_memory_panel.memory_policy_status
+            ),
+            "Forge routes memory by tenant, audience and workflow rather than giving brains broad history.",
+        ),
+        architecture_benchmark_source(
+            "OpenSquad",
+            "Multiple specialized agents mapped to node-brain routing, session records and parallel-ready handoffs."
+                .to_string(),
+            "Forge coordinates agents through workflows and leases, not through a fixed agent team model.",
+        ),
+        architecture_benchmark_source(
+            "Open Design / Penpot",
+            format!(
+                "Design tokens, components, wireframes and UI composition; current renderer families {}.",
+                inputs.ui_composition_panel.addon_renderer_families.join("+")
+            ),
+            "Forge stores creative artifacts and tokens; specialized editors can attach through Addon/UI surfaces.",
+        ),
+        architecture_benchmark_source(
+            "Paperclip",
+            "Company-work framing: product, technical, finance, admin, marketing, communication and delivery decisions in prompt packets."
+                .to_string(),
+            "Forge keeps the operating checklist domain-agnostic and tenant-aware.",
+        ),
+        architecture_benchmark_source(
+            "Remotion",
+            format!(
+                "Programmatic media pipeline as an Addon-owned multimodal runtime; current readiness {}%.",
+                inputs.multimodal_runtime_panel.readiness_percent
+            ),
+            "Media generation belongs to Addons and guarded runtime contracts, not universal Core execution.",
+        ),
+        architecture_benchmark_source(
+            "n8n",
+            format!(
+                "Triggers, webhooks, schedules and node marketplace concepts; current adapters {} and schedules {}.",
+                inputs.addon_capability_panel.event_adapter_count,
+                inputs.schedule_panel.workflows.len()
+            ),
+            "Forge keeps workflow state, policy and validation central while Addons provide nodes/adapters.",
+        ),
+        architecture_benchmark_source(
+            "headroom",
+            format!(
+                "Token headroom, reversible compression and wrapper interception; current headroom status {}.",
+                inputs.harness_panel.headroom_operational_status
+            ),
+            "Forge compresses context/output through auditable receipts and retrieval refs, not lossy hidden summarization.",
+        ),
+    ]
+}
+
+fn architecture_benchmark_source(
+    source: &str,
+    absorbed_concept: String,
+    forge_boundary: &str,
+) -> InteractiveArchitectureBenchmarkSource {
+    InteractiveArchitectureBenchmarkSource {
+        source: source.to_string(),
+        absorbed_concept,
+        forge_boundary: forge_boundary.to_string(),
+    }
 }
 
 pub fn build_operational_tui_smoke(
@@ -4215,6 +4874,28 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             false,
             "low",
             &["replacement", "cli", "tui", "patch", "harness", "sessions", "milestone"],
+        ),
+        command_palette_entry(
+            "architecture.compass",
+            "architecture",
+            "Open architecture compass",
+            "Inspect source-of-truth tracks, evidence, gaps, dependencies, reuse and benchmark boundaries.",
+            "architecture_compass_panel",
+            None,
+            &["interactive", "architecture", "--output", "json"],
+            false,
+            false,
+            "low",
+            &[
+                "architecture",
+                "compass",
+                "gaps",
+                "benchmark",
+                "addons",
+                "workflow",
+                "tenant",
+                "headroom",
+            ],
         ),
         command_palette_entry(
             "operations.cockpit",
@@ -9153,6 +9834,9 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     let structured_logs = render_structured_log_summary(&d.structured_logs_panel);
     let operational_cockpit_sections =
         render_operational_cockpit_sections(&d.operational_cockpit_panel);
+    let architecture_tracks = render_architecture_track_summary(&d.architecture_compass_panel);
+    let architecture_benchmarks =
+        render_architecture_benchmark_summary(&d.architecture_compass_panel);
     let addon_capabilities = render_addon_capability_summary(&d.addon_capability_panel);
     let addon_event_extensions = render_addon_event_extension_summary(&d.addon_capability_panel);
     let addon_renderer_families = if d.addon_renderer_panel.families.is_empty() {
@@ -9173,10 +9857,12 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Addons/capabilities: addons {addon_count}, enabled {addon_enabled}, capabilities {addon_capabilities_count}, permissions {addon_permissions}, contracts {addon_contracts}, event types {addon_event_types}, triggers {addon_event_triggers}, listeners {addon_event_listeners}, adapters {addon_event_adapters}; {addon_capabilities}; events {addon_event_extensions}\n\
          Costs: estimated ${cost_estimated:.4}, observed ${cost_observed:.4}, nodes {cost_nodes}, AI {cost_ai_nodes}, deterministic {cost_deterministic_nodes}, avoided-model {cost_avoided_nodes}\n\
          Handoffs/approvals: ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, pending approvals {pending_approvals}, context blocked {context_blocked}\n\
+         Architecture compass: {architecture_status}; tracks {architecture_track_count}, docs {architecture_doc_count}; {architecture_tracks}\n\
          Smoke test: forge smoke operational-tui --output json\n\n\
          Active runs: {active_runs}\n\
          {run_ids_line}\
          Operational cockpit: {cockpit_attention}; {cockpit_priority}; active work {cockpit_active_work}, ready handoffs {cockpit_ready_handoffs}, human waits {cockpit_human_waits}, due workflows {cockpit_due_workflows}, brain {cockpit_selected_brain}; sections {cockpit_sections}\n\
+         Architecture compass: {architecture_status}; benchmarks {architecture_benchmarks}\n\
          Runs needing attention: {runs_needing_attention}\n\
          Scheduled workflows: {scheduled_workflows}\n\
          Looping workflows: {looping_workflows}\n\
@@ -9236,6 +9922,11 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         cockpit_due_workflows = d.operational_cockpit_panel.due_workflow_count,
         cockpit_selected_brain = d.operational_cockpit_panel.selected_brain,
         cockpit_sections = operational_cockpit_sections,
+        architecture_status = d.architecture_compass_panel.status,
+        architecture_track_count = d.architecture_compass_panel.tracks.len(),
+        architecture_doc_count = d.architecture_compass_panel.source_documents.len(),
+        architecture_tracks = architecture_tracks,
+        architecture_benchmarks = architecture_benchmarks,
         runs_needing_attention = d.runs_needing_attention,
         scheduled_workflows = d.scheduled_workflows,
         looping_workflows = d.looping_workflows,
@@ -11840,6 +12531,15 @@ fn build_ui_composition_panel(
                     vec!["forge interactive replacement-cli --output json".to_string()],
                 ),
                 core_ui_widget(
+                    "architecture_compass_panel",
+                    "Architecture compass",
+                    "architecture_compass_panel",
+                    "architecture_gap_matrix_renderer",
+                    "detailed",
+                    "full",
+                    vec!["forge interactive architecture --output json".to_string()],
+                ),
+                core_ui_widget(
                     "multimodal_runtime_panel",
                     "Multimodal runtime readiness",
                     "multimodal_runtime_panel",
@@ -12387,6 +13087,66 @@ fn render_operational_cockpit_sections(panel: &InteractiveOperationalCockpitPane
                 section.section_id, section.status, section.signal_count, section.primary_command
             )
         })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+pub fn render_interactive_architecture_compass(
+    panel: &InteractiveArchitectureCompassPanel,
+) -> String {
+    format!(
+        "Architecture compass: {status}; docs {doc_count}; tracks {track_count}; dependencies {dependency_count}; conflicts {conflict_count}\nTracks: {tracks}\nBenchmarks: {benchmarks}\nReuse: {reuse}\nNext commands: {commands}\n",
+        status = panel.status,
+        doc_count = panel.source_documents.len(),
+        track_count = panel.tracks.len(),
+        dependency_count = panel.dependencies.len(),
+        conflict_count = panel.conflicts.len(),
+        tracks = render_architecture_track_summary(panel),
+        benchmarks = render_architecture_benchmark_summary(panel),
+        reuse = if panel.reuse_opportunities.is_empty() {
+            "none".to_string()
+        } else {
+            panel.reuse_opportunities.join(" | ")
+        },
+        commands = if panel.next_commands.is_empty() {
+            "none".to_string()
+        } else {
+            panel.next_commands.join(" | ")
+        },
+    )
+}
+
+fn render_architecture_track_summary(panel: &InteractiveArchitectureCompassPanel) -> String {
+    if panel.tracks.is_empty() {
+        return "none".to_string();
+    }
+
+    panel
+        .tracks
+        .iter()
+        .map(|track| {
+            format!(
+                "{}:{} gaps {} next {}",
+                track.track_id,
+                track.status,
+                track.gaps.len(),
+                track.next_increment
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn render_architecture_benchmark_summary(panel: &InteractiveArchitectureCompassPanel) -> String {
+    if panel.benchmark_sources.is_empty() {
+        return "none".to_string();
+    }
+
+    panel
+        .benchmark_sources
+        .iter()
+        .take(6)
+        .map(|source| format!("{} -> {}", source.source, source.forge_boundary))
         .collect::<Vec<_>>()
         .join(" | ")
 }
@@ -14045,6 +14805,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/architecture",
+            "Architecture Compass",
+            "Show source-of-truth architecture tracks, implementation evidence, gaps, dependencies and benchmark boundaries.",
+            &["forge", "interactive", "architecture"],
+            false,
+            "low",
+        ),
+        slash(
             "/readiness",
             "Readiness",
             "Show executor, brain, shell and harness readiness before operational handoff.",
@@ -14886,6 +15654,10 @@ fn repl_focus_panels() -> Vec<InteractiveReplFocusPanel> {
             title: "Task board",
         },
         InteractiveReplFocusPanel {
+            panel_id: "architecture_compass_panel",
+            title: "Architecture compass",
+        },
+        InteractiveReplFocusPanel {
             panel_id: "artifact_panel",
             title: "Artifacts",
         },
@@ -14973,6 +15745,10 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
             let panel = build_interactive_operational_cockpit(store)?;
             Ok(render_interactive_operational_cockpit(&panel))
         }
+        "architecture_compass_panel" => {
+            let panel = build_interactive_architecture_compass(store)?;
+            Ok(render_interactive_architecture_compass(&panel))
+        }
         "task_board_panel" => {
             let panel = build_interactive_task_board(store)?;
             Ok(render_interactive_task_board(&panel))
@@ -15055,6 +15831,11 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
         "/cockpit" => {
             let panel = build_interactive_operational_cockpit(store)?;
             println!("{}", render_interactive_operational_cockpit(&panel));
+            Ok(true)
+        }
+        "/architecture" | "/compass" => {
+            let panel = build_interactive_architecture_compass(store)?;
+            println!("{}", render_interactive_architecture_compass(&panel));
             Ok(true)
         }
         "/task-board" => {

@@ -93,8 +93,8 @@ use crate::interaction::{
 };
 use crate::interactive::{
     build_interactive_action_invocation, build_interactive_action_registry,
-    build_interactive_addon_capabilities_default, build_interactive_artifacts,
-    build_interactive_autocomplete, build_interactive_command_palette,
+    build_interactive_addon_capabilities_default, build_interactive_architecture_compass,
+    build_interactive_artifacts, build_interactive_autocomplete, build_interactive_command_palette,
     build_interactive_context_memory, build_interactive_harness,
     build_interactive_home_with_options, build_interactive_identity,
     build_interactive_multimodal_runtime, build_interactive_operational_cockpit,
@@ -3151,6 +3151,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "--output",
                     "json",
                 ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.architecture",
+                "Inspect Interactive Architecture Compass",
+                "Return the Forge architecture compass with source-of-truth tracks, implementation evidence, open gaps, dependencies, reuse opportunities and benchmark boundaries.",
+                object_schema(&[], &[]),
+                "forge.interactive.architecture_compass.v1",
+                &["forge", "interactive", "architecture", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7578,6 +7587,9 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         "forge.interactive.readiness" => serde_json::to_value(build_interactive_readiness(store)?)?,
         "forge.interactive.operational_cockpit" => {
             serde_json::to_value(build_interactive_operational_cockpit(store)?)?
+        }
+        "forge.interactive.architecture" => {
+            serde_json::to_value(build_interactive_architecture_compass(store)?)?
         }
         "forge.interactive.release_gates" => {
             let input: MilestoneStatusInput = if input.is_null() {

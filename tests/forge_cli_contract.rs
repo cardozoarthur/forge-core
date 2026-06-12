@@ -45041,6 +45041,277 @@ fn interactive_home_surfaces_operational_cockpit_for_operator_focus() {
 }
 
 #[test]
+fn interactive_architecture_compass_is_home_cli_slash_and_mcp_surface() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "smoke",
+            "operational-tui",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let home_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    let compass = &home["dashboard"]["architecture_compass_panel"];
+    assert_eq!(
+        compass["schema_version"],
+        "forge.interactive.architecture_compass.v1"
+    );
+    assert_eq!(compass["status"], "architecture_compass_actionable");
+    assert_eq!(compass["source_documents"].as_array().unwrap().len(), 3);
+    assert!(compass["source_documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|doc| {
+            doc["document_id"] == "goal1"
+                && doc["line_count"] == 487
+                && doc["sha256"]
+                    == "8393a777f02baf5145cee3be6bd764d8b9cebb5c6a5eaa6c0b968f0e46144eea"
+        }));
+    for track_id in [
+        "world_class_tui",
+        "dynamic_workflow_engine",
+        "event_persistent_runtime",
+        "core_addons_domain_agnostic",
+        "tenant_identity_personality_context",
+        "harness_headroom_cli_brains",
+        "human_ai_visual_copilot",
+        "observability_cost_validation",
+    ] {
+        assert!(compass["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|track| track["track_id"] == track_id));
+    }
+    assert!(compass["tracks"].as_array().unwrap().iter().any(|track| {
+        track["track_id"] == "core_addons_domain_agnostic"
+            && track["core_boundary"]
+                .as_str()
+                .unwrap()
+                .contains("domínio fica fora")
+    }));
+    for source in ["headroom", "n8n", "Hermes Agents", "Paperclip"] {
+        assert!(compass["benchmark_sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|benchmark| benchmark["source"].as_str().unwrap().contains(source)));
+    }
+    assert!(compass["dependencies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|dependency| dependency["item"] == "Forge-first CLI adoption"));
+    assert!(compass["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|conflict| conflict
+            .as_str()
+            .unwrap()
+            .contains("domain-specific behavior")));
+    assert!(compass["reuse_opportunities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reuse| reuse.as_str().unwrap().contains("action registry")));
+    assert!(compass["next_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge interactive architecture --output json"
+        )));
+    assert!(home["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/architecture")));
+    assert!(home["dashboard"]["useful_next_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge interactive architecture --output json"
+        )));
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|region| region["widgets"].as_array().unwrap().iter())
+        .any(|widget| widget["panel"] == "architecture_compass_panel"));
+
+    let compass_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "architecture",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let compass_json: Value = serde_json::from_slice(&compass_output).unwrap();
+    assert_eq!(
+        compass_json["schema_version"],
+        "forge.interactive.architecture_compass.v1"
+    );
+    assert!(compass_json["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|track| track["track_id"] == "harness_headroom_cli_brains"));
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "architecture",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Architecture compass:"));
+    assert!(text.contains("harness_headroom_cli_brains"));
+    assert!(text.contains("Benchmarks:"));
+
+    let registry_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-registry",
+            "--query",
+            "architecture",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let registry: Value = serde_json::from_slice(&registry_output).unwrap();
+    assert!(registry["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| {
+            action["action_id"] == "architecture.compass"
+                && action["source_panel"] == "architecture_compass_panel"
+                && action["commands"]
+                    == serde_json::json!(["interactive", "architecture", "--output", "json"])
+                && action["mutates_workflow"] == false
+                && action["requires_approval"] == false
+        }));
+
+    let catalog_output = forge()
+        .args(["interactive", "slash-commands", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let catalog: Value = serde_json::from_slice(&catalog_output).unwrap();
+    let architecture_slash = find_slash_command(&catalog, "/architecture");
+    assert_eq!(
+        architecture_slash["equivalent_command"],
+        serde_json::json!(["forge", "interactive", "architecture"])
+    );
+    assert_eq!(architecture_slash["mutates_workflow"], false);
+
+    let route_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "route",
+            "--input",
+            "/architecture",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let route: Value = serde_json::from_slice(&route_output).unwrap();
+    assert_eq!(route["slash_command"]["name"], "/architecture");
+    assert_eq!(route["slash_command"]["recognized"], true);
+
+    let manifest_output = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest_output).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.architecture");
+    assert_eq!(
+        tool["output_schema"],
+        "forge.interactive.architecture_compass.v1"
+    );
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.interactive.architecture",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.architecture_compass.v1"
+    );
+    assert!(mcp_json["result"]["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|track| track["track_id"] == "event_persistent_runtime"));
+}
+
+#[test]
 fn interactive_operational_cockpit_is_dedicated_cli_slash_and_mcp_surface() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -50166,6 +50437,11 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
 
     for (name, output_schema, mutates_workflow) in [
         ("forge.interactive.home", "forge.interactive.home.v1", false),
+        (
+            "forge.interactive.architecture",
+            "forge.interactive.architecture_compass.v1",
+            false,
+        ),
         (
             "forge.interactive.identity",
             "forge.interactive.identity.v1",
