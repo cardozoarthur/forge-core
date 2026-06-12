@@ -4236,6 +4236,107 @@ fn milestone_evidence_plan_inspects_project_inputs_without_collecting_evidence()
             .unwrap()
             .contains("forge milestone evidence-plan")));
 
+    let missing_multimodal_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "evidence-plan",
+            "--version",
+            "0.5",
+            "--capability",
+            "experimental_multimodal_runtime",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args([
+            "--connected-runtime",
+            "production-vision-runtime",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let missing_multimodal_json: Value =
+        serde_json::from_slice(&missing_multimodal_output).unwrap();
+    assert_eq!(
+        missing_multimodal_json["capability_id"],
+        "experimental_multimodal_runtime"
+    );
+    assert_eq!(
+        missing_multimodal_json["status"],
+        "missing_project_evidence_inputs"
+    );
+    let multimodal_templates = missing_multimodal_json["manifest_templates"]
+        .as_array()
+        .unwrap();
+    let feature_template = multimodal_templates
+        .iter()
+        .find(|template| template["id"] == "multimodal_feature_flag")
+        .expect("missing multimodal feature flag template");
+    assert_eq!(
+        feature_template["schema_version"],
+        "forge.milestone.manifest_template.v1"
+    );
+    assert_eq!(
+        feature_template["target_path"],
+        project.join(".forge/multimodal.json").display().to_string()
+    );
+    assert_eq!(feature_template["secret_free"], true);
+    assert_eq!(
+        feature_template["template_json"]["experimental_enabled"],
+        true
+    );
+    assert_eq!(
+        feature_template["template_json"]["approved_by"],
+        "<operator>"
+    );
+    let runtime_template = multimodal_templates
+        .iter()
+        .find(|template| template["id"] == "multimodal_runtime_manifest")
+        .expect("missing multimodal runtime manifest template");
+    assert_eq!(
+        runtime_template["target_path"],
+        project
+            .join(".forge/multimodal-runtimes.json")
+            .display()
+            .to_string()
+    );
+    assert_eq!(runtime_template["secret_free"], true);
+    assert_eq!(
+        runtime_template["template_json"]["runtimes"][0]["id"],
+        "production-vision-runtime"
+    );
+    assert_eq!(
+        runtime_template["template_json"]["runtimes"][0]["capabilities"][0],
+        "image_understanding"
+    );
+    assert_eq!(
+        runtime_template["template_json"]["runtimes"][0]["network_access"],
+        false
+    );
+    assert_eq!(
+        runtime_template["template_json"]["runtimes"][0]["device_access"],
+        false
+    );
+    assert!(
+        runtime_template["template_json"]["runtimes"][0]["production"]["model_manifest_sha256"]
+            .as_str()
+            .unwrap()
+            .contains("64-char")
+    );
+    assert!(runtime_template["validation_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("forge multimodal runtime-benchmark")));
+
     let provider_script = temp.path().join("project-provider.sh");
     fs::write(
         &provider_script,

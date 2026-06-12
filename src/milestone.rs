@@ -694,6 +694,7 @@ pub fn build_milestone_evidence_plan(
                 &project_root,
                 options.connected_runtime,
                 &mut config_checks,
+                &mut manifest_templates,
                 &mut configured_evidence_sources,
                 &mut evidence_collection_commands,
             )?;
@@ -1482,18 +1483,21 @@ fn plan_experimental_multimodal_evidence(
     project_root: &Path,
     connected_runtime: Option<&str>,
     config_checks: &mut Vec<MilestoneEvidencePlanConfigCheck>,
+    manifest_templates: &mut Vec<MilestoneEvidencePlanManifestTemplate>,
     configured_evidence_sources: &mut Vec<String>,
     evidence_collection_commands: &mut Vec<String>,
 ) -> Result<()> {
-    let feature_path = project_root.join(".forge/multimodal.json");
+    let feature_path = project_root.join(MULTIMODAL_FEATURE_RELATIVE_PATH);
     let feature_enabled = if !feature_path.is_file() {
+        manifest_templates.push(multimodal_feature_flag_template(project_root));
         config_checks.push(MilestoneEvidencePlanConfigCheck {
             id: "multimodal_feature_flag".to_string(),
             status: "missing".to_string(),
             path: Some(feature_path.display().to_string()),
             selected_id: None,
-            summary: "Create .forge/multimodal.json with experimental_enabled=true and approval metadata."
-                .to_string(),
+            summary: format!(
+                "Create {MULTIMODAL_FEATURE_RELATIVE_PATH} with experimental_enabled=true and approval metadata."
+            ),
         });
         false
     } else {
@@ -1513,29 +1517,38 @@ fn plan_experimental_multimodal_evidence(
             summary: if enabled {
                 "Multimodal experimental feature flag is enabled for this project.".to_string()
             } else {
+                manifest_templates.push(multimodal_feature_flag_template(project_root));
                 "Multimodal feature flag exists but experimental_enabled is not true.".to_string()
             },
         });
         enabled
     };
 
-    let manifest_path = project_root.join(".forge/multimodal-runtimes.json");
+    let runtime_id = selected_multimodal_runtime_id(connected_runtime);
+    let manifest_path = project_root.join(MULTIMODAL_RUNTIMES_RELATIVE_PATH);
     if !manifest_path.is_file() {
+        manifest_templates.push(multimodal_runtime_manifest_template(
+            project_root,
+            connected_runtime,
+        ));
         config_checks.push(MilestoneEvidencePlanConfigCheck {
             id: "multimodal_runtime_manifest".to_string(),
             status: "missing".to_string(),
             path: Some(manifest_path.display().to_string()),
-            selected_id: connected_runtime.map(ToString::to_string),
-            summary: "Create .forge/multimodal-runtimes.json with a production connected runtime."
-                .to_string(),
+            selected_id: Some(runtime_id.clone()),
+            summary: format!(
+                "Create {MULTIMODAL_RUNTIMES_RELATIVE_PATH} with a production connected runtime."
+            ),
         });
         evidence_collection_commands.push(format!(
-            "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root {} --connected-runtime <runtime-id> --approved-by <operator> --output json",
-            project_root.display()
+            "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root {} --connected-runtime {} --approved-by <operator> --output json",
+            project_root.display(),
+            runtime_id
         ));
         evidence_collection_commands.push(format!(
-            "forge multimodal runtime-benchmark --capability image_understanding --fixture static_image_labels --project-root {} --connected-runtime <runtime-id> --approved-by <operator> --confirm-runtime-execution --allow-model --output json",
-            project_root.display()
+            "forge multimodal runtime-benchmark --capability image_understanding --fixture static_image_labels --project-root {} --connected-runtime {} --approved-by <operator> --confirm-runtime-execution --allow-model --output json",
+            project_root.display(),
+            runtime_id
         ));
         return Ok(());
     }
@@ -1569,11 +1582,15 @@ fn plan_experimental_multimodal_evidence(
             .unwrap_or_else(|| runtime.get("production").is_some())
     });
     let Some(runtime) = selected else {
+        manifest_templates.push(multimodal_runtime_manifest_template(
+            project_root,
+            connected_runtime,
+        ));
         config_checks.push(MilestoneEvidencePlanConfigCheck {
             id: "multimodal_connected_runtime".to_string(),
             status: "missing".to_string(),
             path: Some(manifest_path.display().to_string()),
-            selected_id: connected_runtime.map(ToString::to_string),
+            selected_id: Some(runtime_id),
             summary: "No selected runtime with production evidence metadata was found.".to_string(),
         });
         return Ok(());
@@ -1670,6 +1687,104 @@ fn plan_experimental_multimodal_evidence(
     Ok(())
 }
 
+fn selected_multimodal_runtime_id(connected_runtime: Option<&str>) -> String {
+    connected_runtime
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("production-vision-runtime")
+        .to_string()
+}
+
+fn multimodal_feature_flag_template(project_root: &Path) -> MilestoneEvidencePlanManifestTemplate {
+    let target_path = project_root.join(MULTIMODAL_FEATURE_RELATIVE_PATH);
+    let template_json = serde_json::json!({
+        "experimental_enabled": true,
+        "approved_by": "<operator>",
+        "reason": "Operator-approved production multimodal runtime evidence collection.",
+        "scope": "project"
+    });
+    MilestoneEvidencePlanManifestTemplate {
+        schema_version: "forge.milestone.manifest_template.v1".to_string(),
+        id: "multimodal_feature_flag".to_string(),
+        status: "template_ready".to_string(),
+        target_path: target_path.display().to_string(),
+        secret_free: true,
+        template_json,
+        preparation_commands: vec![
+            format!("mkdir -p {}", project_root.join(".forge").display()),
+            format!(
+                "write {} with the provided template_json after operator approval; do not store secrets in this file",
+                target_path.display()
+            ),
+        ],
+        validation_commands: vec![format!(
+            "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root {} --output json",
+            project_root.display()
+        )],
+        summary: "Secret-free multimodal experimental feature flag template for operator-approved runtime evidence planning.".to_string(),
+    }
+}
+
+fn multimodal_runtime_manifest_template(
+    project_root: &Path,
+    connected_runtime: Option<&str>,
+) -> MilestoneEvidencePlanManifestTemplate {
+    let runtime_id = selected_multimodal_runtime_id(connected_runtime);
+    let target_path = project_root.join(MULTIMODAL_RUNTIMES_RELATIVE_PATH);
+    let template_json = serde_json::json!({
+        "runtimes": [{
+            "id": runtime_id,
+            "model_id": "<approved-model-id>",
+            "capabilities": ["image_understanding"],
+            "probe_command": ["<absolute-path-to-approved-runtime-probe-command>"],
+            "network_access": false,
+            "device_access": false,
+            "production": {
+                "approved_by": "<operator>",
+                "approval_ref": "<approval-or-change-record>",
+                "runtime_version": "<runtime-version>",
+                "model_manifest_sha256": "<64-char-model-manifest-sha256>",
+                "model_license": "<approved-model-license>",
+                "evidence_artifacts": ["<operator-reviewed-benchmark-artifact>"],
+                "min_quality_score": 0.95,
+                "max_latency_ms": 1000
+            }
+        }]
+    });
+    MilestoneEvidencePlanManifestTemplate {
+        schema_version: "forge.milestone.manifest_template.v1".to_string(),
+        id: "multimodal_runtime_manifest".to_string(),
+        status: "template_ready".to_string(),
+        target_path: target_path.display().to_string(),
+        secret_free: true,
+        template_json,
+        preparation_commands: vec![
+            format!("mkdir -p {}", project_root.join(".forge").display()),
+            format!(
+                "write {} with the provided template_json after replacing placeholders; do not store secrets in this file",
+                target_path.display()
+            ),
+        ],
+        validation_commands: vec![
+            format!(
+                "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root {} --connected-runtime {} --output json",
+                project_root.display(),
+                runtime_id
+            ),
+            format!(
+                "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root {} --connected-runtime {} --approved-by <operator> --output json",
+                project_root.display(),
+                runtime_id
+            ),
+            format!(
+                "forge multimodal runtime-benchmark --capability image_understanding --fixture static_image_labels --project-root {} --connected-runtime {} --approved-by <operator> --confirm-runtime-execution --allow-model --output json",
+                project_root.display(),
+                runtime_id
+            ),
+        ],
+        summary: "Secret-free multimodal runtime manifest template for operator-approved production runtime evidence collection.".to_string(),
+    }
+}
+
 fn milestone_attach_command(version: &str, capability_id: &str, kind: &str) -> String {
     format!(
         "forge milestone attach-evidence --version {version} --capability {capability_id} --kind {kind} --summary \"Operator-approved {kind} receipt.\" --artifact <path> --approved-by <operator> --output json"
@@ -1739,6 +1854,8 @@ const CONNECTED_EXTERNAL_BRAIN_DEMO_SCHEMA_VERSION: &str =
 const CONNECTED_EXTERNAL_BRAIN_PROVIDER_SCHEMA_VERSION: &str =
     "forge.milestone.connected_external_brain_provider.v1";
 const CONNECTED_BRAIN_RUNTIMES_RELATIVE_PATH: &str = ".forge/connected-brain-runtimes.json";
+const MULTIMODAL_FEATURE_RELATIVE_PATH: &str = ".forge/multimodal.json";
+const MULTIMODAL_RUNTIMES_RELATIVE_PATH: &str = ".forge/multimodal-runtimes.json";
 
 #[derive(Debug, Clone, Default)]
 pub struct MilestoneCliDemoOptions<'a> {
