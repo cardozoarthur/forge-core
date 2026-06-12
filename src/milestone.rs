@@ -199,6 +199,7 @@ pub struct MilestoneEvidencePlanReport {
     pub promotion_gate_templates: Vec<MilestonePromotionGateTemplate>,
     pub config_checks: Vec<MilestoneEvidencePlanConfigCheck>,
     pub manifest_templates: Vec<MilestoneEvidencePlanManifestTemplate>,
+    pub provider_candidates: Vec<MilestoneEvidenceProviderCandidate>,
     pub configured_evidence_sources: Vec<String>,
     pub evidence_collection_commands: Vec<String>,
     pub attach_commands: Vec<String>,
@@ -285,6 +286,23 @@ pub struct MilestoneEvidencePlanManifestTemplate {
     pub preparation_commands: Vec<String>,
     pub validation_commands: Vec<String>,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneEvidenceProviderCandidate {
+    pub schema_version: String,
+    pub provider_id: String,
+    pub brain_id: String,
+    pub binary: String,
+    pub detected_path: Option<String>,
+    pub installed: bool,
+    pub version_command: Vec<String>,
+    pub version_status: String,
+    pub version_output: String,
+    pub readiness: String,
+    pub manifest_provider_template: serde_json::Value,
+    pub evidence_blocker: String,
+    pub next_action: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -810,12 +828,14 @@ pub fn build_milestone_evidence_plan(
 
     let mut config_checks = Vec::new();
     let mut manifest_templates = Vec::new();
+    let mut provider_candidates = Vec::new();
     let mut configured_evidence_sources = Vec::new();
     let mut evidence_collection_commands = Vec::new();
     let mut attach_commands = Vec::new();
 
     match capability_id.as_str() {
         "replacement_grade_cli" => {
+            provider_candidates = detect_replacement_cli_provider_candidates();
             plan_replacement_grade_cli_evidence(
                 &project_root,
                 options.connected_brain,
@@ -892,6 +912,7 @@ pub fn build_milestone_evidence_plan(
         promotion_gate_templates,
         config_checks,
         manifest_templates,
+        provider_candidates,
         configured_evidence_sources,
         evidence_collection_commands,
         attach_commands,
@@ -2061,6 +2082,101 @@ fn plan_replacement_grade_cli_evidence(
         provider.id
     ));
     Ok(())
+}
+
+fn detect_replacement_cli_provider_candidates() -> Vec<MilestoneEvidenceProviderCandidate> {
+    [
+        ("codex", "codex", &["-V"][..]),
+        ("opencode", "opencode", &["--version"][..]),
+        ("gemini", "gemini", &["--version"][..]),
+        ("claude", "claude", &["--version"][..]),
+        ("ollama", "ollama", &["--version"][..]),
+    ]
+    .iter()
+    .map(|(provider_id, binary, version_args)| {
+        replacement_cli_provider_candidate(provider_id, binary, version_args)
+    })
+    .collect()
+}
+
+fn replacement_cli_provider_candidate(
+    provider_id: &str,
+    binary: &str,
+    version_args: &[&str],
+) -> MilestoneEvidenceProviderCandidate {
+    let detected_path = resolve_binary_from_path(binary);
+    let (version_status, version_output) = if detected_path.is_some() {
+        ("version_probe_not_run".to_string(), String::new())
+    } else {
+        ("binary_not_found".to_string(), String::new())
+    };
+    let installed = detected_path.is_some();
+    let readiness = if installed {
+        "cli_detected_wrapper_required"
+    } else {
+        "cli_missing"
+    };
+    let command_hint = detected_path
+        .clone()
+        .unwrap_or_else(|| format!("<absolute-path-to-{binary}>"));
+    let manifest_provider_template = serde_json::json!({
+        "id": provider_id,
+        "brain_id": provider_id,
+        "model_id": "<approved-model-id>",
+        "provider_class": "external_cli",
+        "capabilities": ["replacement_grade_cli"],
+        "command": [
+            "<absolute-path-to-approved-provider-wrapper>",
+            "--brain-cli",
+            command_hint,
+            "--emit",
+            "forge.connected_external_brain.provider_output.v1"
+        ],
+        "approved_by": "<operator>",
+        "approval_ref": "<approval-or-change-record>",
+        "allow_model_execution": true,
+        "network_access": false,
+        "device_access": false,
+        "external_resources_mutated": false
+    });
+    MilestoneEvidenceProviderCandidate {
+        schema_version: "forge.milestone.evidence_provider_candidate.v1".to_string(),
+        provider_id: provider_id.to_string(),
+        brain_id: provider_id.to_string(),
+        binary: binary.to_string(),
+        detected_path,
+        installed,
+        version_command: std::iter::once(binary.to_string())
+            .chain(version_args.iter().map(|arg| (*arg).to_string()))
+            .collect(),
+        version_status,
+        version_output,
+        readiness: readiness.to_string(),
+        manifest_provider_template,
+        evidence_blocker:
+            "A detected CLI path or version command is not release evidence. Promotion requires an approved provider wrapper that runs the model and emits forge.connected_external_brain.provider_output.v1 with real_provider_execution_performed=true and model_execution_performed=true."
+                .to_string(),
+        next_action: if installed {
+            format!(
+                "Run the version command only through an approved/synced Forge wrapper, then create an approved provider wrapper for `{provider_id}` in .forge/connected-brain-runtimes.json before collecting external_brain_provider_execution."
+            )
+        } else {
+            format!(
+                "Install or configure `{binary}` before preparing an approved connected-brain provider wrapper."
+            )
+        },
+    }
+}
+
+fn resolve_binary_from_path(binary: &str) -> Option<String> {
+    let path_var = env::var_os("PATH")?;
+    for dir in env::split_paths(&path_var) {
+        let candidate = dir.join(binary);
+        if candidate.is_file() {
+            return Some(candidate.display().to_string());
+        }
+    }
+    None
 }
 
 fn connected_brain_manifest_template(

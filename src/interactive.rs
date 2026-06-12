@@ -44,8 +44,8 @@ use crate::milestone::{
     collect_ready_milestone_evidence, milestone_required_attached_evidence_kinds,
     MilestoneAttachedEvidence, MilestoneCollectReadyEvidenceOptions,
     MilestoneCollectReadyEvidenceReport, MilestoneEvidencePlanManifestTemplate,
-    MilestoneEvidencePlanOptions, MilestonePromotionDecision, MilestonePromotionGateTemplate,
-    MilestoneStatusSummary,
+    MilestoneEvidencePlanOptions, MilestoneEvidenceProviderCandidate, MilestonePromotionDecision,
+    MilestonePromotionGateTemplate, MilestoneStatusSummary,
 };
 use crate::multimodal::{
     build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
@@ -686,6 +686,8 @@ pub struct InteractiveReleaseGateEvidencePlan {
     pub manifest_template_ids: Vec<String>,
     pub manifest_template_paths: Vec<String>,
     pub manifest_templates: Vec<MilestoneEvidencePlanManifestTemplate>,
+    pub provider_candidate_count: usize,
+    pub provider_candidates: Vec<MilestoneEvidenceProviderCandidate>,
     pub promotion_gate_templates: Vec<MilestonePromotionGateTemplate>,
     pub evidence_collection_commands: Vec<String>,
     pub next_action: String,
@@ -3651,6 +3653,8 @@ fn interactive_release_gate_evidence_plan(
         manifest_template_ids,
         manifest_template_paths,
         manifest_templates: plan.manifest_templates,
+        provider_candidate_count: plan.provider_candidates.len(),
+        provider_candidates: plan.provider_candidates,
         promotion_gate_templates: plan.promotion_gate_templates,
         evidence_collection_commands: plan.evidence_collection_commands,
         next_action: plan.next_action,
@@ -10002,15 +10006,35 @@ fn render_release_gate_card_detail(gate: &InteractiveReleaseGateCard) -> String 
 
 fn render_release_gate_evidence_plan_summary(plan: &InteractiveReleaseGateEvidencePlan) -> String {
     format!(
-        "{} ready {}; missing_config {}/{}; templates {}; paths {}; gates {}",
+        "{} ready {}; missing_config {}/{}; templates {}; paths {}; provider_candidates {}; gates {}",
         plan.status,
         plan.ready_to_collect_evidence,
         plan.missing_config_check_count,
         plan.config_check_count,
         render_release_gate_list(&plan.manifest_template_ids),
         render_release_gate_list(&plan.manifest_template_paths),
+        render_release_gate_provider_candidate_summary(&plan.provider_candidates),
         render_release_gate_template_summary(&plan.promotion_gate_templates),
     )
+}
+
+fn render_release_gate_provider_candidate_summary(
+    candidates: &[MilestoneEvidenceProviderCandidate],
+) -> String {
+    if candidates.is_empty() {
+        return "none".to_string();
+    }
+    candidates
+        .iter()
+        .take(5)
+        .map(|candidate| {
+            format!(
+                "{}:{}:{}",
+                candidate.provider_id, candidate.readiness, candidate.version_status
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn render_release_gate_template_summary(templates: &[MilestonePromotionGateTemplate]) -> String {

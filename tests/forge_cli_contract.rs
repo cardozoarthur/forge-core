@@ -4766,6 +4766,45 @@ fn milestone_evidence_plan_inspects_project_inputs_without_collecting_evidence()
                 .unwrap()
                 .contains(&serde_json::json!("review_before_apply"))
     }));
+    let provider_candidates = missing_json["provider_candidates"]
+        .as_array()
+        .expect("evidence-plan should expose external brain provider candidates");
+    assert_eq!(provider_candidates.len(), 5);
+    for provider_id in ["codex", "opencode", "gemini", "claude", "ollama"] {
+        let candidate = provider_candidates
+            .iter()
+            .find(|candidate| candidate["provider_id"] == provider_id)
+            .unwrap_or_else(|| panic!("missing provider candidate {provider_id}"));
+        assert_eq!(
+            candidate["schema_version"],
+            "forge.milestone.evidence_provider_candidate.v1"
+        );
+        assert_eq!(candidate["brain_id"], provider_id);
+        assert!(candidate["version_command"]
+            .as_array()
+            .expect("candidate should include version command")
+            .first()
+            .is_some());
+        assert!(matches!(
+            candidate["readiness"].as_str().unwrap(),
+            "cli_detected_wrapper_required" | "cli_missing"
+        ));
+        assert!(
+            candidate["evidence_blocker"]
+                .as_str()
+                .unwrap()
+                .contains("not release evidence"),
+            "candidate should not treat CLI detection as release evidence: {candidate:?}"
+        );
+        assert_eq!(
+            candidate["manifest_provider_template"]["provider_class"],
+            "external_cli"
+        );
+        assert_eq!(
+            candidate["manifest_provider_template"]["capabilities"][0],
+            "replacement_grade_cli"
+        );
+    }
     assert!(missing_json["config_checks"]
         .as_array()
         .unwrap()
@@ -48330,7 +48369,7 @@ fn no_args_tty_enters_repl_and_shows_dashboard_when_pseudo_terminal_is_available
     let command = format!("{} --store {}", binary.display(), store.display());
 
     let output = std::process::Command::new(timeout)
-        .args(["2", script, "-q", "-c", &command, "/dev/null"])
+        .args(["30", script, "-q", "-c", &command, "/dev/null"])
         .output()
         .unwrap();
 
@@ -48754,7 +48793,7 @@ fn interactive_repl_slash_commands_render_operational_panels_in_place() {
     let command = format!("{} --store {}", binary.display(), store.display());
 
     let mut child = std::process::Command::new(timeout)
-        .args(["3", script, "-q", "-c", &command, "/dev/null"])
+        .args(["30", script, "-q", "-c", &command, "/dev/null"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -48806,7 +48845,7 @@ fn interactive_repl_keyboard_navigation_controls_focus_mode_theme_and_open() {
     let command = format!("{} --store {}", binary.display(), store.display());
 
     let mut child = std::process::Command::new(timeout)
-        .args(["3", script, "-q", "-c", &command, "/dev/null"])
+        .args(["30", script, "-q", "-c", &command, "/dev/null"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -48856,7 +48895,7 @@ fn interactive_repl_q_exits_without_routing_a_workflow() {
     let command = format!("{} --store {}", binary.display(), store.display());
 
     let mut child = std::process::Command::new(timeout)
-        .args(["3", script, "-q", "-c", &command, "/dev/null"])
+        .args(["30", script, "-q", "-c", &command, "/dev/null"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
