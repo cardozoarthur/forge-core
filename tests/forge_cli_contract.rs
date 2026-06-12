@@ -45005,6 +45005,45 @@ fn interactive_home_surfaces_operational_cockpit_for_operator_focus() {
 fn interactive_operational_cockpit_is_dedicated_cli_slash_and_mcp_surface() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Operate a live workflow with an assisted strategic modifier lane",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+    let store_handle = ForgeStore::open(&store).unwrap();
+    let proposal_report = forge_core::ops::create_modifier_proposal(
+        &store_handle,
+        forge_core::ops::OpsModifierProposalInput {
+            workflow_id,
+            target_kind: "workflow_goal",
+            task_id: None,
+            title: "Ajuste estratégico no cockpit",
+            summary: "Proposta humana/IA para reorientar o workflow sem parar a execução.",
+            rationale:
+                "A operação assistida deve aparecer no TUI principal, não só no console web.",
+            proposed_goal: Some("Workflow reorientado pelo cockpit operacional assistido"),
+            proposed_title: None,
+            proposed_expected_output: None,
+            author: "strategist",
+        },
+    )
+    .unwrap();
+    let proposal_id = proposal_report.proposal.proposal_id.clone();
 
     let cockpit_output = forge()
         .args([
@@ -45031,6 +45070,61 @@ fn interactive_operational_cockpit_is_dedicated_cli_slash_and_mcp_surface() {
         .unwrap()
         .iter()
         .any(|section| section["section_id"] == "handoff"));
+    assert!(cockpit["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|section| {
+            section["section_id"] == "modifier"
+                && section["status"] == "pending_strategy"
+                && section["signal_count"] == 1
+        }));
+    assert_eq!(
+        cockpit["modifier_lane"]["schema_version"],
+        "forge.interactive.operational_modifier_lane.v1"
+    );
+    assert_eq!(cockpit["modifier_lane"]["pending_count"], 1);
+    assert_eq!(cockpit["modifier_lane"]["applied_count"], 0);
+    assert_eq!(
+        cockpit["modifier_lane"]["operation_mode"],
+        "human_ai_assisted_runtime_mutation"
+    );
+    assert!(cockpit["modifier_lane"]["proposal_cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|proposal| {
+            proposal["proposal_id"] == proposal_id
+                && proposal["workflow_id"] == workflow_id
+                && proposal["target_kind"] == "workflow_goal"
+                && proposal["status"] == "pending"
+                && proposal["author"] == "strategist"
+                && proposal["apply_route"] == "/api/modifier/apply"
+        }));
+    assert_eq!(
+        cockpit["modifier_lane"]["commands"]["serve_console"],
+        serde_json::json!([
+            "forge",
+            "ops",
+            "serve",
+            "--project-root",
+            ".",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8765"
+        ])
+    );
+    assert_eq!(
+        cockpit["modifier_lane"]["commands"]["apply_proposal_route"],
+        "POST /api/modifier/apply"
+    );
+    assert!(cockpit["modifier_lane"]["next_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "review pending modifier proposals before applying runtime mutations"
+        )));
     assert!(cockpit["next_actions"]
         .as_array()
         .unwrap()
@@ -45053,6 +45147,9 @@ fn interactive_operational_cockpit_is_dedicated_cli_slash_and_mcp_surface() {
     let text = String::from_utf8(text_output).unwrap();
     assert!(text.contains("Operational cockpit:"));
     assert!(text.contains("sections"));
+    assert!(text.contains("modifier lane"));
+    assert!(text.contains("pending proposals 1"));
+    assert!(text.contains(&proposal_id));
 
     let registry_output = forge()
         .args([
@@ -45149,6 +45246,11 @@ fn interactive_operational_cockpit_is_dedicated_cli_slash_and_mcp_surface() {
         mcp_json["result"]["schema_version"],
         "forge.interactive.operational_cockpit.v1"
     );
+    assert_eq!(
+        mcp_json["result"]["modifier_lane"]["schema_version"],
+        "forge.interactive.operational_modifier_lane.v1"
+    );
+    assert_eq!(mcp_json["result"]["modifier_lane"]["pending_count"], 1);
 }
 
 #[test]

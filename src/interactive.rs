@@ -41,7 +41,7 @@ use crate::milestone::{
 };
 use crate::ops::{
     build_addon_view_renderer_report, build_operational_digital_twin, load_modifier_lane,
-    OpsAddonViewRendererReport, OpsOperationalDigitalTwin,
+    OpsAddonViewRendererReport, OpsModifierLane, OpsModifierProposal, OpsOperationalDigitalTwin,
 };
 use crate::registry::{
     list_workflows_with_filters, RegistryContextActionRef, RegistryContextActionSummary,
@@ -93,6 +93,8 @@ const INTERACTIVE_IDENTITY_SCHEMA_VERSION: &str = "forge.interactive.identity.v1
 const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
 const INTERACTIVE_OPERATIONAL_COCKPIT_SCHEMA_VERSION: &str =
     "forge.interactive.operational_cockpit.v1";
+const INTERACTIVE_OPERATIONAL_MODIFIER_LANE_SCHEMA_VERSION: &str =
+    "forge.interactive.operational_modifier_lane.v1";
 const INTERACTIVE_ADDON_CAPABILITY_SCHEMA_VERSION: &str = "forge.interactive.addon_capability.v1";
 const OPERATIONAL_TUI_SMOKE_SCHEMA_VERSION: &str = "forge.smoke.operational_tui.v1";
 const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
@@ -183,6 +185,7 @@ pub struct InteractiveOperationalCockpitPanel {
     pub ready_handoff_count: usize,
     pub pending_human_wait_count: usize,
     pub pending_approval_count: usize,
+    pub pending_modifier_proposal_count: usize,
     pub validation_failure_count: usize,
     pub due_workflow_count: usize,
     pub selected_brain: String,
@@ -192,6 +195,7 @@ pub struct InteractiveOperationalCockpitPanel {
     pub event_count: usize,
     pub estimated_cost_total_usd: f64,
     pub sections: Vec<InteractiveOperationalCockpitSection>,
+    pub modifier_lane: InteractiveOperationalModifierLanePanel,
     pub next_actions: Vec<String>,
 }
 
@@ -204,6 +208,49 @@ pub struct InteractiveOperationalCockpitSection {
     pub summary: String,
     pub primary_command: String,
     pub secondary_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveOperationalModifierLanePanel {
+    pub schema_version: String,
+    pub status: String,
+    pub operation_mode: String,
+    pub purpose: String,
+    pub pending_count: usize,
+    pub applied_count: usize,
+    pub proposal_cards: Vec<InteractiveOperationalModifierProposalCard>,
+    pub commands: InteractiveOperationalModifierLaneCommands,
+    pub next_actions: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveOperationalModifierProposalCard {
+    pub proposal_id: String,
+    pub workflow_id: String,
+    pub target_kind: String,
+    pub task_id: Option<String>,
+    pub title: String,
+    pub summary: String,
+    pub rationale: String,
+    pub author: String,
+    pub status: String,
+    pub created_at: String,
+    pub applied_at: Option<String>,
+    pub applied_revision: Option<u64>,
+    pub apply_route: String,
+    pub inspect_command: Vec<String>,
+    pub apply_payload_hint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveOperationalModifierLaneCommands {
+    pub serve_console: Vec<String>,
+    pub refresh_cockpit: Vec<String>,
+    pub snapshot_route: String,
+    pub propose_goal_route: String,
+    pub propose_task_route: String,
+    pub apply_proposal_route: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1900,6 +1947,7 @@ pub fn build_interactive_home_with_options(
         &structured_logs_panel,
         &cost_panel,
         &context_memory_panel,
+        &modifier_lane,
     );
     let ui_composition_panel = build_ui_composition_panel(&addon_renderer_report);
 
@@ -7499,7 +7547,7 @@ pub fn render_interactive_operational_cockpit(
     panel: &InteractiveOperationalCockpitPanel,
 ) -> String {
     format!(
-        "Operational cockpit: {attention}; {priority}; active work {active_work}, ready handoffs {ready_handoffs}, human waits {human_waits}, due workflows {due_workflows}, brain {selected_brain}; sections {sections}; next {next_actions}",
+        "Operational cockpit: {attention}; {priority}; active work {active_work}, ready handoffs {ready_handoffs}, human waits {human_waits}, due workflows {due_workflows}, brain {selected_brain}; sections {sections}; modifier lane {modifier_lane}; next {next_actions}",
         attention = panel.attention_level,
         priority = panel.priority_summary,
         active_work = panel.active_work_count,
@@ -7508,11 +7556,38 @@ pub fn render_interactive_operational_cockpit(
         due_workflows = panel.due_workflow_count,
         selected_brain = panel.selected_brain,
         sections = render_operational_cockpit_sections(panel),
+        modifier_lane = render_operational_modifier_lane(&panel.modifier_lane),
         next_actions = if panel.next_actions.is_empty() {
             "none".to_string()
         } else {
             panel.next_actions.join(" | ")
         },
+    )
+}
+
+fn render_operational_modifier_lane(panel: &InteractiveOperationalModifierLanePanel) -> String {
+    let proposals = panel
+        .proposal_cards
+        .iter()
+        .take(5)
+        .map(|proposal| {
+            format!(
+                "{}:{}:{}",
+                proposal.proposal_id, proposal.target_kind, proposal.status
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{}; pending proposals {}; applied {}; proposals {}",
+        panel.status,
+        panel.pending_count,
+        panel.applied_count,
+        if proposals.is_empty() {
+            "none".to_string()
+        } else {
+            proposals
+        }
     )
 }
 
@@ -8922,6 +8997,7 @@ fn build_operational_cockpit_panel(
     structured_logs: &InteractiveStructuredLogsPanel,
     cost: &InteractiveCostPanel,
     context_memory: &InteractiveContextMemoryPanel,
+    modifier_lane: &OpsModifierLane,
 ) -> InteractiveOperationalCockpitPanel {
     let active_work_count =
         active_runs + task_board.ready_handoffs + schedule.runnable_due_workflows;
@@ -8932,6 +9008,7 @@ fn build_operational_cockpit_panel(
         || task_board.ready_handoffs > 0
         || schedule.due_workflows > 0
         || !harness.forge_first_ready
+        || modifier_lane.pending_count > 0
     {
         "attention"
     } else {
@@ -8943,9 +9020,12 @@ fn build_operational_cockpit_panel(
         .clone()
         .unwrap_or_else(|| "none".to_string());
     let priority_summary = format!(
-        "{active_work_count} active signals, {runs_needing_attention} runs needing attention, {} ready handoffs, {} human waits, {pending_approvals} pending approvals",
-        task_board.ready_handoffs, task_board.pending_human_interactions
+        "{active_work_count} active signals, {runs_needing_attention} runs needing attention, {} ready handoffs, {} human waits, {pending_approvals} pending approvals, {} modifier proposals",
+        task_board.ready_handoffs,
+        task_board.pending_human_interactions,
+        modifier_lane.pending_count
     );
+    let modifier_panel = build_operational_modifier_lane_panel(modifier_lane);
     let sections = vec![
         operational_cockpit_section(
             "attention",
@@ -9021,6 +9101,31 @@ fn build_operational_cockpit_panel(
             ],
         ),
         operational_cockpit_section(
+            "modifier",
+            "Modifier",
+            if modifier_lane.pending_count > 0 {
+                "pending_strategy"
+            } else if modifier_lane.applied_count > 0 {
+                "applied_history"
+            } else {
+                "idle"
+            },
+            modifier_lane.pending_count + modifier_lane.applied_count,
+            format!(
+                "{} pending proposals; {} applied proposals; mode {}",
+                modifier_lane.pending_count,
+                modifier_lane.applied_count,
+                modifier_panel.operation_mode
+            ),
+            "forge interactive operational-cockpit --output json",
+            vec![
+                "forge ops serve --project-root . --host 127.0.0.1 --port 8765"
+                    .to_string(),
+                "POST /api/modifier/propose-goal".to_string(),
+                "POST /api/modifier/apply".to_string(),
+            ],
+        ),
+        operational_cockpit_section(
             "brain",
             "Brain",
             if sessions.ready_session_count > 0 {
@@ -9073,6 +9178,7 @@ fn build_operational_cockpit_panel(
         ready_handoff_count: task_board.ready_handoffs,
         pending_human_wait_count: task_board.pending_human_interactions,
         pending_approval_count: pending_approvals,
+        pending_modifier_proposal_count: modifier_lane.pending_count,
         validation_failure_count: validation_failures,
         due_workflow_count: schedule.due_workflows,
         selected_brain,
@@ -9082,14 +9188,114 @@ fn build_operational_cockpit_panel(
         event_count: structured_logs.total_event_count,
         estimated_cost_total_usd: cost.estimated_task_cost_total_usd,
         sections,
+        modifier_lane: modifier_panel,
         next_actions: vec![
             "forge interactive operational-cockpit --output json".to_string(),
             "forge interactive task-board --output json".to_string(),
             "forge interactive readiness --output json".to_string(),
+            "forge ops serve --project-root . --host 127.0.0.1 --port 8765".to_string(),
             "forge interactive action-registry --query operational --output json".to_string(),
             "forge interactive structured-logs --output json".to_string(),
             "forge interactive sessions --output json".to_string(),
         ],
+    }
+}
+
+fn build_operational_modifier_lane_panel(
+    lane: &OpsModifierLane,
+) -> InteractiveOperationalModifierLanePanel {
+    let status = if lane.pending_count > 0 {
+        "modifier_lane_pending_review"
+    } else if lane.applied_count > 0 {
+        "modifier_lane_applied_history"
+    } else {
+        "modifier_lane_idle"
+    };
+    let proposal_cards = lane
+        .proposals
+        .iter()
+        .take(12)
+        .map(operational_modifier_proposal_card)
+        .collect::<Vec<_>>();
+    let mut next_actions = vec![
+        "forge ops serve --project-root . --host 127.0.0.1 --port 8765".to_string(),
+        "POST /api/modifier/propose-goal".to_string(),
+        "POST /api/modifier/propose-task".to_string(),
+    ];
+    if lane.pending_count > 0 {
+        next_actions.insert(
+            0,
+            "review pending modifier proposals before applying runtime mutations".to_string(),
+        );
+        next_actions.push("POST /api/modifier/apply".to_string());
+    }
+
+    InteractiveOperationalModifierLanePanel {
+        schema_version: INTERACTIVE_OPERATIONAL_MODIFIER_LANE_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        operation_mode: "human_ai_assisted_runtime_mutation".to_string(),
+        purpose: lane.purpose.clone(),
+        pending_count: lane.pending_count,
+        applied_count: lane.applied_count,
+        proposal_cards,
+        commands: InteractiveOperationalModifierLaneCommands {
+            serve_console: vec![
+                "forge".to_string(),
+                "ops".to_string(),
+                "serve".to_string(),
+                "--project-root".to_string(),
+                ".".to_string(),
+                "--host".to_string(),
+                "127.0.0.1".to_string(),
+                "--port".to_string(),
+                "8765".to_string(),
+            ],
+            refresh_cockpit: vec![
+                "forge".to_string(),
+                "interactive".to_string(),
+                "operational-cockpit".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            snapshot_route: "GET /api/snapshot".to_string(),
+            propose_goal_route: "POST /api/modifier/propose-goal".to_string(),
+            propose_task_route: "POST /api/modifier/propose-task".to_string(),
+            apply_proposal_route: "POST /api/modifier/apply".to_string(),
+        },
+        next_actions,
+        notes: vec![
+            "The modifier lane is read-only in the TUI; applying a proposal remains an explicit ops-console/API mutation.".to_string(),
+            "Use it for human+AI strategic updates to workflow goals or nodes while execution continues.".to_string(),
+        ],
+    }
+}
+
+fn operational_modifier_proposal_card(
+    proposal: &OpsModifierProposal,
+) -> InteractiveOperationalModifierProposalCard {
+    InteractiveOperationalModifierProposalCard {
+        proposal_id: proposal.proposal_id.clone(),
+        workflow_id: proposal.workflow_id.clone(),
+        target_kind: proposal.target_kind.clone(),
+        task_id: proposal.task_id.clone(),
+        title: proposal.title.clone(),
+        summary: proposal.summary.clone(),
+        rationale: proposal.rationale.clone(),
+        author: proposal.author.clone(),
+        status: proposal.status.clone(),
+        created_at: proposal.created_at.clone(),
+        applied_at: proposal.applied_at.clone(),
+        applied_revision: proposal.applied_revision,
+        apply_route: "/api/modifier/apply".to_string(),
+        inspect_command: vec![
+            "forge".to_string(),
+            "inspect".to_string(),
+            "--workflow".to_string(),
+            proposal.workflow_id.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        apply_payload_hint: format!("proposal_id={}", proposal.proposal_id),
     }
 }
 
