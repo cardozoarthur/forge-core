@@ -44366,6 +44366,16 @@ fn interactive_patch_workbench_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("Review queue"));
     assert!(text.contains("Edit intake"));
     assert!(text.contains("Operation plan"));
+    assert!(text.contains("Addon contract: forge.addon.software_development"));
+    assert!(text.contains("capability source_code_patch_lifecycle"));
+    assert!(text.contains("permission source_code.patch"));
+    assert!(text.contains("runtime source_code_patch_lifecycle.executor"));
+    assert!(text.contains("Commands: plan patch plan --workflow <workflow-id>"));
+    assert!(text.contains("review patch review --workflow <workflow-id>"));
+    assert!(text.contains("diff patch diff --workflow <workflow-id>"));
+    assert!(text.contains("apply patch apply --workflow <workflow-id>"));
+    assert!(text.contains("revert patch revert --workflow <workflow-id>"));
+    assert!(text.contains("restore patch restore --workflow <workflow-id>"));
     assert!(text.contains("missing workflow_id, task_id, intent"));
     assert!(text.contains("+beta"));
     assert!(text.contains("sample.txt"));

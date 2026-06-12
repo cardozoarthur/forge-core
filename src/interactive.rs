@@ -6132,7 +6132,7 @@ pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> Strin
 
 pub fn render_interactive_patch_workbench(panel: &InteractivePatchWorkbenchPanel) -> String {
     format!(
-        "Patch workbench: {status}; clean {clean}, files {changed_path_count}, staged {staged_path_count}, unstaged {unstaged_path_count}, untracked {untracked_path_count}, diff {diff_present}, check {diff_check_status}\nRepository: {repository_path}\nFiles: {files}\nDiff preview: {diff_preview}\nReview queue: {review_queue}\nEdit intake: {edit_intake}\nOperation plan: {operation_plan}\nApproval flow: {approval_status}; gate {approval_gate}; approval {requires_human_approval}; apply ready {apply_ready}\n",
+        "Patch workbench: {status}; clean {clean}, files {changed_path_count}, staged {staged_path_count}, unstaged {unstaged_path_count}, untracked {untracked_path_count}, diff {diff_present}, check {diff_check_status}\nRepository: {repository_path}\nAddon contract: {source_addon}; capability {capability_id}; permission {permission_id}; view {view_id}; runtime {runtime_contract_id} via {runtime}/{entrypoint}\nFiles: {files}\nDiff preview: {diff_preview}\nReview queue: {review_queue}\nEdit intake: {edit_intake}\nOperation plan: {operation_plan}\nApproval flow: {approval_status}; gate {approval_gate}; approval {requires_human_approval}; apply ready {apply_ready}\nCommands: {commands}\n",
         status = panel.status,
         clean = panel.clean,
         changed_path_count = panel.changed_path_count,
@@ -6142,6 +6142,13 @@ pub fn render_interactive_patch_workbench(panel: &InteractivePatchWorkbenchPanel
         diff_present = panel.diff_present,
         diff_check_status = panel.diff_check_status,
         repository_path = panel.repository_path,
+        source_addon = panel.addon_contract.source_addon,
+        capability_id = panel.addon_contract.capability_id,
+        permission_id = panel.addon_contract.permission_id,
+        view_id = panel.addon_contract.view_id,
+        runtime_contract_id = panel.addon_contract.runtime_contract_id,
+        runtime = panel.addon_contract.runtime,
+        entrypoint = panel.addon_contract.entrypoint,
         files = render_patch_workbench_file_summary(panel),
         diff_preview = render_patch_diff_preview(&panel.diff_preview),
         review_queue = render_patch_diff_review_queue(&panel.diff_review_queue),
@@ -6151,6 +6158,19 @@ pub fn render_interactive_patch_workbench(panel: &InteractivePatchWorkbenchPanel
         approval_gate = panel.approval_flow.current_gate,
         requires_human_approval = panel.approval_flow.requires_human_approval,
         apply_ready = panel.approval_flow.apply_ready,
+        commands = render_patch_workbench_commands(&panel.commands),
+    )
+}
+
+fn render_patch_workbench_commands(commands: &InteractivePatchWorkbenchCommands) -> String {
+    format!(
+        "plan {}; review {}; diff {}; apply {}; revert {}; restore {}",
+        commands.plan.join(" "),
+        commands.review.join(" "),
+        commands.diff.join(" "),
+        commands.apply.join(" "),
+        commands.revert.join(" "),
+        commands.restore.join(" "),
     )
 }
 
