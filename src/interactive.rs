@@ -18,16 +18,18 @@ use crate::executor::{
 };
 use crate::graph::{AtomicTask, ExecutorKind, TaskStatus};
 use crate::harness::{
-    analyze_token_headroom, build_harness_adoption_plan, build_harness_doctor_report,
-    build_harness_executor_compatibility_report, build_harness_headroom_plan,
-    build_harness_mode_report, build_headroom_stats_report, inspect_cli_harness_shim_status,
+    analyze_token_headroom, build_harness_adoption_plan, build_harness_bootstrap_report,
+    build_harness_doctor_report, build_harness_executor_compatibility_report,
+    build_harness_headroom_plan, build_harness_mode_report, build_headroom_stats_report,
+    inspect_cli_harness_shim_status, install_cli_harness_shim, persist_token_headroom_report,
     resolve_harness_forge_first_source_for_project, resolve_harness_runtime_policy,
+    run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions, CliShimInstallReport,
     CliShimStatusOptions, CliShimStatusReport, CliWrapperPlanReport, HarnessAdoptionPlanOptions,
-    HarnessAdoptionPlanReport, HarnessDoctorOptions, HarnessDoctorReport,
-    HarnessExecutorCompatibilityReport, HarnessHeadroomPlanOptions, HarnessHeadroomPlanReport,
-    HarnessModeOptions, HarnessModeReport, HarnessRuntimePolicyOptions,
-    HarnessSessionLifecyclePlan, HeadroomStatsContentKindBucket, HeadroomStatsOptions,
-    HeadroomStatsReport, HeadroomStatsSourceBucket, TokenHeadroomReport,
+    HarnessAdoptionPlanReport, HarnessBootstrapOptions, HarnessBootstrapReport,
+    HarnessDoctorOptions, HarnessDoctorReport, HarnessExecutorCompatibilityReport,
+    HarnessHeadroomPlanOptions, HarnessHeadroomPlanReport, HarnessModeOptions, HarnessModeReport,
+    HarnessRuntimePolicyOptions, HarnessSessionLifecyclePlan, HeadroomStatsContentKindBucket,
+    HeadroomStatsOptions, HeadroomStatsReport, HeadroomStatsSourceBucket, TokenHeadroomReport,
 };
 use crate::identity::{
     audit_tenant_index, inspect_project_operating_context, list_identity_links,
@@ -71,6 +73,7 @@ use std::env;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
 const INTERACTIVE_WORKFLOW_SIDEBAR_SCHEMA_VERSION: &str = "forge.interactive.workflow_sidebar.v1";
@@ -110,6 +113,7 @@ const INTERACTIVE_OPERATIONAL_MODIFIER_LANE_SCHEMA_VERSION: &str =
     "forge.interactive.operational_modifier_lane.v1";
 const INTERACTIVE_ADDON_CAPABILITY_SCHEMA_VERSION: &str = "forge.interactive.addon_capability.v1";
 const OPERATIONAL_TUI_SMOKE_SCHEMA_VERSION: &str = "forge.smoke.operational_tui.v1";
+const FORGE_FIRST_HARNESS_SMOKE_SCHEMA_VERSION: &str = "forge.smoke.forge_first_harness.v1";
 const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
 const INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION: &str = "forge.interactive.structured_logs.v1";
 const INTERACTIVE_EVENT_RUNTIME_SCHEMA_VERSION: &str = "forge.interactive.event_runtime.v1";
@@ -1882,6 +1886,26 @@ pub struct OperationalTuiSmokeCheck {
     pub command: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ForgeFirstHarnessSmokeReport {
+    pub schema_version: String,
+    pub status: String,
+    pub executor: String,
+    pub project_root: String,
+    pub shim_dir: String,
+    pub real_cmd: String,
+    pub mutates_external_cli: bool,
+    pub executes_external_cli: bool,
+    pub headroom: TokenHeadroomReport,
+    pub adoption_plan: HarnessAdoptionPlanReport,
+    pub bootstrap_plan: HarnessBootstrapReport,
+    pub shim_install: CliShimInstallReport,
+    pub shim_status: CliShimStatusReport,
+    pub exec_receipt: crate::harness::CliHarnessExecReceipt,
+    pub checks: Vec<OperationalTuiSmokeCheck>,
+    pub commands: Vec<String>,
+}
+
 pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeReport> {
     build_interactive_home_with_options(store, InteractiveHomeOptions::default())
 }
@@ -2514,6 +2538,298 @@ pub fn build_operational_tui_smoke(
     })
 }
 
+pub fn build_forge_first_harness_smoke(
+    store: &ForgeStore,
+    project_root: Option<&Path>,
+    executor: &str,
+    real_cmd: Option<&str>,
+) -> Result<ForgeFirstHarnessSmokeReport> {
+    let executor = executor.trim();
+    let executor = if executor.is_empty() {
+        "codex"
+    } else {
+        executor
+    };
+    let smoke_root = forge_harness_smoke_root();
+    let shim_dir = smoke_root.join("bin");
+    let smoke_project_root = project_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| smoke_root.join("project"));
+    std::fs::create_dir_all(&shim_dir)?;
+    std::fs::create_dir_all(&smoke_project_root)?;
+    let real_cmd = real_cmd
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(default_forge_harness_smoke_real_cmd);
+    let context_budget = 120usize;
+    let context_budget_source = "smoke_default";
+    let token_headroom_source = "smoke_default";
+    let require_token_headroom_for_forge_first = true;
+    let headroom_content = forge_harness_smoke_headroom_content();
+    let headroom = analyze_token_headroom(
+        &headroom_content,
+        Some("log"),
+        context_budget,
+        "forge_first_harness_smoke",
+        true,
+    );
+    let headroom = persist_token_headroom_report(store, headroom, &headroom_content)?;
+
+    let adoption_plan = build_harness_adoption_plan(HarnessAdoptionPlanOptions {
+        shim_dir: &shim_dir,
+        executor,
+        forge_first: true,
+        observe_only: false,
+        project_root: Some(&smoke_project_root),
+        workflow_id: None,
+        task_id: None,
+        run_id: None,
+        context_budget,
+        context_budget_source,
+        token_headroom: true,
+        token_headroom_source,
+        require_token_headroom_for_forge_first,
+    })?;
+    let bootstrap_plan = build_harness_bootstrap_report(HarnessBootstrapOptions {
+        shim_dir: &shim_dir,
+        executor,
+        project_root: &smoke_project_root,
+        store_path: None,
+        context_budget,
+        context_budget_source,
+        token_headroom: true,
+        token_headroom_source,
+        apply: false,
+        approved_by: None,
+        force: true,
+    })?;
+    let shim_install = install_cli_harness_shim(CliShimInstallOptions {
+        shim_dir: &shim_dir,
+        executor,
+        real_cmd: Some(&real_cmd),
+        store_path: None,
+        forge_first: true,
+        forge_first_source: "smoke_explicit",
+        workflow_id: None,
+        task_id: None,
+        run_id: None,
+        context_budget,
+        token_headroom: true,
+        force: true,
+    })?;
+    let shim_status = inspect_cli_harness_shim_status(CliShimStatusOptions {
+        shim_dir: &shim_dir,
+        executor,
+    })?;
+    let exec_command = vec![real_cmd.clone(), "forge-first-harness-smoke".to_string()];
+    let exec_receipt = run_cli_harness_exec(CliHarnessExecOptions {
+        store: Some(store),
+        executor,
+        command: &exec_command,
+        forge_first: true,
+        forge_first_source: "smoke_explicit",
+        workflow_id: None,
+        task_id: None,
+        run_id: None,
+        context_budget,
+        context_budget_source,
+        token_headroom: true,
+        token_headroom_source,
+        require_token_headroom_for_forge_first,
+        dry_run: true,
+        allow_exec: false,
+        project_root: Some(&smoke_project_root),
+        cwd: Some(&smoke_project_root),
+    })?;
+
+    let checks = vec![
+        operational_tui_smoke_check(
+            "headroom_persisted",
+            "Token headroom is reversible and persisted",
+            headroom.persisted
+                && headroom.retrieval_available
+                && headroom.estimated_saved_tokens > 0,
+            format!(
+                "{} saved {} tokens; persisted {}; retrieval {}",
+                headroom.status,
+                headroom.estimated_saved_tokens,
+                headroom.persisted,
+                headroom.retrieval_available
+            ),
+            "forge harness token-headroom --persist --output json",
+        ),
+        operational_tui_smoke_check(
+            "adoption_plan_ready",
+            "Forge-first adoption plan is read-only and complete",
+            adoption_plan.status == "harness_adoption_plan_ready"
+                && !adoption_plan.mutates_state
+                && !adoption_plan.executes_child
+                && adoption_plan.recommended_project_config.default_mode == "forge_first",
+            format!(
+                "{}; mutates {}; executes {}; next {}",
+                adoption_plan.status,
+                adoption_plan.mutates_state,
+                adoption_plan.executes_child,
+                adoption_plan.next_action
+            ),
+            "forge harness adoption-plan --forge-first --token-headroom --output json",
+        ),
+        operational_tui_smoke_check(
+            "bootstrap_dry_run",
+            "Bootstrap stays dry-run without approval",
+            bootstrap_plan.status == "harness_bootstrap_planned"
+                && !bootstrap_plan.applied
+                && !bootstrap_plan.mutates_state
+                && bootstrap_plan.would_mutate_state,
+            format!(
+                "{}; config {}; applied {}",
+                bootstrap_plan.status, bootstrap_plan.config_write.status, bootstrap_plan.applied
+            ),
+            "forge harness bootstrap --output json",
+        ),
+        operational_tui_smoke_check(
+            "shim_installed_in_smoke_dir",
+            "Forge-owned shim can be installed in an isolated directory",
+            shim_install.status == "shim_install_ready"
+                && shim_install.blocked_count == 0
+                && shim_install.forge_first
+                && shim_install.token_headroom
+                && shim_install
+                    .shims
+                    .first()
+                    .map(|shim| shim.real_command_resolution_status == "explicit_real_command")
+                    .unwrap_or(false),
+            format!(
+                "{}; installed {}; updated {}; blocked {}",
+                shim_install.status,
+                shim_install.installed_count,
+                shim_install.updated_count,
+                shim_install.blocked_count
+            ),
+            "forge harness install-shims --real-cmd <safe-command> --output json",
+        ),
+        operational_tui_smoke_check(
+            "shim_audit_safe",
+            "Shim audit proves ownership and no recursion without changing PATH",
+            shim_status.shim_exists
+                && shim_status.forge_owned
+                && shim_status.executable
+                && !shim_status.would_recurse,
+            format!(
+                "{}; path {}; exists {}; forge_owned {}; executable {}; recurse {}",
+                shim_status.status,
+                shim_status.path_precedence,
+                shim_status.shim_exists,
+                shim_status.forge_owned,
+                shim_status.executable,
+                shim_status.would_recurse
+            ),
+            "forge harness shim-status --output json",
+        ),
+        operational_tui_smoke_check(
+            "exec_dry_run_forge_first",
+            "Harness exec remains dry-run while projecting Forge-first policy",
+            exec_receipt.status == "harness_exec_dry_run"
+                && exec_receipt.dry_run
+                && !exec_receipt.executed
+                && exec_receipt.forge_first
+                && exec_receipt.output_headroom_enabled,
+            format!(
+                "{}; executed {}; forge_first {}; headroom {}",
+                exec_receipt.status,
+                exec_receipt.executed,
+                exec_receipt.forge_first,
+                exec_receipt.output_headroom_enabled
+            ),
+            "forge harness exec --dry-run --output json",
+        ),
+        operational_tui_smoke_check(
+            "external_cli_not_executed_or_modified",
+            "Smoke does not execute or mutate the external CLI",
+            !exec_receipt.executed
+                && shim_install
+                    .shims
+                    .iter()
+                    .all(|shim| shim.real_command == real_cmd),
+            format!(
+                "real command {}; executed {}; shim dir {}",
+                real_cmd,
+                exec_receipt.executed,
+                shim_dir.display()
+            ),
+            "forge smoke forge-first-harness --output json",
+        ),
+    ];
+    let status = if checks.iter().all(|check| check.passed) {
+        "forge_first_harness_smoke_passed"
+    } else {
+        "forge_first_harness_smoke_failed"
+    };
+
+    Ok(ForgeFirstHarnessSmokeReport {
+        schema_version: FORGE_FIRST_HARNESS_SMOKE_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        executor: executor.to_string(),
+        project_root: smoke_project_root.display().to_string(),
+        shim_dir: shim_dir.display().to_string(),
+        real_cmd,
+        mutates_external_cli: false,
+        executes_external_cli: false,
+        headroom,
+        adoption_plan,
+        bootstrap_plan,
+        shim_install,
+        shim_status,
+        exec_receipt,
+        checks,
+        commands: vec![
+            "forge smoke forge-first-harness --output json".to_string(),
+            "forge harness token-headroom --persist --output json".to_string(),
+            "forge harness adoption-plan --forge-first --token-headroom --output json".to_string(),
+            "forge harness bootstrap --output json".to_string(),
+            "forge harness install-shims --real-cmd <safe-command> --output json".to_string(),
+            "forge harness shim-status --output json".to_string(),
+            "forge harness exec --dry-run --output json".to_string(),
+        ],
+    })
+}
+
+fn forge_harness_smoke_root() -> PathBuf {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    env::temp_dir().join(format!(
+        "forge-first-harness-smoke-{}-{now}",
+        std::process::id()
+    ))
+}
+
+fn default_forge_harness_smoke_real_cmd() -> String {
+    ["/bin/echo", "/usr/bin/printf", "/usr/bin/env"]
+        .iter()
+        .find(|candidate| Path::new(candidate).exists())
+        .map(|candidate| (*candidate).to_string())
+        .unwrap_or_else(|| {
+            env::current_exe()
+                .unwrap_or_else(|_| PathBuf::from("forge"))
+                .display()
+                .to_string()
+        })
+}
+
+fn forge_harness_smoke_headroom_content() -> String {
+    (0..80)
+        .map(|index| {
+            format!(
+                "warning[{index}]: repeated executor output can be compressed by Forge headroom while original bytes remain retrievable"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn operational_tui_smoke_check(
     check_id: &str,
     title: &str,
@@ -2553,6 +2869,37 @@ pub fn render_operational_tui_smoke(report: &OperationalTuiSmokeReport) -> Strin
         cost_estimated_usd = report.dashboard.cost_estimated_usd,
         ready_handoff_count = report.dashboard.ready_handoff_count,
         pending_approval_count = report.dashboard.pending_approval_count,
+        checks = checks,
+        commands = report.commands.join(" | "),
+    )
+}
+
+pub fn render_forge_first_harness_smoke(report: &ForgeFirstHarnessSmokeReport) -> String {
+    let checks = report
+        .checks
+        .iter()
+        .map(|check| format!("{}={} ({})", check.check_id, check.passed, check.evidence))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!(
+        "Forge-first harness smoke: {status}; executor {executor}; project {project_root}; shim {shim_dir}; real_cmd {real_cmd}\nHeadroom: {headroom_status}; saved {saved_tokens} tokens; persisted {persisted}; retrieval {retrieval_available}\nAdoption: {adoption_status}; bootstrap {bootstrap_status}; shim install {shim_install_status}; shim audit {shim_status} ({shim_path_precedence}); exec {exec_status}; external mutated {mutates_external_cli}; external executed {executes_external_cli}\nchecks: {checks}\ncommands: {commands}\n",
+        status = report.status,
+        executor = report.executor,
+        project_root = report.project_root,
+        shim_dir = report.shim_dir,
+        real_cmd = report.real_cmd,
+        headroom_status = report.headroom.status,
+        saved_tokens = report.headroom.estimated_saved_tokens,
+        persisted = report.headroom.persisted,
+        retrieval_available = report.headroom.retrieval_available,
+        adoption_status = report.adoption_plan.status,
+        bootstrap_status = report.bootstrap_plan.status,
+        shim_install_status = report.shim_install.status,
+        shim_status = report.shim_status.status,
+        shim_path_precedence = report.shim_status.path_precedence,
+        exec_status = report.exec_receipt.status,
+        mutates_external_cli = report.mutates_external_cli,
+        executes_external_cli = report.executes_external_cli,
         checks = checks,
         commands = report.commands.join(" | "),
     )

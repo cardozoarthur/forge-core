@@ -31,6 +31,7 @@ O fluxo mental é simples:
 3. `forge request start --goal "<objetivo>" --origin codex` cria um run assíncrono.
 4. `forge interactive task-board` mostra tarefas, handoffs, aprovações e checkpoints.
 5. `forge smoke operational-tui --output json` prova localmente que a TUI abre, cria um fluxo demonstrável e expõe workflows, eventos/schedules, Addons/capabilities, custos e handoffs/approvals.
+6. `forge smoke forge-first-harness --output json` prova localmente que headroom, adoption-plan, bootstrap dry-run, shim Forge-owned e exec dry-run funcionam sem executar ou modificar a CLI externa.
 
 Use `j`/`k` para mover o foco no REPL, `enter` para abrir o painel focado, `m` para alternar modo de visualização, `t` para alternar tema e `q`, `quit`, `exit`, `/quit` ou `/exit` para sair sem criar workflow. Os comandos slash como `/cockpit`, `/task-board`, `/readiness`, `/addons`, `/sessions`, `/logs`, `/permissions` e `/dag` renderizam painéis dentro do próprio REPL.
 
@@ -129,6 +130,7 @@ This is the first functional CLI + Skill version:
 - Addon executor execution for external `executor` workers, with standardized task/input/context envelopes, generic result validation and artifact/event/output audit over the same dispatch ledger
 - harness utilities for token-headroom analysis, Forge-first CLI wrapper planning, non-destructive PATH shim installation, shim status auditing, reversible stdout/stderr headroom receipts and workflow/task/run timeline events across Codex, Claude, Gemini and OpenCode-style executors
 - harness executor compatibility reports embedded in `forge interactive harness` / MCP `forge.interactive.harness`, exposing canonical Codex, Claude, Gemini and OpenCode adapter families plus readiness for env overlay, PATH shim, guarded exec, token headroom, session lifecycle, context/memory/skill/MCP routing and credential-vault boundaries
+- Forge-first harness smoke through `forge smoke forge-first-harness`, proving persisted reversible headroom, read-only adoption-plan, approval-gated bootstrap dry-run, isolated Forge-owned shim installation, shim audit and `harness exec` dry-run without executing or mutating the external CLI
 - intent v2 records workflow mode, event policy, operating context, required capabilities, active addons and capability resolution
 - capability resolution exposes workflow-extension activations, runtime contracts and missing-capability suggestions with source Addon/capability lineage, including trusted local marketplace packages on the store-aware resolver
 - capability-first internal workflow-extension planner registry for first-party Addon builders and policy mutations, with textual matching kept only for legacy intents
@@ -184,6 +186,7 @@ forge sync executors --home "$HOME" --shim-dir .forge/bin --allow codex --output
 forge shells --executor codex --workflow <workflow-id> --task <task-id> --run <run-id> --context-budget 8000 --ttl-seconds 900 --output json
 forge shells --executor codex --workflow <workflow-id> --task <task-id> --run <run-id> --record-session --origin forge_cli --output json
 forge harness exec --executor codex --forge-first --workflow <workflow-id> --task <task-id> --run <run-id> --context-budget 8000 --output json -- codex --version
+forge smoke forge-first-harness --output json
 forge addons catalog --output json
 forge addons installed --output json
 forge addons capabilities --addon forge.addon.example --lifecycle enabled --output json

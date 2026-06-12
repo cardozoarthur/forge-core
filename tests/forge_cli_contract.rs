@@ -48449,6 +48449,120 @@ fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
 }
 
 #[test]
+fn forge_first_harness_smoke_proves_headroom_wrapper_and_shim_without_child_exec() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("project");
+    fs::create_dir_all(project.join(".forge")).unwrap();
+
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "smoke",
+            "forge-first-harness",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--real-cmd",
+            "/bin/echo",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.smoke.forge_first_harness.v1");
+    assert_eq!(json["status"], "forge_first_harness_smoke_passed");
+    assert_eq!(json["executor"], "codex");
+    assert_eq!(json["mutates_external_cli"], false);
+    assert_eq!(json["executes_external_cli"], false);
+    assert_eq!(json["headroom"]["persisted"], true);
+    assert_eq!(json["headroom"]["retrieval_available"], true);
+    assert!(json["headroom"]["estimated_saved_tokens"].as_u64().unwrap() > 0);
+    assert_eq!(
+        json["adoption_plan"]["status"],
+        "harness_adoption_plan_ready"
+    );
+    assert_eq!(json["adoption_plan"]["mutates_state"], false);
+    assert_eq!(json["adoption_plan"]["executes_child"], false);
+    assert_eq!(
+        json["bootstrap_plan"]["status"],
+        "harness_bootstrap_planned"
+    );
+    assert_eq!(json["bootstrap_plan"]["applied"], false);
+    assert_eq!(json["shim_install"]["status"], "shim_install_ready");
+    assert_eq!(json["shim_install"]["blocked_count"], 0);
+    assert_eq!(json["shim_status"]["shim_exists"], true);
+    assert_eq!(json["shim_status"]["forge_owned"], true);
+    assert_eq!(json["shim_status"]["executable"], true);
+    assert_eq!(json["shim_status"]["would_recurse"], false);
+    assert_eq!(json["exec_receipt"]["status"], "harness_exec_dry_run");
+    assert_eq!(json["exec_receipt"]["executed"], false);
+    assert_eq!(json["exec_receipt"]["forge_first"], true);
+    assert_eq!(json["exec_receipt"]["output_headroom_enabled"], true);
+
+    for check_id in [
+        "headroom_persisted",
+        "adoption_plan_ready",
+        "bootstrap_dry_run",
+        "shim_installed_in_smoke_dir",
+        "shim_audit_safe",
+        "exec_dry_run_forge_first",
+        "external_cli_not_executed_or_modified",
+    ] {
+        let check = json["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["check_id"] == check_id)
+            .unwrap_or_else(|| panic!("missing harness smoke check {check_id}"));
+        assert_eq!(
+            check["passed"], true,
+            "harness smoke check {check_id} failed"
+        );
+    }
+
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge smoke forge-first-harness --output json"
+        )));
+
+    let text_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "smoke",
+            "forge-first-harness",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--real-cmd",
+            "/bin/echo",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Forge-first harness smoke: forge_first_harness_smoke_passed"));
+    assert!(text.contains("Headroom: token_headroom_ready"));
+    assert!(text.contains("external executed false"));
+    assert!(text.contains("forge smoke forge-first-harness --output json"));
+}
+
+#[test]
 fn readme_explains_forge_in_five_minutes_and_names_operational_smoke() {
     let readme = fs::read_to_string("README.md").unwrap();
 
@@ -48460,6 +48574,7 @@ fn readme_explains_forge_in_five_minutes_and_names_operational_smoke() {
     assert!(readme.contains("Addons/capabilities"));
     assert!(readme.contains("custos"));
     assert!(readme.contains("handoffs/approvals"));
+    assert!(readme.contains("forge smoke forge-first-harness"));
 }
 
 #[test]
@@ -50121,6 +50236,10 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
             && forge_core::skill::SKILL_MD.contains("forge interactive multimodal-runtime")
             && forge_core::skill::SKILL_MD.contains("dashboard.multimodal_runtime_panel"),
         "the packaged Forge skill should expose the Addon-owned multimodal runtime surface through MCP, CLI and home"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge smoke forge-first-harness"),
+        "the packaged Forge skill should expose the Forge-first harness smoke"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.workflow_dag"),
