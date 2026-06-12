@@ -45400,6 +45400,8 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         "/shells",
         "/harness",
         "/harness doctor",
+        "/harness headroom-plan",
+        "/harness headroom-stats",
         "/runtimes",
         "/validate",
         "/approve",
@@ -45472,6 +45474,26 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         .as_array()
         .unwrap()
         .contains(&Value::String("<executor>".to_string())));
+
+    let headroom_plan = find_slash_command(&json, "/harness headroom-plan");
+    assert_eq!(headroom_plan["risk_level"], "low");
+    assert_eq!(headroom_plan["mutates_workflow"], false);
+    assert!(headroom_plan["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("headroom-plan".to_string())));
+    assert!(headroom_plan["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("<executor>".to_string())));
+
+    let headroom_stats = find_slash_command(&json, "/harness headroom-stats");
+    assert_eq!(headroom_stats["risk_level"], "low");
+    assert_eq!(headroom_stats["mutates_workflow"], false);
+    assert!(headroom_stats["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("headroom-stats".to_string())));
 
     let pm = find_slash_command(&json, "/pm");
     assert_eq!(pm["risk_level"], "medium");
@@ -45711,6 +45733,39 @@ fn interactive_route_slash_command_stays_command_mode_without_workflow() {
         .as_array()
         .unwrap()
         .contains(&Value::String("status".to_string())));
+
+    let headroom = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "route",
+            "--input",
+            "/harness headroom-stats",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let headroom_json: Value = serde_json::from_slice(&headroom).unwrap();
+    assert_eq!(headroom_json["input_kind"], "slash_command");
+    assert_eq!(headroom_json["routing_decision"], "slash_command");
+    assert_eq!(headroom_json["workflow_created"], false);
+    assert_eq!(
+        headroom_json["slash_command"]["name"],
+        "/harness headroom-stats"
+    );
+    assert_eq!(headroom_json["slash_command"]["recognized"], true);
+    assert!(headroom_json["slash_command"]["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("headroom-stats".to_string())));
 }
 
 #[test]
