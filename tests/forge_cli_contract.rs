@@ -46148,6 +46148,8 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         "/harness doctor",
         "/harness headroom-plan",
         "/harness headroom-stats",
+        "/harness adoption-plan",
+        "/harness bootstrap",
         "/runtimes",
         "/validate",
         "/approve",
@@ -46240,6 +46242,38 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         .as_array()
         .unwrap()
         .contains(&Value::String("headroom-stats".to_string())));
+
+    let adoption_plan = find_slash_command(&json, "/harness adoption-plan");
+    assert_eq!(adoption_plan["risk_level"], "low");
+    assert_eq!(adoption_plan["mutates_workflow"], false);
+    assert!(adoption_plan["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("adoption-plan".to_string())));
+    assert!(adoption_plan["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("<executor>".to_string())));
+    assert!(adoption_plan["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("<dir>".to_string())));
+
+    let bootstrap = find_slash_command(&json, "/harness bootstrap");
+    assert_eq!(bootstrap["risk_level"], "medium");
+    assert_eq!(bootstrap["mutates_workflow"], true);
+    assert!(bootstrap["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("bootstrap".to_string())));
+    assert!(bootstrap["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("--apply".to_string())));
+    assert!(bootstrap["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("<operator>".to_string())));
 
     let pm = find_slash_command(&json, "/pm");
     assert_eq!(pm["risk_level"], "medium");
@@ -46532,6 +46566,86 @@ fn interactive_route_slash_command_stays_command_mode_without_workflow() {
         .as_array()
         .unwrap()
         .contains(&Value::String("headroom-stats".to_string())));
+
+    let adoption = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "route",
+            "--input",
+            "/harness adoption-plan --executor codex --shim-dir /tmp/forge-bin --project-root /repo",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let adoption_json: Value = serde_json::from_slice(&adoption).unwrap();
+    assert_eq!(adoption_json["input_kind"], "slash_command");
+    assert_eq!(adoption_json["routing_decision"], "slash_command");
+    assert_eq!(
+        adoption_json["slash_command"]["name"],
+        "/harness adoption-plan"
+    );
+    assert_eq!(adoption_json["slash_command"]["recognized"], true);
+    assert_eq!(adoption_json["slash_command"]["mutates_workflow"], false);
+    assert_eq!(adoption_json["slash_command"]["risk_level"], "low");
+    assert_eq!(
+        adoption_json["slash_command"]["execution_boundary"],
+        "slash_command_not_executed"
+    );
+    assert!(adoption_json["slash_command"]["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("adoption-plan".to_string())));
+
+    let bootstrap = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "route",
+            "--input",
+            "/harness bootstrap --executor codex --shim-dir /tmp/forge-bin --project-root /repo --approved-by arthur",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let bootstrap_json: Value = serde_json::from_slice(&bootstrap).unwrap();
+    assert_eq!(bootstrap_json["input_kind"], "slash_command");
+    assert_eq!(bootstrap_json["routing_decision"], "slash_command");
+    assert_eq!(
+        bootstrap_json["slash_command"]["name"],
+        "/harness bootstrap"
+    );
+    assert_eq!(bootstrap_json["slash_command"]["recognized"], true);
+    assert_eq!(bootstrap_json["slash_command"]["mutates_workflow"], true);
+    assert_eq!(bootstrap_json["slash_command"]["risk_level"], "medium");
+    assert_eq!(
+        bootstrap_json["slash_command"]["execution_boundary"],
+        "slash_command_not_executed"
+    );
+    assert!(bootstrap_json["slash_command"]["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("bootstrap".to_string())));
+    assert!(bootstrap_json["slash_command"]["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("--apply".to_string())));
 }
 
 #[test]
@@ -46748,6 +46862,14 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("/harness headroom-stats")));
+    assert!(home_json["result"]["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/harness adoption-plan")));
+    assert!(home_json["result"]["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/harness bootstrap")));
     assert!(home_json["result"]["dashboard"]["useful_next_commands"]
         .as_array()
         .unwrap()
@@ -46759,6 +46881,18 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         .unwrap()
         .contains(&serde_json::json!(
             "forge harness headroom-stats --output json"
+        )));
+    assert!(home_json["result"]["dashboard"]["useful_next_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge harness adoption-plan --executor codex --shim-dir $HOME/.forge/bin --project-root . --output json"
+        )));
+    assert!(home_json["result"]["dashboard"]["useful_next_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge harness bootstrap --executor codex --shim-dir $HOME/.forge/bin --project-root . --apply --approved-by <operator> --output json"
         )));
     assert!(home_json["result"]["dashboard"]["workflow_focus"].is_array());
     assert_eq!(
@@ -46939,6 +47073,20 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         .unwrap()
         .iter()
         .any(|command| command["name"] == "/patch restore" && command["mutates_workflow"] == true));
+    assert!(slash_json["result"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command["name"] == "/harness adoption-plan"
+            && command["mutates_workflow"] == false
+            && command["risk_level"] == "low"));
+    assert!(slash_json["result"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command["name"] == "/harness bootstrap"
+            && command["mutates_workflow"] == true
+            && command["risk_level"] == "medium"));
 
     let route_input = serde_json::json!({
         "input": "What is the current Forge status?",
