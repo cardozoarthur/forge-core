@@ -1259,6 +1259,8 @@ pub struct InteractiveHarnessCommands {
     pub headroom_plan: Vec<String>,
     pub headroom_stats: Vec<String>,
     pub adoption_plan: Vec<String>,
+    pub lineage_plan: Vec<String>,
+    pub lineage_exec_dry_run: Vec<String>,
     pub activation_profile: Vec<String>,
     pub bootstrap_project_harness: Vec<String>,
     pub install_shims: Vec<String>,
@@ -5661,6 +5663,10 @@ fn build_interactive_harness_forge_first_adoption_readiness(
     }
     if mode.require_lineage_for_exec && !session_lifecycle_plan.lineage_complete {
         next_commands.push(interactive_forge_command_line(&commands.sessions));
+        next_commands.push(interactive_forge_command_line(&commands.lineage_plan));
+        next_commands.push(interactive_forge_command_line(
+            &commands.lineage_exec_dry_run,
+        ));
     }
     next_commands.push(interactive_forge_command_line(&commands.wrap_plan));
     next_commands.push(interactive_forge_command_line(&commands.headroom_plan));
@@ -6663,6 +6669,85 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             false,
             "low",
             &["harness", "adoption", "bootstrap", "forge-first", "shim", "plan"],
+        ),
+        command_palette_entry(
+            "harness.lineage_plan",
+            "harness",
+            "Inspect lineage handoff plan",
+            "Inspect the Forge-first harness plan with workflow/task/run placeholders before a brain CLI handoff.",
+            "harness_panel",
+            None,
+            &[
+                "harness",
+                "adoption-plan",
+                "--executor",
+                "codex",
+                "--shim-dir",
+                "$HOME/.forge/bin",
+                "--project-root",
+                ".",
+                "--workflow",
+                "<workflow-id>",
+                "--task",
+                "<task-id>",
+                "--run",
+                "<run-id>",
+                "--output",
+                "json",
+            ],
+            false,
+            false,
+            "low",
+            &[
+                "harness",
+                "lineage",
+                "workflow",
+                "task",
+                "run",
+                "handoff",
+                "brain",
+            ],
+        ),
+        command_palette_entry(
+            "harness.lineage_exec_dry_run",
+            "harness",
+            "Validate lineage exec dry-run",
+            "Validate the guarded harness exec receipt with workflow/task/run lineage without executing the child CLI.",
+            "harness_panel",
+            None,
+            &[
+                "harness",
+                "exec",
+                "--executor",
+                "codex",
+                "--forge-first",
+                "--project-root",
+                ".",
+                "--workflow",
+                "<workflow-id>",
+                "--task",
+                "<task-id>",
+                "--run",
+                "<run-id>",
+                "--output",
+                "json",
+                "--",
+                "codex",
+            ],
+            true,
+            true,
+            "medium",
+            &[
+                "harness",
+                "lineage",
+                "exec",
+                "dry-run",
+                "workflow",
+                "task",
+                "run",
+                "handoff",
+                "brain",
+            ],
         ),
         command_palette_entry(
             "harness.bootstrap_project_harness",
@@ -12192,6 +12277,57 @@ fn interactive_harness_commands(
             "--output".to_string(),
             "json".to_string(),
         ],
+        lineage_plan: vec![
+            "harness".to_string(),
+            "adoption-plan".to_string(),
+            "--executor".to_string(),
+            executor.to_string(),
+            "--shim-dir".to_string(),
+            shim_dir.clone(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--task".to_string(),
+            "<task-id>".to_string(),
+            "--run".to_string(),
+            "<run-id>".to_string(),
+            "--context-budget".to_string(),
+            context_budget.to_string(),
+            if token_headroom {
+                "--token-headroom".to_string()
+            } else {
+                "--no-token-headroom".to_string()
+            },
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        lineage_exec_dry_run: vec![
+            "harness".to_string(),
+            "exec".to_string(),
+            "--executor".to_string(),
+            executor.to_string(),
+            "--forge-first".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--task".to_string(),
+            "<task-id>".to_string(),
+            "--run".to_string(),
+            "<run-id>".to_string(),
+            "--context-budget".to_string(),
+            context_budget.to_string(),
+            if token_headroom {
+                "--token-headroom".to_string()
+            } else {
+                "--no-token-headroom".to_string()
+            },
+            "--output".to_string(),
+            "json".to_string(),
+            "--".to_string(),
+            executor.to_string(),
+        ],
         adoption_plan: vec![
             "harness".to_string(),
             "adoption-plan".to_string(),
@@ -14362,7 +14498,7 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         panel.next_actions.join(" | ")
     };
     format!(
-        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; headroom-plan {headroom_plan}; adoption-plan {adoption_plan}; forge-first readiness {forge_first_readiness}; compatibility {compatibility_status}; headroom-stats {headroom_stats} ({headroom_blob_count} blobs); headroom action {headroom_action}; adoption action {adoption_action}; session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | headroom-plan | adoption-plan | bootstrap | headroom-stats | install-shims | exec\nWrapper plan: {wrapper_plan}\nForge-first adoption: {forge_first_adoption}\nHeadroom runtime: {headroom_runtime}\nOrchestration: {orchestration}\nCompatibility: {compatibility}\nLifecycle gates: {lifecycle_gates}\nHeadroom stats: {headroom_details}\nNext actions: {next_actions}\n",
+        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; headroom-plan {headroom_plan}; adoption-plan {adoption_plan}; forge-first readiness {forge_first_readiness}; compatibility {compatibility_status}; headroom-stats {headroom_stats} ({headroom_blob_count} blobs); headroom action {headroom_action}; adoption action {adoption_action}; session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | headroom-plan | adoption-plan | lineage-plan | lineage-exec-dry-run | bootstrap | headroom-stats | install-shims | exec\nWrapper plan: {wrapper_plan}\nForge-first adoption: {forge_first_adoption}\nHeadroom runtime: {headroom_runtime}\nOrchestration: {orchestration}\nCompatibility: {compatibility}\nLifecycle gates: {lifecycle_gates}\nHeadroom stats: {headroom_details}\nNext actions: {next_actions}\n",
         status = panel.status,
         executor = panel.executor,
         mode = panel.mode.effective_mode,

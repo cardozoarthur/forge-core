@@ -45068,6 +45068,71 @@ views:
     assert_eq!(headroom["action"]["source_panel"], "harness_panel");
     assert_eq!(headroom["operation_plan"]["status"], "ready");
 
+    let lineage_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-invocation",
+            "--action",
+            "harness.lineage_exec_dry_run",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let lineage: Value = serde_json::from_slice(&lineage_output).unwrap();
+    assert_eq!(lineage["status"], "action_invocation_ready");
+    assert_eq!(
+        lineage["requested_action_id"],
+        "harness.lineage_exec_dry_run"
+    );
+    assert_eq!(lineage["can_execute"], true);
+    assert_eq!(lineage["not_executed"], true);
+    assert_eq!(
+        lineage["selected_command"],
+        serde_json::json!([
+            "harness",
+            "exec",
+            "--executor",
+            "codex",
+            "--forge-first",
+            "--project-root",
+            ".",
+            "--workflow",
+            "<workflow-id>",
+            "--task",
+            "<task-id>",
+            "--run",
+            "<run-id>",
+            "--output",
+            "json",
+            "--",
+            "codex"
+        ])
+    );
+    assert_eq!(
+        lineage["selected_command_text"],
+        "harness exec --executor codex --forge-first --project-root . --workflow <workflow-id> --task <task-id> --run <run-id> --output json -- codex"
+    );
+    assert_eq!(lineage["source_panel"], "harness_panel");
+    assert_eq!(lineage["risk_level"], "medium");
+    assert_eq!(lineage["mutates_workflow"], true);
+    assert_eq!(lineage["requires_approval"], true);
+    assert_eq!(
+        lineage["execution_boundary"],
+        "external_command_not_executed"
+    );
+    assert_eq!(lineage["operation_plan"]["status"], "ready");
+    assert_eq!(
+        lineage["operation_plan"]["recommended_action"],
+        "execute_command"
+    );
+
     let bootstrap_output = forge()
         .current_dir(temp.path())
         .args([
@@ -45734,6 +45799,88 @@ fn interactive_command_palette_surfaces_contextual_actions_for_replacement_cli()
                         && entry["operation_plan"]["status"] == "ready"
                         && entry["operation_plan"]["recommended_action"] == "execute_command"
                         && entry["operation_plan"]["diagnostic_only"] == false
+                })
+        }));
+    let lineage_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "command-palette",
+            "--query",
+            "lineage",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let lineage_json: Value = serde_json::from_slice(&lineage_output).unwrap();
+    assert!(lineage_json["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|group| {
+            group["group_id"] == "harness"
+                && group["entries"].as_array().unwrap().iter().any(|entry| {
+                    entry["action_id"] == "harness.lineage_plan"
+                        && entry["title"] == "Inspect lineage handoff plan"
+                        && entry["source_panel"] == "harness_panel"
+                        && entry["commands"]
+                            == serde_json::json!([
+                                "harness",
+                                "adoption-plan",
+                                "--executor",
+                                "codex",
+                                "--shim-dir",
+                                "$HOME/.forge/bin",
+                                "--project-root",
+                                ".",
+                                "--workflow",
+                                "<workflow-id>",
+                                "--task",
+                                "<task-id>",
+                                "--run",
+                                "<run-id>",
+                                "--output",
+                                "json"
+                            ])
+                        && entry["mutates_workflow"] == false
+                        && entry["requires_approval"] == false
+                        && entry["risk_level"] == "low"
+                        && entry["operation_plan"]["status"] == "ready"
+                })
+                && group["entries"].as_array().unwrap().iter().any(|entry| {
+                    entry["action_id"] == "harness.lineage_exec_dry_run"
+                        && entry["title"] == "Validate lineage exec dry-run"
+                        && entry["source_panel"] == "harness_panel"
+                        && entry["commands"]
+                            == serde_json::json!([
+                                "harness",
+                                "exec",
+                                "--executor",
+                                "codex",
+                                "--forge-first",
+                                "--project-root",
+                                ".",
+                                "--workflow",
+                                "<workflow-id>",
+                                "--task",
+                                "<task-id>",
+                                "--run",
+                                "<run-id>",
+                                "--output",
+                                "json",
+                                "--",
+                                "codex"
+                            ])
+                        && entry["mutates_workflow"] == true
+                        && entry["requires_approval"] == true
+                        && entry["risk_level"] == "medium"
+                        && entry["operation_plan"]["status"] == "ready"
+                        && entry["operation_plan"]["recommended_action"] == "execute_command"
                 })
         }));
     let bootstrap_output = forge()
@@ -47762,6 +47909,26 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("adoption-plan")));
+    assert!(json["commands"]["lineage_plan"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("adoption-plan")));
+    assert!(json["commands"]["lineage_plan"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("<workflow-id>")));
+    assert!(json["commands"]["lineage_exec_dry_run"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("exec")));
+    assert!(json["commands"]["lineage_exec_dry_run"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("--forge-first")));
+    assert!(json["commands"]["lineage_exec_dry_run"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("<run-id>")));
     assert!(json["commands"]["bootstrap_project_harness"]
         .as_array()
         .unwrap()
@@ -47798,6 +47965,8 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("bootstrap"));
     assert!(text.contains("headroom-plan"));
     assert!(text.contains("headroom-stats"));
+    assert!(text.contains("lineage-plan"));
+    assert!(text.contains("lineage-exec-dry-run"));
     assert!(text.contains("forge-first readiness forge_first_default_blocked"));
     assert!(
         text.contains("Forge-first adoption: forge.interactive.harness_forge_first_adoption.v1")
