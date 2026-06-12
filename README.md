@@ -32,7 +32,7 @@ O fluxo mental é simples:
 4. `forge interactive task-board` mostra tarefas, handoffs, aprovações e checkpoints.
 5. `forge smoke operational-tui --output json` prova localmente que a TUI abre, cria um fluxo demonstrável e expõe workflows, eventos/schedules, Addons/capabilities, custos e handoffs/approvals.
 
-Use `j`/`k` para mover o foco no REPL, `enter` para abrir o painel focado, `m` para alternar modo de visualização e `t` para alternar tema. Os comandos slash como `/cockpit`, `/task-board`, `/readiness`, `/addons`, `/sessions`, `/logs`, `/permissions` e `/dag` renderizam painéis dentro do próprio REPL.
+Use `j`/`k` para mover o foco no REPL, `enter` para abrir o painel focado, `m` para alternar modo de visualização, `t` para alternar tema e `q`, `quit`, `exit`, `/quit` ou `/exit` para sair sem criar workflow. Os comandos slash como `/cockpit`, `/task-board`, `/readiness`, `/addons`, `/sessions`, `/logs`, `/permissions` e `/dag` renderizam painéis dentro do próprio REPL.
 
 ## Status
 

@@ -6929,6 +6929,9 @@ pub fn route_interactive_input(
     origin: &str,
 ) -> Result<InteractiveRouteReport> {
     let trimmed = input.trim();
+    if is_repl_exit_command(trimmed) {
+        return Ok(local_exit_route(trimmed));
+    }
     if let Some(pm_goal) = parse_pm_goal(trimmed) {
         return route_pm_workflow(store, pm_goal, origin);
     }
@@ -6976,6 +6979,49 @@ pub fn route_interactive_input(
         product_decision_revision: None,
         retention_decision,
     })
+}
+
+fn is_repl_exit_command(input: &str) -> bool {
+    matches!(
+        input.trim().to_ascii_lowercase().as_str(),
+        "q" | "quit" | "exit" | "/quit" | "/exit"
+    )
+}
+
+fn local_exit_route(input: &str) -> InteractiveRouteReport {
+    let normalized = input.trim().to_ascii_lowercase();
+    let command_name = if normalized.contains("quit") || normalized == "q" {
+        "/quit"
+    } else {
+        "/exit"
+    };
+
+    InteractiveRouteReport {
+        status: "routed".to_string(),
+        schema_version: INTERACTIVE_ROUTE_SCHEMA_VERSION.to_string(),
+        input_kind: "local_command".to_string(),
+        routing_decision: "exit_repl".to_string(),
+        routing_explanation:
+            "Local operator exit command; Forge closes the REPL without creating workflow state."
+                .to_string(),
+        workflow_created: false,
+        run_id: None,
+        workflow_id: None,
+        answer: Some("goodbye".to_string()),
+        slash_command: Some(SlashCommandRoute {
+            name: command_name.to_string(),
+            recognized: true,
+            input_arguments: Vec::new(),
+            input_argument_text: String::new(),
+            equivalent_command: Vec::new(),
+            mutates_workflow: false,
+            risk_level: "low".to_string(),
+            execution_boundary: "local_repl_exit_not_executed_by_forge".to_string(),
+        }),
+        product_decision_id: None,
+        product_decision_revision: None,
+        retention_decision: no_retention_decision(),
+    }
 }
 
 fn parse_pm_goal(input: &str) -> Option<&str> {
@@ -11647,7 +11693,7 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
             continue;
         }
 
-        if matches!(trimmed, "/exit" | "/quit") {
+        if is_repl_exit_command(trimmed) {
             println!("goodbye");
             break;
         }

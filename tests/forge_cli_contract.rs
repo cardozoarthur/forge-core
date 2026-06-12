@@ -48040,6 +48040,48 @@ fn interactive_repl_keyboard_navigation_controls_focus_mode_theme_and_open() {
 }
 
 #[test]
+fn interactive_repl_q_exits_without_routing_a_workflow() {
+    let script = if Path::new("/usr/bin/script").exists() {
+        "/usr/bin/script"
+    } else if Path::new("/bin/script").exists() {
+        "/bin/script"
+    } else {
+        return;
+    };
+    let timeout = if Path::new("/usr/bin/timeout").exists() {
+        "/usr/bin/timeout"
+    } else if Path::new("/bin/timeout").exists() {
+        "/bin/timeout"
+    } else {
+        return;
+    };
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let binary = assert_cmd::cargo::cargo_bin("forge");
+    let command = format!("{} --store {}", binary.display(), store.display());
+
+    let mut child = std::process::Command::new(timeout)
+        .args(["3", script, "-q", "-c", &command, "/dev/null"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"q\n").unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Forge operational TUI"));
+    assert!(stdout.contains("goodbye"));
+    assert!(!stdout.contains("Routing: new_workflow"));
+    assert!(!stdout.contains("Workflow ID:"));
+}
+
+#[test]
 fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -48240,6 +48282,48 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         .as_array()
         .unwrap()
         .contains(&Value::String("decision".to_string())));
+}
+
+#[test]
+fn interactive_route_treats_exit_aliases_as_local_commands_without_workflow() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    for input in ["q", "quit", "exit", "/quit", "/exit"] {
+        let output = forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "interactive",
+                "route",
+                "--input",
+                input,
+                "--origin",
+                "codex",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let json: Value = serde_json::from_slice(&output).unwrap();
+
+        assert_eq!(json["status"], "routed");
+        assert_eq!(json["input_kind"], "local_command");
+        assert_eq!(json["routing_decision"], "exit_repl");
+        assert_eq!(json["workflow_created"], false);
+        assert_eq!(json["run_id"], Value::Null);
+        assert_eq!(json["workflow_id"], Value::Null);
+        assert_eq!(json["slash_command"]["recognized"], true);
+        assert_eq!(json["slash_command"]["mutates_workflow"], false);
+        assert_eq!(
+            json["slash_command"]["execution_boundary"],
+            "local_repl_exit_not_executed_by_forge"
+        );
+        assert_eq!(json["retention_decision"]["action"], "none");
+    }
 }
 
 #[test]
