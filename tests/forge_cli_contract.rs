@@ -43661,6 +43661,23 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("headroom-stats"));
     assert!(text.contains(json["headroom_recommended_action"].as_str().unwrap()));
     assert!(text.contains("session lifecycle"));
+    assert!(text.contains("Wrapper plan: forge_first true"));
+    assert!(text.contains("launch forge harness exec --executor codex"));
+    assert!(text.contains("env FORGE_HARNESS=enabled"));
+    assert!(text.contains("FORGE_PROMPT_PACKET_REQUIRED=true"));
+    assert!(text.contains("FORGE_CONTEXT_ROUTING=forge_controlled"));
+    assert!(text.contains("FORGE_TOKEN_HEADROOM_REQUIRED=true"));
+    assert!(text.contains("Orchestration: control forge_core"));
+    assert!(text.contains("gates prompt_packet_required, context_budget_enforced"));
+    assert!(text.contains("Lifecycle gates: codex-shell lineage false"));
+    assert!(text.contains("missing workflow_id, task_id, run_id"));
+    assert!(text.contains("record_launch_plan:available forge shells --executor codex"));
+    assert!(text.contains(
+        "record_opened:blocked_until_lineage forge sessions lifecycle --session codex-shell"
+    ));
+    assert!(text.contains("Headroom stats: blobs 1"));
+    assert!(text.contains("source interactive-harness-test"));
+    assert!(text.contains("retrieve forge harness retrieve-headroom --ref"));
 
     let home_output = forge()
         .current_dir(&project_root)

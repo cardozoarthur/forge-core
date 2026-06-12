@@ -6482,7 +6482,7 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         panel.next_actions.join(" | ")
     };
     format!(
-        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; headroom-plan {headroom_plan}; headroom-stats {headroom_stats} ({headroom_blob_count} blobs); headroom action {headroom_action}; session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | headroom-plan | headroom-stats | install-shims | exec\nNext actions: {next_actions}\n",
+        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; headroom-plan {headroom_plan}; headroom-stats {headroom_stats} ({headroom_blob_count} blobs); headroom action {headroom_action}; session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | headroom-plan | headroom-stats | install-shims | exec\nWrapper plan: {wrapper_plan}\nOrchestration: {orchestration}\nLifecycle gates: {lifecycle_gates}\nHeadroom stats: {headroom_details}\nNext actions: {next_actions}\n",
         status = panel.status,
         executor = panel.executor,
         mode = panel.mode.effective_mode,
@@ -6497,7 +6497,137 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         session_id = panel.session_lifecycle_plan.session_id,
         project_root = panel.project_root,
         shim_dir = panel.shim_dir,
+        wrapper_plan = render_harness_wrapper_plan(&panel.wrapper_plan),
+        orchestration = render_harness_orchestration(&panel.wrapper_plan),
+        lifecycle_gates = render_harness_lifecycle_gates(&panel.session_lifecycle_plan),
+        headroom_details = render_harness_headroom_stats(&panel.headroom_stats),
         next_actions = next_actions,
+    )
+}
+
+fn render_harness_wrapper_plan(plan: &CliWrapperPlanReport) -> String {
+    let env = plan
+        .env
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.name.as_str(),
+                "FORGE_HARNESS"
+                    | "FORGE_PROMPT_PACKET_REQUIRED"
+                    | "FORGE_CONTEXT_ROUTING"
+                    | "FORGE_MEMORY_ROUTING"
+                    | "FORGE_SKILL_ROUTING"
+                    | "FORGE_MCP_ROUTING"
+                    | "FORGE_TOKEN_HEADROOM_REQUIRED"
+                    | "FORGE_SESSION_LIFECYCLE"
+                    | "FORGE_EVENT_RECEIPTS"
+            )
+        })
+        .map(|item| format!("{}={}", item.name, item.value))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "forge_first {}; strategy {}; launch {}; env {}",
+        plan.forge_first,
+        plan.wrapper_strategy,
+        plan.launch_command.join(" "),
+        if env.is_empty() {
+            "none".to_string()
+        } else {
+            env
+        }
+    )
+}
+
+fn render_harness_orchestration(plan: &CliWrapperPlanReport) -> String {
+    let contract = &plan.orchestration_contract;
+    let stages = contract
+        .routing_stages
+        .iter()
+        .take(8)
+        .map(|stage| format!("{}:{}->{}", stage.id, stage.owner, stage.target))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "control {}; status {}; gates {}; stages {}",
+        contract.control_plane,
+        contract.status,
+        if contract.gates.is_empty() {
+            "none".to_string()
+        } else {
+            contract.gates.join(", ")
+        },
+        if stages.is_empty() {
+            "none".to_string()
+        } else {
+            stages
+        }
+    )
+}
+
+fn render_harness_lifecycle_gates(plan: &HarnessSessionLifecyclePlan) -> String {
+    let missing = if plan.missing_lineage.is_empty() {
+        "none".to_string()
+    } else {
+        plan.missing_lineage.join(", ")
+    };
+    let gates = plan
+        .gates
+        .iter()
+        .take(6)
+        .map(|gate| {
+            format!(
+                "{}:{} {}",
+                gate.gate_id,
+                gate.status,
+                gate.command.join(" ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!(
+        "{} lineage {}; missing {}; gates {}",
+        plan.session_id,
+        plan.lineage_complete,
+        missing,
+        if gates.is_empty() {
+            "none".to_string()
+        } else {
+            gates
+        }
+    )
+}
+
+fn render_harness_headroom_stats(stats: &HeadroomStatsReport) -> String {
+    let source = stats
+        .primary_savings_source
+        .as_deref()
+        .or_else(|| stats.by_source.first().map(|bucket| bucket.source.as_str()))
+        .unwrap_or("none");
+    let kind = stats
+        .primary_savings_content_kind
+        .as_deref()
+        .or_else(|| {
+            stats
+                .by_content_kind
+                .first()
+                .map(|bucket| bucket.content_kind.as_str())
+        })
+        .unwrap_or("none");
+    let retrieve = stats
+        .next_commands
+        .iter()
+        .find(|command| command.contains("retrieve-headroom"))
+        .map(String::as_str)
+        .unwrap_or("none");
+    format!(
+        "blobs {}; saved_tokens {}; average_savings {:.2}%; source {}; kind {}; retrieve {}",
+        stats.total_blobs,
+        stats.total_estimated_saved_tokens,
+        stats.average_savings_percent,
+        source,
+        kind,
+        retrieve
     )
 }
 
