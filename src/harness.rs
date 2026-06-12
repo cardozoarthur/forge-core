@@ -1778,6 +1778,11 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
     }
     launch_command.push("--context-budget".to_string());
     launch_command.push(context_budget.to_string());
+    launch_command.push(if token_headroom {
+        "--token-headroom".to_string()
+    } else {
+        "--no-token-headroom".to_string()
+    });
     launch_command.push("--".to_string());
     launch_command.extend(command.clone());
 

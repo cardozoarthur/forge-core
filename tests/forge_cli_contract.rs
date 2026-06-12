@@ -952,6 +952,109 @@ fn harness_project_policy_sets_context_budget_and_requires_headroom_for_forge_fi
 }
 
 #[test]
+fn harness_wrap_plan_launch_command_preserves_token_headroom_decision_for_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("project");
+    fs::create_dir_all(project.join(".forge")).unwrap();
+    fs::write(
+        project.join(".forge/harness.json"),
+        r#"{"default_mode":"forge_first","default_context_budget":777,"default_token_headroom":false}"#,
+    )
+    .unwrap();
+
+    let disabled_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "harness",
+            "wrap-plan",
+            "--executor",
+            "codex",
+            "--cmd",
+            "codex",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let disabled: Value = serde_json::from_slice(&disabled_output).unwrap();
+    assert_eq!(disabled["token_headroom_enabled"], false);
+    assert_eq!(disabled["token_headroom_source"], "project_config");
+    assert!(disabled["launch_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("--no-token-headroom".to_string())));
+
+    let enabled_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "harness",
+            "wrap-plan",
+            "--executor",
+            "codex",
+            "--cmd",
+            "codex",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--token-headroom",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let enabled: Value = serde_json::from_slice(&enabled_output).unwrap();
+    assert_eq!(enabled["token_headroom_enabled"], true);
+    assert_eq!(enabled["token_headroom_source"], "explicit_flag");
+    assert!(enabled["launch_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("--token-headroom".to_string())));
+    assert!(!enabled["launch_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("--no-token-headroom".to_string())));
+
+    let mcp_input = serde_json::json!({
+        "executor": "opencode",
+        "command": ["opencode"],
+        "project_root": project.display().to_string(),
+        "token_headroom": false
+    });
+    let mcp_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.wrap_plan",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp_json["result"]["token_headroom_enabled"], false);
+    assert!(mcp_json["result"]["launch_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("--no-token-headroom".to_string())));
+}
+
+#[test]
 fn harness_doctor_audits_forge_first_headroom_and_shim_readiness_for_cli_and_mcp() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
