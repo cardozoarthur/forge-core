@@ -835,6 +835,7 @@ pub struct EventServiceView {
     pub id: String,
     pub service_kind: String,
     pub status: String,
+    pub tenant_context: EventTenantContext,
     pub lease_owner: String,
     pub lease_id: String,
     pub lease_acquired_at: String,
@@ -848,10 +849,14 @@ pub struct EventServiceView {
 
 impl From<StoredEventServiceRecord> for EventServiceView {
     fn from(record: StoredEventServiceRecord) -> Self {
+        let operating_context =
+            serde_json::from_value::<OperatingContextSpec>(record.tenant_context)
+                .unwrap_or_default();
         Self {
             id: record.id,
             service_kind: record.service_kind,
             status: record.status,
+            tenant_context: EventTenantContext::from(&operating_context),
             lease_owner: record.lease_owner,
             lease_id: record.lease_id,
             lease_acquired_at: record.lease_acquired_at,
@@ -3154,6 +3159,8 @@ pub fn run_event_worker_service(
         30,
     )?;
     let service_id = plan.service_id.clone();
+    let operating_context = load_project_operating_context(project_root)?;
+    let tenant_context = serde_json::to_value(&operating_context)?;
     let lease_id = format!("evtlease_{}", Uuid::new_v4().to_string().replace('-', ""));
     let acquired_at = Utc::now();
     let mut lease_expires_at = acquired_at + ChronoDuration::seconds(lease_seconds as i64);
@@ -3191,6 +3198,7 @@ pub fn run_event_worker_service(
         id: &service_id,
         service_kind: "worker",
         status: "running",
+        tenant_context: &tenant_context,
         lease_owner: &lease_owner,
         lease_id: &lease_id,
         lease_acquired_at: &acquired_at.to_rfc3339(),
@@ -3303,6 +3311,7 @@ pub fn run_event_worker_service(
             id: &service_id,
             service_kind: "worker",
             status: "running",
+            tenant_context: &tenant_context,
             lease_owner: &lease_owner,
             lease_id: &lease_id,
             lease_acquired_at: &acquired_at.to_rfc3339(),
@@ -3407,6 +3416,7 @@ pub fn run_event_worker_service(
         id: &service_id,
         service_kind: "worker",
         status: final_status,
+        tenant_context: &tenant_context,
         lease_owner: &lease_owner,
         lease_id: &lease_id,
         lease_acquired_at: &acquired_at.to_rfc3339(),
@@ -3431,8 +3441,6 @@ pub fn run_event_worker_service(
         health,
         global_event_id: None,
     };
-    let operating_context = load_project_operating_context(project_root)?;
-    let tenant_context = serde_json::to_value(&operating_context)?;
     let event_data = serde_json::to_value(&report)?;
     let global_event_id = store.record_global_event(GlobalEventWrite {
         source: "event_service_run",
@@ -3500,6 +3508,8 @@ pub fn run_event_webhook_ingress_service(
         30,
     )?;
     let service_id = plan.service_id.clone();
+    let operating_context = load_project_operating_context(project_root)?;
+    let tenant_context = serde_json::to_value(&operating_context)?;
     let lease_id = format!("evtlease_{}", Uuid::new_v4().to_string().replace('-', ""));
     let acquired_at = Utc::now();
     let mut lease_expires_at = acquired_at + ChronoDuration::seconds(lease_seconds as i64);
@@ -3545,6 +3555,7 @@ pub fn run_event_webhook_ingress_service(
         id: &service_id,
         service_kind: "webhook_ingress",
         status: "running",
+        tenant_context: &tenant_context,
         lease_owner: &lease_owner,
         lease_id: &lease_id,
         lease_acquired_at: &acquired_at.to_rfc3339(),
@@ -3632,6 +3643,7 @@ pub fn run_event_webhook_ingress_service(
                 id: &service_id,
                 service_kind: "webhook_ingress",
                 status: "running",
+                tenant_context: &tenant_context,
                 lease_owner: &lease_owner,
                 lease_id: &lease_id,
                 lease_acquired_at: &acquired_at.to_rfc3339(),
@@ -3692,6 +3704,7 @@ pub fn run_event_webhook_ingress_service(
                 id: &service_id,
                 service_kind: "webhook_ingress",
                 status: "failed",
+                tenant_context: &tenant_context,
                 lease_owner: &lease_owner,
                 lease_id: &lease_id,
                 lease_acquired_at: &acquired_at.to_rfc3339(),
@@ -3768,6 +3781,7 @@ pub fn run_event_webhook_ingress_service(
         id: &service_id,
         service_kind: "webhook_ingress",
         status: final_status,
+        tenant_context: &tenant_context,
         lease_owner: &lease_owner,
         lease_id: &lease_id,
         lease_acquired_at: &acquired_at.to_rfc3339(),
@@ -3792,8 +3806,6 @@ pub fn run_event_webhook_ingress_service(
         health,
         global_event_id: None,
     };
-    let operating_context = load_project_operating_context(project_root)?;
-    let tenant_context = serde_json::to_value(&operating_context)?;
     let event_data = serde_json::to_value(&report)?;
     let global_event_id = store.record_global_event(GlobalEventWrite {
         source: "event_service_run",
@@ -4049,16 +4061,30 @@ fn next_event_service_supervisor_backoff(current: u64, max: u64) -> u64 {
 
 pub fn list_event_services(
     store: &ForgeStore,
+    project_root: &Path,
     service_kind: Option<&str>,
     status: Option<&str>,
     limit: usize,
 ) -> Result<EventServiceListReport> {
+    let operating_context = load_project_operating_context(project_root)?;
+    let (organization_id, brand_id, product_id) = event_service_tenant_filters_for_context(
+        store,
+        &operating_context,
+        "events services list",
+    )?;
     let service_kind = service_kind
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let status = status.map(str::trim).filter(|value| !value.is_empty());
     let services = store
-        .list_event_services(service_kind, status, limit)?
+        .list_event_services(
+            service_kind,
+            status,
+            limit,
+            organization_id.as_deref(),
+            brand_id.as_deref(),
+            product_id.as_deref(),
+        )?
         .into_iter()
         .map(EventServiceView::from)
         .collect::<Vec<_>>();
@@ -4069,6 +4095,9 @@ pub fn list_event_services(
             "service_kind": service_kind,
             "status": status,
             "limit": limit.max(1),
+            "organization_id": organization_id,
+            "brand_id": brand_id,
+            "product_id": product_id,
         }),
         service_count: services.len(),
         services,
@@ -4090,13 +4119,26 @@ pub fn recover_stale_event_services(
         .filter(|value| !value.is_empty());
     let origin = normalize_text(Some(origin)).unwrap_or_else(|| "forge".to_string());
     let limit = limit.max(1);
+    let operating_context = load_project_operating_context(&project_root)?;
+    let (organization_id, brand_id, product_id) = event_service_tenant_filters_for_context(
+        store,
+        &operating_context,
+        "events services recover",
+    )?;
     let recovery_id = format!(
         "evtsvcrecover_{}",
         Uuid::new_v4().to_string().replace('-', "")
     );
     let now = Utc::now();
     let observed_at = now.to_rfc3339();
-    let service_records = store.list_event_services(service_kind, Some("running"), limit)?;
+    let service_records = store.list_event_services(
+        service_kind,
+        Some("running"),
+        limit,
+        organization_id.as_deref(),
+        brand_id.as_deref(),
+        product_id.as_deref(),
+    )?;
     let mut recovered = Vec::new();
     let mut stale_running_count = 0usize;
 
@@ -4143,6 +4185,7 @@ pub fn recover_stale_event_services(
             id: &service.id,
             service_kind: &service.service_kind,
             status: "stale",
+            tenant_context: &service.tenant_context,
             lease_owner: &service.lease_owner,
             lease_id: &service.lease_id,
             lease_acquired_at: &service.lease_acquired_at,
@@ -4175,6 +4218,9 @@ pub fn recover_stale_event_services(
             "service_kind": service_kind,
             "status": "running",
             "limit": limit,
+            "organization_id": organization_id,
+            "brand_id": brand_id,
+            "product_id": product_id,
         }),
         scanned_count: service_records.len(),
         stale_running_count,
@@ -4183,7 +4229,6 @@ pub fn recover_stale_event_services(
         global_event_id: None,
     };
     if report.recovered_count > 0 {
-        let operating_context = load_project_operating_context(&project_root)?;
         let tenant_context = serde_json::to_value(&operating_context)?;
         let event_data = serde_json::to_value(&report)?;
         let global_event_id = store.record_global_event(GlobalEventWrite {
@@ -4311,7 +4356,20 @@ pub fn run_event_runtime_reconcile(
         None
     };
 
-    let service_records = store.list_event_services(Some("worker"), None, service_limit)?;
+    let (service_organization_id, service_brand_id, service_product_id) =
+        event_service_tenant_filters_for_context(
+            store,
+            &operating_context,
+            "events runtime reconcile services snapshot",
+        )?;
+    let service_records = store.list_event_services(
+        Some("worker"),
+        None,
+        service_limit,
+        service_organization_id.as_deref(),
+        service_brand_id.as_deref(),
+        service_product_id.as_deref(),
+    )?;
     let now = Utc::now();
     let running_count = service_records
         .iter()
@@ -4633,6 +4691,8 @@ pub fn run_event_runtime_daemon(
         "evtrtdaemon_{}",
         Uuid::new_v4().to_string().replace('-', "")
     );
+    let operating_context = load_project_operating_context(&project_root)?;
+    let tenant_context = serde_json::to_value(&operating_context)?;
     let lease_id = format!("lease_{}", Uuid::new_v4().to_string().replace('-', ""));
     let stop_file_display = stop_file.map(|path| path.display().to_string());
     let started_at = Utc::now();
@@ -4676,6 +4736,7 @@ pub fn run_event_runtime_daemon(
         id: &service_id,
         service_kind: "runtime_reconcile",
         status: "running",
+        tenant_context: &tenant_context,
         lease_owner: &lease_owner,
         lease_id: &lease_id,
         lease_acquired_at: &started_at.to_rfc3339(),
@@ -4804,6 +4865,7 @@ pub fn run_event_runtime_daemon(
             id: &service_id,
             service_kind: "runtime_reconcile",
             status: "running",
+            tenant_context: &tenant_context,
             lease_owner: &lease_owner,
             lease_id: &lease_id,
             lease_acquired_at: &started_at.to_rfc3339(),
@@ -4887,6 +4949,7 @@ pub fn run_event_runtime_daemon(
         id: &service_id,
         service_kind: "runtime_reconcile",
         status: service_status,
+        tenant_context: &tenant_context,
         lease_owner: &lease_owner,
         lease_id: &lease_id,
         lease_acquired_at: &started_at.to_rfc3339(),
@@ -4935,8 +4998,6 @@ pub fn run_event_runtime_daemon(
         cycles,
         global_event_id: None,
     };
-    let operating_context = load_project_operating_context(&project_root)?;
-    let tenant_context = serde_json::to_value(&operating_context)?;
     let event_data = serde_json::to_value(&report)?;
     let global_event_id = store.record_global_event(GlobalEventWrite {
         source: "event_runtime_daemon",
@@ -6829,6 +6890,22 @@ fn global_event_matches_filters(
 }
 
 fn event_inbox_tenant_filters_for_context(
+    store: &ForgeStore,
+    operating_context: &OperatingContextSpec,
+    action: &str,
+) -> Result<(Option<String>, Option<String>, Option<String>)> {
+    if operating_context.tenant_policy_mode != "enforce" {
+        return Ok((None, None, None));
+    }
+    ensure_operating_context_policy(store, operating_context, action)?;
+    Ok((
+        Some(operating_context.organization.id.clone()),
+        Some(operating_context.brand.id.clone()),
+        Some(operating_context.product.id.clone()),
+    ))
+}
+
+fn event_service_tenant_filters_for_context(
     store: &ForgeStore,
     operating_context: &OperatingContextSpec,
     action: &str,

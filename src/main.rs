@@ -1794,6 +1794,8 @@ enum EventCommands {
         output: OutputFormat,
     },
     Services {
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
         #[arg(long = "kind")]
         service_kind: Option<String>,
         #[arg(long)]
@@ -4559,14 +4561,20 @@ fn run() -> Result<i32> {
                 )
             }
             EventCommands::Services {
+                project_root,
                 service_kind,
                 status,
                 limit,
                 output,
             } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report =
-                    list_event_services(&store, service_kind.as_deref(), status.as_deref(), limit)?;
+                let report = list_event_services(
+                    &store,
+                    &project_root,
+                    service_kind.as_deref(),
+                    status.as_deref(),
+                    limit,
+                )?;
                 print_response(output, &report)?;
                 Ok(0)
             }

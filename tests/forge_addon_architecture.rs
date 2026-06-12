@@ -134,6 +134,116 @@ fn insert_expired_event_service(store: &Path, service_id: &str, service_kind: &s
         .unwrap();
 }
 
+fn write_event_service_tenant_context(
+    project_root: &Path,
+    organization_id: &str,
+    brand_id: &str,
+    product_id: &str,
+) {
+    let forge_dir = project_root.join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("operating-context.yaml"),
+        format!(
+            r#"
+organization:
+  scope: organization
+  id: {organization_id}
+  label: {organization_id}
+brand:
+  scope: brand
+  id: {brand_id}
+  label: {brand_id}
+product:
+  scope: product
+  id: {product_id}
+  label: {product_id}
+user:
+  scope: user
+  id: tenant-service-operator
+  label: Tenant Service Operator
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#
+        ),
+    )
+    .unwrap();
+}
+
+fn insert_expired_event_service_for_tenant(
+    store: &Path,
+    service_id: &str,
+    organization_id: &str,
+    brand_id: &str,
+    product_id: &str,
+) {
+    let acquired_at = (Utc::now() - Duration::minutes(20)).to_rfc3339();
+    let expires_at = (Utc::now() - Duration::minutes(10)).to_rfc3339();
+    let heartbeat_at = (Utc::now() - Duration::minutes(11)).to_rfc3339();
+    let tenant_context = serde_json::json!({
+        "organization": {"scope": "organization", "id": organization_id, "label": organization_id},
+        "brand": {"scope": "brand", "id": brand_id, "label": brand_id},
+        "product": {"scope": "product", "id": product_id, "label": product_id},
+        "user": {"scope": "user", "id": "tenant-service-operator", "label": "Tenant Service Operator"},
+        "channel": {"scope": "channel", "id": "local_cli", "label": "Local CLI"},
+        "memory_scope": "organization_project_session",
+        "personality_scope": "organization_workflow_node",
+        "tenant_policy_mode": "enforce",
+        "brand_identity": {},
+        "design_system": {},
+        "operating_policy": {}
+    });
+    let data = serde_json::json!({
+        "schema_version": "test.event_service_state.v1",
+        "health": {
+            "status": "running",
+            "heartbeat_count": 1
+        }
+    });
+    let connection = Connection::open(store).unwrap();
+    connection
+        .execute(
+            r#"
+            INSERT INTO event_services (
+                id,
+                service_kind,
+                status,
+                organization_id,
+                brand_id,
+                product_id,
+                user_id,
+                channel_id,
+                tenant_context_json,
+                lease_owner,
+                lease_id,
+                lease_acquired_at,
+                lease_expires_at,
+                last_heartbeat_at,
+                heartbeat_ttl_seconds,
+                data_json
+            )
+            VALUES (?1, 'worker', 'running', ?2, ?3, ?4, 'tenant-service-operator', 'local_cli', ?5, ?6, ?7, ?8, ?9, ?10, 60, ?11)
+            "#,
+            rusqlite::params![
+                service_id,
+                organization_id,
+                brand_id,
+                product_id,
+                serde_json::to_string(&tenant_context).unwrap(),
+                format!("{service_id}-owner"),
+                format!("{service_id}-lease"),
+                acquired_at,
+                expires_at,
+                heartbeat_at,
+                serde_json::to_string(&data).unwrap()
+            ],
+        )
+        .unwrap();
+}
+
 fn start_external_api_worker_server(expected_requests: usize) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!(
@@ -10950,6 +11060,249 @@ fn event_service_run_executes_worker_with_persistent_lease_and_mcp_status() {
         .any(|event| {
             event["kind"] == "event_service_run_completed" && event["source"] == "event_service_run"
         }));
+}
+
+#[test]
+fn event_services_enforce_project_tenant_policy_for_list_recovery_and_reconcile() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let visible_root = temp.path().join("visible");
+    let hidden_root = temp.path().join("hidden");
+    write_event_service_tenant_context(
+        &visible_root,
+        "service-visible-org",
+        "service-visible-brand",
+        "service-visible-product",
+    );
+    write_event_service_tenant_context(
+        &hidden_root,
+        "service-hidden-org",
+        "service-hidden-brand",
+        "service-hidden-product",
+    );
+
+    for root in [&visible_root, &hidden_root] {
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "identity",
+                "sync",
+                "--project-root",
+                root.to_str().unwrap(),
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    for (root, owner) in [
+        (&visible_root, "visible-service-manager"),
+        (&hidden_root, "hidden-service-manager"),
+    ] {
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "events",
+                "service-run",
+                "--kind",
+                "worker",
+                "--project-root",
+                root.to_str().unwrap(),
+                "--max-cycles",
+                "1",
+                "--interval-seconds",
+                "0",
+                "--idle-exit",
+                "--lease-owner",
+                owner,
+                "--lease-seconds",
+                "60",
+                "--heartbeat-seconds",
+                "10",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    let visible_services_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "services",
+            "--project-root",
+            visible_root.to_str().unwrap(),
+            "--kind",
+            "worker",
+            "--limit",
+            "10",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let visible_services_json: Value = serde_json::from_slice(&visible_services_output).unwrap();
+    assert_eq!(
+        visible_services_json["schema_version"],
+        "forge.event_services.v1"
+    );
+    assert_eq!(
+        visible_services_json["filters"]["organization_id"],
+        "service-visible-org"
+    );
+    assert_eq!(visible_services_json["service_count"], 1);
+    assert_eq!(
+        visible_services_json["services"][0]["tenant_context"]["organization"]["id"],
+        "service-visible-org"
+    );
+    assert_eq!(
+        visible_services_json["services"][0]["lease_owner"],
+        "visible-service-manager"
+    );
+    assert!(visible_services_json["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|service| service["lease_owner"] != "hidden-service-manager"));
+
+    let mcp_services_input = serde_json::json!({
+        "project_root": visible_root.display().to_string(),
+        "kind": "worker",
+        "limit": 10
+    })
+    .to_string();
+    let mcp_services_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.events.services",
+            "--input",
+            mcp_services_input.as_str(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_services_json: Value = serde_json::from_slice(&mcp_services_output).unwrap();
+    assert_eq!(mcp_services_json["result"]["service_count"], 1);
+    assert_eq!(
+        mcp_services_json["result"]["services"][0]["tenant_context"]["organization"]["id"],
+        "service-visible-org"
+    );
+
+    insert_expired_event_service_for_tenant(
+        &store,
+        "svc-visible-stale",
+        "service-visible-org",
+        "service-visible-brand",
+        "service-visible-product",
+    );
+    insert_expired_event_service_for_tenant(
+        &store,
+        "svc-hidden-stale",
+        "service-hidden-org",
+        "service-hidden-brand",
+        "service-hidden-product",
+    );
+
+    let recover_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "services-recover",
+            "--project-root",
+            visible_root.to_str().unwrap(),
+            "--kind",
+            "worker",
+            "--limit",
+            "10",
+            "--origin",
+            "tenant_recovery",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recover_json: Value = serde_json::from_slice(&recover_output).unwrap();
+    assert_eq!(recover_json["scanned_count"], 1);
+    assert_eq!(recover_json["recovered_count"], 1);
+    assert_eq!(recover_json["services"][0]["id"], "svc-visible-stale");
+    assert_eq!(
+        recover_json["services"][0]["tenant_context"]["organization"]["id"],
+        "service-visible-org"
+    );
+
+    let reconcile_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "runtime-reconcile",
+            "--project-root",
+            visible_root.to_str().unwrap(),
+            "--service-limit",
+            "10",
+            "--recover-stale-services",
+            "--lease-owner",
+            "tenant-reconcile",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let reconcile_json: Value = serde_json::from_slice(&reconcile_output).unwrap();
+    assert_eq!(reconcile_json["service_recovery"]["recovered_count"], 0);
+    assert!(reconcile_json["services"]["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|service| service["tenant_context"]["organization"]["id"] == "service-visible-org"));
+
+    let hidden_running_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "services",
+            "--project-root",
+            hidden_root.to_str().unwrap(),
+            "--kind",
+            "worker",
+            "--status",
+            "running",
+            "--limit",
+            "10",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let hidden_running_json: Value = serde_json::from_slice(&hidden_running_output).unwrap();
+    assert_eq!(hidden_running_json["service_count"], 1);
+    assert_eq!(hidden_running_json["services"][0]["id"], "svc-hidden-stale");
 }
 
 #[test]

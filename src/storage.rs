@@ -361,6 +361,7 @@ pub struct EventServiceWrite<'a> {
     pub id: &'a str,
     pub service_kind: &'a str,
     pub status: &'a str,
+    pub tenant_context: &'a serde_json::Value,
     pub lease_owner: &'a str,
     pub lease_id: &'a str,
     pub lease_acquired_at: &'a str,
@@ -432,6 +433,12 @@ pub struct StoredEventServiceRecord {
     pub id: String,
     pub service_kind: String,
     pub status: String,
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    pub user_id: String,
+    pub channel_id: String,
+    pub tenant_context: serde_json::Value,
     pub lease_owner: String,
     pub lease_id: String,
     pub lease_acquired_at: String,
@@ -757,6 +764,12 @@ impl ForgeStore {
                 id TEXT PRIMARY KEY,
                 service_kind TEXT NOT NULL,
                 status TEXT NOT NULL,
+                organization_id TEXT NOT NULL DEFAULT '',
+                brand_id TEXT NOT NULL DEFAULT '',
+                product_id TEXT NOT NULL DEFAULT '',
+                user_id TEXT NOT NULL DEFAULT '',
+                channel_id TEXT NOT NULL DEFAULT '',
+                tenant_context_json TEXT NOT NULL DEFAULT '{}',
                 lease_owner TEXT NOT NULL,
                 lease_id TEXT NOT NULL,
                 lease_acquired_at TEXT NOT NULL,
@@ -1052,6 +1065,7 @@ impl ForgeStore {
         self.ensure_event_observability_context_columns()?;
         self.backfill_event_observability_index()?;
         self.ensure_event_inbox_tenant_columns()?;
+        self.ensure_event_services_tenant_columns()?;
         self.ensure_memory_promotion_tenant_columns()?;
         self.ensure_operational_tenant_columns()?;
         Ok(())
@@ -1187,6 +1201,74 @@ impl ForgeStore {
             r#"
             CREATE INDEX IF NOT EXISTS idx_event_inbox_tenant
                 ON event_inbox (organization_id, brand_id, product_id, status, created_at);
+            "#,
+        )?;
+        Ok(())
+    }
+
+    fn ensure_event_services_tenant_columns(&self) -> Result<()> {
+        for column in [
+            "organization_id",
+            "brand_id",
+            "product_id",
+            "user_id",
+            "channel_id",
+        ] {
+            if !self.table_has_column("event_services", column)? {
+                let result = self.connection.execute(
+                    &format!(
+                        "ALTER TABLE event_services ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                    ),
+                    [],
+                );
+                if let Err(error) = result {
+                    if !error.to_string().contains("duplicate column name") {
+                        return Err(error.into());
+                    }
+                }
+            }
+        }
+        if !self.table_has_column("event_services", "tenant_context_json")? {
+            let result = self.connection.execute(
+                "ALTER TABLE event_services ADD COLUMN tenant_context_json TEXT NOT NULL DEFAULT '{}'",
+                [],
+            );
+            if let Err(error) = result {
+                if !error.to_string().contains("duplicate column name") {
+                    return Err(error.into());
+                }
+            }
+        }
+        let default_context = default_operating_context_json();
+        self.connection.execute(
+            r#"
+            UPDATE event_services
+            SET organization_id = ?1,
+                brand_id = ?2,
+                product_id = ?3,
+                user_id = ?4,
+                channel_id = ?5,
+                tenant_context_json = ?6
+            WHERE organization_id = ''
+               OR brand_id = ''
+               OR product_id = ''
+               OR user_id = ''
+               OR channel_id = ''
+               OR tenant_context_json = '{}'
+            "#,
+            params![
+                tenant_context_identity_id(&default_context, "organization"),
+                tenant_context_identity_id(&default_context, "brand"),
+                tenant_context_identity_id(&default_context, "product"),
+                tenant_context_identity_id(&default_context, "user"),
+                tenant_context_identity_id(&default_context, "channel"),
+                serde_json::to_string(&default_context)?,
+            ],
+        )?;
+        self.connection.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_event_services_tenant
+                ON event_services (organization_id, brand_id, product_id, service_kind, status, updated_at);
             "#,
         )?;
         Ok(())
@@ -2211,12 +2293,23 @@ impl ForgeStore {
     }
 
     pub fn try_save_event_service(&self, service: EventServiceWrite<'_>) -> Result<bool> {
+        let organization_id = tenant_context_identity_id(service.tenant_context, "organization");
+        let brand_id = tenant_context_identity_id(service.tenant_context, "brand");
+        let product_id = tenant_context_identity_id(service.tenant_context, "product");
+        let user_id = tenant_context_identity_id(service.tenant_context, "user");
+        let channel_id = tenant_context_identity_id(service.tenant_context, "channel");
         let changed = self.connection.execute(
             r#"
             INSERT INTO event_services (
                 id,
                 service_kind,
                 status,
+                organization_id,
+                brand_id,
+                product_id,
+                user_id,
+                channel_id,
+                tenant_context_json,
                 lease_owner,
                 lease_id,
                 lease_acquired_at,
@@ -2225,10 +2318,16 @@ impl ForgeStore {
                 heartbeat_ttl_seconds,
                 data_json
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             ON CONFLICT(id) DO UPDATE SET
                 service_kind=excluded.service_kind,
                 status=excluded.status,
+                organization_id=excluded.organization_id,
+                brand_id=excluded.brand_id,
+                product_id=excluded.product_id,
+                user_id=excluded.user_id,
+                channel_id=excluded.channel_id,
+                tenant_context_json=excluded.tenant_context_json,
                 lease_owner=excluded.lease_owner,
                 lease_id=excluded.lease_id,
                 lease_acquired_at=excluded.lease_acquired_at,
@@ -2237,13 +2336,19 @@ impl ForgeStore {
                 heartbeat_ttl_seconds=excluded.heartbeat_ttl_seconds,
                 data_json=excluded.data_json,
                 updated_at=CURRENT_TIMESTAMP
-            WHERE event_services.lease_expires_at <= ?11
+            WHERE event_services.lease_expires_at <= ?17
                OR event_services.status IN ('completed', 'completed_with_failures', 'failed', 'stopped')
             "#,
             params![
                 service.id,
                 service.service_kind,
                 service.status,
+                organization_id,
+                brand_id,
+                product_id,
+                user_id,
+                channel_id,
+                serde_json::to_string(service.tenant_context)?,
                 service.lease_owner,
                 service.lease_id,
                 service.lease_acquired_at,
@@ -2258,12 +2363,23 @@ impl ForgeStore {
     }
 
     pub fn save_event_service(&self, service: EventServiceWrite<'_>) -> Result<()> {
+        let organization_id = tenant_context_identity_id(service.tenant_context, "organization");
+        let brand_id = tenant_context_identity_id(service.tenant_context, "brand");
+        let product_id = tenant_context_identity_id(service.tenant_context, "product");
+        let user_id = tenant_context_identity_id(service.tenant_context, "user");
+        let channel_id = tenant_context_identity_id(service.tenant_context, "channel");
         self.connection.execute(
             r#"
             INSERT INTO event_services (
                 id,
                 service_kind,
                 status,
+                organization_id,
+                brand_id,
+                product_id,
+                user_id,
+                channel_id,
+                tenant_context_json,
                 lease_owner,
                 lease_id,
                 lease_acquired_at,
@@ -2272,10 +2388,16 @@ impl ForgeStore {
                 heartbeat_ttl_seconds,
                 data_json
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             ON CONFLICT(id) DO UPDATE SET
                 service_kind=excluded.service_kind,
                 status=excluded.status,
+                organization_id=excluded.organization_id,
+                brand_id=excluded.brand_id,
+                product_id=excluded.product_id,
+                user_id=excluded.user_id,
+                channel_id=excluded.channel_id,
+                tenant_context_json=excluded.tenant_context_json,
                 lease_owner=excluded.lease_owner,
                 lease_id=excluded.lease_id,
                 lease_acquired_at=excluded.lease_acquired_at,
@@ -2289,6 +2411,12 @@ impl ForgeStore {
                 service.id,
                 service.service_kind,
                 service.status,
+                organization_id,
+                brand_id,
+                product_id,
+                user_id,
+                channel_id,
+                serde_json::to_string(service.tenant_context)?,
                 service.lease_owner,
                 service.lease_id,
                 service.lease_acquired_at,
@@ -2306,7 +2434,8 @@ impl ForgeStore {
             r#"
             SELECT id, service_kind, status, lease_owner, lease_id, lease_acquired_at,
                    lease_expires_at, last_heartbeat_at, heartbeat_ttl_seconds,
-                   data_json, created_at, updated_at
+                   data_json, created_at, updated_at,
+                   organization_id, brand_id, product_id, user_id, channel_id, tenant_context_json
             FROM event_services
             WHERE id = ?1
             "#,
@@ -2322,28 +2451,41 @@ impl ForgeStore {
         service_kind: Option<&str>,
         status: Option<&str>,
         limit: usize,
+        organization_id: Option<&str>,
+        brand_id: Option<&str>,
+        product_id: Option<&str>,
     ) -> Result<Vec<StoredEventServiceRecord>> {
         let limit = limit.max(1);
         let kind_filter = service_kind
             .map(str::trim)
             .filter(|value| !value.is_empty());
         let status_filter = status.map(str::trim).filter(|value| !value.is_empty());
+        let organization_filter = normalize_optional_filter(organization_id);
+        let brand_filter = normalize_optional_filter(brand_id);
+        let product_filter = normalize_optional_filter(product_id);
         let mut statement = self.connection.prepare(
             r#"
             SELECT id, service_kind, status, lease_owner, lease_id, lease_acquired_at,
                    lease_expires_at, last_heartbeat_at, heartbeat_ttl_seconds,
-                   data_json, created_at, updated_at
+                   data_json, created_at, updated_at,
+                   organization_id, brand_id, product_id, user_id, channel_id, tenant_context_json
             FROM event_services
             WHERE (?1 IS NULL OR service_kind = ?1)
               AND (?2 IS NULL OR status = ?2)
+              AND (?3 IS NULL OR organization_id = ?3)
+              AND (?4 IS NULL OR brand_id = ?4)
+              AND (?5 IS NULL OR product_id = ?5)
             ORDER BY updated_at DESC, created_at DESC, id ASC
-            LIMIT ?3
+            LIMIT ?6
             "#,
         )?;
         let rows = statement.query_map(
             params![
                 kind_filter,
                 status_filter,
+                organization_filter,
+                brand_filter,
+                product_filter,
                 i64::try_from(limit).unwrap_or(i64::MAX)
             ],
             stored_event_service_from_row,
@@ -4613,10 +4755,23 @@ fn operational_tenant_columns(workflow: Option<&Workflow>) -> OperationalTenantC
 fn stored_event_service_from_row(row: &Row<'_>) -> rusqlite::Result<StoredEventServiceRecord> {
     let heartbeat_ttl_seconds = row.get::<_, i64>(8)?.max(0) as u64;
     let data_json = row.get::<_, String>(9)?;
+    let tenant_context_json = row.get::<_, String>(17)?;
     Ok(StoredEventServiceRecord {
         id: row.get(0)?,
         service_kind: row.get(1)?,
         status: row.get(2)?,
+        organization_id: row.get(12)?,
+        brand_id: row.get(13)?,
+        product_id: row.get(14)?,
+        user_id: row.get(15)?,
+        channel_id: row.get(16)?,
+        tenant_context: serde_json::from_str(&tenant_context_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                17,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
         lease_owner: row.get(3)?,
         lease_id: row.get(4)?,
         lease_acquired_at: row.get(5)?,

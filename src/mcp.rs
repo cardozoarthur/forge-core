@@ -2508,6 +2508,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "List persisted event service records with status, lease, heartbeat, health and latest data.",
                 object_schema(
                     &[
+                        ("project_root", "string", "project root for tenant context"),
                         ("kind", "string", "optional service kind filter"),
                         ("status", "string", "optional service status filter"),
                         ("limit", "integer", "maximum rows"),
@@ -2519,6 +2520,8 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "forge",
                     "events",
                     "services",
+                    "--project-root",
+                    ".",
                     "--output",
                     "json",
                 ],
@@ -6679,8 +6682,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         "forge.events.services" => {
             let input: EventServicesInput = parse_input(input)?;
             let service_kind = input.kind.or(input.service_kind);
+            let project_root = input
+                .project_root
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
             serde_json::to_value(list_event_services(
                 store,
+                &project_root,
                 service_kind.as_deref(),
                 input.status.as_deref(),
                 input.limit.unwrap_or(20),
