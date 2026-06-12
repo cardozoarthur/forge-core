@@ -92,11 +92,12 @@ use crate::interaction::{
 use crate::interactive::{
     build_interactive_action_invocation, build_interactive_action_registry,
     build_interactive_autocomplete, build_interactive_command_palette, build_interactive_harness,
-    build_interactive_home, build_interactive_identity, build_interactive_patch_workbench,
-    build_interactive_permissions, build_interactive_readiness, build_interactive_release_gates,
-    build_interactive_sessions, build_interactive_structured_logs, build_interactive_task_board,
-    build_interactive_workflow_dag, route_interactive_input, slash_command_catalog,
-    InteractiveHarnessOptions, InteractiveSessionsOptions,
+    build_interactive_home_with_options, build_interactive_identity,
+    build_interactive_patch_workbench, build_interactive_permissions, build_interactive_readiness,
+    build_interactive_release_gates, build_interactive_sessions, build_interactive_structured_logs,
+    build_interactive_task_board, build_interactive_workflow_dag, route_interactive_input,
+    slash_command_catalog, InteractiveHarnessOptions, InteractiveHomeOptions,
+    InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -1716,6 +1717,11 @@ struct ArtifactFetchInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct InteractiveHomeInput {
+    project_root: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct MilestoneStatusInput {
     version: Option<String>,
     project_root: Option<String>,
@@ -3006,10 +3012,20 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.interactive.home",
                 "Inspect Interactive Home",
-                "Return the no-argument Forge interactive home dashboard for agent-visible runtime state without launching a TTY.",
-                object_schema(&[], &[]),
+                "Return the Forge interactive home dashboard for agent-visible runtime state without launching a TTY; project_root lets agents inspect project-scoped panels without relying on cwd.",
+                object_schema(&[
+                    ("project_root", "string", "optional project root for project-scoped dashboard panels"),
+                ], &[]),
                 "forge.interactive.home.v1",
-                &["forge", "interactive", "home", "--output", "json"],
+                &[
+                    "forge",
+                    "interactive",
+                    "home",
+                    "--project-root",
+                    "<project-root>",
+                    "--output",
+                    "json",
+                ],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7218,7 +7234,19 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
-        "forge.interactive.home" => serde_json::to_value(build_interactive_home(store)?)?,
+        "forge.interactive.home" => {
+            let input: InteractiveHomeInput = if input.is_null() {
+                InteractiveHomeInput { project_root: None }
+            } else {
+                parse_input(input)?
+            };
+            serde_json::to_value(build_interactive_home_with_options(
+                store,
+                InteractiveHomeOptions {
+                    project_root: input.project_root.map(PathBuf::from),
+                },
+            )?)?
+        }
         "forge.interactive.readiness" => serde_json::to_value(build_interactive_readiness(store)?)?,
         "forge.interactive.release_gates" => {
             let input: MilestoneStatusInput = if input.is_null() {

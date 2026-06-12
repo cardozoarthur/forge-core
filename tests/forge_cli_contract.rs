@@ -43439,6 +43439,8 @@ fn interactive_retention_requires_approval_before_deleting_artifact_workflow() {
 fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("home-project");
+    fs::create_dir_all(project.join(".forge")).unwrap();
 
     let manifest = forge()
         .args(["mcp", "tools", "--output", "json"])
@@ -43479,6 +43481,11 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         .arg(store.to_str().unwrap())
         .current_dir(temp.path())
         .args(["mcp", "call", "forge.interactive.home"])
+        .arg("--input")
+        .arg(format!(
+            r#"{{"project_root":{}}}"#,
+            serde_json::to_string(project.to_str().unwrap()).unwrap()
+        ))
         .args(["--output", "json"])
         .assert()
         .success()
@@ -43574,6 +43581,60 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         home_json["result"]["dashboard"]["identity_panel"]["current_context"]["organization_id"]
             .is_string(),
         "interactive home should expose operating identity context for TUI/web dashboards"
+    );
+    assert!(
+        home_json["result"]["dashboard"]["release_gates_panel"]["gate_cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gate| gate["capability_id"] == "replacement_grade_cli"
+                && gate["evidence_plan"]["project_root"] == project.display().to_string()
+                && gate["evidence_plan"]["manifest_template_ids"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("connected_brain_runtime_manifest")))
+    );
+    assert!(
+        home_json["result"]["dashboard"]["release_gates_panel"]["gate_cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |gate| gate["capability_id"] == "experimental_multimodal_runtime"
+                    && gate["evidence_plan"]["project_root"] == project.display().to_string()
+                    && gate["evidence_plan"]["manifest_template_ids"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!("multimodal_runtime_manifest"))
+            )
+    );
+
+    let cli_home = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "interactive",
+            "home",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cli_home_json: Value = serde_json::from_slice(&cli_home).unwrap();
+    assert!(
+        cli_home_json["dashboard"]["release_gates_panel"]["gate_cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |gate| gate["capability_id"] == "experimental_multimodal_runtime"
+                    && gate["evidence_plan"]["project_root"] == project.display().to_string()
+            )
     );
 
     let brain_router = forge()

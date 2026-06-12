@@ -91,6 +91,11 @@ pub struct InteractiveHomeReport {
     pub slash_commands: Vec<SlashCommandSpec>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct InteractiveHomeOptions {
+    pub project_root: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct InteractiveBanner {
     pub mark: String,
@@ -1297,6 +1302,13 @@ pub struct RetentionDecision {
 }
 
 pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeReport> {
+    build_interactive_home_with_options(store, InteractiveHomeOptions::default())
+}
+
+pub fn build_interactive_home_with_options(
+    store: &ForgeStore,
+    options: InteractiveHomeOptions,
+) -> Result<InteractiveHomeReport> {
     let workflows = list_workflows_with_filters(
         store,
         WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
@@ -1395,7 +1407,9 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             )
         })
         .collect::<Vec<_>>();
-    let repository_context_path = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let repository_context_path = options
+        .project_root
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let harness_shim_dir = default_interactive_harness_shim_dir();
     let harness_panel = build_interactive_harness(
         store,
@@ -1416,7 +1430,8 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
     let command_palette_panel = build_interactive_command_palette(store, None)?;
     let action_registry_panel = build_action_registry_from_palette(&command_palette_panel);
     let autocomplete_panel = build_interactive_autocomplete(store, "")?;
-    let release_gates_panel = build_interactive_release_gates(store, "0.5", None)?;
+    let release_gates_panel =
+        build_interactive_release_gates(store, "0.5", Some(&repository_context_path))?;
     let harness_mode_panel = harness_panel.mode.clone();
     let harness_doctor_panel = harness_panel.doctor.clone();
     let runtime_node_status = if runtimes.usable.is_empty() {
