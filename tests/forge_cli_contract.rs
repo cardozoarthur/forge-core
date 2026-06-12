@@ -45561,6 +45561,150 @@ tenant_policy_mode: enforce
 }
 
 #[test]
+fn interactive_addon_capabilities_command_and_mcp_surface_are_dedicated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "addon-capabilities",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.interactive.addon_capability.v1"
+    );
+    assert_eq!(json["status"], "addon_capabilities_ready");
+    assert!(json["addon_count"].as_u64().unwrap() >= 1);
+    assert!(json["enabled_addon_count"].as_u64().unwrap() >= 1);
+    assert!(json["capability_count"].as_u64().unwrap() >= 1);
+    assert!(json["enabled_capability_count"].as_u64().unwrap() >= 1);
+    assert!(json["runtime_contract_count"].as_u64().unwrap() >= 1);
+    assert!(json["view_count"].as_u64().unwrap() >= 1);
+    assert!(json["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability.as_str().unwrap().contains("workflow_runtime")));
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge addons capabilities --output json"
+        )));
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge addons observability --output json"
+        )));
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "addon-capabilities",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Addons/capabilities"));
+    assert!(text.contains("workflow_runtime"));
+    assert!(text.contains("runtime contracts"));
+    assert!(text.contains("forge addons capabilities --output json"));
+
+    let home_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["addon_capability_panel"]["schema_version"],
+        "forge.interactive.addon_capability.v1"
+    );
+    assert!(home["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/addons")));
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |region| region["widgets"].as_array().unwrap().iter().any(|widget| {
+                widget["widget_id"] == "addon_capability_panel"
+                    && widget["commands"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!(
+                            "forge interactive addon-capabilities --output json"
+                        ))
+            })
+        ));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.addon_capabilities");
+    assert_eq!(
+        tool["output_schema"],
+        "forge.interactive.addon_capability.v1"
+    );
+    assert!(tool["description"]
+        .as_str()
+        .unwrap()
+        .contains("Addon capabilities"));
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.addon_capabilities"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.addon_capability.v1"
+    );
+    assert!(mcp_json["result"]["capability_count"].as_u64().unwrap() >= 1);
+}
+
+#[test]
 fn interactive_identity_command_and_mcp_surface_unify_context_aliases_and_tenant_audit() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

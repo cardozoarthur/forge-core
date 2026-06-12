@@ -1827,7 +1827,7 @@ pub fn build_interactive_home_with_options(
                     .to_string(),
                 "forge interactive sessions --output json".to_string(),
                 "forge interactive action-registry --output json".to_string(),
-                "forge addons capabilities --output json".to_string(),
+                "forge interactive addon-capabilities --output json".to_string(),
                 "forge addons observability --output json".to_string(),
                 "forge interactive release-gates --output json".to_string(),
                 "forge interactive patch-workbench --output json".to_string(),
@@ -1987,7 +1987,7 @@ pub fn build_operational_tui_smoke(
                 "{}; {} addons; {} capabilities",
                 d.addon_capability_panel.status, dashboard.addon_count, dashboard.capability_count
             ),
-            "forge addons capabilities --output json",
+            "forge interactive addon-capabilities --output json",
         ),
         operational_tui_smoke_check(
             "shows_costs",
@@ -2054,7 +2054,7 @@ pub fn build_operational_tui_smoke(
             "forge interactive operational-cockpit --output json".to_string(),
             "forge interactive task-board --output json".to_string(),
             "forge interactive structured-logs --output json".to_string(),
-            "forge addons capabilities --output json".to_string(),
+            "forge interactive addon-capabilities --output json".to_string(),
             "forge cost ledger --output json".to_string(),
             "forge smoke operational-tui --output json".to_string(),
         ],
@@ -5724,6 +5724,13 @@ pub fn build_interactive_structured_logs(
     Ok(build_structured_logs_panel(&timeline))
 }
 
+pub fn build_interactive_addon_capabilities_default(
+    store: &ForgeStore,
+) -> InteractiveAddonCapabilityPanel {
+    let catalog = load_addon_catalog_from_store(store, &default_addon_dirs()).ok();
+    build_interactive_addon_capabilities(store, catalog.as_ref())
+}
+
 pub fn build_interactive_addon_capabilities(
     store: &ForgeStore,
     catalog: Option<&AddonCatalog>,
@@ -5861,6 +5868,7 @@ pub fn build_interactive_addon_capabilities(
             "forge addons capabilities --output json".to_string(),
             "forge addons observability --output json".to_string(),
             "forge addons views --surface tui --output json".to_string(),
+            "forge interactive addon-capabilities --output json".to_string(),
             "forge interactive action-registry --query addon --output json".to_string(),
         ],
     }
@@ -8251,7 +8259,7 @@ fn build_ui_composition_panel(
             "capability_index_renderer",
             "standard",
             "full",
-            vec!["forge addons capabilities --output json".to_string()],
+            vec!["forge interactive addon-capabilities --output json".to_string()],
         ),
         core_ui_widget(
             "addon_renderer_panel",
@@ -9842,7 +9850,7 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "/addons",
             "Addons/Capabilities",
             "Show Addons, capabilities, permission gates, runtime contracts, views and dispatch state.",
-            &["forge", "addons", "capabilities", "--output", "json"],
+            &["forge", "interactive", "addon-capabilities"],
             false,
             "low",
         ),
@@ -10736,8 +10744,7 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
             Ok(render_interactive_readiness(&panel))
         }
         "addon_capability_panel" => {
-            let catalog = load_addon_catalog_from_store(store, &default_addon_dirs()).ok();
-            let panel = build_interactive_addon_capabilities(store, catalog.as_ref());
+            let panel = build_interactive_addon_capabilities_default(store);
             Ok(render_interactive_addon_capabilities(&panel))
         }
         "sessions_panel" => {
@@ -10793,8 +10800,7 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
             Ok(true)
         }
         "/addons" => {
-            let catalog = load_addon_catalog_from_store(store, &default_addon_dirs()).ok();
-            let panel = build_interactive_addon_capabilities(store, catalog.as_ref());
+            let panel = build_interactive_addon_capabilities_default(store);
             println!("{}", render_interactive_addon_capabilities(&panel));
             Ok(true)
         }

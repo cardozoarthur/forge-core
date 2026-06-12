@@ -93,7 +93,8 @@ use crate::interaction::{
 };
 use crate::interactive::{
     build_interactive_action_invocation, build_interactive_action_registry,
-    build_interactive_autocomplete, build_interactive_command_palette, build_interactive_harness,
+    build_interactive_addon_capabilities_default, build_interactive_autocomplete,
+    build_interactive_command_palette, build_interactive_harness,
     build_interactive_home_with_options, build_interactive_identity,
     build_interactive_operational_cockpit, build_interactive_patch_workbench,
     build_interactive_permissions, build_interactive_readiness, build_interactive_release_gates,
@@ -3247,6 +3248,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.permissions.v1",
                 &["forge", "interactive", "permissions", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.addon_capabilities",
+                "Inspect Interactive Addon Capabilities",
+                "Return the Forge interactive Addon capabilities surface with Addon lifecycle counts, capability registry totals, permission gates, runtime contracts, TUI views and dispatch state without mutating state.",
+                object_schema(&[], &[]),
+                "forge.interactive.addon_capability.v1",
+                &["forge", "interactive", "addon-capabilities", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7543,6 +7553,9 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.interactive.permissions" => {
             serde_json::to_value(build_interactive_permissions(store)?)?
+        }
+        "forge.interactive.addon_capabilities" => {
+            serde_json::to_value(build_interactive_addon_capabilities_default(store))?
         }
         "forge.interactive.identity" => {
             let input: InteractiveIdentityInput = if input.is_null() {
