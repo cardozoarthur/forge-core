@@ -6292,7 +6292,7 @@ pub fn render_interactive_permissions(panel: &InteractivePermissionsPanel) -> St
 
 pub fn render_interactive_identity(panel: &InteractiveIdentityPanel) -> String {
     format!(
-        "Identity center: {status}; context {organization}/{brand}/{product}, user {user}, channel {channel}, policy {policy}\nRegistry: identities {identity_count}, active links {link_count}, channel aliases {channel_alias_count}, memberships {membership_count}, active memberships {active_membership_count}, tenant audit missing {tenant_audit_missing_count}\nIdentities: {identities}\nChannel aliases: {aliases}\nMemberships: {memberships}\n",
+        "Identity center: {status}; context {organization}/{brand}/{product}, user {user}, channel {channel}, policy {policy}\nContext: source {context_source}, memory {memory_scope}, personality {personality_scope}, warnings {warning_count}; tenant audit {tenant_audit_status} missing {tenant_audit_missing_count}\nRegistry: identities {identity_count}, active links {link_count}, channel aliases {channel_alias_count}, memberships {membership_count}, active memberships {active_membership_count}\nIdentities: {identities}\nChannel aliases: {aliases}\nMemberships: {memberships}\nCommands: {commands}\n",
         status = panel.status,
         organization = panel.current_context.organization_id,
         brand = panel.current_context.brand_id,
@@ -6300,6 +6300,11 @@ pub fn render_interactive_identity(panel: &InteractiveIdentityPanel) -> String {
         user = panel.current_context.user_id,
         channel = panel.current_context.channel_id,
         policy = panel.current_context.tenant_policy_mode,
+        context_source = panel.current_context.source,
+        memory_scope = panel.current_context.memory_scope,
+        personality_scope = panel.current_context.personality_scope,
+        warning_count = panel.current_context.warning_count,
+        tenant_audit_status = panel.tenant_audit.status,
         identity_count = panel.identity_count,
         link_count = panel.link_count,
         channel_alias_count = panel.channel_alias_count,
@@ -6309,6 +6314,7 @@ pub fn render_interactive_identity(panel: &InteractiveIdentityPanel) -> String {
         identities = render_identity_record_summary(panel),
         aliases = render_identity_alias_summary(panel),
         memberships = render_identity_membership_summary(panel),
+        commands = render_identity_command_summary(panel),
     )
 }
 
@@ -6335,8 +6341,13 @@ fn render_identity_alias_summary(panel: &InteractiveIdentityPanel) -> String {
         .take(8)
         .map(|alias| {
             format!(
-                "{} [{} {}]",
-                alias.alias_path, alias.link_type, alias.status
+                "{} [{} {}, source {}, commands {}; commands {}]",
+                alias.alias_path,
+                alias.link_type,
+                alias.status,
+                alias.source,
+                alias.commands.resolve.join(" "),
+                alias.commands.unlink.join(" ")
             )
         })
         .collect::<Vec<_>>()
@@ -6353,16 +6364,30 @@ fn render_identity_membership_summary(panel: &InteractiveIdentityPanel) -> Strin
         .take(8)
         .map(|membership| {
             format!(
-                "{}:{} -> {} ({}, {} permissions)",
+                "{}:{} -> {} ({}, {} permissions, status {}, commands {})",
                 membership.subject_scope,
                 membership.subject_id,
                 membership.tenant_path,
                 membership.role,
-                membership.permission_count
+                membership.permission_count,
+                membership.status,
+                membership.commands.update.join(" ")
             )
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+fn render_identity_command_summary(panel: &InteractiveIdentityPanel) -> String {
+    [
+        panel.commands.sync.join(" "),
+        panel.commands.context.join(" "),
+        panel.commands.link.join(" "),
+        panel.commands.resolve.join(" "),
+        panel.commands.memberships.join(" "),
+        panel.commands.tenant_audit.join(" "),
+    ]
+    .join(" | ")
 }
 
 pub fn render_interactive_readiness(panel: &InteractiveReadinessPanel) -> String {

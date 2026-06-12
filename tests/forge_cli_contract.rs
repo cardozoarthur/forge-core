@@ -44928,6 +44928,15 @@ tenant_policy_mode: enforce
     assert!(text.contains("Identity center"));
     assert!(text.contains("operator-1"));
     assert!(text.contains("telegram:chat-42"));
+    assert!(text.contains("Context: source"));
+    assert!(text.contains("tenant audit tenant_index_complete missing 0"));
+    assert!(text.contains("Commands:"));
+    assert!(text.contains("identity sync"));
+    assert!(text.contains("tenant-audit"));
+    assert!(text.contains("commands identity resolve"));
+    assert!(text.contains("commands identity unlink"));
+    assert!(text.contains("digital-directive/forge/core"));
+    assert!(text.contains("commands identity membership-update"));
 
     let manifest = forge()
         .args(["mcp", "tools", "--output", "json"])
