@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -36,6 +37,8 @@ pub const CLI_HARNESS_SESSION_LIFECYCLE_PLAN_SCHEMA_VERSION: &str =
 pub const CLI_SHIM_INSTALL_SCHEMA_VERSION: &str = "forge.harness.shim_install.v1";
 pub const CLI_SHIM_STATUS_SCHEMA_VERSION: &str = "forge.harness.shim_status.v1";
 const CLI_SHIM_MARKER: &str = "# forge-harness-shim:v1";
+const CLI_HARNESS_ACTIVATION_BEGIN: &str = "# >>> forge harness activation profile";
+const CLI_HARNESS_ACTIVATION_END: &str = "# <<< forge harness activation profile";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenHeadroomReport {
@@ -342,9 +345,19 @@ pub struct HarnessActivationProfileReport {
     pub executor: String,
     pub shim_dir: String,
     pub project_root: String,
+    pub apply: bool,
+    pub applied: bool,
     pub mutates_state: bool,
     pub executes_child: bool,
     pub writes_shell_rc: bool,
+    pub would_write_shell_rc: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell_rc: Option<String>,
+    pub shell_rc_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approved_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_path: Option<String>,
     pub forge_first: bool,
     pub context_budget: usize,
     pub context_budget_source: String,
@@ -356,6 +369,8 @@ pub struct HarnessActivationProfileReport {
     pub deactivation_commands: Vec<String>,
     pub activation_script: String,
     pub deactivation_script: String,
+    pub managed_block: String,
+    pub rollback_commands: Vec<String>,
     pub next_commands: Vec<String>,
     pub notes: Vec<String>,
 }
@@ -503,6 +518,9 @@ pub struct HarnessActivationProfileOptions<'a> {
     pub context_budget_source: &'a str,
     pub token_headroom: bool,
     pub token_headroom_source: &'a str,
+    pub apply: bool,
+    pub shell_rc: Option<&'a Path>,
+    pub approved_by: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1438,7 +1456,7 @@ pub fn build_harness_headroom_plan(
 
 pub fn build_harness_activation_profile(
     options: HarnessActivationProfileOptions<'_>,
-) -> HarnessActivationProfileReport {
+) -> Result<HarnessActivationProfileReport> {
     let executor = normalize_executor(options.executor);
     let shim_dir = options
         .shim_dir
@@ -1522,16 +1540,156 @@ pub fn build_harness_activation_profile(
     ];
     let activation_script = format!("{}\n", activation_commands.join("\n"));
     let deactivation_script = format!("{}\n", deactivation_commands.join("\n"));
+    let managed_block = harness_activation_managed_block(
+        &executor,
+        &shim_dir_display,
+        &project_root_display,
+        &activation_script,
+    );
+    let shell_rc_path = options.shell_rc.map(Path::to_path_buf);
+    let shell_rc_display = shell_rc_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+    let approved_by = options
+        .approved_by
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let mut status = "harness_activation_profile_ready".to_string();
+    let mut applied = false;
+    let mut mutates_state = false;
+    let mut writes_shell_rc = false;
+    let mut shell_rc_status = if options.apply {
+        "planned_apply_requested".to_string()
+    } else {
+        "not_requested".to_string()
+    };
+    let mut backup_path = None;
+    let mut notes = vec![
+        "Activation profile is read-only unless --apply, --shell-rc and --approved-by are all supplied.".to_string(),
+        "Source the activation script only in shells where selected CLIs should prefer Forge infrastructure.".to_string(),
+        "Deactivate by running the deactivation commands or starting a fresh shell.".to_string(),
+    ];
 
-    HarnessActivationProfileReport {
+    if options.apply {
+        if approved_by.is_none() {
+            status = "harness_activation_profile_blocked_missing_approval".to_string();
+            shell_rc_status = "blocked_missing_approval".to_string();
+            notes.push(
+                "Shell startup files are not modified without an explicit approver.".to_string(),
+            );
+        } else if shell_rc_path.is_none() {
+            status = "harness_activation_profile_blocked_missing_shell_rc".to_string();
+            shell_rc_status = "blocked_missing_shell_rc".to_string();
+            notes.push(
+                "Supply --shell-rc <path> to choose the exact startup file Forge may update."
+                    .to_string(),
+            );
+        } else if let Some(shell_rc) = shell_rc_path.as_ref() {
+            let existed_before = shell_rc.exists();
+            let existing = match fs::read_to_string(shell_rc) {
+                Ok(content) => content,
+                Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to read {}", shell_rc.display()));
+                }
+            };
+            if let Some(parent) = shell_rc.parent() {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create shell rc parent {}", parent.display())
+                })?;
+            }
+            if existed_before {
+                let backup = shell_rc_backup_path(shell_rc);
+                fs::write(&backup, existing.as_bytes())
+                    .with_context(|| format!("failed to write {}", backup.display()))?;
+                backup_path = Some(backup.display().to_string());
+            }
+            let updated = replace_harness_activation_block(&existing, &managed_block);
+            fs::write(shell_rc, updated.as_bytes())
+                .with_context(|| format!("failed to write {}", shell_rc.display()))?;
+            status = "harness_activation_profile_applied".to_string();
+            applied = true;
+            mutates_state = true;
+            writes_shell_rc = true;
+            shell_rc_status = if existing.contains(CLI_HARNESS_ACTIVATION_BEGIN) {
+                "updated_managed_block".to_string()
+            } else if existed_before {
+                "appended_managed_block".to_string()
+            } else {
+                "created_shell_rc".to_string()
+            };
+            notes.push(
+                "A Forge-managed shell block was written; user shell activation still requires opening a new shell or sourcing the file.".to_string(),
+            );
+        }
+    }
+
+    let shell_rc_arg = shell_rc_display
+        .clone()
+        .unwrap_or_else(|| "<shell-rc>".to_string());
+    let rollback_commands = vec![
+        format!(
+            "sed -i '/{}/,/{}/d' {}",
+            CLI_HARNESS_ACTIVATION_BEGIN,
+            CLI_HARNESS_ACTIVATION_END,
+            shell_quote(&shell_rc_arg)
+        ),
+        backup_path
+            .as_ref()
+            .map(|backup| format!("cp {} {}", shell_quote(backup), shell_quote(&shell_rc_arg)))
+            .unwrap_or_else(|| {
+                "no backup was created because the shell rc did not exist before apply".to_string()
+            }),
+    ];
+    let mut next_commands = vec![
+        format!(
+            "forge harness shim-status --shim-dir {} --executor {} --output json",
+            shell_quote(&shim_dir_display),
+            shell_quote(&executor)
+        ),
+        format!(
+            "forge harness doctor --shim-dir {} --executor {} --project-root {} --output json",
+            shell_quote(&shim_dir_display),
+            shell_quote(&executor),
+            shell_quote(&project_root_display)
+        ),
+        format!(
+            "forge sync executors --shim-dir {} --allow {} --output json",
+            shell_quote(&shim_dir_display),
+            shell_quote(&executor)
+        ),
+    ];
+    if !applied {
+        next_commands.insert(
+            0,
+            format!(
+                "forge harness activation-profile --shim-dir {} --executor {} --project-root {} --shell-rc {} --apply --approved-by <operator> --output json",
+                shell_quote(&shim_dir_display),
+                shell_quote(&executor),
+                shell_quote(&project_root_display),
+                shell_quote(&shell_rc_arg)
+            ),
+        );
+    }
+
+    Ok(HarnessActivationProfileReport {
         schema_version: CLI_HARNESS_ACTIVATION_PROFILE_SCHEMA_VERSION.to_string(),
-        status: "harness_activation_profile_ready".to_string(),
+        status,
         executor: executor.clone(),
         shim_dir: shim_dir_display.clone(),
         project_root: project_root_display.clone(),
-        mutates_state: false,
+        apply: options.apply,
+        applied,
+        mutates_state,
         executes_child: false,
-        writes_shell_rc: false,
+        writes_shell_rc,
+        would_write_shell_rc: true,
+        shell_rc: shell_rc_display,
+        shell_rc_status,
+        approved_by,
+        backup_path,
         forge_first: true,
         context_budget: options.context_budget,
         context_budget_source: options.context_budget_source.to_string(),
@@ -1543,30 +1701,62 @@ pub fn build_harness_activation_profile(
         deactivation_commands,
         activation_script,
         deactivation_script,
-        next_commands: vec![
-            format!(
-                "forge harness shim-status --shim-dir {} --executor {} --output json",
-                shell_quote(&shim_dir_display),
-                shell_quote(&executor)
-            ),
-            format!(
-                "forge harness doctor --shim-dir {} --executor {} --project-root {} --output json",
-                shell_quote(&shim_dir_display),
-                shell_quote(&executor),
-                shell_quote(&project_root_display)
-            ),
-            format!(
-                "forge sync executors --shim-dir {} --allow {} --output json",
-                shell_quote(&shim_dir_display),
-                shell_quote(&executor)
-            ),
-        ],
-        notes: vec![
-            "Activation profile is read-only: it prints shell commands but never edits shell startup files.".to_string(),
-            "Source the activation script only in shells where selected CLIs should prefer Forge infrastructure.".to_string(),
-            "Deactivate by running the deactivation commands or starting a fresh shell.".to_string(),
-        ],
+        managed_block,
+        rollback_commands,
+        next_commands,
+        notes,
+    })
+}
+
+fn harness_activation_managed_block(
+    executor: &str,
+    shim_dir: &str,
+    project_root: &str,
+    activation_script: &str,
+) -> String {
+    format!(
+        "{begin}\n# forge-harness-activation:v1\n# executor={executor}\n# shim_dir={shim_dir}\n# project_root={project_root}\n{activation_script}{end}\n",
+        begin = CLI_HARNESS_ACTIVATION_BEGIN,
+        end = CLI_HARNESS_ACTIVATION_END,
+    )
+}
+
+fn shell_rc_backup_path(shell_rc: &Path) -> PathBuf {
+    let file_name = shell_rc
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("shellrc");
+    shell_rc.with_file_name(format!("{file_name}.forge-backup"))
+}
+
+fn replace_harness_activation_block(existing: &str, managed_block: &str) -> String {
+    if let Some(start) = existing.find(CLI_HARNESS_ACTIVATION_BEGIN) {
+        if let Some(end_relative) = existing[start..].find(CLI_HARNESS_ACTIVATION_END) {
+            let end_marker_end = start + end_relative + CLI_HARNESS_ACTIVATION_END.len();
+            let end = existing[end_marker_end..]
+                .find('\n')
+                .map(|offset| end_marker_end + offset + 1)
+                .unwrap_or(end_marker_end);
+            let mut updated = String::new();
+            updated.push_str(&existing[..start]);
+            if !updated.ends_with('\n') && !updated.is_empty() {
+                updated.push('\n');
+            }
+            updated.push_str(managed_block);
+            updated.push_str(&existing[end..]);
+            return updated;
+        }
     }
+
+    let mut updated = existing.to_string();
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    if !updated.is_empty() {
+        updated.push('\n');
+    }
+    updated.push_str(managed_block);
+    updated
 }
 
 pub fn build_harness_adoption_plan(

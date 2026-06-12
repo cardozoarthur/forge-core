@@ -810,6 +810,12 @@ enum HarnessCommands {
         executor: String,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
+        #[arg(long = "shell-rc")]
+        shell_rc: Option<PathBuf>,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long = "approved-by")]
+        approved_by: Option<String>,
         #[arg(long = "context-budget")]
         context_budget: Option<usize>,
         #[arg(long = "token-headroom")]
@@ -6436,6 +6442,9 @@ fn run() -> Result<i32> {
                 shim_dir,
                 executor,
                 project_root,
+                shell_rc,
+                apply,
+                approved_by,
                 context_budget,
                 token_headroom,
                 no_token_headroom,
@@ -6460,7 +6469,10 @@ fn run() -> Result<i32> {
                     context_budget_source: &runtime_policy.context_budget_source,
                     token_headroom: runtime_policy.token_headroom,
                     token_headroom_source: &runtime_policy.token_headroom_source,
-                });
+                    apply,
+                    shell_rc: shell_rc.as_deref(),
+                    approved_by: approved_by.as_deref(),
+                })?;
                 print_response(output, &report)?;
                 Ok(0)
             }

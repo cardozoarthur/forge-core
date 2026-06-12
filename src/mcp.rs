@@ -608,6 +608,9 @@ struct HarnessActivationProfileInput {
     shim_dir: String,
     executor: String,
     project_root: Option<String>,
+    shell_rc: Option<String>,
+    apply: Option<bool>,
+    approved_by: Option<String>,
     context_budget: Option<usize>,
     token_headroom: Option<bool>,
 }
@@ -6023,17 +6026,20 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.harness.activation_profile",
                 "Project Forge-First Shell Activation",
-                "Return a read-only shell activation/deactivation profile that puts Forge-owned CLI shims first in PATH and exports Forge-first harness defaults without editing shell startup files or launching child CLIs.",
+                "Return a shell activation/deactivation profile that puts Forge-owned CLI shims first in PATH and exports Forge-first harness defaults. Dry-run by default; with apply, shell_rc and approved_by it writes a reversible Forge-managed shell startup block without launching child CLIs.",
                 object_schema(&[
                     ("executor", "string", "codex|claude|gemini|opencode"),
                     ("shim_dir", "string", "directory where Forge-owned shims should live"),
                     ("project_root", "string", "optional project root containing .forge/harness.json"),
+                    ("shell_rc", "string", "optional shell startup file to update when apply=true"),
+                    ("apply", "boolean", "write the managed shell startup block when true"),
+                    ("approved_by", "string", "required approver when apply=true"),
                     ("context_budget", "integer", "context byte budget"),
                     ("token_headroom", "boolean", "enable token-headroom defaults"),
                 ], &["executor", "shim_dir"]),
                 "forge.harness.activation_profile.v1",
                 &["forge", "harness", "activation-profile", "--executor", "<executor>", "--shim-dir", "<dir>", "--project-root", "<project-root>", "--output", "json"],
-                ToolFlags::new(true, false),
+                ToolFlags::new(false, false),
             ),
             tool(
                 "forge.harness.bootstrap",
@@ -9530,8 +9536,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     context_budget_source: &runtime_policy.context_budget_source,
                     token_headroom: runtime_policy.token_headroom,
                     token_headroom_source: &runtime_policy.token_headroom_source,
+                    apply: input.apply.unwrap_or(false),
+                    shell_rc: input.shell_rc.as_deref().map(std::path::Path::new),
+                    approved_by: input.approved_by.as_deref(),
                 },
-            ))?
+            )?)?
         }
         "forge.harness.bootstrap" => {
             let input: HarnessBootstrapInput = parse_input(input)?;

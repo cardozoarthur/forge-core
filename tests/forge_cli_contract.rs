@@ -2001,6 +2001,10 @@ fn harness_activation_profile_projects_shell_profile_for_forge_first_cli_default
     assert_eq!(json["mutates_state"], false);
     assert_eq!(json["executes_child"], false);
     assert_eq!(json["writes_shell_rc"], false);
+    assert_eq!(json["would_write_shell_rc"], true);
+    assert_eq!(json["apply"], false);
+    assert_eq!(json["applied"], false);
+    assert_eq!(json["shell_rc_status"], "not_requested");
     assert_eq!(json["forge_first"], true);
     assert_eq!(json["token_headroom"], true);
     assert_eq!(json["context_budget"], 4096);
@@ -2037,6 +2041,18 @@ fn harness_activation_profile_projects_shell_profile_for_forge_first_cli_default
         .as_str()
         .unwrap()
         .contains("FORGE_HARNESS_CONTEXT_BUDGET=4096"));
+    assert!(json["managed_block"]
+        .as_str()
+        .unwrap()
+        .contains("forge-harness-activation:v1"));
+    assert!(json["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap_or("")
+            .contains("--apply --approved-by")));
     assert!(json["next_commands"]
         .as_array()
         .unwrap()
@@ -2045,6 +2061,100 @@ fn harness_activation_profile_projects_shell_profile_for_forge_first_cli_default
             .as_str()
             .unwrap_or("")
             .contains("forge harness shim-status")));
+
+    let shell_rc = temp.path().join(".bashrc");
+    fs::write(&shell_rc, "export EXISTING_FORGE_TEST=1\n").unwrap();
+    let blocked_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "activation-profile",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--shell-rc",
+            shell_rc.to_str().unwrap(),
+            "--apply",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let blocked: Value = serde_json::from_slice(&blocked_output).unwrap();
+    assert_eq!(
+        blocked["status"],
+        "harness_activation_profile_blocked_missing_approval"
+    );
+    assert_eq!(blocked["applied"], false);
+    assert_eq!(blocked["mutates_state"], false);
+    assert_eq!(blocked["writes_shell_rc"], false);
+    assert_eq!(blocked["shell_rc_status"], "blocked_missing_approval");
+    assert_eq!(
+        fs::read_to_string(&shell_rc).unwrap(),
+        "export EXISTING_FORGE_TEST=1\n"
+    );
+
+    let applied_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "activation-profile",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--shell-rc",
+            shell_rc.to_str().unwrap(),
+            "--apply",
+            "--approved-by",
+            "arthur",
+            "--context-budget",
+            "4096",
+            "--token-headroom",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let applied: Value = serde_json::from_slice(&applied_output).unwrap();
+    assert_eq!(applied["status"], "harness_activation_profile_applied");
+    assert_eq!(applied["apply"], true);
+    assert_eq!(applied["applied"], true);
+    assert_eq!(applied["mutates_state"], true);
+    assert_eq!(applied["writes_shell_rc"], true);
+    assert_eq!(applied["approved_by"], "arthur");
+    assert_eq!(applied["shell_rc"], shell_rc.to_str().unwrap());
+    assert_eq!(applied["shell_rc_status"], "appended_managed_block");
+    let backup_path = applied["backup_path"].as_str().unwrap();
+    assert!(Path::new(backup_path).is_file());
+    assert_eq!(
+        fs::read_to_string(backup_path).unwrap(),
+        "export EXISTING_FORGE_TEST=1\n"
+    );
+    let shell_rc_content = fs::read_to_string(&shell_rc).unwrap();
+    assert!(shell_rc_content.contains("export EXISTING_FORGE_TEST=1"));
+    assert!(shell_rc_content.contains("# >>> forge harness activation profile"));
+    assert!(shell_rc_content.contains("# forge-harness-activation:v1"));
+    assert!(shell_rc_content.contains("FORGE_HARNESS_DEFAULT_MODE=forge_first"));
+    assert!(shell_rc_content.contains(shim_dir.to_str().unwrap()));
+    assert!(applied["rollback_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command.as_str().unwrap_or("").contains("sed -i")));
 
     let adoption_output = forge()
         .args([
@@ -2105,6 +2215,9 @@ fn harness_activation_profile_projects_shell_profile_for_forge_first_cli_default
         "shim_dir": shim_dir,
         "executor": "codex",
         "project_root": project,
+        "shell_rc": temp.path().join(".mcp-bashrc"),
+        "apply": true,
+        "approved_by": "mcp-test",
         "context_budget": 2048,
         "token_headroom": false
     });
@@ -2130,8 +2243,15 @@ fn harness_activation_profile_projects_shell_profile_for_forge_first_cli_default
         mcp_json["result"]["schema_version"],
         "forge.harness.activation_profile.v1"
     );
+    assert_eq!(
+        mcp_json["result"]["status"],
+        "harness_activation_profile_applied"
+    );
+    assert_eq!(mcp_json["result"]["applied"], true);
+    assert_eq!(mcp_json["result"]["approved_by"], "mcp-test");
     assert_eq!(mcp_json["result"]["context_budget"], 2048);
     assert_eq!(mcp_json["result"]["token_headroom"], false);
+    assert!(temp.path().join(".mcp-bashrc").is_file());
 }
 
 #[cfg(unix)]
