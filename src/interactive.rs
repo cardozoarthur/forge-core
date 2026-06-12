@@ -5626,6 +5626,7 @@ fn release_gate_commands(version: &str) -> InteractiveReleaseGateCommands {
 fn release_gate_next_commands(capability_id: &str) -> Vec<String> {
     match capability_id {
         "replacement_grade_cli" => vec![
+            "forge milestone prepare-evidence-inputs --version 0.5 --capability replacement_grade_cli --project-root <project-root> --connected-brain <provider-id> --apply --approved-by <operator> --output json".to_string(),
             "forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root <project-root> --connected-brain <provider-id> --output json".to_string(),
             "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root <project-root> --connected-brain <provider-id> --approved-by <operator> --origin codex --output json".to_string(),
             "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind broader_project_coding_research_workflow --project-root <project-root> --approved-by <operator> --origin codex --output json".to_string(),
@@ -5636,6 +5637,7 @@ fn release_gate_next_commands(capability_id: &str) -> Vec<String> {
             "forge interactive patch-workbench --output json".to_string(),
         ],
         "experimental_multimodal_runtime" => vec![
+            "forge milestone prepare-evidence-inputs --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --apply --approved-by <operator> --output json".to_string(),
             "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --output json".to_string(),
             "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --approved-by <operator> --output json".to_string(),
             "forge multimodal status --output json".to_string(),

@@ -45344,6 +45344,10 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
             && gate["next_commands"].as_array().unwrap().iter().any(|command| command
                 .as_str()
                 .unwrap()
+                .contains("forge milestone prepare-evidence-inputs --version 0.5 --capability replacement_grade_cli"))
+            && gate["next_commands"].as_array().unwrap().iter().any(|command| command
+                .as_str()
+                .unwrap()
                 .contains("forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli"))
             && gate["next_commands"].as_array().unwrap().iter().any(|command| command
                 .as_str()
@@ -45401,6 +45405,10 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
                 .contains(&serde_json::json!(
                     "forge multimodal readiness --capability image_understanding --output json"
                 ))
+            && gate["next_commands"].as_array().unwrap().iter().any(|command| command
+                .as_str()
+                .unwrap()
+                .contains("forge milestone prepare-evidence-inputs --version 0.5 --capability experimental_multimodal_runtime"))
             && gate["next_commands"].as_array().unwrap().iter().any(|command| command
                 .as_str()
                 .unwrap()
@@ -45480,7 +45488,10 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains(".forge/connected-brain-runtimes.json"));
     assert!(text.contains("external_brain_provider_execution gates provider_contract_validated"));
     assert!(text.contains(
-        "commands forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli"
+        "commands forge milestone prepare-evidence-inputs --version 0.5 --capability replacement_grade_cli"
+    ));
+    assert!(text.contains(
+        "forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli"
     ));
     assert!(text.contains(
         "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution"
