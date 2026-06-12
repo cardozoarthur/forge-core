@@ -210,6 +210,7 @@ pub struct InteractiveArchitectureCompassPanel {
     pub source_documents: Vec<InteractiveArchitectureSourceDocument>,
     pub tracks: Vec<InteractiveArchitectureTrack>,
     pub benchmark_sources: Vec<InteractiveArchitectureBenchmarkSource>,
+    pub execution_plan: InteractiveArchitectureExecutionPlan,
     pub dependencies: Vec<InteractiveArchitectureDependency>,
     pub conflicts: Vec<String>,
     pub reuse_opportunities: Vec<String>,
@@ -248,6 +249,33 @@ pub struct InteractiveArchitectureDependency {
     pub item: String,
     pub depends_on: Vec<String>,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveArchitectureExecutionPlan {
+    pub schema_version: String,
+    pub status: String,
+    pub strategy: String,
+    pub selection_rule: String,
+    pub increments: Vec<InteractiveArchitectureExecutionIncrement>,
+    pub acceptance_policy: String,
+    pub next_command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveArchitectureExecutionIncrement {
+    pub increment_id: String,
+    pub priority: usize,
+    pub title: String,
+    pub status: String,
+    pub source_refs: Vec<String>,
+    pub depends_on: Vec<String>,
+    pub unlocks: Vec<String>,
+    pub core_boundary: String,
+    pub addon_boundary: String,
+    pub acceptance_gates: Vec<String>,
+    pub evidence_commands: Vec<String>,
+    pub risk_controls: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2818,6 +2846,7 @@ fn build_architecture_compass_panel(
     } else {
         "architecture_compass_actionable"
     };
+    let execution_plan = architecture_execution_plan(&tracks);
 
     InteractiveArchitectureCompassPanel {
         schema_version: INTERACTIVE_ARCHITECTURE_COMPASS_SCHEMA_VERSION.to_string(),
@@ -2844,6 +2873,7 @@ fn build_architecture_compass_panel(
         ],
         tracks,
         benchmark_sources: architecture_benchmark_sources(inputs),
+        execution_plan,
         dependencies: vec![
             architecture_dependency(
                 "Forge-first CLI adoption",
@@ -2894,6 +2924,319 @@ fn build_architecture_compass_panel(
     }
 }
 
+fn architecture_execution_plan(
+    tracks: &[InteractiveArchitectureTrack],
+) -> InteractiveArchitectureExecutionPlan {
+    let increments = vec![
+        architecture_increment(
+            "stabilize_operational_tui",
+            1,
+            "TUI operacional como entrada padrão do Forge",
+            architecture_increment_status(tracks, &["world_class_tui", "observability_cost_validation"]),
+            &["goal1:Fase 2", "goal1:Fase 6", "goal1:Critério 10"],
+            &["core_addons_domain_agnostic"],
+            &[
+                "Operadores enxergam workflows, eventos, schedules, Addons, custos e aprovações sem abrir painéis separados.",
+                "Home, REPL, MCP e smoke compartilham o mesmo contrato de dados.",
+            ],
+            "Core pode renderizar cockpit, navegação, task-board, DAG, logs, custos e composição; não pode embutir UX específica de domínio.",
+            "Addons fornecem widgets especializados e ações de domínio através de views/capabilities, mantendo o Core genérico.",
+            &[
+                "`forge` abre uma superfície operacional útil em TTY e em snapshot sem TTY.",
+                "`forge smoke operational-tui --output json` passa todos os checks obrigatórios.",
+                "A home mostra Architecture Compass e execução incremental sem mutar workflow.",
+            ],
+            &[
+                "forge",
+                "forge interactive home --output json",
+                "forge smoke operational-tui --output json",
+            ],
+            &[
+                "Não criar atalhos de domínio no Core.",
+                "Manter o snapshot sem TTY scriptável para CI e agentes.",
+            ],
+        ),
+        architecture_increment(
+            "activate_dynamic_event_runtime",
+            2,
+            "Runtime dinâmico, event-driven, persistente e efêmero",
+            architecture_increment_status(
+                tracks,
+                &["dynamic_workflow_engine", "event_persistent_runtime"],
+            ),
+            &[
+                "goal1:Fase 3",
+                "goal1:Fase 3.6",
+                "goal1:Fase 3.7",
+                "goal3:Event Extensions",
+            ],
+            &["stabilize_operational_tui", "core_addons_domain_agnostic"],
+            &[
+                "Workflows podem iniciar, continuar, pausar, retomar e evoluir por eventos.",
+                "Schedulers, waits, checkpoints e resume viram rotina operacional visível.",
+            ],
+            "Core mantém grafo, eventos normalizados, leases, estado, checkpoints, waits e validação.",
+            "Transportes como Telegram, WhatsApp, Kafka, MQTT, sensores e CRMs entram como Addons/adapters.",
+            &[
+                "Eventos inbound aparecem no event runtime e podem acionar workflows sem código de canal no Core.",
+                "Workflows persistentes e efêmeros aparecem no task-board, DAG e timeline.",
+                "Replanejamento preserva revisions, checkpoints e auditoria.",
+            ],
+            &[
+                "forge interactive workflow-dag --output json",
+                "forge interactive schedules --output json",
+                "forge interactive structured-logs --output json",
+                "forge events runtime-reconcile --project-root . --output json",
+            ],
+            &[
+                "Não confundir agente permanente com primitive separada de workflow.",
+                "Não deixar adapters externos pularem permissões, tenant policy ou evento global.",
+            ],
+        ),
+        architecture_increment(
+            "harden_core_addon_kernel",
+            3,
+            "Kernel Core + Addons domain-agnostic",
+            architecture_increment_status(tracks, &["core_addons_domain_agnostic"]),
+            &[
+                "goal1:Fase 3.5",
+                "goal3:Core Responsibilities",
+                "goal3:Capability Discovery",
+                "goal3:Addon Lifecycle",
+            ],
+            &["activate_dynamic_event_runtime"],
+            &[
+                "Novos domínios entram por capabilities, manifests, workers, views e validators.",
+                "Core continua pequeno, universal e capaz de operar sem Addon específico de domínio.",
+            ],
+            "Core conhece goals, workflows, events, context, memory, identity, permissions, artifacts, observability, scheduling, runtime, UI composition e registries.",
+            "Domínios como software, SDR, logística, saúde, jurídico e RH ficam em Addons instaláveis/removíveis.",
+            &[
+                "Capability discovery sugere Addons ausentes sem templates fixos.",
+                "Install/enable/disable/upgrade/downgrade preservam compatibilidade e permissões.",
+                "Addon views compõem UI sem recompilar Core.",
+            ],
+            &[
+                "forge interactive addon-capabilities --output json",
+                "forge addons catalog --output json",
+                "forge addons resolve --goal \"operate a logistics workflow\" --output json",
+            ],
+            &[
+                "Rejeitar novas features de domínio no Core quando puderem ser Addon.",
+                "Manter permissões granulares e manifests auditáveis.",
+            ],
+        ),
+        architecture_increment(
+            "tenant_personality_memory_os",
+            4,
+            "Sistema operacional multi-tenant com memória e personalidade",
+            architecture_increment_status(tracks, &["tenant_identity_personality_context"]),
+            &[
+                "goal1:Fase 5",
+                "goal1:Fase 5.5",
+                "goal2:Fase 5.7",
+                "goal2:Fase 5.8",
+                "goal2:Fase 7.8",
+            ],
+            &["harden_core_addon_kernel"],
+            &[
+                "Uma instalação opera múltiplas organizações, marcas, produtos, usuários e canais.",
+                "Cada workflow e node pode carregar personalidade, contexto organizacional e memória governada.",
+            ],
+            "Core aplica isolamento, identity links, membership, memory policy, prompt packets e validation gates.",
+            "Brand assets, design systems, personas especializadas e dados de negócio vivem em contexto organizacional ou Addons.",
+            &[
+                "Context/handoff inclui organization_context, personality_decision e company_work_decision.",
+                "Memórias respeitam escopo global, organização, projeto e processamento com audiência/visibilidade.",
+                "Tenant policy bloqueia leitura/mutação fora da organização ativa.",
+            ],
+            &[
+                "forge interactive identity --output json",
+                "forge interactive context-memory --output json",
+                "forge memory policy --project-root . --output json",
+                "forge context --workflow <id> --task <task-id> --project-root . --strict --output json",
+            ],
+            &[
+                "Não vazar memória privada para contexto global ou público.",
+                "Não permitir que brain externo ignore personalidade ou contexto organizacional.",
+            ],
+        ),
+        architecture_increment(
+            "forge_first_harness_headroom",
+            5,
+            "Harness Forge-first com headroom, wrappers e brains substituíveis",
+            architecture_increment_status(tracks, &["harness_headroom_cli_brains"]),
+            &["goal1:Fase 1", "goal1:Fase 4", "headroom benchmark"],
+            &["tenant_personality_memory_os"],
+            &[
+                "Codex, Gemini, Claude, OpenCode e futuros CLIs operam como brains, não como orquestradores.",
+                "Wrappers e shims preservam lineage, permissões, contexto, custo e compressão reversível.",
+            ],
+            "Core controla routing, sessions, shell lifecycle, harness policy, headroom receipts e retrieval refs.",
+            "Brains e CLIs continuam externos e substituíveis; integrações específicas entram por manifestos ou Addons.",
+            &[
+                "`forge smoke forge-first-harness --output json` prova headroom, shim, bootstrap dry-run e exec dry-run.",
+                "Wrapper nunca executa CLI externa em smoke sem aprovação explícita.",
+                "Compressão preserva original recuperável por retrieval ref e audit trail.",
+            ],
+            &[
+                "forge interactive harness --output json",
+                "forge harness headroom-plan --executor codex --project-root . --output json",
+                "forge harness wrap-plan --executor codex --cmd codex --project-root . --output json",
+                "forge smoke forge-first-harness --output json",
+            ],
+            &[
+                "Não esconder perda de contexto por sumarização opaca.",
+                "Não promover provider/model execution sem manifesto aprovado e recibo real.",
+            ],
+        ),
+        architecture_increment(
+            "visual_human_ai_workspace",
+            6,
+            "Workspace visual Humano + IA e gêmeo digital operacional",
+            architecture_increment_status(tracks, &["human_ai_visual_copilot", "world_class_tui"]),
+            &["goal1:Fase 7", "goal2:Fase 7.8", "goal3:UI Composition Engine"],
+            &["activate_dynamic_event_runtime", "tenant_personality_memory_os"],
+            &[
+                "Operador e Forge co-criam artefatos, whiteboards, DAGs, wireframes, flows, docs e backlogs.",
+                "Mudanças humanas podem virar eventos que atualizam workflows e artefatos relacionados.",
+            ],
+            "Core guarda artifacts, digital twin, modifier lane, UI composition e eventos de colaboração.",
+            "Editores especializados, design tools, multimídia e painéis de domínio entram como Addons ou surfaces Ops.",
+            &[
+                "Digital twin mostra o que acontece, feito, faltante, validado, rejeitado e aguardando aprovação.",
+                "Artifact panel e UI composition expõem widgets Core/Addons com permissões.",
+                "Modifier lane registra propostas e aplicação com auditoria.",
+            ],
+            &[
+                "forge interactive operational-cockpit --output json",
+                "forge interactive task-board --output json",
+                "forge interactive artifacts --output json",
+            ],
+            &[
+                "Não fixar UI por domínio.",
+                "Não permitir edição visual sem evento, revisão ou vínculo ao workflow.",
+            ],
+        ),
+        architecture_increment(
+            "observability_cost_improvement_loop",
+            7,
+            "Observabilidade, custos e auto-melhoria controlada",
+            architecture_increment_status(tracks, &["observability_cost_validation"]),
+            &["goal1:Fase 4", "goal1:Fase 6"],
+            &["activate_dynamic_event_runtime", "forge_first_harness_headroom"],
+            &[
+                "Forge mede eventos, contexto, memória, custo, tempo, tokens, validação e outcomes.",
+                "Auto-melhoria escolhe candidatos por evidência, custo e repetição, não por intuição.",
+            ],
+            "Core mede, rankeia, valida, gera experimento e exige benchmark/aprovação antes de promoção.",
+            "Políticas de otimização específicas podem ser configuráveis por Addon, organização ou workflow.",
+            &[
+                "Structured logs e cost ledger materializam eventos recentes e custo por workflow/node.",
+                "Improve candidates identifica tarefas AI evitáveis e handoffs paralelizáveis.",
+                "Improve promote exige benchmark, validação e aprovação explícita.",
+            ],
+            &[
+                "forge interactive structured-logs --output json",
+                "forge cost ledger --project-root . --output json",
+                "forge improve candidates --output json",
+            ],
+            &[
+                "Não auto-promover mudanças de política sem benchmark.",
+                "Não usar métrica estreita para declarar aceite amplo.",
+            ],
+        ),
+    ];
+
+    let status = if increments
+        .iter()
+        .all(|increment| increment.status == "validated")
+    {
+        "incremental_plan_validated"
+    } else {
+        "incremental_plan_actionable"
+    };
+
+    InteractiveArchitectureExecutionPlan {
+        schema_version: "forge.interactive.architecture_execution_plan.v1".to_string(),
+        status: status.to_string(),
+        strategy: "architecture_correctness_first".to_string(),
+        selection_rule: "Ship the smallest increment that strengthens a universal Core primitive or an Addon escape hatch, preserves workflow/event/tenant boundaries, and has executable evidence gates.".to_string(),
+        increments,
+        acceptance_policy: "An increment is accepted only when its evidence commands prove the stated gates without adding domain-specific behavior to Core.".to_string(),
+        next_command: "forge interactive architecture --output json".to_string(),
+    }
+}
+
+fn architecture_increment_status(
+    tracks: &[InteractiveArchitectureTrack],
+    track_ids: &[&str],
+) -> String {
+    let statuses = track_ids
+        .iter()
+        .filter_map(|track_id| {
+            tracks
+                .iter()
+                .find(|track| track.track_id == *track_id)
+                .map(|track| track.status.as_str())
+        })
+        .collect::<Vec<_>>();
+
+    if !statuses.is_empty() && statuses.iter().all(|status| *status == "validated") {
+        "validated".to_string()
+    } else if statuses
+        .iter()
+        .any(|status| matches!(*status, "validated" | "in_progress"))
+    {
+        "in_progress".to_string()
+    } else {
+        "planned".to_string()
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "static architecture-plan metadata stays more auditable as positional fixture data"
+)]
+fn architecture_increment(
+    increment_id: &str,
+    priority: usize,
+    title: &str,
+    status: String,
+    source_refs: &[&str],
+    depends_on: &[&str],
+    unlocks: &[&str],
+    core_boundary: &str,
+    addon_boundary: &str,
+    acceptance_gates: &[&str],
+    evidence_commands: &[&str],
+    risk_controls: &[&str],
+) -> InteractiveArchitectureExecutionIncrement {
+    InteractiveArchitectureExecutionIncrement {
+        increment_id: increment_id.to_string(),
+        priority,
+        title: title.to_string(),
+        status,
+        source_refs: source_refs.iter().map(|value| value.to_string()).collect(),
+        depends_on: depends_on.iter().map(|value| value.to_string()).collect(),
+        unlocks: unlocks.iter().map(|value| value.to_string()).collect(),
+        core_boundary: core_boundary.to_string(),
+        addon_boundary: addon_boundary.to_string(),
+        acceptance_gates: acceptance_gates
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
+        evidence_commands: evidence_commands
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
+        risk_controls: risk_controls
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
+    }
+}
+
 fn architecture_status(validated: bool, in_progress: bool) -> String {
     if validated {
         "validated".to_string()
@@ -2918,6 +3261,10 @@ fn architecture_source_document(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "static architecture track metadata stays more auditable as positional fixture data"
+)]
 fn architecture_track(
     track_id: &str,
     title: &str,
@@ -7890,6 +8237,10 @@ pub fn build_interactive_replacement_cli(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "static readiness surface metadata stays compact and readable as fixture data"
+)]
 fn replacement_cli_surface(
     surface_id: &str,
     title: &str,
@@ -8081,7 +8432,7 @@ pub fn build_interactive_multimodal_runtime(
     let feature_guard_ready =
         !feature_flag.enabled || feature_flag.approved_by.is_some() || enable_experimental;
     let inventory_ready = status_report.capability_count >= 10
-        && status_report.installs_performed == false
+        && !status_report.installs_performed
         && status_report.available_count <= status_report.capability_count;
     let template_ready = install_plan.status == "plan_only"
         && matches!(
@@ -8348,6 +8699,10 @@ fn multimodal_missing_addon_blockers(
     blockers
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "static multimodal surface metadata stays compact and readable as fixture data"
+)]
 fn multimodal_runtime_surface(
     surface_id: &str,
     title: &str,
@@ -9845,6 +10200,8 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     let architecture_tracks = render_architecture_track_summary(&d.architecture_compass_panel);
     let architecture_benchmarks =
         render_architecture_benchmark_summary(&d.architecture_compass_panel);
+    let architecture_execution_plan =
+        render_architecture_execution_plan_summary(&d.architecture_compass_panel);
     let addon_capabilities = render_addon_capability_summary(&d.addon_capability_panel);
     let addon_event_extensions = render_addon_event_extension_summary(&d.addon_capability_panel);
     let addon_renderer_families = if d.addon_renderer_panel.families.is_empty() {
@@ -9866,11 +10223,13 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Costs: estimated ${cost_estimated:.4}, observed ${cost_observed:.4}, nodes {cost_nodes}, AI {cost_ai_nodes}, deterministic {cost_deterministic_nodes}, avoided-model {cost_avoided_nodes}\n\
          Handoffs/approvals: ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, pending approvals {pending_approvals}, context blocked {context_blocked}\n\
          Architecture compass: {architecture_status}; tracks {architecture_track_count}, docs {architecture_doc_count}; {architecture_tracks}\n\
+         Architecture execution plan: {architecture_execution_plan}\n\
          Smoke test: forge smoke operational-tui --output json\n\n\
          Active runs: {active_runs}\n\
          {run_ids_line}\
          Operational cockpit: {cockpit_attention}; {cockpit_priority}; active work {cockpit_active_work}, ready handoffs {cockpit_ready_handoffs}, human waits {cockpit_human_waits}, due workflows {cockpit_due_workflows}, brain {cockpit_selected_brain}; sections {cockpit_sections}\n\
          Architecture compass: {architecture_status}; benchmarks {architecture_benchmarks}\n\
+         Architecture execution plan: {architecture_execution_plan}\n\
          Runs needing attention: {runs_needing_attention}\n\
          Scheduled workflows: {scheduled_workflows}\n\
          Looping workflows: {looping_workflows}\n\
@@ -9935,6 +10294,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         architecture_doc_count = d.architecture_compass_panel.source_documents.len(),
         architecture_tracks = architecture_tracks,
         architecture_benchmarks = architecture_benchmarks,
+        architecture_execution_plan = architecture_execution_plan,
         runs_needing_attention = d.runs_needing_attention,
         scheduled_workflows = d.scheduled_workflows,
         looping_workflows = d.looping_workflows,
@@ -13103,13 +13463,14 @@ pub fn render_interactive_architecture_compass(
     panel: &InteractiveArchitectureCompassPanel,
 ) -> String {
     format!(
-        "Architecture compass: {status}; docs {doc_count}; tracks {track_count}; dependencies {dependency_count}; conflicts {conflict_count}\nTracks: {tracks}\nBenchmarks: {benchmarks}\nReuse: {reuse}\nNext commands: {commands}\n",
+        "Architecture compass: {status}; docs {doc_count}; tracks {track_count}; dependencies {dependency_count}; conflicts {conflict_count}\nTracks: {tracks}\nExecution plan: {execution_plan}\nBenchmarks: {benchmarks}\nReuse: {reuse}\nNext commands: {commands}\n",
         status = panel.status,
         doc_count = panel.source_documents.len(),
         track_count = panel.tracks.len(),
         dependency_count = panel.dependencies.len(),
         conflict_count = panel.conflicts.len(),
         tracks = render_architecture_track_summary(panel),
+        execution_plan = render_architecture_execution_plan_summary(panel),
         benchmarks = render_architecture_benchmark_summary(panel),
         reuse = if panel.reuse_opportunities.is_empty() {
             "none".to_string()
@@ -13121,6 +13482,35 @@ pub fn render_interactive_architecture_compass(
         } else {
             panel.next_commands.join(" | ")
         },
+    )
+}
+
+fn render_architecture_execution_plan_summary(
+    panel: &InteractiveArchitectureCompassPanel,
+) -> String {
+    let plan = &panel.execution_plan;
+    if plan.increments.is_empty() {
+        return format!("{} with no increments", plan.status);
+    }
+
+    let increments = plan
+        .increments
+        .iter()
+        .map(|increment| {
+            format!(
+                "{}.{}:{} gates {} evidence {}",
+                increment.priority,
+                increment.increment_id,
+                increment.status,
+                increment.acceptance_gates.len(),
+                increment.evidence_commands.join("+")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!(
+        "{} {}; rule {}; next {}",
+        plan.status, increments, plan.selection_rule, plan.next_command
     )
 }
 

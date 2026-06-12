@@ -4780,11 +4780,10 @@ fn milestone_evidence_plan_inspects_project_inputs_without_collecting_evidence()
             "forge.milestone.evidence_provider_candidate.v1"
         );
         assert_eq!(candidate["brain_id"], provider_id);
-        assert!(candidate["version_command"]
+        assert!(!candidate["version_command"]
             .as_array()
             .expect("candidate should include version command")
-            .first()
-            .is_some());
+            .is_empty());
         assert!(matches!(
             candidate["readiness"].as_str().unwrap(),
             "cli_detected_wrapper_required" | "cli_missing"
@@ -45123,6 +45122,76 @@ fn interactive_architecture_compass_is_home_cli_slash_and_mcp_surface() {
             .iter()
             .any(|benchmark| benchmark["source"].as_str().unwrap().contains(source)));
     }
+    assert_eq!(
+        compass["execution_plan"]["schema_version"],
+        "forge.interactive.architecture_execution_plan.v1"
+    );
+    assert_eq!(
+        compass["execution_plan"]["status"],
+        "incremental_plan_actionable"
+    );
+    assert_eq!(
+        compass["execution_plan"]["strategy"],
+        "architecture_correctness_first"
+    );
+    assert!(compass["execution_plan"]["selection_rule"]
+        .as_str()
+        .unwrap()
+        .contains("universal Core primitive"));
+    assert_eq!(
+        compass["execution_plan"]["increments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        7
+    );
+    assert_eq!(
+        compass["execution_plan"]["increments"][0]["increment_id"],
+        "stabilize_operational_tui"
+    );
+    assert!(compass["execution_plan"]["increments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|increment| {
+            increment["increment_id"] == "harden_core_addon_kernel"
+                && increment["addon_boundary"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Domínios como software")
+                && increment["evidence_commands"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!(
+                        "forge interactive addon-capabilities --output json"
+                    ))
+        }));
+    assert!(compass["execution_plan"]["increments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|increment| {
+            increment["increment_id"] == "forge_first_harness_headroom"
+                && increment["evidence_commands"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!(
+                        "forge smoke forge-first-harness --output json"
+                    ))
+                && increment["risk_controls"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|risk| risk.as_str().unwrap().contains("sumarização opaca"))
+        }));
+    assert!(compass["execution_plan"]["acceptance_policy"]
+        .as_str()
+        .unwrap()
+        .contains("domain-specific behavior"));
+    assert_eq!(
+        compass["execution_plan"]["next_command"],
+        "forge interactive architecture --output json"
+    );
     assert!(compass["dependencies"]
         .as_array()
         .unwrap()
@@ -45204,6 +45273,8 @@ fn interactive_architecture_compass_is_home_cli_slash_and_mcp_surface() {
     let text = String::from_utf8(text_output).unwrap();
     assert!(text.contains("Architecture compass:"));
     assert!(text.contains("harness_headroom_cli_brains"));
+    assert!(text.contains("Execution plan:"));
+    assert!(text.contains("forge_first_harness_headroom"));
     assert!(text.contains("Benchmarks:"));
 
     let registry_output = forge()
@@ -48707,6 +48778,7 @@ fn no_args_non_tty_renders_operational_dashboard_and_exits_for_scripts() {
     assert!(stdout.contains("Costs:"));
     assert!(stdout.contains("Handoffs/approvals:"));
     assert!(stdout.contains("Architecture compass:"));
+    assert!(stdout.contains("Architecture execution plan:"));
     assert!(stdout.contains("Smoke test: forge smoke operational-tui"));
     assert!(stdout.contains("Quick actions"));
     assert!(stdout.contains("Useful next commands"));
