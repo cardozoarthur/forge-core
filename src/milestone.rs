@@ -8,8 +8,8 @@ use crate::graph::{
 };
 use crate::handoff::build_task_handoff_with_project;
 use crate::harness::{
-    build_harness_bootstrap_report, run_cli_harness_exec, CliHarnessExecOptions,
-    HarnessBootstrapOptions,
+    build_harness_bootstrap_report, build_headroom_stats_report, run_cli_harness_exec,
+    CliHarnessExecOptions, HarnessBootstrapOptions, HeadroomStatsOptions, HeadroomStatsReport,
 };
 use crate::intent::parse_intent;
 use crate::interactive::{build_interactive_harness, InteractiveHarnessOptions};
@@ -1872,6 +1872,7 @@ pub struct MilestoneCliDemoReport {
     pub workflow_id: String,
     pub promotion_ready: bool,
     pub external_resources_mutated: bool,
+    pub headroom_stats: HeadroomStatsReport,
     pub flows: Vec<ReplacementCliDemoFlow>,
     pub remaining_gaps: Vec<String>,
     pub lean_governance: Vec<String>,
@@ -2321,6 +2322,14 @@ pub fn build_replacement_cli_demo_with_options(
         None,
         origin,
     )?;
+    let headroom_stats = build_headroom_stats_report(
+        store,
+        HeadroomStatsOptions {
+            source: None,
+            content_kind: None,
+            limit: 5,
+        },
+    )?;
 
     Ok(MilestoneCliDemoReport {
         status: "replacement_cli_demo_generated".to_string(),
@@ -2330,6 +2339,7 @@ pub fn build_replacement_cli_demo_with_options(
         workflow_id: coding_workflow.id.clone(),
         promotion_ready: false,
         external_resources_mutated: false,
+        headroom_stats,
         flows: vec![
             ReplacementCliDemoFlow {
                 kind: "coding_task".to_string(),
@@ -2798,6 +2808,11 @@ grep -q 'research artifacts' docs/research/findings.md
   printf 'artifacts=src/lib.rs,tests/workflow_contract.txt,docs/research/findings.md\n'
   printf 'validation=code_and_research_markers_verified\n'
   printf 'research_summary=Forge routed coding and research through one lineage-preserving workflow.\n'
+  i=0
+  while [ "$i" -lt 48 ]; do
+    printf 'trace[%02d]=workflow=%s task=%s run=%s phase=project_coding_research status=observed artifact_set=code,research,contract\n' "$i" "$FORGE_WORKFLOW_ID" "$FORGE_TASK_ID" "$FORGE_RUN_ID"
+    i=$((i + 1))
+  done
 }
 "#;
     let command = vec![

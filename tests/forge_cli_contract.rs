@@ -6726,6 +6726,38 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
     assert_eq!(json["promotion_ready"], false);
     assert_eq!(json["external_resources_mutated"], false);
     assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
+    assert_eq!(
+        json["headroom_stats"]["schema_version"],
+        "forge.harness.headroom_stats.v1"
+    );
+    assert_eq!(json["headroom_stats"]["status"], "headroom_stats_ready");
+    assert!(
+        json["headroom_stats"]["total_blobs"].as_u64().unwrap() >= 3,
+        "cli-demo should aggregate headroom receipts across executor, real-project and external-brain flows"
+    );
+    assert!(
+        json["headroom_stats"]["total_estimated_saved_tokens"]
+            .as_u64()
+            .unwrap()
+            > 0,
+        "cli-demo should expose token savings at milestone level"
+    );
+    assert!(json["headroom_stats"]["top_saved_blobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|blob| blob["retrieval_ref"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("forge://harness/headroom/")));
+    assert!(json["headroom_stats"]["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap_or("")
+            .contains("forge harness retrieve-headroom --ref")));
 
     let flows = json["flows"].as_array().unwrap();
     assert_eq!(flows.len(), 8);
@@ -7453,6 +7485,11 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
         "the packaged Forge skill should teach project connected brain provider selection"
     );
     assert!(
+        forge_core::skill::SKILL_MD.contains("top-level `headroom_stats`")
+            && forge_core::skill::SKILL_MD.contains("aggregated replacement-CLI token savings"),
+        "the packaged Forge skill should teach agents to inspect aggregated replacement CLI headroom stats"
+    );
+    assert!(
         forge_core::skill::SKILL_MD.contains("manifest_templates")
             && forge_core::skill::SKILL_MD.contains(".forge/connected-brain-runtimes.json"),
         "the packaged Forge skill should teach agents to use secret-free connected brain manifest templates before evidence collection"
@@ -7520,6 +7557,14 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
     );
     assert_eq!(json["result"]["capability_id"], "replacement_grade_cli");
     assert_eq!(json["result"]["promotion_ready"], false);
+    assert_eq!(
+        json["result"]["headroom_stats"]["schema_version"],
+        "forge.harness.headroom_stats.v1"
+    );
+    assert_eq!(
+        json["result"]["headroom_stats"]["status"],
+        "headroom_stats_ready"
+    );
 }
 
 #[test]
