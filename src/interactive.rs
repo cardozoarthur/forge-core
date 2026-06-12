@@ -123,6 +123,8 @@ const REPLACEMENT_CLI_EVIDENCE_SMOKE_SCHEMA_VERSION: &str =
 const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
 const INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION: &str = "forge.interactive.structured_logs.v1";
 const INTERACTIVE_EVENT_RUNTIME_SCHEMA_VERSION: &str = "forge.interactive.event_runtime.v1";
+const INTERACTIVE_EVENT_WORKFLOW_LIFECYCLE_SCHEMA_VERSION: &str =
+    "forge.interactive.event_workflow_lifecycle.v1";
 const SLASH_COMMANDS_SCHEMA_VERSION: &str = "forge.interactive.slash_commands.v1";
 const INTERACTIVE_ROUTE_SCHEMA_VERSION: &str = "forge.interactive.route.v1";
 
@@ -373,6 +375,7 @@ pub struct InteractiveEventRuntimePanel {
     pub action_required: bool,
     pub recommended_action: String,
     pub recommendation_reason: String,
+    pub workflow_lifecycle: InteractiveEventWorkflowLifecyclePanel,
     pub event_cards: Vec<InteractiveEventRuntimeEventCard>,
     pub service_cards: Vec<InteractiveEventRuntimeServiceCard>,
     pub commands: InteractiveEventRuntimeCommands,
@@ -405,6 +408,34 @@ pub struct InteractiveEventRuntimeCommands {
     pub service_supervise: Vec<String>,
     pub webhook_ingress: Vec<String>,
     pub services: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveEventWorkflowLifecyclePanel {
+    pub schema_version: String,
+    pub status: String,
+    pub action_count: usize,
+    pub validated_action_count: usize,
+    pub needs_attention_count: usize,
+    pub core_owned_actions: Vec<String>,
+    pub addon_owned_channels: Vec<String>,
+    pub actions: Vec<InteractiveEventWorkflowLifecycleAction>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveEventWorkflowLifecycleAction {
+    pub action: String,
+    pub normalized_route: String,
+    pub status: String,
+    pub purpose: String,
+    pub required_payload_fields: Vec<String>,
+    pub core_boundary: String,
+    pub addon_boundary: String,
+    pub primary_command: Vec<String>,
+    pub evidence_commands: Vec<String>,
+    pub acceptance_gates: Vec<String>,
+    pub risk_controls: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2033,6 +2064,21 @@ pub fn build_interactive_operational_cockpit(
     Ok(report.dashboard.operational_cockpit_panel)
 }
 
+pub fn build_interactive_event_runtime(
+    store: &ForgeStore,
+    project_root: &Path,
+) -> Result<InteractiveEventRuntimePanel> {
+    let workflows = list_workflows_with_filters(
+        store,
+        WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
+    )?;
+    Ok(build_event_runtime_panel(
+        store,
+        project_root,
+        &workflows.workflows,
+    ))
+}
+
 pub fn build_interactive_architecture_compass(
     store: &ForgeStore,
 ) -> Result<InteractiveArchitectureCompassPanel> {
@@ -3508,6 +3554,32 @@ pub fn build_operational_tui_smoke(
             "forge interactive schedules --output json",
         ),
         operational_tui_smoke_check(
+            "shows_event_workflow_lifecycle",
+            "TUI shows event-driven workflow lifecycle actions",
+            d.event_runtime_panel.workflow_lifecycle.action_count == 6
+                && d.event_runtime_panel
+                    .workflow_lifecycle
+                    .validated_action_count
+                    == 6
+                && d.event_runtime_panel
+                    .workflow_lifecycle
+                    .actions
+                    .iter()
+                    .any(|action| {
+                        action.action == "end_workflow"
+                            && action.normalized_route == "complete_workflow"
+                    }),
+            format!(
+                "{}; {}/{} validated lifecycle actions",
+                d.event_runtime_panel.workflow_lifecycle.status,
+                d.event_runtime_panel
+                    .workflow_lifecycle
+                    .validated_action_count,
+                d.event_runtime_panel.workflow_lifecycle.action_count
+            ),
+            "forge interactive event-runtime --output json",
+        ),
+        operational_tui_smoke_check(
             "shows_addons_and_capabilities",
             "TUI shows Addons and capabilities",
             !d.addon_capability_panel.status.is_empty(),
@@ -3582,6 +3654,7 @@ pub fn build_operational_tui_smoke(
             "forge interactive operational-cockpit --output json".to_string(),
             "forge interactive task-board --output json".to_string(),
             "forge interactive schedules --output json".to_string(),
+            "forge interactive event-runtime --output json".to_string(),
             "forge interactive structured-logs --output json".to_string(),
             "forge interactive addon-capabilities --output json".to_string(),
             "forge cost ledger --output json".to_string(),
@@ -10558,14 +10631,38 @@ fn render_event_runtime_panel(panel: &InteractiveEventRuntimePanel) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ");
+    let lifecycle_actions = panel
+        .workflow_lifecycle
+        .actions
+        .iter()
+        .map(|action| {
+            if action.action == action.normalized_route {
+                format!("{}:{}", action.action, action.status)
+            } else {
+                format!(
+                    "{}->{}:{}",
+                    action.action, action.normalized_route, action.status
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
-        "{}; pending events {}; workers {}/{}; wakeable workflows {}; recommendation {}; events {}; services {}",
+        "{}; pending events {}; workers {}/{}; wakeable workflows {}; recommendation {}; lifecycle {}/{} {} {}; events {}; services {}",
         panel.status,
         panel.pending_event_count,
         panel.running_service_count,
         panel.service_count,
         panel.wakeable_workflow_count,
         panel.recommended_action,
+        panel.workflow_lifecycle.validated_action_count,
+        panel.workflow_lifecycle.action_count,
+        panel.workflow_lifecycle.status,
+        if lifecycle_actions.is_empty() {
+            "none".to_string()
+        } else {
+            lifecycle_actions
+        },
         if events.is_empty() {
             "none".to_string()
         } else {
@@ -10577,6 +10674,10 @@ fn render_event_runtime_panel(panel: &InteractiveEventRuntimePanel) -> String {
             services
         }
     )
+}
+
+pub fn render_interactive_event_runtime(panel: &InteractiveEventRuntimePanel) -> String {
+    render_event_runtime_panel(panel)
 }
 
 fn render_operational_modifier_lane(panel: &InteractiveOperationalModifierLanePanel) -> String {
@@ -12035,6 +12136,7 @@ fn build_event_runtime_panel(
 ) -> InteractiveEventRuntimePanel {
     let project_root_text = project_root.display().to_string();
     let commands = event_runtime_commands(&project_root_text);
+    let workflow_lifecycle = build_event_workflow_lifecycle_panel(&project_root_text);
     let persistent_workflow_count = workflows
         .iter()
         .filter(|workflow| workflow.runtime.persistent)
@@ -12065,6 +12167,7 @@ fn build_event_runtime_panel(
                 action_required: false,
                 recommended_action: "inspect_event_runtime".to_string(),
                 recommendation_reason: format!("failed to load operating context: {error}"),
+                workflow_lifecycle,
                 event_cards: Vec::new(),
                 service_cards: Vec::new(),
                 commands,
@@ -12177,10 +12280,219 @@ fn build_event_runtime_panel(
         action_required,
         recommended_action: recommended_action.to_string(),
         recommendation_reason: recommendation_reason.to_string(),
+        workflow_lifecycle,
         event_cards,
         service_cards,
         commands,
         notes,
+    }
+}
+
+fn build_event_workflow_lifecycle_panel(
+    project_root: &str,
+) -> InteractiveEventWorkflowLifecyclePanel {
+    let actions = vec![
+        event_workflow_lifecycle_action(
+            project_root,
+            EventWorkflowLifecycleActionSpec {
+                action: "start_workflow",
+                normalized_route: "start_workflow",
+                status: "validated",
+                purpose:
+                    "Create a workflow from an inbound event without requiring an existing workflow.",
+                required_payload_fields: &["goal"],
+                example_input: r#"{"goal":"Demonstrate an event-started workflow"}"#,
+                acceptance_gates: &[
+                "workflow_id is created and persisted",
+                "inbound event status becomes routed",
+                "tenant policy is checked before workflow creation",
+            ],
+            },
+        ),
+        event_workflow_lifecycle_action(
+            project_root,
+            EventWorkflowLifecycleActionSpec {
+                action: "continue_workflow",
+                normalized_route: "continue_workflow",
+                status: "validated",
+                purpose: "Continue an existing workflow by attaching an artifact, recording a checkpoint, answering a human wait, completing a ready task or driving a run.",
+                required_payload_fields: &["workflow_id or run_id", "continue_action"],
+                example_input: r#"{"workflow_id":"<workflow-id>","continue_action":"drive_run"}"#,
+                acceptance_gates: &[
+                "workflow_id or run_id resolves to one workflow",
+                "continue_action is one of attach_artifact, checkpoint, answer_interaction, complete_task or drive_run",
+                "route result is recorded under event lineage",
+            ],
+            },
+        ),
+        event_workflow_lifecycle_action(
+            project_root,
+            EventWorkflowLifecycleActionSpec {
+                action: "pause_workflow",
+                normalized_route: "pause_workflow",
+                status: "validated",
+                purpose: "Pause a workflow through the same event inbox used by external channels.",
+                required_payload_fields: &["workflow_id"],
+                example_input: r#"{"workflow_id":"<workflow-id>"}"#,
+                acceptance_gates: &[
+                "workflow status is changed through Forge-owned workflow mutation",
+                "pause revision is persisted",
+                "event routing records the originating adapter policy",
+            ],
+            },
+        ),
+        event_workflow_lifecycle_action(
+            project_root,
+            EventWorkflowLifecycleActionSpec {
+                action: "resume_workflow",
+                normalized_route: "resume_workflow",
+                status: "validated",
+                purpose: "Resume a paused workflow and derive the correct runnable status from current task state.",
+                required_payload_fields: &["workflow_id"],
+                example_input: r#"{"workflow_id":"<workflow-id>"}"#,
+                acceptance_gates: &[
+                "workflow status is restored through Forge-owned workflow mutation",
+                "resume revision is persisted",
+                "event routing records the originating adapter policy",
+            ],
+            },
+        ),
+        event_workflow_lifecycle_action(
+            project_root,
+            EventWorkflowLifecycleActionSpec {
+                action: "modify_workflow",
+                normalized_route: "modify_workflow",
+                status: "validated",
+                purpose: "Modify a live workflow goal from an event without stopping the workflow.",
+                required_payload_fields: &["workflow_id", "goal"],
+                example_input: r#"{"workflow_id":"<workflow-id>","goal":"Updated operating objective"}"#,
+                acceptance_gates: &[
+                "goal revision is persisted",
+                "intent is reparsed from the new goal",
+                "previous and new deliverables are reported",
+            ],
+            },
+        ),
+        event_workflow_lifecycle_action(
+            project_root,
+            EventWorkflowLifecycleActionSpec {
+                action: "end_workflow",
+                normalized_route: "complete_workflow",
+                status: "validated_with_completion_gate",
+                purpose: "End a workflow by routing the event to the validation-gated completion path.",
+                required_payload_fields: &["workflow_id"],
+                example_input: r#"{"workflow_id":"<workflow-id>"}"#,
+                acceptance_gates: &[
+                "alias end_workflow normalizes to complete_workflow",
+                "validate_workflow must be promotable before completion",
+                "completion revision and route result are persisted",
+            ],
+            },
+        ),
+    ];
+    let validated_action_count = actions
+        .iter()
+        .filter(|action| action.status.starts_with("validated"))
+        .count();
+    let needs_attention_count = actions.len().saturating_sub(validated_action_count);
+
+    InteractiveEventWorkflowLifecyclePanel {
+        schema_version: INTERACTIVE_EVENT_WORKFLOW_LIFECYCLE_SCHEMA_VERSION.to_string(),
+        status: if needs_attention_count == 0 {
+            "event_workflow_lifecycle_ready".to_string()
+        } else {
+            "event_workflow_lifecycle_needs_attention".to_string()
+        },
+        action_count: actions.len(),
+        validated_action_count,
+        needs_attention_count,
+        core_owned_actions: actions
+            .iter()
+            .map(|action| action.action.clone())
+            .collect::<Vec<_>>(),
+        addon_owned_channels: vec![
+            "telegram".to_string(),
+            "whatsapp".to_string(),
+            "discord".to_string(),
+            "email".to_string(),
+            "sms".to_string(),
+            "voice".to_string(),
+            "api".to_string(),
+            "webhook".to_string(),
+            "cron".to_string(),
+            "kafka".to_string(),
+            "rabbitmq".to_string(),
+            "mqtt".to_string(),
+            "database".to_string(),
+            "file_watch".to_string(),
+            "sensor".to_string(),
+            "telemetry".to_string(),
+        ],
+        actions,
+        notes: vec![
+            "Core owns generic workflow lifecycle mutations; Addons own channel ingress, auth, schema mapping and permissions.".to_string(),
+            "The panel is read-only; operators still execute explicit event commands or managed workers.".to_string(),
+        ],
+    }
+}
+
+struct EventWorkflowLifecycleActionSpec<'a> {
+    action: &'a str,
+    normalized_route: &'a str,
+    status: &'a str,
+    purpose: &'a str,
+    required_payload_fields: &'a [&'a str],
+    example_input: &'a str,
+    acceptance_gates: &'a [&'a str],
+}
+
+fn event_workflow_lifecycle_action(
+    project_root: &str,
+    spec: EventWorkflowLifecycleActionSpec<'_>,
+) -> InteractiveEventWorkflowLifecycleAction {
+    InteractiveEventWorkflowLifecycleAction {
+        action: spec.action.to_string(),
+        normalized_route: spec.normalized_route.to_string(),
+        status: spec.status.to_string(),
+        purpose: spec.purpose.to_string(),
+        required_payload_fields: spec
+            .required_payload_fields
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect(),
+        core_boundary: "Forge Core routes lifecycle actions and persists workflow/event lineage; it does not embed channel-specific handlers.".to_string(),
+        addon_boundary: "Ingress channels, auth verification, schema mapping, permissions and external delivery stay in Addons/adapters.".to_string(),
+        primary_command: vec![
+            "forge".to_string(),
+            "events".to_string(),
+            "ingest".to_string(),
+            "--origin".to_string(),
+            "webhook".to_string(),
+            "--action".to_string(),
+            spec.action.to_string(),
+            "--project-root".to_string(),
+            project_root.to_string(),
+            "--input".to_string(),
+            spec.example_input.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        evidence_commands: vec![
+            "forge events route --event <event-id> --project-root <project-root> --output json".to_string(),
+            "forge events inbox --status routed --project-root <project-root> --output json".to_string(),
+            "forge interactive event-runtime --project-root <project-root> --output json".to_string(),
+            "forge interactive structured-logs --output json".to_string(),
+        ],
+        acceptance_gates: spec
+            .acceptance_gates
+            .iter()
+            .map(|gate| (*gate).to_string())
+            .collect(),
+        risk_controls: vec![
+            "adapter policy must allow the normalized action when a matching Addon adapter is declared".to_string(),
+            "tenant policy is enforced before exposing or mutating tenant-bound workflows".to_string(),
+            "mutations are persisted through Forge-owned workflow APIs, never directly by channel handlers".to_string(),
+        ],
     }
 }
 

@@ -8336,6 +8336,7 @@ fn event_route_action_mutates_workflow(action: &str) -> bool {
             | "modify_workflow"
             | "pause_workflow"
             | "resume_workflow"
+            | "end_workflow"
             | "complete_workflow"
     )
 }
@@ -8935,7 +8936,7 @@ fn normalized_action(action: &str) -> String {
         "modify" | "update_goal" | "change_goal" => "modify_workflow".to_string(),
         "pause" => "pause_workflow".to_string(),
         "resume" => "resume_workflow".to_string(),
-        "complete" | "finish_workflow" => "complete_workflow".to_string(),
+        "complete" | "end" | "end_workflow" | "finish_workflow" => "complete_workflow".to_string(),
         other => other.to_string(),
     }
 }

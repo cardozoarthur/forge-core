@@ -26101,6 +26101,80 @@ fn inbound_event_scan_can_dispatch_activation_runtime_contracts() {
 }
 
 #[test]
+fn inbound_event_end_workflow_alias_reaches_completion_gate() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let plan_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Demonstrate event end workflow alias",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan: Value = serde_json::from_slice(&plan_output).unwrap();
+    let workflow_id = plan["workflow_id"].as_str().unwrap();
+
+    let ingest_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "ingest",
+            "--origin",
+            "webhook",
+            "--action",
+            "end_workflow",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--input",
+            &format!(r#"{{"workflow_id":"{workflow_id}"}}"#),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ingest: Value = serde_json::from_slice(&ingest_output).unwrap();
+    let event_id = ingest["event"]["id"].as_str().unwrap();
+
+    let route_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "route",
+            "--event",
+            event_id,
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(route_output).unwrap();
+    assert!(stderr.contains("not validation-ready for completion"));
+    assert!(!stderr.contains("unsupported inbound event action"));
+}
+
+#[test]
 fn event_runtime_reconcile_can_dispatch_activation_runtime_contracts() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -45523,6 +45597,75 @@ tenant_policy_mode: audit
             "json"
         ])
     );
+    let lifecycle = &home["dashboard"]["event_runtime_panel"]["workflow_lifecycle"];
+    assert_eq!(
+        lifecycle["schema_version"],
+        "forge.interactive.event_workflow_lifecycle.v1"
+    );
+    assert_eq!(lifecycle["status"], "event_workflow_lifecycle_ready");
+    assert_eq!(lifecycle["action_count"], 6);
+    assert_eq!(lifecycle["validated_action_count"], 6);
+    assert!(lifecycle["addon_owned_channels"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("telegram")));
+    assert!(lifecycle["addon_owned_channels"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("webhook")));
+    let end_action = lifecycle["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["action"] == "end_workflow")
+        .expect("end_workflow lifecycle action");
+    assert_eq!(end_action["normalized_route"], "complete_workflow");
+    assert_eq!(end_action["status"], "validated_with_completion_gate");
+
+    let event_runtime_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "event-runtime",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let event_runtime: Value = serde_json::from_slice(&event_runtime_output).unwrap();
+    assert_eq!(
+        event_runtime["workflow_lifecycle"]["actions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        6
+    );
+    assert!(String::from_utf8(
+        forge()
+            .current_dir(temp.path())
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "interactive",
+                "event-runtime",
+                "--project-root",
+                temp.path().to_str().unwrap(),
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone()
+    )
+    .unwrap()
+    .contains("end_workflow->complete_workflow"));
 
     let cockpit_output = forge()
         .current_dir(temp.path())
@@ -48869,6 +49012,7 @@ fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
         "opens_useful_tui",
         "shows_active_workflows",
         "shows_events_and_schedules",
+        "shows_event_workflow_lifecycle",
         "shows_addons_and_capabilities",
         "shows_costs",
         "shows_handoffs_and_approvals",
@@ -48897,6 +49041,12 @@ fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
         .unwrap()
         .contains(&serde_json::json!(
             "forge interactive schedules --output json"
+        )));
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge interactive event-runtime --output json"
         )));
     assert!(json["commands"]
         .as_array()
