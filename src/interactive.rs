@@ -763,6 +763,7 @@ pub struct InteractiveWorkflowSidebarCommands {
 pub struct InteractiveReplacementCliPanel {
     pub schema_version: String,
     pub status: String,
+    pub project_root: String,
     pub milestone: String,
     pub capability_id: String,
     pub promotion_ready: bool,
@@ -804,6 +805,11 @@ pub struct InteractiveReplacementCliCommands {
     pub sessions: Vec<String>,
     pub release_gates: Vec<String>,
     pub cli_demo: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InteractiveReplacementCliOptions {
+    pub project_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3000,6 +3006,7 @@ pub fn build_interactive_home_with_options(
     let repository_context_path = options
         .project_root
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let repository_context_display = repository_context_path.display().to_string();
     let harness_shim_dir = default_interactive_harness_shim_dir();
     let harness_panel = build_interactive_harness(
         store,
@@ -3172,7 +3179,12 @@ pub fn build_interactive_home_with_options(
         &identity_panel,
         &context_memory_panel,
     )?;
-    let replacement_cli_panel = build_interactive_replacement_cli(store)?;
+    let replacement_cli_panel = build_interactive_replacement_cli_with_options(
+        store,
+        InteractiveReplacementCliOptions {
+            project_root: Some(repository_context_path.clone()),
+        },
+    )?;
     let multimodal_runtime_panel =
         build_interactive_multimodal_runtime(store, &repository_context_path, false)?;
     let operational_cockpit_panel = build_operational_cockpit_panel(
@@ -3213,7 +3225,8 @@ pub fn build_interactive_home_with_options(
         cost_panel: &cost_panel,
         improvement_loop_panel: &improvement_loop_panel,
     });
-    let ui_composition_panel = build_ui_composition_panel(&addon_renderer_report);
+    let ui_composition_panel =
+        build_ui_composition_panel(&addon_renderer_report, &repository_context_path);
     let architecture_compass_panel = build_architecture_compass_panel(ArchitectureCompassInputs {
         workflows: &workflows,
         schedule_panel: &schedule_panel,
@@ -3309,23 +3322,33 @@ pub fn build_interactive_home_with_options(
                 "forge inspect <workflow-id>".to_string(),
                 "forge request list".to_string(),
                 "forge interactive workflow-sidebar --output json".to_string(),
-                "forge interactive architecture --output json".to_string(),
+                format!(
+                    "forge interactive architecture --project-root {repository_context_display} --output json"
+                ),
                 "forge interactive core-boundary --output json".to_string(),
-                "forge interactive replacement-cli --output json".to_string(),
-                "forge interactive multimodal-runtime --project-root . --output json"
-                    .to_string(),
+                format!(
+                    "forge interactive replacement-cli --project-root {repository_context_display} --output json"
+                ),
+                format!(
+                    "forge interactive multimodal-runtime --project-root {repository_context_display} --output json"
+                ),
                 "forge schedule list".to_string(),
                 "forge interactive schedules --output json".to_string(),
                 "forge schedule worker-status".to_string(),
-                "forge interactive harness --output json".to_string(),
+                format!(
+                    "forge interactive harness --project-root {repository_context_display} --output json"
+                ),
                 "forge interactive token-usage --output json".to_string(),
-                "forge harness headroom-plan --executor codex --project-root . --output json"
-                    .to_string(),
+                format!(
+                    "forge harness headroom-plan --executor codex --project-root {repository_context_display} --output json"
+                ),
                 "forge harness headroom-stats --output json".to_string(),
-                "forge harness adoption-plan --executor codex --shim-dir $HOME/.forge/bin --project-root . --output json"
-                    .to_string(),
-                "forge harness bootstrap --executor codex --shim-dir $HOME/.forge/bin --project-root . --apply --approved-by <operator> --output json"
-                    .to_string(),
+                format!(
+                    "forge harness adoption-plan --executor codex --shim-dir $HOME/.forge/bin --project-root {repository_context_display} --output json"
+                ),
+                format!(
+                    "forge harness bootstrap --executor codex --shim-dir $HOME/.forge/bin --project-root {repository_context_display} --apply --approved-by <operator> --output json"
+                ),
                 "forge interactive sessions --output json".to_string(),
                 "forge interactive action-registry --output json".to_string(),
                 "forge interactive artifacts --output json".to_string(),
@@ -9474,6 +9497,20 @@ pub fn build_interactive_workflow_sidebar(
 pub fn build_interactive_replacement_cli(
     store: &ForgeStore,
 ) -> Result<InteractiveReplacementCliPanel> {
+    build_interactive_replacement_cli_with_options(
+        store,
+        InteractiveReplacementCliOptions::default(),
+    )
+}
+
+pub fn build_interactive_replacement_cli_with_options(
+    store: &ForgeStore,
+    options: InteractiveReplacementCliOptions,
+) -> Result<InteractiveReplacementCliPanel> {
+    let project_root = options
+        .project_root
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let project_root_display = project_root.display().to_string();
     let workflows = list_workflows_with_filters(
         store,
         WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
@@ -9485,10 +9522,11 @@ pub fn build_interactive_replacement_cli(
     let command_palette = build_interactive_command_palette(store, None)?;
     let action_registry = build_interactive_action_registry(store, None)?;
     let autocomplete = build_interactive_autocomplete(store, "/pa")?;
-    let harness =
-        build_interactive_harness(store, InteractiveHarnessOptions::default_for_current_dir())?;
+    let mut harness_options = InteractiveHarnessOptions::default_for_current_dir();
+    harness_options.project_root = Some(project_root.clone());
+    let harness = build_interactive_harness(store, harness_options)?;
     let sessions = build_interactive_sessions(store, InteractiveSessionsOptions::default())?;
-    let release_gates = build_interactive_release_gates(store, "0.5", None)?;
+    let release_gates = build_interactive_release_gates(store, "0.5", Some(&project_root))?;
     let structured_logs = build_interactive_structured_logs(store)?;
     let cost_ledger = build_cost_ledger(store, None, None, None, None).ok();
     let permissions = build_interactive_permissions(store)?;
@@ -9536,7 +9574,7 @@ pub fn build_interactive_replacement_cli(
             &[],
             &[
                 "forge",
-                "forge interactive home --output json",
+                &format!("forge interactive home --project-root {project_root_display} --output json"),
                 "forge interactive slash-commands --output json",
             ],
         ),
@@ -9724,6 +9762,7 @@ pub fn build_interactive_replacement_cli(
     Ok(InteractiveReplacementCliPanel {
         schema_version: INTERACTIVE_REPLACEMENT_CLI_SCHEMA_VERSION.to_string(),
         status: status.to_string(),
+        project_root: project_root_display.clone(),
         milestone: "0.5".to_string(),
         capability_id: "replacement_grade_cli".to_string(),
         promotion_ready,
@@ -9737,7 +9776,7 @@ pub fn build_interactive_replacement_cli(
         surfaces,
         blockers,
         next_actions,
-        commands: replacement_cli_commands(),
+        commands: replacement_cli_commands(&project_root),
         notes: vec![
             "This panel is read-only; it aggregates replacement-grade CLI readiness without launching child CLIs or collecting evidence.".to_string(),
             "Promotion remains false until required milestone evidence is attached and validated.".to_string(),
@@ -9918,17 +9957,22 @@ fn replacement_cli_next_actions(promotion_ready: bool, missing: &[String]) -> Ve
     actions
 }
 
-fn replacement_cli_commands() -> InteractiveReplacementCliCommands {
+fn replacement_cli_commands(project_root: &Path) -> InteractiveReplacementCliCommands {
+    let project_root = project_root.display().to_string();
     InteractiveReplacementCliCommands {
         refresh: vec![
             "interactive".to_string(),
             "replacement-cli".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
             "--output".to_string(),
             "json".to_string(),
         ],
         home: vec![
             "interactive".to_string(),
             "home".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -9961,6 +10005,8 @@ fn replacement_cli_commands() -> InteractiveReplacementCliCommands {
         harness: vec![
             "interactive".to_string(),
             "harness".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -9975,6 +10021,8 @@ fn replacement_cli_commands() -> InteractiveReplacementCliCommands {
             "release-gates".to_string(),
             "--version".to_string(),
             "0.5".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -9983,6 +10031,8 @@ fn replacement_cli_commands() -> InteractiveReplacementCliCommands {
             "cli-demo".to_string(),
             "--origin".to_string(),
             "codex".to_string(),
+            "--project-root".to_string(),
+            project_root,
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -16436,7 +16486,9 @@ fn guided_step(
 
 fn build_ui_composition_panel(
     addon_renderer_report: &OpsAddonViewRendererReport,
+    project_root: &Path,
 ) -> InteractiveUiCompositionPanel {
+    let project_root_text = project_root.display().to_string();
     let mut addon_widgets = addon_renderer_report
         .renderers
         .iter()
@@ -16480,7 +16532,9 @@ fn build_ui_composition_panel(
                     "navigation_renderer",
                     "compact",
                     "full",
-                    vec!["forge interactive home --output json".to_string()],
+                    vec![format!(
+                        "forge interactive home --project-root {project_root_text} --output json"
+                    )],
                 ),
                 core_ui_widget(
                     "command_palette_panel",
@@ -16518,7 +16572,9 @@ fn build_ui_composition_panel(
                     "status_renderer",
                     "standard",
                     "full",
-                    vec!["forge interactive harness --output json".to_string()],
+                    vec![format!(
+                        "forge interactive harness --project-root {project_root_text} --output json"
+                    )],
                 ),
                 core_ui_widget(
                     "replacement_cli_panel",
@@ -16527,7 +16583,9 @@ fn build_ui_composition_panel(
                     "readiness_matrix_renderer",
                     "detailed",
                     "full",
-                    vec!["forge interactive replacement-cli --output json".to_string()],
+                    vec![format!(
+                        "forge interactive replacement-cli --project-root {project_root_text} --output json"
+                    )],
                 ),
                 core_ui_widget(
                     "architecture_compass_panel",
@@ -16536,7 +16594,9 @@ fn build_ui_composition_panel(
                     "architecture_gap_matrix_renderer",
                     "detailed",
                     "full",
-                    vec!["forge interactive architecture --output json".to_string()],
+                    vec![format!(
+                        "forge interactive architecture --project-root {project_root_text} --output json"
+                    )],
                 ),
                 core_ui_widget(
                     "multimodal_runtime_panel",
@@ -16545,10 +16605,9 @@ fn build_ui_composition_panel(
                     "addon_runtime_readiness_renderer",
                     "detailed",
                     "full",
-                    vec![
-                        "forge interactive multimodal-runtime --project-root . --output json"
-                            .to_string(),
-                    ],
+                    vec![format!(
+                        "forge interactive multimodal-runtime --project-root {project_root_text} --output json"
+                    )],
                 ),
                 core_ui_widget(
                     "sessions_panel",
@@ -20187,6 +20246,33 @@ fn render_interactive_tui_frame(
             dashboard.task_board_panel.task_count,
             dashboard.task_board_panel.ready_handoffs,
             dashboard.task_board_panel.pending_human_interactions
+        ),
+        format!(
+            "Architecture compass: {}; tracks {}, docs {}, conflicts {}",
+            dashboard.architecture_compass_panel.status,
+            dashboard.architecture_compass_panel.tracks.len(),
+            dashboard.architecture_compass_panel.source_documents.len(),
+            dashboard.architecture_compass_panel.conflicts.len()
+        ),
+        format!(
+            "Architecture execution plan: {}; increments {}, next {}",
+            dashboard
+                .architecture_compass_panel
+                .execution_plan
+                .status,
+            dashboard
+                .architecture_compass_panel
+                .execution_plan
+                .increments
+                .len(),
+            dashboard
+                .architecture_compass_panel
+                .execution_plan
+                .next_command
+        ),
+        format!(
+            "Useful next commands: {}",
+            tui_join_limited(&dashboard.useful_next_commands, 3, "none")
         ),
         "Smoke test: forge smoke operational-tui --output json | Quick actions: /status /cockpit /task-board".to_string(),
     ];

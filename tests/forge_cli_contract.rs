@@ -46756,7 +46756,7 @@ tenant_policy_mode: audit
         .any(|command| command
             .as_str()
             .unwrap()
-            .contains("forge interactive architecture --output json")));
+            .contains("forge interactive architecture --project-root")));
     assert!(home["dashboard"]["ui_composition_panel"]["regions"]
         .as_array()
         .unwrap()
@@ -47902,9 +47902,13 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
                     && widget["commands"]
                         .as_array()
                         .unwrap()
-                        .contains(&serde_json::json!(
-                            "forge interactive harness --output json"
-                        ))
+                        .iter()
+                        .any(|command| {
+                            command
+                                .as_str()
+                                .unwrap()
+                                .contains("forge interactive harness --project-root")
+                        })
             })
         ));
 
@@ -52956,6 +52960,9 @@ fn interactive_retention_requires_approval_before_deleting_artifact_workflow() {
 fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("replacement-cli-project");
+    std::fs::create_dir_all(project_root.join(".forge")).unwrap();
+    let project_root_text = project_root.to_str().unwrap();
 
     forge()
         .args([
@@ -52979,6 +52986,8 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
             store.to_str().unwrap(),
             "interactive",
             "replacement-cli",
+            "--project-root",
+            project_root_text,
             "--output",
             "json",
         ])
@@ -52992,6 +53001,7 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
         panel["schema_version"],
         "forge.interactive.replacement_cli.v1"
     );
+    assert_eq!(panel["project_root"], project_root_text);
     assert_eq!(panel["capability_id"], "replacement_grade_cli");
     assert_eq!(panel["promotion_ready"], false);
     assert!(panel["readiness_percent"].as_u64().unwrap() >= 80);
@@ -53017,6 +53027,26 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("replacement-cli")));
+    assert!(panel["commands"]["refresh"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("--project-root")));
+    assert!(panel["commands"]["refresh"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(project_root_text)));
+    assert!(panel["commands"]["home"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(project_root_text)));
+    assert!(panel["commands"]["harness"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(project_root_text)));
+    assert!(panel["commands"]["release_gates"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(project_root_text)));
     assert!(panel["commands"]["cli_demo"]
         .as_array()
         .unwrap()
@@ -53081,6 +53111,8 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
             store.to_str().unwrap(),
             "interactive",
             "home",
+            "--project-root",
+            project_root_text,
             "--output",
             "json",
         ])
@@ -53093,6 +53125,10 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
     assert_eq!(
         home["dashboard"]["replacement_cli_panel"]["schema_version"],
         "forge.interactive.replacement_cli.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["replacement_cli_panel"]["project_root"],
+        project_root_text
     );
     assert!(home["dashboard"]["ui_composition_panel"]["regions"]
         .as_array()
@@ -53107,6 +53143,8 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
             store.to_str().unwrap(),
             "interactive",
             "replacement-cli",
+            "--project-root",
+            project_root_text,
         ])
         .assert()
         .success()
@@ -53133,11 +53171,17 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
     );
     assert_eq!(tool["async_safe"], true);
     assert_eq!(tool["mutates_workflow"], false);
+    assert!(tool["input_schema"]["properties"]
+        .as_object()
+        .unwrap()
+        .contains_key("project_root"));
 
     let mcp_output = forge()
         .arg("--store")
         .arg(store.to_str().unwrap())
         .args(["mcp", "call", "forge.interactive.replacement_cli"])
+        .arg("--input")
+        .arg(serde_json::json!({ "project_root": project_root_text }).to_string())
         .args(["--output", "json"])
         .assert()
         .success()
@@ -53150,6 +53194,7 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
         mcp["result"]["schema_version"],
         "forge.interactive.replacement_cli.v1"
     );
+    assert_eq!(mcp["result"]["project_root"], project_root_text);
 
     let slash = forge()
         .args(["interactive", "slash-commands", "--output", "json"])
@@ -53552,9 +53597,12 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
     assert!(home_json["result"]["dashboard"]["useful_next_commands"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::json!(
-            "forge harness headroom-plan --executor codex --project-root . --output json"
-        )));
+        .iter()
+        .any(|command| {
+            let command = command.as_str().unwrap();
+            command.starts_with("forge harness headroom-plan --executor codex --project-root ")
+                && command.ends_with(" --output json")
+        }));
     assert!(home_json["result"]["dashboard"]["useful_next_commands"]
         .as_array()
         .unwrap()
@@ -53564,15 +53612,23 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
     assert!(home_json["result"]["dashboard"]["useful_next_commands"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::json!(
-            "forge harness adoption-plan --executor codex --shim-dir $HOME/.forge/bin --project-root . --output json"
-        )));
+        .iter()
+        .any(|command| {
+            let command = command.as_str().unwrap();
+            command.starts_with(
+                "forge harness adoption-plan --executor codex --shim-dir $HOME/.forge/bin --project-root ",
+            ) && command.ends_with(" --output json")
+        }));
     assert!(home_json["result"]["dashboard"]["useful_next_commands"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::json!(
-            "forge harness bootstrap --executor codex --shim-dir $HOME/.forge/bin --project-root . --apply --approved-by <operator> --output json"
-        )));
+        .iter()
+        .any(|command| {
+            let command = command.as_str().unwrap();
+            command.starts_with(
+                "forge harness bootstrap --executor codex --shim-dir $HOME/.forge/bin --project-root ",
+            ) && command.ends_with(" --apply --approved-by <operator> --output json")
+        }));
     assert!(home_json["result"]["dashboard"]["workflow_focus"].is_array());
     assert_eq!(
         home_json["result"]["dashboard"]["ui_composition_panel"]["schema_version"],

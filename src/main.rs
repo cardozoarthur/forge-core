@@ -115,7 +115,7 @@ use forge_core::interactive::{
     build_interactive_improvement_loop, build_interactive_multimodal_runtime,
     build_interactive_operating_context, build_interactive_operational_cockpit,
     build_interactive_patch_workbench, build_interactive_permissions, build_interactive_readiness,
-    build_interactive_release_gates, build_interactive_replacement_cli,
+    build_interactive_release_gates, build_interactive_replacement_cli_with_options,
     build_interactive_schedules, build_interactive_sessions, build_interactive_structured_logs,
     build_interactive_task_board, build_interactive_token_usage, build_interactive_ui_composition,
     build_interactive_workflow_dag, build_interactive_workflow_mutation,
@@ -138,7 +138,7 @@ use forge_core::interactive::{
     render_interactive_workflow_sidebar, render_operational_tui_smoke,
     render_replacement_cli_evidence_smoke, route_interactive_input, run_interactive_repl,
     slash_command_catalog, InteractiveHarnessOptions, InteractiveHomeOptions,
-    InteractiveSessionsOptions,
+    InteractiveReplacementCliOptions, InteractiveSessionsOptions,
 };
 use forge_core::ir::{CreativeArtifact, TokenCollection};
 use forge_core::lease::{acquire_task_lease, release_task_lease};
@@ -3364,6 +3364,8 @@ enum InteractiveCommands {
         output: OutputFormat,
     },
     ReplacementCli {
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -8380,9 +8382,15 @@ fn run() -> Result<i32> {
                 }
                 Ok(0)
             }
-            InteractiveCommands::ReplacementCli { output } => {
+            InteractiveCommands::ReplacementCli {
+                project_root,
+                output,
+            } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = build_interactive_replacement_cli(&store)?;
+                let report = build_interactive_replacement_cli_with_options(
+                    &store,
+                    InteractiveReplacementCliOptions { project_root },
+                )?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => {

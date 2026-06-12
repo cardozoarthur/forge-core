@@ -102,12 +102,13 @@ use crate::interactive::{
     build_interactive_improvement_loop, build_interactive_multimodal_runtime,
     build_interactive_operating_context, build_interactive_operational_cockpit,
     build_interactive_patch_workbench, build_interactive_permissions, build_interactive_readiness,
-    build_interactive_release_gates, build_interactive_replacement_cli,
+    build_interactive_release_gates, build_interactive_replacement_cli_with_options,
     build_interactive_schedules, build_interactive_sessions, build_interactive_structured_logs,
     build_interactive_task_board, build_interactive_token_usage, build_interactive_ui_composition,
     build_interactive_workflow_dag, build_interactive_workflow_mutation,
     build_interactive_workflow_sidebar, route_interactive_input, slash_command_catalog,
-    InteractiveHarnessOptions, InteractiveHomeOptions, InteractiveSessionsOptions,
+    InteractiveHarnessOptions, InteractiveHomeOptions, InteractiveReplacementCliOptions,
+    InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -3441,10 +3442,20 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.interactive.replacement_cli",
                 "Inspect Replacement CLI Readiness",
-                "Return the Forge replacement-grade CLI readiness panel across TUI home, workflow operations, patch UX, action discovery, harness/session controls, observability, approvals and milestone evidence without launching a TTY or mutating state.",
-                object_schema(&[], &[]),
+                "Return the Forge replacement-grade CLI readiness panel across TUI home, workflow operations, patch UX, action discovery, harness/session controls, observability, approvals and milestone evidence without launching a TTY or mutating state; project_root lets agents inspect project-scoped harness and release-gate state without relying on cwd.",
+                object_schema(&[
+                    ("project_root", "string", "optional project root for project-scoped replacement CLI panels"),
+                ], &[]),
                 "forge.interactive.replacement_cli.v1",
-                &["forge", "interactive", "replacement-cli", "--output", "json"],
+                &[
+                    "forge",
+                    "interactive",
+                    "replacement-cli",
+                    "--project-root",
+                    "<project-root>",
+                    "--output",
+                    "json",
+                ],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7936,7 +7947,17 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(build_interactive_workflow_mutation(store)?)?
         }
         "forge.interactive.replacement_cli" => {
-            serde_json::to_value(build_interactive_replacement_cli(store)?)?
+            let input: InteractiveHomeInput = if input.is_null() {
+                InteractiveHomeInput { project_root: None }
+            } else {
+                parse_input(input)?
+            };
+            serde_json::to_value(build_interactive_replacement_cli_with_options(
+                store,
+                InteractiveReplacementCliOptions {
+                    project_root: input.project_root.map(PathBuf::from),
+                },
+            )?)?
         }
         "forge.interactive.multimodal_runtime" => {
             let input: InteractiveMultimodalRuntimeInput = if input.is_null() {
