@@ -1,7 +1,8 @@
 use crate::addon::{
-    list_addon_event_adapters, load_addon_catalog_from_store, AddonCatalog, AddonEventAdapterView,
-    AddonEventChannelView, AddonEventExtensionRegistry, AddonEventListenerView,
-    AddonEventTriggerView, AddonPermissionGate, EventAdapterCredentialVaultRef,
+    evaluate_addon_runtime_contract_policy, list_addon_event_adapters,
+    load_addon_catalog_from_store, AddonCatalog, AddonEventAdapterView, AddonEventChannelView,
+    AddonEventExtensionRegistry, AddonEventListenerView, AddonEventTriggerView,
+    AddonPermissionGate, AddonRuntimeContractPolicyEntry, EventAdapterCredentialVaultRef,
     EventAdapterDeclaration,
 };
 use crate::artifact::hex_sha256;
@@ -77,6 +78,8 @@ pub const EVENT_WEBHOOK_INGRESS_RESPONSE_SCHEMA_VERSION: &str =
 pub const EVENT_ADAPTER_POLICY_SCHEMA_VERSION: &str = "forge.event_adapter_policy.v1";
 pub const EVENT_ADDON_ADAPTER_PLAN_SCHEMA_VERSION: &str = "forge.event_addon_adapter_plan.v1";
 pub const EVENT_EXTENSION_MATCHES_SCHEMA_VERSION: &str = "forge.event_extension_matches.v1";
+pub const EVENT_WORKFLOW_ACTIVATION_PLAN_SCHEMA_VERSION: &str =
+    "forge.event_workflow_activation_plan.v1";
 pub const EVENT_EGRESS_EMIT_SCHEMA_VERSION: &str = "forge.event_egress_emit.v1";
 pub const EVENT_EGRESS_REQUEST_SCHEMA_VERSION: &str = "forge.event_egress_request.v1";
 pub const EVENT_EGRESS_DELIVERY_EVIDENCE_SCHEMA_VERSION: &str =
@@ -1009,6 +1012,7 @@ pub struct InboundEventAddonAdapterPlan {
     pub allowed_count: usize,
     pub blocked_count: usize,
     pub event_extension_matches: InboundEventExtensionMatches,
+    pub event_workflow_activation_plan: InboundEventWorkflowActivationPlan,
     pub adapters: Vec<InboundEventAddonAdapterPlanEntry>,
     pub next_commands: Vec<Vec<String>>,
     pub notes: Vec<String>,
@@ -1025,6 +1029,43 @@ pub struct InboundEventExtensionMatches {
     pub listeners: Vec<AddonEventListenerView>,
     pub channels: Vec<AddonEventChannelView>,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InboundEventWorkflowActivationPlan {
+    pub schema_version: String,
+    pub status: String,
+    pub activation_count: usize,
+    pub dispatch_ready_count: usize,
+    pub blocked_count: usize,
+    pub activations: Vec<InboundEventWorkflowActivation>,
+    pub next_commands: Vec<Vec<String>>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InboundEventWorkflowActivation {
+    pub id: String,
+    pub source_kind: String,
+    pub source_id: String,
+    pub addon_id: String,
+    pub addon_name: String,
+    pub addon_version: String,
+    pub addon_lifecycle: String,
+    pub capability_id: String,
+    pub workflow_extension_id: String,
+    pub event_type: String,
+    pub channel: String,
+    pub adapter_id: String,
+    pub normalized_action: String,
+    pub operation: String,
+    pub permission_gate: AddonPermissionGate,
+    pub runtime_contract_count: usize,
+    pub dispatch_allowed: bool,
+    pub runtime_contracts: Vec<AddonRuntimeContractPolicyEntry>,
+    pub dispatch_commands: Vec<Vec<String>>,
+    pub issues: Vec<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -7254,6 +7295,12 @@ fn build_inbound_addon_event_adapter_plan(
         adapter_policy,
         &adapters,
     );
+    let event_workflow_activation_plan = build_inbound_event_workflow_activation_plan(
+        catalog,
+        event,
+        adapter_policy,
+        &event_extension_matches,
+    );
 
     let matched_count = adapters
         .iter()
@@ -7284,6 +7331,7 @@ fn build_inbound_addon_event_adapter_plan(
         allowed_count,
         blocked_count,
         event_extension_matches,
+        event_workflow_activation_plan,
         next_commands: inbound_event_addon_adapter_next_commands(event, &adapters),
         notes: inbound_event_addon_adapter_plan_notes(adapter_policy, matched_count, &adapters),
         adapters,
@@ -7374,6 +7422,339 @@ fn build_inbound_event_extension_matches(
         listeners: matched_listeners,
         channels: matched_channels,
         notes,
+    }
+}
+
+fn build_inbound_event_workflow_activation_plan(
+    catalog: &AddonCatalog,
+    event: &InboundEventRecord,
+    adapter_policy: &InboundEventAdapterPolicyReport,
+    matches: &InboundEventExtensionMatches,
+) -> InboundEventWorkflowActivationPlan {
+    let mut activations = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for trigger in &matches.triggers {
+        let activation =
+            event_workflow_activation_from_trigger(catalog, event, adapter_policy, trigger);
+        if seen.insert(activation.id.clone()) {
+            activations.push(activation);
+        }
+    }
+    for listener in &matches.listeners {
+        let activation =
+            event_workflow_activation_from_listener(catalog, event, adapter_policy, listener);
+        if seen.insert(activation.id.clone()) {
+            activations.push(activation);
+        }
+    }
+
+    activations.sort_by(|left, right| {
+        event_workflow_activation_status_rank(left.dispatch_allowed)
+            .cmp(&event_workflow_activation_status_rank(
+                right.dispatch_allowed,
+            ))
+            .then_with(|| left.addon_id.cmp(&right.addon_id))
+            .then_with(|| left.source_kind.cmp(&right.source_kind))
+            .then_with(|| left.source_id.cmp(&right.source_id))
+    });
+
+    let dispatch_ready_count = activations
+        .iter()
+        .filter(|activation| activation.dispatch_allowed)
+        .count();
+    let blocked_count = activations.len().saturating_sub(dispatch_ready_count);
+    let status = if activations.is_empty() {
+        "workflow_activation_unmatched"
+    } else if dispatch_ready_count == activations.len() {
+        "workflow_activation_ready"
+    } else if dispatch_ready_count > 0 {
+        "workflow_activation_partially_ready"
+    } else {
+        "workflow_activation_blocked"
+    };
+    let next_commands = activations
+        .iter()
+        .flat_map(|activation| activation.dispatch_commands.clone())
+        .collect::<Vec<_>>();
+    let notes = event_workflow_activation_plan_notes(status, &activations);
+
+    InboundEventWorkflowActivationPlan {
+        schema_version: EVENT_WORKFLOW_ACTIVATION_PLAN_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        activation_count: activations.len(),
+        dispatch_ready_count,
+        blocked_count,
+        activations,
+        next_commands,
+        notes,
+    }
+}
+
+fn event_workflow_activation_from_trigger(
+    catalog: &AddonCatalog,
+    event: &InboundEventRecord,
+    adapter_policy: &InboundEventAdapterPolicyReport,
+    trigger: &AddonEventTriggerView,
+) -> InboundEventWorkflowActivation {
+    let activation = EventWorkflowActivationInput {
+        source_kind: "trigger",
+        source_id: &trigger.trigger.id,
+        addon_id: &trigger.addon_id,
+        addon_name: &trigger.addon_name,
+        addon_version: &trigger.addon_version,
+        addon_lifecycle: &trigger.addon_lifecycle,
+        capability_id: &trigger.trigger.capability_id,
+        workflow_extension_id: &trigger.trigger.workflow_extension_id,
+        event_type: &trigger.trigger.event_type,
+        channel: &trigger.trigger.channel,
+        adapter_id: &trigger.trigger.adapter_id,
+        runtime_contract_id: None,
+        permission_gate: &trigger.permission_gate,
+    };
+    event_workflow_activation(catalog, event, adapter_policy, activation)
+}
+
+fn event_workflow_activation_from_listener(
+    catalog: &AddonCatalog,
+    event: &InboundEventRecord,
+    adapter_policy: &InboundEventAdapterPolicyReport,
+    listener: &AddonEventListenerView,
+) -> InboundEventWorkflowActivation {
+    let runtime_contract_id = normalize_text(Some(&listener.listener.runtime_contract_id));
+    let activation = EventWorkflowActivationInput {
+        source_kind: "listener",
+        source_id: &listener.listener.id,
+        addon_id: &listener.addon_id,
+        addon_name: &listener.addon_name,
+        addon_version: &listener.addon_version,
+        addon_lifecycle: &listener.addon_lifecycle,
+        capability_id: &listener.listener.capability_id,
+        workflow_extension_id: &listener.listener.workflow_extension_id,
+        event_type: &listener.listener.event_type,
+        channel: &listener.listener.channel,
+        adapter_id: &listener.listener.adapter_id,
+        runtime_contract_id: runtime_contract_id.as_deref(),
+        permission_gate: &listener.permission_gate,
+    };
+    event_workflow_activation(catalog, event, adapter_policy, activation)
+}
+
+struct EventWorkflowActivationInput<'a> {
+    source_kind: &'a str,
+    source_id: &'a str,
+    addon_id: &'a str,
+    addon_name: &'a str,
+    addon_version: &'a str,
+    addon_lifecycle: &'a str,
+    capability_id: &'a str,
+    workflow_extension_id: &'a str,
+    event_type: &'a str,
+    channel: &'a str,
+    adapter_id: &'a str,
+    runtime_contract_id: Option<&'a str>,
+    permission_gate: &'a AddonPermissionGate,
+}
+
+fn event_workflow_activation(
+    catalog: &AddonCatalog,
+    event: &InboundEventRecord,
+    adapter_policy: &InboundEventAdapterPolicyReport,
+    input: EventWorkflowActivationInput<'_>,
+) -> InboundEventWorkflowActivation {
+    let runtime_contracts = event_workflow_activation_runtime_contracts(catalog, &input);
+    let mut issues = Vec::new();
+    if !input.permission_gate.allowed {
+        issues.push(format!(
+            "event {} permission gate denied activation: {}",
+            input.source_kind, input.permission_gate.status
+        ));
+    }
+    if runtime_contracts.is_empty() {
+        issues.push("no runtime contract matched this event workflow activation".to_string());
+    }
+    for contract in runtime_contracts
+        .iter()
+        .filter(|contract| !contract.dispatch_allowed)
+    {
+        issues.push(format!(
+            "runtime contract {} is blocked: {}",
+            contract.contract_id, contract.status
+        ));
+        issues.extend(contract.issues.clone());
+    }
+    let dispatch_allowed = input.permission_gate.allowed
+        && runtime_contracts
+            .iter()
+            .any(|contract| contract.dispatch_allowed);
+    let dispatch_commands = if input.permission_gate.allowed {
+        runtime_contracts
+            .iter()
+            .filter(|contract| contract.dispatch_allowed)
+            .map(|contract| {
+                event_workflow_activation_dispatch_command(event, adapter_policy, &input, contract)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let reason = if dispatch_allowed {
+        "matched Addon Event Extension can dispatch a runtime contract".to_string()
+    } else {
+        "matched Addon Event Extension is not dispatch-ready".to_string()
+    };
+
+    InboundEventWorkflowActivation {
+        id: format!(
+            "{}:{}:{}",
+            input.addon_id, input.source_kind, input.source_id
+        ),
+        source_kind: input.source_kind.to_string(),
+        source_id: input.source_id.to_string(),
+        addon_id: input.addon_id.to_string(),
+        addon_name: input.addon_name.to_string(),
+        addon_version: input.addon_version.to_string(),
+        addon_lifecycle: input.addon_lifecycle.to_string(),
+        capability_id: input.capability_id.to_string(),
+        workflow_extension_id: input.workflow_extension_id.to_string(),
+        event_type: input.event_type.to_string(),
+        channel: input.channel.to_string(),
+        adapter_id: input.adapter_id.to_string(),
+        normalized_action: adapter_policy.normalized_action.clone(),
+        operation: adapter_policy.normalized_action.clone(),
+        permission_gate: input.permission_gate.clone(),
+        runtime_contract_count: runtime_contracts.len(),
+        dispatch_allowed,
+        runtime_contracts,
+        dispatch_commands,
+        issues,
+        reason,
+    }
+}
+
+fn event_workflow_activation_runtime_contracts(
+    catalog: &AddonCatalog,
+    input: &EventWorkflowActivationInput<'_>,
+) -> Vec<AddonRuntimeContractPolicyEntry> {
+    let capability_filter = normalize_text(Some(input.capability_id));
+    let contract_filter = input.runtime_contract_id.and_then(|contract_id| {
+        normalize_text(Some(contract_id)).filter(|contract_id| !contract_id.is_empty())
+    });
+    let policy = evaluate_addon_runtime_contract_policy(
+        catalog,
+        Some(input.addon_id),
+        contract_filter.as_deref(),
+        None,
+        if contract_filter.is_some() {
+            None
+        } else {
+            capability_filter.as_deref()
+        },
+        None,
+    );
+    let workflow_extension_filter = normalize_text(Some(input.workflow_extension_id));
+
+    let mut contracts = policy
+        .contracts
+        .into_iter()
+        .filter(|contract| {
+            if let Some(filter) = contract_filter.as_deref() {
+                return contract.contract_id == filter;
+            }
+            workflow_extension_filter
+                .as_deref()
+                .map(|workflow_extension| {
+                    contract.contract.workflow_extension_id == workflow_extension
+                })
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    contracts.sort_by(|left, right| {
+        event_workflow_contract_status_rank(left.dispatch_allowed)
+            .cmp(&event_workflow_contract_status_rank(right.dispatch_allowed))
+            .then_with(|| left.contract_type.cmp(&right.contract_type))
+            .then_with(|| left.contract_id.cmp(&right.contract_id))
+    });
+    contracts
+}
+
+fn event_workflow_activation_dispatch_command(
+    event: &InboundEventRecord,
+    adapter_policy: &InboundEventAdapterPolicyReport,
+    activation: &EventWorkflowActivationInput<'_>,
+    contract: &AddonRuntimeContractPolicyEntry,
+) -> Vec<String> {
+    let input = json!({
+        "schema_version": "forge.event_workflow_activation.v1",
+        "event_id": event.id,
+        "origin": event.origin,
+        "action": event.action,
+        "normalized_action": adapter_policy.normalized_action,
+        "source_kind": activation.source_kind,
+        "source_id": activation.source_id,
+        "addon_id": activation.addon_id,
+        "capability_id": activation.capability_id,
+        "workflow_extension_id": activation.workflow_extension_id,
+        "event_type": activation.event_type,
+        "channel": activation.channel,
+        "adapter_id": activation.adapter_id,
+        "contract_id": contract.contract_id,
+        "contract_type": contract.contract_type,
+    });
+    vec![
+        "forge".to_string(),
+        "addons".to_string(),
+        "dispatch-contract".to_string(),
+        "--addon".to_string(),
+        activation.addon_id.to_string(),
+        "--contract".to_string(),
+        contract.contract_id.clone(),
+        "--source".to_string(),
+        format!("event_inbox:{}", event.id),
+        "--input".to_string(),
+        serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string()),
+        "--output".to_string(),
+        "json".to_string(),
+    ]
+}
+
+fn event_workflow_activation_plan_notes(
+    status: &str,
+    activations: &[InboundEventWorkflowActivation],
+) -> Vec<String> {
+    match status {
+        "workflow_activation_unmatched" => vec![
+            "No matched Addon Event Extension declared a workflow activation.".to_string(),
+        ],
+        "workflow_activation_ready" => vec![
+            "Matched Addon Event Extensions are ready to dispatch runtime contracts; Forge did not execute handlers inline.".to_string(),
+        ],
+        "workflow_activation_partially_ready" => vec![format!(
+            "{} event workflow activation(s) need permission or contract repair before dispatch.",
+            activations
+                .iter()
+                .filter(|activation| !activation.dispatch_allowed)
+                .count()
+        )],
+        _ => vec![
+            "Matched Addon Event Extensions are blocked by permission gates or missing runtime contracts.".to_string(),
+        ],
+    }
+}
+
+fn event_workflow_activation_status_rank(dispatch_allowed: bool) -> usize {
+    if dispatch_allowed {
+        0
+    } else {
+        1
+    }
+}
+
+fn event_workflow_contract_status_rank(dispatch_allowed: bool) -> usize {
+    if dispatch_allowed {
+        0
+    } else {
+        1
     }
 }
 

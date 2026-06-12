@@ -24689,6 +24689,20 @@ workflows:
   - id: demo_event_route_workflow
     kind: dynamic_workflow_strategy
     description: Plan work from demo event extension matches.
+runtime_contracts:
+  - id: demo_event_route_planner
+    title: Demo event route planner
+    contract_type: planning_strategy
+    capability_id: demo_event_route_operations
+    workflow_extension_id: demo_event_route_workflow
+    runtime: external_worker
+    entrypoint: demo.event.route.plan
+    inputs:
+      - forge.event_workflow_activation
+    outputs:
+      - forge.workflow_plan
+    permissions:
+      - demo.event.consume
 event_types:
   - id: demo.message
     title: Demo message
@@ -24843,6 +24857,42 @@ event_adapters:
         route["addon_event_adapter_plan"]["event_extension_matches"]["channels"][0]["channel"]
             ["id"],
         "demo.inbox"
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["event_workflow_activation_plan"]["schema_version"],
+        "forge.event_workflow_activation_plan.v1"
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["event_workflow_activation_plan"]["status"],
+        "workflow_activation_ready"
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["event_workflow_activation_plan"]["activation_count"],
+        2
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["event_workflow_activation_plan"]["dispatch_ready_count"],
+        2
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["event_workflow_activation_plan"]["activations"][0]
+            ["workflow_extension_id"],
+        "demo_event_route_workflow"
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["event_workflow_activation_plan"]["activations"][0]
+            ["runtime_contracts"][0]["contract_id"],
+        "demo_event_route_planner"
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["event_workflow_activation_plan"]["activations"][0]
+            ["dispatch_commands"][0][1],
+        "addons"
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["event_workflow_activation_plan"]["activations"][0]
+            ["dispatch_commands"][0][2],
+        "dispatch-contract"
     );
 }
 
