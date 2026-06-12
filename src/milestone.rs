@@ -23,12 +23,13 @@ use crate::patch::{
 };
 use crate::request::{heartbeat_request, start_async_request, RunActivity};
 use crate::schedule::{create_daily_goal_research_workflow, run_daily_goal_research_smoke};
-use crate::storage::ForgeStore;
+use crate::storage::{ForgeStore, GlobalEventWrite};
 use crate::workflow::{
     attach_creative_artifact, attach_workflow_artifact, set_workflow_token_collection,
     update_workflow_node_brain_routing, WorkflowNodeBrainRoutingUpdateInput,
 };
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
@@ -38,6 +39,8 @@ use std::process::Command;
 
 const MILESTONE_STATUS_SCHEMA_VERSION: &str = "forge.milestone.status.v1";
 const MILESTONE_MANIFEST_SCHEMA_VERSION: &str = "forge.milestone.manifest.v1";
+const MILESTONE_ATTACHED_EVIDENCE_SCHEMA_VERSION: &str = "forge.milestone.attached_evidence.v1";
+const MILESTONE_ATTACHED_EVIDENCE_EVENT_KIND: &str = "milestone_evidence_attached";
 const SUPPORTED_MILESTONE: &str = "0.5";
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,6 +91,7 @@ pub struct MilestoneManifestReport {
     pub completed_capabilities: Vec<MilestoneManifestCapability>,
     pub missing_capabilities: Vec<MilestoneManifestCapability>,
     pub validation_evidence: Vec<MilestoneManifestEvidence>,
+    pub attached_evidence: Vec<MilestoneAttachedEvidence>,
     pub demos: Vec<MilestoneManifestDemo>,
     pub known_gaps: Vec<MilestoneManifestGap>,
     pub promotion_decision: MilestonePromotionDecision,
@@ -133,6 +137,37 @@ pub struct MilestoneManifestGap {
     pub status: String,
     pub gap: String,
     pub next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MilestoneAttachedEvidence {
+    pub schema_version: String,
+    pub milestone: String,
+    pub capability_id: String,
+    pub evidence_id: String,
+    pub kind: String,
+    pub status: String,
+    pub summary: String,
+    pub artifact_path: String,
+    pub artifact_sha256: String,
+    pub artifact_bytes: u64,
+    pub approved_by: String,
+    pub origin: String,
+    pub promotion_impact: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub global_event_id: Option<i64>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MilestoneAttachEvidenceOptions<'a> {
+    pub version: &'a str,
+    pub capability_id: &'a str,
+    pub kind: &'a str,
+    pub summary: &'a str,
+    pub artifact_path: &'a Path,
+    pub approved_by: &'a str,
+    pub origin: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -269,7 +304,19 @@ pub fn build_milestone_research(version: &str) -> Result<MilestoneResearchReport
 }
 
 pub fn build_milestone_manifest(version: &str) -> Result<MilestoneManifestReport> {
+    build_milestone_manifest_with_store(version, None)
+}
+
+pub fn build_milestone_manifest_with_store(
+    version: &str,
+    store: Option<&ForgeStore>,
+) -> Result<MilestoneManifestReport> {
     let status = build_milestone_status(version)?;
+    let attached_evidence = if let Some(store) = store {
+        load_milestone_attached_evidence(store, version)?
+    } else {
+        Vec::new()
+    };
     let requirements = status
         .capabilities
         .iter()
@@ -339,10 +386,162 @@ pub fn build_milestone_manifest(version: &str) -> Result<MilestoneManifestReport
         completed_capabilities,
         missing_capabilities,
         validation_evidence,
+        attached_evidence,
         demos,
         known_gaps,
         promotion_decision: status.promotion_decision,
     })
+}
+
+pub fn attach_milestone_evidence(
+    store: &ForgeStore,
+    options: MilestoneAttachEvidenceOptions<'_>,
+) -> Result<MilestoneAttachedEvidence> {
+    let version = normalize_required(options.version, "version")?;
+    if version != SUPPORTED_MILESTONE {
+        bail!("unsupported milestone {version}; currently supported: {SUPPORTED_MILESTONE}");
+    }
+    let capability_id = normalize_required(options.capability_id, "capability")?;
+    if !forge_05_capabilities()
+        .iter()
+        .any(|capability| capability.id == capability_id)
+    {
+        bail!("unknown milestone capability `{capability_id}` for milestone {version}");
+    }
+    let kind = normalize_required(options.kind, "kind")?;
+    let summary = normalize_required(options.summary, "summary")?;
+    let approved_by = normalize_required(options.approved_by, "approved-by")?;
+    let origin = normalize_required(options.origin, "origin")?;
+
+    let artifact_bytes = fs::read(options.artifact_path).with_context(|| {
+        format!(
+            "failed to read milestone evidence artifact {}",
+            options.artifact_path.display()
+        )
+    })?;
+    let artifact_sha256 = hex_sha256(&artifact_bytes);
+    let created_at = Utc::now().to_rfc3339();
+    let evidence_id = format!(
+        "{}-{}-{}",
+        sanitize_milestone_component(&capability_id),
+        sanitize_milestone_component(&kind),
+        Utc::now().timestamp_millis()
+    );
+    let artifact_file_name = options
+        .artifact_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(sanitize_milestone_component)
+        .unwrap_or_else(|| "evidence-artifact".to_string());
+    let artifact_path = format!("artifacts/milestone/{version}/{evidence_id}-{artifact_file_name}");
+    let artifact_target = store.base_dir().join(&artifact_path);
+    if let Some(parent) = artifact_target.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create milestone evidence directory {}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(&artifact_target, &artifact_bytes).with_context(|| {
+        format!(
+            "failed to write milestone evidence artifact {}",
+            artifact_target.display()
+        )
+    })?;
+
+    let mut evidence = MilestoneAttachedEvidence {
+        schema_version: MILESTONE_ATTACHED_EVIDENCE_SCHEMA_VERSION.to_string(),
+        milestone: version,
+        capability_id,
+        evidence_id,
+        kind,
+        status: "recorded".to_string(),
+        summary,
+        artifact_path,
+        artifact_sha256,
+        artifact_bytes: artifact_bytes.len() as u64,
+        approved_by,
+        origin,
+        promotion_impact: "evidence_attached_not_auto_promoted".to_string(),
+        global_event_id: None,
+        created_at,
+    };
+    let event_payload = serde_json::to_value(&evidence)?;
+    let tenant_context = serde_json::json!({
+        "organization": {"id": "forge"},
+        "brand": {"id": "forge"},
+        "product": {"id": "forge"},
+        "user": {"id": evidence.approved_by},
+        "channel": {"id": "milestone"}
+    });
+    let global_event_id = store.record_global_event(GlobalEventWrite {
+        source: "milestone",
+        source_id: &evidence.evidence_id,
+        workflow_id: None,
+        kind: MILESTONE_ATTACHED_EVIDENCE_EVENT_KIND,
+        origin: &evidence.origin,
+        status: "recorded",
+        data: &event_payload,
+        tenant_context: &tenant_context,
+    })?;
+    evidence.global_event_id = Some(global_event_id);
+    Ok(evidence)
+}
+
+pub fn load_milestone_attached_evidence(
+    store: &ForgeStore,
+    version: &str,
+) -> Result<Vec<MilestoneAttachedEvidence>> {
+    let version = version.trim();
+    let mut evidence = Vec::new();
+    for event in store.load_global_events()? {
+        if event.kind != MILESTONE_ATTACHED_EVIDENCE_EVENT_KIND {
+            continue;
+        }
+        let mut attached = match serde_json::from_value::<MilestoneAttachedEvidence>(event.data) {
+            Ok(attached) => attached,
+            Err(_) => continue,
+        };
+        if attached.milestone != version {
+            continue;
+        }
+        attached.global_event_id = Some(event.id);
+        if attached.created_at.trim().is_empty() {
+            attached.created_at = event.created_at;
+        }
+        evidence.push(attached);
+    }
+    evidence.sort_by_key(|item| item.global_event_id.unwrap_or_default());
+    Ok(evidence)
+}
+
+fn normalize_required(value: &str, field: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("{field} is required");
+    }
+    Ok(value.to_string())
+}
+
+fn sanitize_milestone_component(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if sanitized.is_empty() {
+        "milestone".to_string()
+    } else {
+        sanitized
+    }
 }
 
 const EXPORT_DEMO_SCHEMA_VERSION: &str = "forge.milestone.export_demo.v1";

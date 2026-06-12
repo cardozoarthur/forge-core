@@ -3472,6 +3472,12 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
             && tool["async_safe"] == true
             && tool["mutates_workflow"] == false
     }));
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.milestone.attach_evidence"
+            && tool["output_schema"] == "forge.milestone.attached_evidence.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == true
+    }));
 
     let call = forge()
         .arg("--store")
@@ -3617,6 +3623,154 @@ fn milestone_manifest_surfaces_requirements_evidence_gaps_and_promotion_decision
             .contains(&serde_json::json!("replacement_grade_cli")),
         "replacement-grade CLI is new 0.5 scope and must block promotion until it has demo evidence"
     );
+}
+
+#[test]
+fn milestone_attach_evidence_persists_receipts_without_auto_promotion() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let receipt = temp.path().join("production-runtime-receipt.json");
+    fs::write(
+        &receipt,
+        r#"{"runtime":"connected-production","model_execution":true,"passed":true}"#,
+    )
+    .unwrap();
+    let receipt_sha = hex_sha256(&fs::read(&receipt).unwrap());
+
+    let attach_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "attach-evidence",
+            "--version",
+            "0.5",
+            "--capability",
+            "experimental_multimodal_runtime",
+            "--kind",
+            "production_runtime_benchmark",
+            "--summary",
+            "Operator-approved connected production runtime benchmark receipt.",
+            "--artifact",
+        ])
+        .arg(receipt.to_str().unwrap())
+        .args([
+            "--approved-by",
+            "arthur",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let attach_json: Value = serde_json::from_slice(&attach_output).unwrap();
+    assert_eq!(
+        attach_json["schema_version"],
+        "forge.milestone.attached_evidence.v1"
+    );
+    assert_eq!(
+        attach_json["capability_id"],
+        "experimental_multimodal_runtime"
+    );
+    assert_eq!(attach_json["kind"], "production_runtime_benchmark");
+    assert_eq!(attach_json["status"], "recorded");
+    assert_eq!(attach_json["approved_by"], "arthur");
+    assert_eq!(attach_json["origin"], "codex");
+    assert_eq!(attach_json["artifact_sha256"], receipt_sha);
+    assert!(attach_json["artifact_path"]
+        .as_str()
+        .unwrap()
+        .starts_with("artifacts/milestone/0.5/"));
+    assert!(attach_json["global_event_id"].as_i64().unwrap() > 0);
+    assert_eq!(
+        attach_json["promotion_impact"],
+        "evidence_attached_not_auto_promoted"
+    );
+
+    let mcp_receipt = temp.path().join("external-provider-receipt.json");
+    fs::write(
+        &mcp_receipt,
+        r#"{"provider":"connected-brain","real_provider_execution":true,"passed":true}"#,
+    )
+    .unwrap();
+    let mcp_receipt_sha = hex_sha256(&fs::read(&mcp_receipt).unwrap());
+    let mcp_input = serde_json::json!({
+        "version": "0.5",
+        "capability_id": "replacement_grade_cli",
+        "kind": "external_brain_provider_execution",
+        "summary": "Operator-approved connected external brain provider execution receipt.",
+        "artifact_path": mcp_receipt.to_str().unwrap(),
+        "approved_by": "arthur",
+        "origin": "codex"
+    });
+    let mcp_attach_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.milestone.attach_evidence"])
+        .arg("--input")
+        .arg(mcp_input.to_string())
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let mcp_attach_json: Value = serde_json::from_slice(&mcp_attach_output).unwrap();
+    assert_eq!(mcp_attach_json["status"], "ok");
+    assert_eq!(
+        mcp_attach_json["result"]["schema_version"],
+        "forge.milestone.attached_evidence.v1"
+    );
+    assert_eq!(
+        mcp_attach_json["result"]["capability_id"],
+        "replacement_grade_cli"
+    );
+    assert_eq!(
+        mcp_attach_json["result"]["artifact_sha256"],
+        mcp_receipt_sha
+    );
+
+    let manifest_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "manifest",
+            "--version",
+            "0.5",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let manifest_json: Value = serde_json::from_slice(&manifest_output).unwrap();
+    let attached = manifest_json["attached_evidence"].as_array().unwrap();
+    assert!(attached.iter().any(|evidence| {
+        evidence["capability_id"] == "experimental_multimodal_runtime"
+            && evidence["kind"] == "production_runtime_benchmark"
+            && evidence["artifact_sha256"] == receipt_sha
+            && evidence["promotion_impact"] == "evidence_attached_not_auto_promoted"
+    }));
+    assert!(attached.iter().any(|evidence| {
+        evidence["capability_id"] == "replacement_grade_cli"
+            && evidence["kind"] == "external_brain_provider_execution"
+            && evidence["artifact_sha256"] == mcp_receipt_sha
+    }));
+    assert_eq!(manifest_json["promotion_decision"]["decision"], "fail");
+    assert!(manifest_json["promotion_decision"]["blocked_by"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("experimental_multimodal_runtime")));
 }
 
 #[test]

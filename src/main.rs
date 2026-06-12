@@ -122,8 +122,9 @@ use forge_core::memory::{
     MemoryRetentionOptions, MemorySearchOptions,
 };
 use forge_core::milestone::{
-    build_milestone_export_demo, build_milestone_manifest, build_milestone_research,
-    build_milestone_status, build_replacement_cli_demo_with_options, MilestoneCliDemoOptions,
+    attach_milestone_evidence, build_milestone_export_demo, build_milestone_manifest_with_store,
+    build_milestone_research, build_milestone_status, build_replacement_cli_demo_with_options,
+    MilestoneAttachEvidenceOptions, MilestoneCliDemoOptions,
 };
 use forge_core::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
@@ -3319,6 +3320,25 @@ enum MilestoneCommands {
     Manifest {
         #[arg(long, default_value = "0.5")]
         version: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    #[command(name = "attach-evidence")]
+    AttachEvidence {
+        #[arg(long, default_value = "0.5")]
+        version: String,
+        #[arg(long = "capability", alias = "capability-id")]
+        capability_id: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long = "approved-by")]
+        approved_by: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -7956,7 +7976,34 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
             MilestoneCommands::Manifest { version, output } => {
-                let report = build_milestone_manifest(&version)?;
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_milestone_manifest_with_store(&version, Some(&store))?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MilestoneCommands::AttachEvidence {
+                version,
+                capability_id,
+                kind,
+                summary,
+                artifact,
+                approved_by,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = attach_milestone_evidence(
+                    &store,
+                    MilestoneAttachEvidenceOptions {
+                        version: &version,
+                        capability_id: &capability_id,
+                        kind: &kind,
+                        summary: &summary,
+                        artifact_path: &artifact,
+                        approved_by: &approved_by,
+                        origin: &origin,
+                    },
+                )?;
                 print_response(output, &report)?;
                 Ok(0)
             }

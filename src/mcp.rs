@@ -98,8 +98,9 @@ use crate::memory::{
     MemoryRetentionOptions, MemorySearchOptions,
 };
 use crate::milestone::{
-    build_milestone_export_demo, build_milestone_manifest, build_milestone_research,
-    build_milestone_status, build_replacement_cli_demo_with_options, MilestoneCliDemoOptions,
+    attach_milestone_evidence, build_milestone_export_demo, build_milestone_manifest_with_store,
+    build_milestone_research, build_milestone_status, build_replacement_cli_demo_with_options,
+    MilestoneAttachEvidenceOptions, MilestoneCliDemoOptions,
 };
 use crate::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
@@ -1637,6 +1638,19 @@ struct ArtifactFetchInput {
 #[derive(Debug, Deserialize)]
 struct MilestoneStatusInput {
     version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MilestoneAttachEvidenceInput {
+    version: Option<String>,
+    capability: Option<String>,
+    capability_id: Option<String>,
+    kind: String,
+    summary: String,
+    artifact: Option<String>,
+    artifact_path: Option<String>,
+    approved_by: String,
+    origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5636,7 +5650,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.milestone.manifest",
                 "Generate Forge Milestone Manifest",
-                "Generate the Forge 0.5 promotion manifest with requirements, completed and missing capabilities, validation evidence, demos, gaps and decision.",
+                "Generate the Forge 0.5 promotion manifest with requirements, completed and missing capabilities, validation evidence, attached evidence, demos, gaps and decision.",
                 object_schema(&[("version", "string", "milestone version, currently 0.5")], &[]),
                 "forge.milestone.manifest.v1",
                 &[
@@ -5649,6 +5663,35 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "json",
                 ],
                 ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.milestone.attach_evidence",
+                "Attach Milestone Evidence",
+                "Attach an operator-approved milestone evidence artifact into the Forge store and global event timeline without auto-promoting the milestone.",
+                object_schema(&[
+                    ("version", "string", "milestone version, currently 0.5"),
+                    ("capability_id", "string", "milestone capability id"),
+                    ("kind", "string", "evidence kind, for example production_runtime_benchmark"),
+                    ("summary", "string", "short evidence summary"),
+                    ("artifact_path", "string", "local path to the evidence artifact"),
+                    ("approved_by", "string", "operator approving this evidence attachment"),
+                    ("origin", "string", "codex|opencode|gemini|forge_cli|skill|mcp"),
+                ], &["capability_id", "kind", "summary", "artifact_path", "approved_by"]),
+                "forge.milestone.attached_evidence.v1",
+                &[
+                    "forge",
+                    "milestone",
+                    "attach-evidence",
+                    "--version",
+                    "0.5",
+                    "--capability",
+                    "<capability-id>",
+                    "--artifact",
+                    "<artifact-path>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, true),
             ),
             tool(
                 "forge.milestone.research",
@@ -8720,7 +8763,32 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         "forge.milestone.manifest" => {
             let input: MilestoneStatusInput = parse_input(input)?;
             let version = input.version.unwrap_or_else(|| "0.5".to_string());
-            serde_json::to_value(build_milestone_manifest(&version)?)?
+            serde_json::to_value(build_milestone_manifest_with_store(&version, Some(store))?)?
+        }
+        "forge.milestone.attach_evidence" => {
+            let input: MilestoneAttachEvidenceInput = parse_input(input)?;
+            let version = input.version.unwrap_or_else(|| "0.5".to_string());
+            let capability_id = input
+                .capability_id
+                .or(input.capability)
+                .context("capability_id is required")?;
+            let artifact_path = input
+                .artifact_path
+                .or(input.artifact)
+                .context("artifact_path is required")?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(attach_milestone_evidence(
+                store,
+                MilestoneAttachEvidenceOptions {
+                    version: &version,
+                    capability_id: &capability_id,
+                    kind: &input.kind,
+                    summary: &input.summary,
+                    artifact_path: &PathBuf::from(artifact_path),
+                    approved_by: &input.approved_by,
+                    origin: &origin,
+                },
+            )?)?
         }
         "forge.milestone.research" => {
             let input: MilestoneStatusInput = parse_input(input)?;
