@@ -777,6 +777,7 @@ pub struct InteractiveReplacementCliPanel {
     pub blocked_surface_count: usize,
     pub readiness_percent: u64,
     pub surfaces: Vec<InteractiveReplacementCliSurface>,
+    pub external_brain_evidence_plan: InteractiveReleaseGateEvidencePlan,
     pub blockers: Vec<String>,
     pub next_actions: Vec<String>,
     pub commands: InteractiveReplacementCliCommands,
@@ -807,6 +808,9 @@ pub struct InteractiveReplacementCliCommands {
     pub sessions: Vec<String>,
     pub release_gates: Vec<String>,
     pub cli_demo: Vec<String>,
+    pub evidence_plan: Vec<String>,
+    pub prepare_evidence_inputs: Vec<String>,
+    pub collect_external_brain_evidence: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -9619,6 +9623,12 @@ pub fn build_interactive_replacement_cli_with_options(
     let harness = build_interactive_harness(store, harness_options)?;
     let sessions = build_interactive_sessions(store, InteractiveSessionsOptions::default())?;
     let release_gates = build_interactive_release_gates(store, "0.5", Some(&project_root))?;
+    let external_brain_evidence_plan = interactive_release_gate_evidence_plan(
+        store,
+        "0.5",
+        "replacement_grade_cli",
+        Some(&project_root),
+    )?;
     let structured_logs = build_interactive_structured_logs(store)?;
     let cost_ledger = build_cost_ledger(store, None, None, None, None).ok();
     let permissions = build_interactive_permissions(store)?;
@@ -9646,6 +9656,7 @@ pub fn build_interactive_replacement_cli_with_options(
     );
     let next_actions =
         replacement_cli_next_actions(promotion_ready, &missing_attached_evidence_kinds);
+    let replacement_commands = replacement_cli_commands(&project_root);
 
     let mut surfaces = vec![
         replacement_cli_surface(
@@ -9818,12 +9829,18 @@ pub fn build_interactive_replacement_cli_with_options(
             &required_attached_evidence_kinds,
             &attached_evidence_kinds,
             &missing_attached_evidence_kinds,
+            &external_brain_evidence_plan,
         ),
         blockers.clone(),
         vec![
             "forge milestone cli-demo --origin codex --output json".to_string(),
-            "forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root <project-root> --connected-brain <provider-id> --output json".to_string(),
-            "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root <project-root> --connected-brain <provider-id> --approved-by <operator> --origin codex --output json".to_string(),
+            format!("forge {}", replacement_commands.evidence_plan.join(" ")),
+            format!(
+                "forge {}",
+                replacement_commands
+                    .collect_external_brain_evidence
+                    .join(" ")
+            ),
         ],
     ));
 
@@ -9866,9 +9883,10 @@ pub fn build_interactive_replacement_cli_with_options(
         blocked_surface_count,
         readiness_percent,
         surfaces,
+        external_brain_evidence_plan,
         blockers,
         next_actions,
-        commands: replacement_cli_commands(&project_root),
+        commands: replacement_commands,
         notes: vec![
             "This panel is read-only; it aggregates replacement-grade CLI readiness without launching child CLIs or collecting evidence.".to_string(),
             "Promotion remains false until required milestone evidence is attached and validated.".to_string(),
@@ -9935,12 +9953,27 @@ fn replacement_cli_milestone_evidence_items(
     required: &[String],
     attached: &[String],
     missing: &[String],
+    external_brain_evidence_plan: &InteractiveReleaseGateEvidencePlan,
 ) -> Vec<String> {
     let mut evidence = vec![
         "milestone_cli_demo_command_available".to_string(),
         "evidence_plan_lists_connected_brain_manifest".to_string(),
         "promotion_requires_attached_operator_evidence".to_string(),
+        format!(
+            "external_brain_evidence_plan_status:{}",
+            external_brain_evidence_plan.status
+        ),
+        format!(
+            "external_brain_provider_candidates:{}",
+            external_brain_evidence_plan.provider_candidate_count
+        ),
     ];
+    evidence.extend(
+        external_brain_evidence_plan
+            .manifest_template_ids
+            .iter()
+            .map(|id| format!("manifest_template:{id}")),
+    );
     evidence.extend(
         required
             .iter()
@@ -10124,7 +10157,58 @@ fn replacement_cli_commands(project_root: &Path) -> InteractiveReplacementCliCom
             "--origin".to_string(),
             "codex".to_string(),
             "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        evidence_plan: vec![
+            "milestone".to_string(),
+            "evidence-plan".to_string(),
+            "--version".to_string(),
+            "0.5".to_string(),
+            "--capability".to_string(),
+            "replacement_grade_cli".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--connected-brain".to_string(),
+            "<provider-id>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        prepare_evidence_inputs: vec![
+            "milestone".to_string(),
+            "prepare-evidence-inputs".to_string(),
+            "--version".to_string(),
+            "0.5".to_string(),
+            "--capability".to_string(),
+            "replacement_grade_cli".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--connected-brain".to_string(),
+            "<provider-id>".to_string(),
+            "--apply".to_string(),
+            "--approved-by".to_string(),
+            "<operator>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        collect_external_brain_evidence: vec![
+            "milestone".to_string(),
+            "collect-evidence".to_string(),
+            "--version".to_string(),
+            "0.5".to_string(),
+            "--capability".to_string(),
+            "replacement_grade_cli".to_string(),
+            "--kind".to_string(),
+            "external_brain_provider_execution".to_string(),
+            "--project-root".to_string(),
             project_root,
+            "--connected-brain".to_string(),
+            "<provider-id>".to_string(),
+            "--approved-by".to_string(),
+            "<operator>".to_string(),
+            "--origin".to_string(),
+            "codex".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -13864,7 +13948,7 @@ pub fn render_interactive_workflow_sidebar(panel: &InteractiveWorkflowSidebarPan
 
 pub fn render_interactive_replacement_cli(panel: &InteractiveReplacementCliPanel) -> String {
     format!(
-        "Replacement CLI: {status}; milestone {milestone}; capability {capability_id}; readiness {readiness_percent}% ({ready_surface_count}/{surface_count}); promotion_ready {promotion_ready}\nSurfaces: {surfaces}\nBlockers: {blockers}\nCommands: {commands}\n",
+        "Replacement CLI: {status}; milestone {milestone}; capability {capability_id}; readiness {readiness_percent}% ({ready_surface_count}/{surface_count}); promotion_ready {promotion_ready}\nExternal brain evidence: {external_plan_status}; ready {external_ready}; providers {external_providers}; templates {external_templates}\nSurfaces: {surfaces}\nBlockers: {blockers}\nCommands: {commands}\n",
         status = panel.status,
         milestone = panel.milestone,
         capability_id = panel.capability_id,
@@ -13872,6 +13956,21 @@ pub fn render_interactive_replacement_cli(panel: &InteractiveReplacementCliPanel
         ready_surface_count = panel.ready_surface_count,
         surface_count = panel.surface_count,
         promotion_ready = panel.promotion_ready,
+        external_plan_status = panel.external_brain_evidence_plan.status,
+        external_ready = panel.external_brain_evidence_plan.ready_to_collect_evidence,
+        external_providers = panel.external_brain_evidence_plan.provider_candidate_count,
+        external_templates = if panel
+            .external_brain_evidence_plan
+            .manifest_template_ids
+            .is_empty()
+        {
+            "none".to_string()
+        } else {
+            panel
+                .external_brain_evidence_plan
+                .manifest_template_ids
+                .join(",")
+        },
         surfaces = render_replacement_cli_surface_summary(panel),
         blockers = if panel.blockers.is_empty() {
             "none".to_string()
@@ -13883,6 +13982,11 @@ pub fn render_interactive_replacement_cli(panel: &InteractiveReplacementCliPanel
             format!("forge {}", panel.commands.patch_workbench.join(" ")),
             format!("forge {}", panel.commands.harness.join(" ")),
             format!("forge {}", panel.commands.cli_demo.join(" ")),
+            format!("forge {}", panel.commands.evidence_plan.join(" ")),
+            format!(
+                "forge {}",
+                panel.commands.collect_external_brain_evidence.join(" ")
+            ),
         ]
         .join(" | "),
     )

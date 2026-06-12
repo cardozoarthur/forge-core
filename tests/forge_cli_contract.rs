@@ -53346,6 +53346,43 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("cli-demo")));
+    assert_eq!(
+        panel["external_brain_evidence_plan"]["schema_version"],
+        "forge.interactive.release_gate_evidence_plan.v1"
+    );
+    assert!(
+        panel["external_brain_evidence_plan"]["manifest_template_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("connected_brain_runtime_manifest"))
+    );
+    assert!(
+        panel["external_brain_evidence_plan"]["provider_candidate_count"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(panel["external_brain_evidence_plan"]["config_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["id"] == "connected_brain_manifest"));
+    assert!(panel["commands"]["evidence_plan"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("evidence-plan")));
+    assert!(panel["commands"]["evidence_plan"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("--connected-brain")));
+    assert!(panel["commands"]["prepare_evidence_inputs"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("prepare-evidence-inputs")));
+    assert!(panel["commands"]["collect_external_brain_evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("external_brain_provider_execution")));
 
     let surfaces = panel["surfaces"].as_array().unwrap();
     for surface_id in [
@@ -53448,8 +53485,10 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
         .clone();
     let text = String::from_utf8(text_output).unwrap();
     assert!(text.contains("Replacement CLI:"));
+    assert!(text.contains("External brain evidence:"));
     assert!(text.contains("file_editing_ux[ready]"));
     assert!(text.contains("forge milestone cli-demo"));
+    assert!(text.contains("external_brain_provider_execution"));
 
     let tools = forge()
         .args(["mcp", "tools", "--output", "json"])
@@ -53490,6 +53529,10 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
         "forge.interactive.replacement_cli.v1"
     );
     assert_eq!(mcp["result"]["project_root"], project_root_text);
+    assert_eq!(
+        mcp["result"]["external_brain_evidence_plan"]["schema_version"],
+        "forge.interactive.release_gate_evidence_plan.v1"
+    );
 
     let slash = forge()
         .args(["interactive", "slash-commands", "--output", "json"])
