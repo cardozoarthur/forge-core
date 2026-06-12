@@ -44692,7 +44692,14 @@ tenant_policy_mode: enforce
     let text = String::from_utf8(text_output).unwrap();
     assert!(text.contains("Permission center"));
     assert!(text.contains("operator-1"));
+    assert!(text.contains("grants workflow:mutate"));
+    assert!(text.contains("commands identity membership-update"));
     assert!(text.contains("telegram:egress:send_document"));
+    assert!(text.contains("risk high"));
+    assert!(text.contains("commands addons revoke-permission"));
+    assert!(text.contains(&format!("{workflow_id}:{task_id}")));
+    assert!(text.contains("required true"));
+    assert!(text.contains("commands interaction answer"));
 
     let manifest = forge()
         .args(["mcp", "tools", "--output", "json"])

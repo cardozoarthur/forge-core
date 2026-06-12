@@ -6601,12 +6601,15 @@ fn render_permission_membership_summary(panel: &InteractivePermissionsPanel) -> 
             .take(8)
             .map(|membership| {
                 format!(
-                    "{}:{}@{} ({}, {} permissions)",
+                    "{}:{}@{} ({}, {} permissions, grants {}, denies {}, commands {})",
                     membership.subject_scope,
                     membership.subject_id,
                     membership.tenant_path,
                     membership.role,
-                    membership.permission_count
+                    membership.permission_count,
+                    render_permission_list(&membership.permission_grants),
+                    render_permission_list(&membership.permission_denies),
+                    membership.commands.update.join(" ")
                 )
             })
             .collect::<Vec<_>>()
@@ -6624,11 +6627,14 @@ fn render_addon_permission_summary(panel: &InteractivePermissionsPanel) -> Strin
             .take(8)
             .map(|authorization| {
                 format!(
-                    "{}:{} ({}, {})",
+                    "{}:{} ({}, risk {}, approved_by {}, source {}, commands {})",
                     authorization.addon_id,
                     authorization.permission_id,
                     authorization.status,
-                    authorization.risk
+                    authorization.risk,
+                    authorization.approved_by,
+                    authorization.source,
+                    authorization.commands.revoke.join(" ")
                 )
             })
             .collect::<Vec<_>>()
@@ -6646,12 +6652,25 @@ fn render_permission_approval_summary(panel: &InteractivePermissionsPanel) -> St
             .take(8)
             .map(|item| {
                 format!(
-                    "{}:{} {} ({})",
-                    item.workflow_id, item.task_id, item.kind, item.state
+                    "{}:{} {} ({}, required {}, commands {})",
+                    item.workflow_id,
+                    item.task_id,
+                    item.kind,
+                    item.state,
+                    item.required,
+                    item.commands.answer.join(" ")
                 )
             })
             .collect::<Vec<_>>()
             .join(" | ")
+    }
+}
+
+fn render_permission_list(items: &[String]) -> String {
+    if items.is_empty() {
+        "none".to_string()
+    } else {
+        items.join(",")
     }
 }
 
