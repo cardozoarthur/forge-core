@@ -3827,6 +3827,19 @@ printf 'native:%s\n' "$*"
     assert_eq!(status["executable"], true);
     assert_eq!(status["path_precedence"], "shim_first");
     assert_eq!(status["would_recurse"], false);
+    assert_eq!(
+        status["activation_diagnostic"]["schema_version"],
+        "forge.harness.shim_activation_diagnostic.v1"
+    );
+    assert_eq!(
+        status["activation_diagnostic"]["status"],
+        "shim_activation_active"
+    );
+    assert_eq!(
+        status["activation_diagnostic"]["activation_required"],
+        false
+    );
+    assert_eq!(status["activation_diagnostic"]["reason"], "shim_first");
     assert_eq!(status["store_path"], store.to_str().unwrap());
     assert_eq!(status["real_command_source"], "shim_script");
     assert_eq!(
@@ -3888,6 +3901,18 @@ printf 'native:%s\n' "$*"
     assert_eq!(manual_status["forge_owned"], false);
     assert_eq!(manual_status["path_precedence"], "manual_shim_first");
     assert_eq!(manual_status["would_recurse"], true);
+    assert_eq!(
+        manual_status["activation_diagnostic"]["status"],
+        "shim_activation_blocked"
+    );
+    assert_eq!(
+        manual_status["activation_diagnostic"]["activation_possible"],
+        false
+    );
+    assert_eq!(
+        manual_status["activation_diagnostic"]["reason"],
+        "recursion_risk"
+    );
     assert!(manual_status["instructions"]
         .as_array()
         .unwrap()
@@ -3939,8 +3964,52 @@ printf 'native:%s\n' "$*"
         "shim_not_on_path"
     );
     assert_eq!(
+        inactive["shim_status"]["activation_diagnostic"]["status"],
+        "shim_activation_recommended"
+    );
+    assert_eq!(
+        inactive["shim_status"]["activation_diagnostic"]["activation_required"],
+        true
+    );
+    assert_eq!(
+        inactive["shim_status"]["activation_diagnostic"]["activation_possible"],
+        true
+    );
+    assert_eq!(
+        inactive["shim_status"]["activation_diagnostic"]["reason"],
+        "shim_not_on_path"
+    );
+    assert!(
+        inactive["shim_status"]["activation_diagnostic"]["one_shot_activation_command"]
+            .as_str()
+            .unwrap()
+            .contains("export PATH=")
+    );
+    assert_eq!(
         inactive["forge_first_adoption_readiness"]["blocked_reasons"],
         serde_json::json!(["forge_shim_installed_but_path_not_active"])
+    );
+    assert_eq!(
+        inactive["forge_first_adoption_readiness"]["activation_status"],
+        "shim_activation_recommended"
+    );
+    assert_eq!(
+        inactive["forge_first_adoption_readiness"]["activation_required"],
+        true
+    );
+    assert_eq!(
+        inactive["forge_first_adoption_readiness"]["activation_possible"],
+        true
+    );
+    assert_eq!(
+        inactive["forge_first_adoption_readiness"]["activation_reason"],
+        "shim_not_on_path"
+    );
+    assert!(
+        inactive["forge_first_adoption_readiness"]["activation_command"]
+            .as_str()
+            .unwrap()
+            .contains("forge harness shim-status")
     );
     assert!(inactive["forge_first_adoption_readiness"]["next_commands"]
         .as_array()
@@ -3993,6 +4062,10 @@ printf 'native:%s\n' "$*"
     );
     assert_eq!(mcp_status["result"]["status"], "shim_status_ready");
     assert_eq!(mcp_status["result"]["path_precedence"], "shim_first");
+    assert_eq!(
+        mcp_status["result"]["activation_diagnostic"]["status"],
+        "shim_activation_active"
+    );
 }
 
 #[cfg(unix)]

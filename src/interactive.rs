@@ -1225,6 +1225,12 @@ pub struct InteractiveHarnessForgeFirstAdoptionReadiness {
     pub token_headroom_ready: bool,
     pub token_headroom_required: bool,
     pub shim_ready: bool,
+    pub activation_status: String,
+    pub activation_required: bool,
+    pub activation_possible: bool,
+    pub activation_reason: String,
+    pub activation_command: String,
+    pub activation_profile_command: Vec<String>,
     pub lineage_policy_ready: bool,
     pub lineage_context_ready: bool,
     pub execution_guard_status: String,
@@ -5522,6 +5528,7 @@ pub fn build_interactive_harness(
         &options.executor,
         &mode,
         &doctor,
+        &shim_status,
         &wrapper_plan,
         &session_lifecycle_plan,
         &commands,
@@ -5582,6 +5589,7 @@ fn build_interactive_harness_forge_first_adoption_readiness(
     executor: &str,
     mode: &HarnessModeReport,
     doctor: &HarnessDoctorReport,
+    shim_status: &CliShimStatusReport,
     wrapper_plan: &CliWrapperPlanReport,
     session_lifecycle_plan: &HarnessSessionLifecyclePlan,
     commands: &InteractiveHarnessCommands,
@@ -5671,6 +5679,18 @@ fn build_interactive_harness_forge_first_adoption_readiness(
         token_headroom_ready: doctor.token_headroom_ready,
         token_headroom_required: mode.require_token_headroom_for_forge_first,
         shim_ready: doctor.shim_ready,
+        activation_status: shim_status.activation_diagnostic.status.clone(),
+        activation_required: shim_status.activation_diagnostic.activation_required,
+        activation_possible: shim_status.activation_diagnostic.activation_possible,
+        activation_reason: shim_status.activation_diagnostic.reason.clone(),
+        activation_command: shim_status
+            .activation_diagnostic
+            .one_shot_activation_command
+            .clone(),
+        activation_profile_command: shim_status
+            .activation_diagnostic
+            .activation_profile_command
+            .clone(),
         lineage_policy_ready: doctor.lineage_policy_ready,
         lineage_context_ready: doctor.lineage_context_ready,
         execution_guard_status,
@@ -14188,11 +14208,14 @@ fn render_harness_forge_first_adoption(
     readiness: &InteractiveHarnessForgeFirstAdoptionReadiness,
 ) -> String {
     format!(
-        "{} ready {}; active {}; shim {}; headroom {}; lineage {}; blockers {}; next {}; routes {}",
+        "{} ready {}; active {}; shim {}; activation {} reason {} possible {}; headroom {}; lineage {}; blockers {}; next {}; routes {}",
         readiness.schema_version,
         readiness.ready_to_use_as_default,
         readiness.forge_first_default_active,
         readiness.shim_ready,
+        readiness.activation_status,
+        readiness.activation_reason,
+        readiness.activation_possible,
         readiness.token_headroom_ready,
         readiness.lineage_policy_ready,
         if readiness.blocked_reasons.is_empty() {

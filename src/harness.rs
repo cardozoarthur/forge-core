@@ -36,6 +36,8 @@ pub const CLI_HARNESS_SESSION_LIFECYCLE_PLAN_SCHEMA_VERSION: &str =
     "forge.harness.session_lifecycle_plan.v1";
 pub const CLI_SHIM_INSTALL_SCHEMA_VERSION: &str = "forge.harness.shim_install.v1";
 pub const CLI_SHIM_STATUS_SCHEMA_VERSION: &str = "forge.harness.shim_status.v1";
+pub const CLI_SHIM_ACTIVATION_DIAGNOSTIC_SCHEMA_VERSION: &str =
+    "forge.harness.shim_activation_diagnostic.v1";
 const CLI_SHIM_MARKER: &str = "# forge-harness-shim:v1";
 const CLI_HARNESS_ACTIVATION_BEGIN: &str = "# >>> forge harness activation profile";
 const CLI_HARNESS_ACTIVATION_END: &str = "# <<< forge harness activation profile";
@@ -691,8 +693,25 @@ pub struct CliShimStatusReport {
     pub store_path: Option<String>,
     pub forge_binary: Option<String>,
     pub would_recurse: bool,
+    pub activation_diagnostic: CliShimActivationDiagnostic,
     pub checks: Vec<String>,
     pub instructions: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CliShimActivationDiagnostic {
+    pub schema_version: String,
+    pub status: String,
+    pub activation_required: bool,
+    pub activation_possible: bool,
+    pub reason: String,
+    pub path_precedence: String,
+    pub shim_ready_for_activation: bool,
+    pub one_shot_activation_command: String,
+    pub activation_profile_command: Vec<String>,
+    pub verification_commands: Vec<String>,
+    pub rollback_hints: Vec<String>,
     pub notes: Vec<String>,
 }
 
@@ -4135,6 +4154,16 @@ pub fn inspect_cli_harness_shim_status(
     } else {
         "shim_status_degraded"
     };
+    let activation_diagnostic = shim_activation_diagnostic(ShimActivationDiagnosticInput {
+        status,
+        path_precedence: &path_precedence,
+        shim_dir: &shim_dir,
+        executor: &executor,
+        shim_exists,
+        forge_owned,
+        executable,
+        would_recurse,
+    });
 
     Ok(CliShimStatusReport {
         schema_version: CLI_SHIM_STATUS_SCHEMA_VERSION.to_string(),
@@ -4158,6 +4187,7 @@ pub fn inspect_cli_harness_shim_status(
             .as_ref()
             .and_then(|script| script.forge_binary.clone()),
         would_recurse,
+        activation_diagnostic,
         checks: shim_status_checks(
             shim_exists,
             forge_owned,
@@ -5040,6 +5070,124 @@ fn shim_status_checks(
         "no shim recursion risk detected".to_string()
     });
     checks
+}
+
+struct ShimActivationDiagnosticInput<'a> {
+    status: &'a str,
+    path_precedence: &'a str,
+    shim_dir: &'a Path,
+    executor: &'a str,
+    shim_exists: bool,
+    forge_owned: bool,
+    executable: bool,
+    would_recurse: bool,
+}
+
+fn shim_activation_diagnostic(
+    input: ShimActivationDiagnosticInput<'_>,
+) -> CliShimActivationDiagnostic {
+    let shim_ready_for_activation =
+        input.shim_exists && input.forge_owned && input.executable && !input.would_recurse;
+    let activation_profile_command = vec![
+        "forge".to_string(),
+        "harness".to_string(),
+        "activation-profile".to_string(),
+        "--shim-dir".to_string(),
+        input.shim_dir.display().to_string(),
+        "--executor".to_string(),
+        input.executor.to_string(),
+        "--project-root".to_string(),
+        ".".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ];
+    let shim_status_command = format!(
+        "forge harness shim-status --shim-dir {} --executor {} --output json",
+        shell_quote(&input.shim_dir.display().to_string()),
+        shell_quote(input.executor)
+    );
+    let one_shot_activation_command = if shim_ready_for_activation {
+        format!(
+            "export PATH={}:$PATH && {shim_status_command}",
+            shell_quote(&input.shim_dir.display().to_string())
+        )
+    } else {
+        String::new()
+    };
+    let (status, activation_required, activation_possible, reason) =
+        if input.status == "shim_status_ready" {
+            (
+                "shim_activation_active",
+                false,
+                false,
+                input.path_precedence.to_string(),
+            )
+        } else if !input.shim_exists {
+            (
+                "shim_activation_unavailable",
+                true,
+                false,
+                "shim_missing".to_string(),
+            )
+        } else if input.would_recurse {
+            (
+                "shim_activation_blocked",
+                true,
+                false,
+                "recursion_risk".to_string(),
+            )
+        } else if !input.forge_owned {
+            (
+                "shim_activation_blocked",
+                true,
+                false,
+                "shim_not_forge_owned".to_string(),
+            )
+        } else if !input.executable {
+            (
+                "shim_activation_blocked",
+                true,
+                false,
+                "shim_not_executable".to_string(),
+            )
+        } else {
+            (
+                "shim_activation_recommended",
+                true,
+                true,
+                input.path_precedence.to_string(),
+            )
+        };
+
+    let mut verification_commands = vec![shim_status_command];
+    if activation_possible {
+        verification_commands.push(one_shot_activation_command.clone());
+    }
+
+    CliShimActivationDiagnostic {
+        schema_version: CLI_SHIM_ACTIVATION_DIAGNOSTIC_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        activation_required,
+        activation_possible,
+        reason,
+        path_precedence: input.path_precedence.to_string(),
+        shim_ready_for_activation,
+        one_shot_activation_command,
+        activation_profile_command,
+        verification_commands,
+        rollback_hints: vec![
+            "This report is read-only; undo any manual PATH export by opening a new shell or restoring the previous PATH."
+                .to_string(),
+            "Use the activation-profile rollback commands only when you applied a managed shell profile block."
+                .to_string(),
+        ],
+        notes: vec![
+            "Activation means PATH prefers the Forge-owned shim before the native brain CLI."
+                .to_string(),
+            "A recommended activation still requires the operator to opt into the PATH change."
+                .to_string(),
+        ],
+    }
 }
 
 fn shim_status_instructions(status: &str, shim_dir: &Path, executor: &str) -> Vec<String> {
