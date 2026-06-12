@@ -7431,6 +7431,72 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
             .unwrap_or("")
             .contains("forge harness retrieve-headroom --ref")));
 
+    let runtime_wrapper = &json["headroom_runtime_wrapper"];
+    assert_eq!(
+        runtime_wrapper["schema_version"],
+        "forge.milestone.headroom_runtime_wrapper_demo.v1"
+    );
+    assert_eq!(
+        runtime_wrapper["status"],
+        "headroom_runtime_wrapper_demo_ready"
+    );
+    assert_eq!(runtime_wrapper["executor"], "codex");
+    assert_eq!(runtime_wrapper["non_executing"], true);
+    assert_eq!(runtime_wrapper["child_cli_launched"], false);
+    assert_eq!(runtime_wrapper["external_resources_mutated"], false);
+    assert_eq!(
+        runtime_wrapper["wrapper_plan"]["schema_version"],
+        "forge.harness.cli_wrapper_plan.v1"
+    );
+    assert_eq!(
+        runtime_wrapper["wrapper_plan"]["headroom_runtime_plan"]["schema_version"],
+        "forge.harness.headroom_runtime_plan.v1"
+    );
+    assert_eq!(
+        runtime_wrapper["wrapper_plan"]["headroom_runtime_plan"]["enabled"],
+        true
+    );
+    assert_eq!(
+        runtime_wrapper["wrapper_plan"]["headroom_runtime_plan"]["reversible_store"]["uri_scheme"],
+        "forge://harness/headroom/"
+    );
+    assert!(
+        runtime_wrapper["wrapper_plan"]["headroom_runtime_plan"]["interception_points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|point| point["point_id"] == "tool_output"
+                && point["action"] == "compress_then_return_retrieval_ref"
+                && point["required"] == true)
+    );
+    assert!(
+        runtime_wrapper["wrapper_plan"]["headroom_runtime_plan"]["content_routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|route| route["content_kind"] == "log"
+                && route["strategy"] == "signal_log_compressor"
+                && route["reversible"] == true)
+    );
+    assert!(
+        runtime_wrapper["wrapper_plan"]["headroom_runtime_plan"]["mcp_tools"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("forge.harness.retrieve_headroom"))
+    );
+    assert!(runtime_wrapper["wrapper_plan"]["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|env| env["name"] == "FORGE_HEADROOM_RUNTIME_PLAN"
+            && env["value"] == "forge.harness.headroom_runtime_plan.v1"));
+    assert!(runtime_wrapper["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "headroom_runtime_wrapper_plan_reuses_harness_contract"
+        )));
+
     let flows = json["flows"].as_array().unwrap();
     assert_eq!(flows.len(), 8);
     for kind in [
@@ -8153,6 +8219,10 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
         "the packaged Forge skill should mention the connected external brain provider contract receipt"
     );
     assert!(
+        forge_core::skill::SKILL_MD.contains("forge.milestone.headroom_runtime_wrapper_demo.v1"),
+        "the packaged Forge skill should mention the Headroom runtime wrapper demo receipt"
+    );
+    assert!(
         forge_core::skill::SKILL_MD.contains("--connected-brain <provider-id>"),
         "the packaged Forge skill should teach project connected brain provider selection"
     );
@@ -8160,6 +8230,11 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
         forge_core::skill::SKILL_MD.contains("top-level `headroom_stats`")
             && forge_core::skill::SKILL_MD.contains("aggregated replacement-CLI token savings"),
         "the packaged Forge skill should teach agents to inspect aggregated replacement CLI headroom stats"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("top-level `headroom_runtime_wrapper`")
+            && forge_core::skill::SKILL_MD.contains("structured wrapper runtime contract"),
+        "the packaged Forge skill should teach agents to inspect the replacement CLI Headroom wrapper contract"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("manifest_templates")
