@@ -41672,6 +41672,8 @@ fn interactive_task_board_command_and_mcp_surface_are_dedicated() {
     let text = String::from_utf8(board_text).unwrap();
     assert!(text.contains("Task board"));
     assert!(text.contains(workflow_id));
+    assert!(text.contains(&format!("actions forge inspect {workflow_id}")));
+    assert!(text.contains("forge interaction list"));
 
     let manifest = forge()
         .args(["mcp", "tools", "--output", "json"])

@@ -7371,8 +7371,13 @@ fn render_task_board_lane_summary(panel: &InteractiveTaskBoardPanel) -> String {
         .lanes
         .iter()
         .map(|lane| {
+            let next_actions = if lane.next_actions.is_empty() {
+                "none".to_string()
+            } else {
+                lane.next_actions.join(" -> ")
+            };
             format!(
-                "{} [{}] tasks {}/{}, cards {}, ready handoffs {}, human waits {}, checkpoints {}, artifacts {}",
+                "{} [{}] tasks {}/{}, cards {}, ready handoffs {}, human waits {}, checkpoints {}, artifacts {}, actions {}",
                 lane.workflow_id,
                 lane.lifecycle_state,
                 lane.completed_tasks,
@@ -7381,7 +7386,8 @@ fn render_task_board_lane_summary(panel: &InteractiveTaskBoardPanel) -> String {
                 lane.ready_handoffs,
                 lane.pending_human_interactions,
                 lane.checkpoint_resume_candidates,
-                lane.artifact_count
+                lane.artifact_count,
+                next_actions
             )
         })
         .collect::<Vec<_>>()
