@@ -19978,6 +19978,20 @@ fn render_interactive_tui_frame(
     let key_line = "j/k focus | enter open | r refresh | m mode | t theme | /help | q quit";
     let compatibility_lines = vec![
         format!(
+            "Guided cockpit: {}; visual {}; steps {}/{}; current {}; next {}",
+            guided.status,
+            guided.visual_mode,
+            guided.completed_step_count,
+            guided.total_step_count,
+            guided.current_step_id,
+            guided.next_command
+        ),
+        format!(
+            "Guided steps: create_workflow to close_outcome; total {}; blocked {}; confirmations {}",
+            guided.total_step_count, guided.blocked_step_count, guided.confirmation_step_count
+        ),
+        "Safe actions: read-only panels open directly; mutating actions require preview, confirmation and visible rollback.".to_string(),
+        format!(
             "Active workflows: {}; Active runs: {}; focus {}",
             sidebar.workflow_count, dashboard.active_runs, dashboard.workflow_focus.len()
         ),
@@ -20223,7 +20237,8 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
     if !std::io::stdin().is_terminal() {
         let store = ForgeStore::open(store_path)?;
         let report = build_interactive_home(&store)?;
-        println!("{}", render_interactive_home(&report));
+        let repl_state = InteractiveReplState::from_home(&report);
+        println!("{}", render_interactive_tui_frame(&report, &repl_state));
         return Ok(0);
     }
 

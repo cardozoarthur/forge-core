@@ -51487,6 +51487,7 @@ fn interactive_guided_cockpit_is_default_forge_tui_cli_and_mcp_surface() {
         .stdout
         .clone();
     let default_text = String::from_utf8(default_output).unwrap();
+    assert!(default_text.contains("Forge advanced operational TUI"));
     assert!(default_text.contains("Forge operational TUI"));
     assert!(default_text.contains("Guided cockpit:"));
     assert!(default_text.contains("Guided steps:"));
