@@ -95,11 +95,11 @@ use crate::interactive::{
     build_interactive_action_invocation, build_interactive_action_registry,
     build_interactive_autocomplete, build_interactive_command_palette, build_interactive_harness,
     build_interactive_home_with_options, build_interactive_identity,
-    build_interactive_patch_workbench, build_interactive_permissions, build_interactive_readiness,
-    build_interactive_release_gates, build_interactive_sessions, build_interactive_structured_logs,
-    build_interactive_task_board, build_interactive_workflow_dag, route_interactive_input,
-    slash_command_catalog, InteractiveHarnessOptions, InteractiveHomeOptions,
-    InteractiveSessionsOptions,
+    build_interactive_operational_cockpit, build_interactive_patch_workbench,
+    build_interactive_permissions, build_interactive_readiness, build_interactive_release_gates,
+    build_interactive_sessions, build_interactive_structured_logs, build_interactive_task_board,
+    build_interactive_workflow_dag, route_interactive_input, slash_command_catalog,
+    InteractiveHarnessOptions, InteractiveHomeOptions, InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -3114,6 +3114,21 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.readiness.v1",
                 &["forge", "interactive", "readiness", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.operational_cockpit",
+                "Inspect Interactive Operational Cockpit",
+                "Return the dedicated Forge operational cockpit for attention, handoffs, human waits, brain readiness, cost and observability without loading the full home dashboard.",
+                object_schema(&[], &[]),
+                "forge.interactive.operational_cockpit.v1",
+                &[
+                    "forge",
+                    "interactive",
+                    "operational-cockpit",
+                    "--output",
+                    "json",
+                ],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7420,6 +7435,9 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             )?)?
         }
         "forge.interactive.readiness" => serde_json::to_value(build_interactive_readiness(store)?)?,
+        "forge.interactive.operational_cockpit" => {
+            serde_json::to_value(build_interactive_operational_cockpit(store)?)?
+        }
         "forge.interactive.release_gates" => {
             let input: MilestoneStatusInput = if input.is_null() {
                 MilestoneStatusInput {

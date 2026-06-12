@@ -44067,12 +44067,167 @@ fn interactive_home_surfaces_operational_cockpit_for_operator_focus() {
                 action["action_id"] == "operations.cockpit"
                     && action["source_panel"] == "operational_cockpit_panel"
                     && action["commands"]
-                        == serde_json::json!(["interactive", "home", "--output", "json"])
+                        == serde_json::json!([
+                            "interactive",
+                            "operational-cockpit",
+                            "--output",
+                            "json"
+                        ])
                     && action["mutates_workflow"] == false
                     && action["requires_approval"] == false
                     && action["risk_level"] == "low"
             })
     }));
+}
+
+#[test]
+fn interactive_operational_cockpit_is_dedicated_cli_slash_and_mcp_surface() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let cockpit_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "operational-cockpit",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cockpit: Value = serde_json::from_slice(&cockpit_output).unwrap();
+    assert_eq!(
+        cockpit["schema_version"],
+        "forge.interactive.operational_cockpit.v1"
+    );
+    assert_eq!(cockpit["status"], "operational_cockpit_ready");
+    assert!(cockpit["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|section| section["section_id"] == "handoff"));
+    assert!(cockpit["next_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge interactive operational-cockpit --output json"
+        )));
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "operational-cockpit",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Operational cockpit:"));
+    assert!(text.contains("sections"));
+
+    let registry_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-registry",
+            "--query",
+            "cockpit",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let registry: Value = serde_json::from_slice(&registry_output).unwrap();
+    let action = registry["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["action_id"] == "operations.cockpit")
+        .expect("operational cockpit action should remain discoverable");
+    assert_eq!(
+        action["commands"],
+        serde_json::json!(["interactive", "operational-cockpit", "--output", "json"])
+    );
+
+    let catalog_output = forge()
+        .args(["interactive", "slash-commands", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let catalog: Value = serde_json::from_slice(&catalog_output).unwrap();
+    let cockpit_slash = find_slash_command(&catalog, "/cockpit");
+    assert_eq!(
+        cockpit_slash["equivalent_command"],
+        serde_json::json!(["forge", "interactive", "operational-cockpit"])
+    );
+    assert_eq!(cockpit_slash["mutates_workflow"], false);
+
+    let route_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "route",
+            "--input",
+            "/cockpit",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let route: Value = serde_json::from_slice(&route_output).unwrap();
+    assert_eq!(route["slash_command"]["name"], "/cockpit");
+    assert_eq!(route["slash_command"]["recognized"], true);
+
+    let manifest_output = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest_output).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.operational_cockpit");
+    assert_eq!(
+        tool["output_schema"],
+        "forge.interactive.operational_cockpit.v1"
+    );
+
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.interactive.operational_cockpit",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.operational_cockpit.v1"
+    );
 }
 
 #[test]

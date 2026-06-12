@@ -1367,6 +1367,13 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
     build_interactive_home_with_options(store, InteractiveHomeOptions::default())
 }
 
+pub fn build_interactive_operational_cockpit(
+    store: &ForgeStore,
+) -> Result<InteractiveOperationalCockpitPanel> {
+    let report = build_interactive_home(store)?;
+    Ok(report.dashboard.operational_cockpit_panel)
+}
+
 pub fn build_interactive_home_with_options(
     store: &ForgeStore,
     options: InteractiveHomeOptions,
@@ -2714,7 +2721,7 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             "Inspect the unified operator focus for workflows, handoffs, human waits, brain readiness and observability.",
             "operational_cockpit_panel",
             None,
-            &["interactive", "home", "--output", "json"],
+            &["interactive", "operational-cockpit", "--output", "json"],
             false,
             false,
             "low",
@@ -6375,6 +6382,27 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     )
 }
 
+pub fn render_interactive_operational_cockpit(
+    panel: &InteractiveOperationalCockpitPanel,
+) -> String {
+    format!(
+        "Operational cockpit: {attention}; {priority}; active work {active_work}, ready handoffs {ready_handoffs}, human waits {human_waits}, due workflows {due_workflows}, brain {selected_brain}; sections {sections}; next {next_actions}",
+        attention = panel.attention_level,
+        priority = panel.priority_summary,
+        active_work = panel.active_work_count,
+        ready_handoffs = panel.ready_handoff_count,
+        human_waits = panel.pending_human_wait_count,
+        due_workflows = panel.due_workflow_count,
+        selected_brain = panel.selected_brain,
+        sections = render_operational_cockpit_sections(panel),
+        next_actions = if panel.next_actions.is_empty() {
+            "none".to_string()
+        } else {
+            panel.next_actions.join(" | ")
+        },
+    )
+}
+
 pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> String {
     format!(
         "Task board: {status}; workflows {workflow_count}, tasks {task_count}, ready handoffs {ready_handoffs}, human waits {human_waits}, checkpoints {checkpoints}, artifacts {artifacts}\nLanes: {lanes}\nCards: {cards}\n",
@@ -7678,6 +7706,7 @@ fn build_operational_cockpit_panel(
         estimated_cost_total_usd: cost.estimated_task_cost_total_usd,
         sections,
         next_actions: vec![
+            "forge interactive operational-cockpit --output json".to_string(),
             "forge interactive task-board --output json".to_string(),
             "forge interactive readiness --output json".to_string(),
             "forge interactive action-registry --query operational --output json".to_string(),
@@ -9274,6 +9303,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Task Board",
             "Show operational workflow lanes with handoffs, checkpoints, human waits and artifacts.",
             &["forge", "interactive", "task-board"],
+            false,
+            "low",
+        ),
+        slash(
+            "/cockpit",
+            "Operational Cockpit",
+            "Show the dedicated operational cockpit for attention, handoffs, waits, brain readiness and observability.",
+            &["forge", "interactive", "operational-cockpit"],
             false,
             "low",
         ),
