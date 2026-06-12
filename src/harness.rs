@@ -1369,9 +1369,20 @@ pub fn build_harness_adoption_plan(
     };
     let commands = HarnessAdoptionCommands {
         write_project_harness_config: vec![
-            "mkdir".to_string(),
-            "-p".to_string(),
-            format!("{}/.forge", project_root_display),
+            "forge".to_string(),
+            "harness".to_string(),
+            "bootstrap".to_string(),
+            "--executor".to_string(),
+            executor.clone(),
+            "--shim-dir".to_string(),
+            shim_dir_display.clone(),
+            "--project-root".to_string(),
+            project_root_display.clone(),
+            "--apply".to_string(),
+            "--approved-by".to_string(),
+            "<operator>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
         ],
         mode: vec![
             "forge".to_string(),
@@ -1459,7 +1470,14 @@ pub fn build_harness_adoption_plan(
             executor.clone(),
         ],
     };
-    let next_action = if !doctor.shim_ready {
+    let next_action = if mode.project_config_status != "loaded" {
+        format!(
+            "forge harness bootstrap --executor {} --shim-dir {} --project-root {} --apply --approved-by <operator> --output json",
+            shell_quote(&executor),
+            shell_quote(&shim_dir_display),
+            shell_quote(&project_root_display)
+        )
+    } else if !doctor.shim_ready {
         format!(
             "forge harness install-shims --shim-dir {} --executor {} --project-root {} --output json",
             shell_quote(&shim_dir_display),

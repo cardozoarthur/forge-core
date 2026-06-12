@@ -1788,6 +1788,55 @@ fn harness_adoption_plan_models_forge_first_headroom_for_cli_mcp_and_skill() {
         forge_core::skill::SKILL_MD.contains("forge.harness.adoption_plan"),
         "the packaged Forge skill should expose the harness adoption plan MCP tool"
     );
+
+    let fresh_project = temp.path().join("fresh-project");
+    fs::create_dir_all(&fresh_project).unwrap();
+    let fresh_output = forge()
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "adoption-plan",
+            "--executor",
+            "codex",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--project-root",
+            fresh_project.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let fresh_json: Value = serde_json::from_slice(&fresh_output).unwrap();
+    let write_step = fresh_json["adoption_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "write_project_harness_config")
+        .unwrap();
+    assert_eq!(write_step["status"], "recommended");
+    assert_eq!(write_step["requires_approval"], true);
+    let write_command = fresh_json["commands"]["write_project_harness_config"]
+        .as_array()
+        .unwrap();
+    assert!(write_command.contains(&serde_json::json!("bootstrap")));
+    assert!(write_command.contains(&serde_json::json!("--apply")));
+    assert!(write_command.contains(&serde_json::json!("--approved-by")));
+    assert!(write_command.contains(&serde_json::json!("<operator>")));
+    assert!(fresh_json["next_action"]
+        .as_str()
+        .unwrap()
+        .contains("forge harness bootstrap"));
+    assert!(fresh_json["next_action"]
+        .as_str()
+        .unwrap()
+        .contains("--apply"));
+    assert!(!fresh_project.join(".forge/harness.json").exists());
 }
 
 #[cfg(unix)]
