@@ -45298,6 +45298,105 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
         "forge.harness.session_lifecycle_plan.v1"
     );
     assert_eq!(json["session_lifecycle_plan"]["session_id"], "codex-shell");
+    assert_eq!(
+        json["executor_compatibility"]["schema_version"],
+        "forge.harness.executor_compatibility.v1"
+    );
+    assert_eq!(json["executor_compatibility"]["selected_executor"], "codex");
+    assert_eq!(
+        json["executor_compatibility"]["selected_adapter_family"],
+        "codex_cli"
+    );
+    assert_eq!(
+        json["executor_compatibility"]["status"],
+        "executor_compatibility_degraded"
+    );
+    assert!(
+        json["executor_compatibility"]["canonical_executor_families"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |family| family["executor"] == "claude" && family["adapter_family"] == "claude_cli"
+            )
+    );
+    assert!(
+        json["executor_compatibility"]["canonical_executor_families"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |family| family["executor"] == "gemini" && family["adapter_family"] == "gemini_cli"
+            )
+    );
+    assert!(
+        json["executor_compatibility"]["canonical_executor_families"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|family| {
+                family["executor"] == "opencode" && family["adapter_family"] == "opencode_cli"
+            })
+    );
+    let compatibility = json["executor_compatibility"]["selected_compatibility"]
+        .as_object()
+        .unwrap();
+    assert_eq!(compatibility["executor"], "codex");
+    assert_eq!(compatibility["native_entrypoint"], "codex");
+    assert!(compatibility["supported_surfaces"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("env_overlay")));
+    assert!(compatibility["supported_surfaces"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("path_shim")));
+    assert!(compatibility["supported_surfaces"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("harness_exec")));
+    assert!(compatibility["supported_surfaces"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("token_headroom")));
+    assert!(compatibility["supported_surfaces"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("context_routing")));
+    assert!(compatibility["supported_surfaces"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("memory_routing")));
+    assert!(compatibility["supported_surfaces"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("skill_routing")));
+    assert!(compatibility["supported_surfaces"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("mcp_routing")));
+    assert!(compatibility["supported_surfaces"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("credential_vault_boundary")));
+    assert!(compatibility["readiness"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["surface"] == "path_shim" && item["status"] == "blocked"));
+    assert!(compatibility["readiness"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["surface"] == "token_headroom" && item["status"] == "ready"));
+    assert!(compatibility["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap_or("")
+            .contains("forge harness install-shims")));
     let headroom_next_commands = json["headroom_plan"]["next_commands"].as_array().unwrap();
     assert!(headroom_next_commands
         .iter()
@@ -45384,6 +45483,11 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("FORGE_TOKEN_HEADROOM_REQUIRED=true"));
     assert!(text.contains("Orchestration: control forge_core"));
     assert!(text.contains("gates prompt_packet_required, context_budget_enforced"));
+    assert!(text.contains("Compatibility: forge.harness.executor_compatibility.v1"));
+    assert!(text.contains("selected codex via codex_cli"));
+    assert!(text.contains("surfaces env_overlay, path_shim, harness_exec"));
+    assert!(text.contains("path_shim:blocked"));
+    assert!(text.contains("token_headroom:ready"));
     assert!(text.contains("Lifecycle gates: codex-shell lineage false"));
     assert!(text.contains("missing workflow_id, task_id, run_id"));
     assert!(text.contains("record_launch_plan:available forge shells --executor codex"));
@@ -45433,6 +45537,14 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert_eq!(
         home["dashboard"]["harness_panel"]["session_lifecycle_plan"]["schema_version"],
         "forge.harness.session_lifecycle_plan.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["harness_panel"]["executor_compatibility"]["schema_version"],
+        "forge.harness.executor_compatibility.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["harness_panel"]["executor_compatibility"]["selected_executor"],
+        "codex"
     );
     assert!(home["dashboard"]["ui_composition_panel"]["regions"]
         .as_array()
@@ -45513,6 +45625,14 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert_eq!(
         mcp_json["result"]["session_lifecycle_plan"]["schema_version"],
         "forge.harness.session_lifecycle_plan.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["executor_compatibility"]["schema_version"],
+        "forge.harness.executor_compatibility.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["executor_compatibility"]["selected_adapter_family"],
+        "codex_cli"
     );
 }
 

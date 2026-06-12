@@ -22,7 +22,7 @@ The intended architecture is hybrid:
 
 ## Forge em 5 minutos
 
-Forge é o painel operacional e o runtime persistente que transforma um objetivo em workflows auditáveis. Ao abrir `forge` em um terminal interativo, o operador deve ver o cockpit principal com workflows ativos, eventos/schedules, Addons/capabilities, custos, handoffs/approvals, readiness de brains/shells e comandos próximos.
+Forge é o painel operacional e o runtime persistente que transforma um objetivo em workflows auditáveis. Ao abrir `forge` em um terminal interativo, o operador deve ver o cockpit principal com workflows ativos, eventos/schedules, Addons/capabilities, custos, handoffs/approvals, readiness de brains/shells, compatibilidade de executores e comandos próximos.
 
 O fluxo mental é simples:
 
@@ -87,7 +87,7 @@ This is the first functional CLI + Skill version:
 - process-liveness-aware run activity so a recorded live executor PID keeps long-running Forge handoffs active even after heartbeat TTL expiry
 - Forge-owned patch planning for agent file edits, with bounded context contract, repo-relative path permission gates, file snapshots, diff-review commands, validation commands, apply artifacts and guarded revert proposals without silent destructive restores
 - MCP tool manifest and call surface for agent workflows: list, inspect, interactive home/slash/route, start/resume/status, schedule create/update/list/summary, loop inspect/summary, task handoff, context request, validation status and bounded artifact fetch
-- interactive home dashboard through `forge interactive home --project-root <project-root>` and MCP `forge.interactive.home` with `project_root`, including `harness_mode_panel`, harness headroom stats, project-root-aware release gates and `/harness` quick action so TUI/web/agent dashboards can see the effective Forge-first mode, source, project config status and token-headroom savings before opening brain shells
+- interactive home dashboard through `forge interactive home --project-root <project-root>` and MCP `forge.interactive.home` with `project_root`, including `harness_mode_panel`, harness headroom stats, executor compatibility, project-root-aware release gates and `/harness` quick action so TUI/web/agent dashboards can see the effective Forge-first mode, source, project config status, token-headroom savings and CLI adapter readiness before opening brain shells
 - interactive task board through `forge interactive task-board` and MCP `forge.interactive.task_board`, using `forge.interactive.task_board.v1` to expose workflow lanes, operable per-task cards, ready handoffs, blocked/failed/running task counts, checkpoint resume candidates, pending human interactions, artifact counts and direct next-action commands for TUI/web/agent dashboards
 - 0.5 milestone status, promotion manifest, release-gates panel, evidence-plan, collect-evidence, collect-ready-evidence and attached-evidence ledger surfaces for release-gate inspection, including project-root-aware secret-free `manifest_templates` for missing project evidence manifests such as `.forge/connected-brain-runtimes.json`, `.forge/multimodal.json` and `.forge/multimodal-runtimes.json`
 - native daily Goal research workflow planning and smoke execution for `hackathon` reports with Markdown/PDF artifacts and redacted Telegram delivery records
@@ -126,6 +126,7 @@ This is the first functional CLI + Skill version:
 - Addon validator execution for external `validator` workers, with standardized subject/input/context envelopes, decision validation and result audit over the same dispatch ledger
 - Addon executor execution for external `executor` workers, with standardized task/input/context envelopes, generic result validation and artifact/event/output audit over the same dispatch ledger
 - harness utilities for token-headroom analysis, Forge-first CLI wrapper planning, non-destructive PATH shim installation, shim status auditing, reversible stdout/stderr headroom receipts and workflow/task/run timeline events across Codex, Claude, Gemini and OpenCode-style executors
+- harness executor compatibility reports embedded in `forge interactive harness` / MCP `forge.interactive.harness`, exposing canonical Codex, Claude, Gemini and OpenCode adapter families plus readiness for env overlay, PATH shim, guarded exec, token headroom, session lifecycle, context/memory/skill/MCP routing and credential-vault boundaries
 - intent v2 records workflow mode, event policy, operating context, required capabilities, active addons and capability resolution
 - capability resolution exposes workflow-extension activations, runtime contracts and missing-capability suggestions with source Addon/capability lineage, including trusted local marketplace packages on the store-aware resolver
 - capability-first internal workflow-extension planner registry for first-party Addon builders and policy mutations, with textual matching kept only for legacy intents

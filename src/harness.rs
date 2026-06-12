@@ -22,6 +22,8 @@ pub const CLI_HARNESS_HEADROOM_PLAN_SCHEMA_VERSION: &str = "forge.harness.headro
 pub const CLI_HARNESS_HEADROOM_RUNTIME_PLAN_SCHEMA_VERSION: &str =
     "forge.harness.headroom_runtime_plan.v1";
 pub const CLI_HARNESS_ADOPTION_PLAN_SCHEMA_VERSION: &str = "forge.harness.adoption_plan.v1";
+pub const CLI_HARNESS_EXECUTOR_COMPATIBILITY_SCHEMA_VERSION: &str =
+    "forge.harness.executor_compatibility.v1";
 pub const CLI_HARNESS_BOOTSTRAP_SCHEMA_VERSION: &str = "forge.harness.bootstrap.v1";
 pub const CLI_HARNESS_ORCHESTRATION_CONTRACT_SCHEMA_VERSION: &str =
     "forge.harness.orchestration_contract.v1";
@@ -327,6 +329,50 @@ pub struct HarnessAdoptionCommands {
     pub sync_executors: Vec<String>,
     pub wrap_plan: Vec<String>,
     pub exec_with_lineage: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessExecutorCompatibilityReport {
+    pub schema_version: String,
+    pub status: String,
+    pub selected_executor: String,
+    pub selected_adapter_family: String,
+    pub selected_compatibility: HarnessExecutorCompatibility,
+    pub canonical_executor_families: Vec<HarnessExecutorFamily>,
+    pub compatibility_matrix: Vec<HarnessExecutorCompatibility>,
+    pub next_action: String,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessExecutorFamily {
+    pub executor: String,
+    pub display_name: String,
+    pub adapter_family: String,
+    pub native_entrypoint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessExecutorCompatibility {
+    pub executor: String,
+    pub display_name: String,
+    pub adapter_family: String,
+    pub native_entrypoint: String,
+    pub selected: bool,
+    pub compatibility_status: String,
+    pub supported_surfaces: Vec<String>,
+    pub readiness: Vec<HarnessExecutorSurfaceReadiness>,
+    pub next_commands: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessExecutorSurfaceReadiness {
+    pub surface: String,
+    pub status: String,
+    pub source: String,
+    pub reason: String,
+    pub command: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1680,6 +1726,600 @@ pub fn build_harness_adoption_plan(
             "Use it when an operator wants Codex, Claude, Gemini or OpenCode to prefer Forge infrastructure without hiding the native CLI boundary.".to_string(),
         ],
     })
+}
+
+pub fn build_harness_executor_compatibility_report(
+    executor: &str,
+    project_root: &Path,
+    shim_dir: &Path,
+    doctor: &HarnessDoctorReport,
+    wrapper_plan: &CliWrapperPlanReport,
+    session_lifecycle_plan: &HarnessSessionLifecyclePlan,
+) -> HarnessExecutorCompatibilityReport {
+    let selected_executor = normalize_executor(executor);
+    let canonical_executor_families = canonical_harness_executor_families(&selected_executor);
+    let selected_family = canonical_executor_families
+        .iter()
+        .find(|family| family.executor == selected_executor)
+        .cloned()
+        .unwrap_or_else(|| harness_executor_family(&selected_executor));
+    let selected_compatibility = harness_executor_compatibility(
+        selected_family.clone(),
+        true,
+        project_root,
+        shim_dir,
+        Some(doctor),
+        Some(wrapper_plan),
+        Some(session_lifecycle_plan),
+    );
+    let compatibility_matrix = canonical_executor_families
+        .iter()
+        .cloned()
+        .map(|family| {
+            if family.executor == selected_executor {
+                selected_compatibility.clone()
+            } else {
+                harness_executor_compatibility(
+                    family,
+                    false,
+                    project_root,
+                    shim_dir,
+                    None,
+                    None,
+                    None,
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    let status = if selected_compatibility.compatibility_status == "ready" {
+        "executor_compatibility_ready"
+    } else {
+        "executor_compatibility_degraded"
+    };
+    let next_action = selected_compatibility
+        .next_commands
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "forge interactive harness --output json".to_string());
+
+    HarnessExecutorCompatibilityReport {
+        schema_version: CLI_HARNESS_EXECUTOR_COMPATIBILITY_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        selected_executor,
+        selected_adapter_family: selected_family.adapter_family,
+        selected_compatibility,
+        canonical_executor_families,
+        compatibility_matrix,
+        next_action,
+        notes: vec![
+            "This report is read-only and keeps Codex, Claude, Gemini and OpenCode as replaceable execution brains under Forge-owned routing.".to_string(),
+            "Forge owns workflow state, context, memory, skills, MCP, credential-vault references, session lifecycle, token headroom and receipts; the native CLI remains the executor entrypoint.".to_string(),
+        ],
+    }
+}
+
+fn harness_executor_compatibility(
+    family: HarnessExecutorFamily,
+    selected: bool,
+    project_root: &Path,
+    shim_dir: &Path,
+    doctor: Option<&HarnessDoctorReport>,
+    wrapper_plan: Option<&CliWrapperPlanReport>,
+    session_lifecycle_plan: Option<&HarnessSessionLifecyclePlan>,
+) -> HarnessExecutorCompatibility {
+    let supported_surfaces = harness_executor_supported_surfaces();
+    let readiness = if selected {
+        selected_harness_executor_readiness(
+            &family,
+            project_root,
+            shim_dir,
+            doctor.expect("selected executor compatibility requires doctor report"),
+            wrapper_plan.expect("selected executor compatibility requires wrapper plan"),
+            session_lifecycle_plan
+                .expect("selected executor compatibility requires session lifecycle plan"),
+        )
+    } else {
+        non_selected_harness_executor_readiness(&family, project_root, shim_dir)
+    };
+    let compatibility_status = harness_executor_compatibility_status(selected, &readiness);
+    let next_commands =
+        harness_executor_next_commands(&family, project_root, shim_dir, selected, &readiness);
+    let notes = if selected {
+        vec![
+            "Selected executor readiness is derived from harness doctor, wrapper plan, shim status, lineage policy and headroom policy.".to_string(),
+            "A blocked surface does not remove the executor; it tells the TUI/operator which Forge-first capability must be enabled before real child execution.".to_string(),
+        ]
+    } else {
+        vec![
+            "Canonical executor family is known to the harness but was not selected for this readiness run.".to_string(),
+            format!(
+                "Run `forge interactive harness --executor {}` to inspect live readiness for this brain.",
+                family.executor
+            ),
+        ]
+    };
+
+    HarnessExecutorCompatibility {
+        executor: family.executor,
+        display_name: family.display_name,
+        adapter_family: family.adapter_family,
+        native_entrypoint: family.native_entrypoint,
+        selected,
+        compatibility_status,
+        supported_surfaces,
+        readiness,
+        next_commands,
+        notes,
+    }
+}
+
+fn selected_harness_executor_readiness(
+    family: &HarnessExecutorFamily,
+    project_root: &Path,
+    shim_dir: &Path,
+    doctor: &HarnessDoctorReport,
+    wrapper_plan: &CliWrapperPlanReport,
+    session_lifecycle_plan: &HarnessSessionLifecyclePlan,
+) -> Vec<HarnessExecutorSurfaceReadiness> {
+    let project_root_display = project_root.display().to_string();
+    let shim_dir_display = shim_dir.display().to_string();
+    let executor = &family.executor;
+    let env_overlay_ready = wrapper_plan
+        .env
+        .iter()
+        .any(|item| item.name == "FORGE_HARNESS" && item.value == "enabled");
+    let routing_env_ready = |name: &str| {
+        wrapper_plan
+            .env
+            .iter()
+            .any(|item| item.name == name && item.value == "forge_controlled")
+    };
+    let credential_boundary_ready = wrapper_plan.env.iter().any(|item| {
+        item.name == "FORGE_CREDENTIAL_VAULT_BOUNDARY" && item.value == "reference_only"
+    });
+    let event_receipts_ready = wrapper_plan
+        .env
+        .iter()
+        .any(|item| item.name == "FORGE_EVENT_RECEIPTS" && item.value == "required");
+
+    vec![
+        executor_surface_readiness(
+            "env_overlay",
+            if env_overlay_ready { "ready" } else { "blocked" },
+            "wrapper_plan.env",
+            "Forge harness env overlay marks child CLI execution as Forge-controlled.",
+            vec![
+                "forge".to_string(),
+                "harness".to_string(),
+                "wrap-plan".to_string(),
+                "--executor".to_string(),
+                executor.clone(),
+                "--project-root".to_string(),
+                project_root_display.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        ),
+        executor_surface_readiness(
+            "path_shim",
+            if doctor.shim_ready { "ready" } else { "blocked" },
+            "harness_doctor.shim_ready",
+            "PATH shim must prefer the Forge-owned wrapper before native CLI defaults can be intercepted.",
+            vec![
+                "forge".to_string(),
+                "harness".to_string(),
+                "install-shims".to_string(),
+                "--shim-dir".to_string(),
+                shim_dir_display.clone(),
+                "--executor".to_string(),
+                executor.clone(),
+                "--project-root".to_string(),
+                project_root_display.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        ),
+        executor_surface_readiness(
+            "harness_exec",
+            if doctor.lineage_policy_ready {
+                "ready"
+            } else {
+                "blocked"
+            },
+            "harness_doctor.lineage_policy_ready",
+            "Real harness exec requires workflow, task and run lineage when project policy requires it.",
+            vec![
+                "forge".to_string(),
+                "harness".to_string(),
+                "exec".to_string(),
+                "--executor".to_string(),
+                executor.clone(),
+                "--project-root".to_string(),
+                project_root_display.clone(),
+                "--workflow".to_string(),
+                "<workflow-id>".to_string(),
+                "--task".to_string(),
+                "<task-id>".to_string(),
+                "--run".to_string(),
+                "<run-id>".to_string(),
+                "--execute".to_string(),
+                "--allow-exec".to_string(),
+                "--".to_string(),
+                family.native_entrypoint.clone(),
+            ],
+        ),
+        executor_surface_readiness(
+            "token_headroom",
+            if doctor.token_headroom_ready {
+                "ready"
+            } else if wrapper_plan.require_token_headroom_for_forge_first && wrapper_plan.forge_first {
+                "blocked"
+            } else {
+                "disabled"
+            },
+            "harness_doctor.token_headroom_ready",
+            "Token headroom keeps tool output, logs and large context reversible without flooding the child brain.",
+            vec![
+                "forge".to_string(),
+                "harness".to_string(),
+                "headroom-plan".to_string(),
+                "--executor".to_string(),
+                executor.clone(),
+                "--project-root".to_string(),
+                project_root_display.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        ),
+        executor_surface_readiness(
+            "session_lifecycle",
+            if session_lifecycle_plan.lineage_complete {
+                "ready"
+            } else {
+                "blocked"
+            },
+            "session_lifecycle_plan.lineage_complete",
+            "Opening or attaching brain shells should be recorded through Forge session lifecycle with workflow lineage.",
+            vec![
+                "forge".to_string(),
+                "sessions".to_string(),
+                "lifecycle".to_string(),
+                "--session".to_string(),
+                session_lifecycle_plan.session_id.clone(),
+                "--state".to_string(),
+                "opened".to_string(),
+                "--origin".to_string(),
+                "forge_cli".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        ),
+        executor_surface_readiness(
+            "project_policy",
+            if doctor.mode.project_config_status == "loaded" {
+                "ready"
+            } else {
+                "recommended"
+            },
+            "harness_mode.project_config_status",
+            "Project .forge/harness.json makes Forge-first mode, token headroom and lineage requirements explicit.",
+            vec![
+                "forge".to_string(),
+                "harness".to_string(),
+                "bootstrap".to_string(),
+                "--executor".to_string(),
+                executor.clone(),
+                "--shim-dir".to_string(),
+                shim_dir_display,
+                "--project-root".to_string(),
+                project_root_display.clone(),
+                "--apply".to_string(),
+                "--approved-by".to_string(),
+                "<operator>".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        ),
+        executor_surface_readiness(
+            "context_routing",
+            if routing_env_ready("FORGE_CONTEXT_ROUTING") {
+                "ready"
+            } else {
+                "blocked"
+            },
+            "wrapper_plan.env.FORGE_CONTEXT_ROUTING",
+            "Task context should be built by Forge context policy instead of an implicit CLI project scan.",
+            vec!["forge".to_string(), "context".to_string(), "--output".to_string(), "json".to_string()],
+        ),
+        executor_surface_readiness(
+            "memory_routing",
+            if routing_env_ready("FORGE_MEMORY_ROUTING") {
+                "ready"
+            } else {
+                "blocked"
+            },
+            "wrapper_plan.env.FORGE_MEMORY_ROUTING",
+            "Memory reads remain scoped by Forge visibility, tenant and project policy.",
+            vec![
+                "forge".to_string(),
+                "memory".to_string(),
+                "policy".to_string(),
+                "--project-root".to_string(),
+                project_root_display.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        ),
+        executor_surface_readiness(
+            "skill_routing",
+            if routing_env_ready("FORGE_SKILL_ROUTING") {
+                "ready"
+            } else {
+                "blocked"
+            },
+            "wrapper_plan.env.FORGE_SKILL_ROUTING",
+            "Skills are selected through Forge workflow/node capability context rather than hidden CLI defaults.",
+            vec!["forge".to_string(), "interactive".to_string(), "readiness".to_string(), "--output".to_string(), "json".to_string()],
+        ),
+        executor_surface_readiness(
+            "mcp_routing",
+            if routing_env_ready("FORGE_MCP_ROUTING") {
+                "ready"
+            } else {
+                "blocked"
+            },
+            "wrapper_plan.env.FORGE_MCP_ROUTING",
+            "MCP tools remain routed by Forge capabilities, permissions and workflow state.",
+            vec!["forge".to_string(), "mcp".to_string(), "tools".to_string(), "--output".to_string(), "json".to_string()],
+        ),
+        executor_surface_readiness(
+            "credential_vault_boundary",
+            if credential_boundary_ready {
+                "ready"
+            } else {
+                "blocked"
+            },
+            "wrapper_plan.env.FORGE_CREDENTIAL_VAULT_BOUNDARY",
+            "Credential vault values stay out of prompts; child CLIs receive only governed references or injected env at execution time.",
+            vec!["forge".to_string(), "harness".to_string(), "doctor".to_string(), "--executor".to_string(), executor.clone(), "--output".to_string(), "json".to_string()],
+        ),
+        executor_surface_readiness(
+            "event_receipts",
+            if event_receipts_ready { "ready" } else { "blocked" },
+            "wrapper_plan.env.FORGE_EVENT_RECEIPTS",
+            "Guarded child work should emit Forge receipts for workflow, task and run lineage.",
+            vec!["forge".to_string(), "events".to_string(), "tail".to_string(), "--output".to_string(), "json".to_string()],
+        ),
+        executor_surface_readiness(
+            "cost_and_headroom_accounting",
+            "ready",
+            "headroom_stats",
+            "Forge can account token-headroom savings and execution cost signals separately from the brain CLI.",
+            vec![
+                "forge".to_string(),
+                "harness".to_string(),
+                "headroom-stats".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        ),
+    ]
+}
+
+fn non_selected_harness_executor_readiness(
+    family: &HarnessExecutorFamily,
+    project_root: &Path,
+    shim_dir: &Path,
+) -> Vec<HarnessExecutorSurfaceReadiness> {
+    let project_root_display = project_root.display().to_string();
+    let shim_dir_display = shim_dir.display().to_string();
+    harness_executor_supported_surfaces()
+        .into_iter()
+        .map(|surface| {
+            let command = match surface.as_str() {
+                "path_shim" => vec![
+                    "forge".to_string(),
+                    "harness".to_string(),
+                    "doctor".to_string(),
+                    "--executor".to_string(),
+                    family.executor.clone(),
+                    "--shim-dir".to_string(),
+                    shim_dir_display.clone(),
+                    "--project-root".to_string(),
+                    project_root_display.clone(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ],
+                _ => vec![
+                    "forge".to_string(),
+                    "interactive".to_string(),
+                    "harness".to_string(),
+                    "--executor".to_string(),
+                    family.executor.clone(),
+                    "--project-root".to_string(),
+                    project_root_display.clone(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ],
+            };
+            executor_surface_readiness(
+                &surface,
+                "inspect_required",
+                "not_selected_executor",
+                "Select this executor to compute live Forge-first readiness for its shim, policy and lineage state.",
+                command,
+            )
+        })
+        .collect()
+}
+
+fn harness_executor_compatibility_status(
+    selected: bool,
+    readiness: &[HarnessExecutorSurfaceReadiness],
+) -> String {
+    if !selected {
+        return "not_selected_inspect_required".to_string();
+    }
+    if readiness.iter().any(|item| item.status == "blocked") {
+        "degraded".to_string()
+    } else if readiness
+        .iter()
+        .any(|item| item.status == "recommended" || item.status == "disabled")
+    {
+        "ready_with_recommendations".to_string()
+    } else {
+        "ready".to_string()
+    }
+}
+
+fn harness_executor_next_commands(
+    family: &HarnessExecutorFamily,
+    project_root: &Path,
+    shim_dir: &Path,
+    selected: bool,
+    readiness: &[HarnessExecutorSurfaceReadiness],
+) -> Vec<String> {
+    let project_root_display = project_root.display().to_string();
+    let shim_dir_display = shim_dir.display().to_string();
+    if !selected {
+        return vec![format!(
+            "forge interactive harness --executor {} --shim-dir {} --project-root {} --output json",
+            shell_quote(&family.executor),
+            shell_quote(&shim_dir_display),
+            shell_quote(&project_root_display)
+        )];
+    }
+
+    let mut commands = Vec::new();
+    if readiness
+        .iter()
+        .any(|item| item.surface == "path_shim" && item.status == "blocked")
+    {
+        commands.push(format!(
+            "forge harness install-shims --shim-dir {} --executor {} --project-root {} --output json",
+            shell_quote(&shim_dir_display),
+            shell_quote(&family.executor),
+            shell_quote(&project_root_display)
+        ));
+    }
+    if readiness
+        .iter()
+        .any(|item| item.surface == "harness_exec" && item.status == "blocked")
+    {
+        commands.push(
+            "pass --workflow <workflow-id> --task <task-id> --run <run-id> before real harness exec"
+                .to_string(),
+        );
+    }
+    commands.push(format!(
+        "forge harness wrap-plan --executor {} --project-root {} --output json",
+        shell_quote(&family.executor),
+        shell_quote(&project_root_display)
+    ));
+    commands.push(format!(
+        "forge harness headroom-plan --executor {} --project-root {} --output json",
+        shell_quote(&family.executor),
+        shell_quote(&project_root_display)
+    ));
+    commands.push(format!(
+        "forge sync executors --shim-dir {} --allow {} --output json",
+        shell_quote(&shim_dir_display),
+        shell_quote(&family.executor)
+    ));
+    commands
+}
+
+fn executor_surface_readiness(
+    surface: &str,
+    status: &str,
+    source: &str,
+    reason: &str,
+    command: Vec<String>,
+) -> HarnessExecutorSurfaceReadiness {
+    HarnessExecutorSurfaceReadiness {
+        surface: surface.to_string(),
+        status: status.to_string(),
+        source: source.to_string(),
+        reason: reason.to_string(),
+        command,
+    }
+}
+
+fn canonical_harness_executor_families(selected_executor: &str) -> Vec<HarnessExecutorFamily> {
+    let mut families = vec![
+        harness_executor_family("codex"),
+        harness_executor_family("claude"),
+        harness_executor_family("gemini"),
+        harness_executor_family("opencode"),
+    ];
+    if !families
+        .iter()
+        .any(|family| family.executor == selected_executor)
+    {
+        families.push(harness_executor_family(selected_executor));
+    }
+    families
+}
+
+fn harness_executor_family(executor: &str) -> HarnessExecutorFamily {
+    let executor = normalize_executor(executor);
+    HarnessExecutorFamily {
+        display_name: harness_executor_display_name(&executor).to_string(),
+        adapter_family: harness_executor_adapter_family(&executor).to_string(),
+        native_entrypoint: harness_executor_native_entrypoint(&executor).to_string(),
+        executor,
+    }
+}
+
+fn harness_executor_display_name(executor: &str) -> &'static str {
+    match executor {
+        "codex" => "Codex CLI",
+        "claude" => "Claude Code",
+        "gemini" => "Gemini CLI",
+        "opencode" => "OpenCode CLI",
+        _ => "Generic CLI",
+    }
+}
+
+fn harness_executor_adapter_family(executor: &str) -> &'static str {
+    match executor {
+        "codex" => "codex_cli",
+        "claude" => "claude_cli",
+        "gemini" => "gemini_cli",
+        "opencode" => "opencode_cli",
+        _ => "generic_cli",
+    }
+}
+
+fn harness_executor_native_entrypoint(executor: &str) -> &str {
+    match executor {
+        "codex" => "codex",
+        "claude" => "claude",
+        "gemini" => "gemini",
+        "opencode" => "opencode",
+        value => value,
+    }
+}
+
+fn harness_executor_supported_surfaces() -> Vec<String> {
+    [
+        "env_overlay",
+        "path_shim",
+        "harness_exec",
+        "token_headroom",
+        "session_lifecycle",
+        "project_policy",
+        "context_routing",
+        "memory_routing",
+        "skill_routing",
+        "mcp_routing",
+        "credential_vault_boundary",
+        "event_receipts",
+        "cost_and_headroom_accounting",
+    ]
+    .into_iter()
+    .map(ToString::to_string)
+    .collect()
 }
 
 struct HarnessAdoptionStepInput<'a> {
