@@ -73,15 +73,16 @@ use forge_core::executor::{
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff_with_project;
 use forge_core::harness::{
-    analyze_token_headroom, build_cli_wrapper_plan, build_harness_adoption_plan,
-    build_harness_bootstrap_report, build_harness_doctor_report, build_harness_headroom_plan,
-    build_harness_mode_report, build_headroom_stats_report, inspect_cli_harness_shim_status,
-    install_cli_harness_shim, persist_token_headroom_report,
+    analyze_token_headroom, build_cli_wrapper_plan, build_harness_activation_profile,
+    build_harness_adoption_plan, build_harness_bootstrap_report, build_harness_doctor_report,
+    build_harness_headroom_plan, build_harness_mode_report, build_headroom_stats_report,
+    inspect_cli_harness_shim_status, install_cli_harness_shim, persist_token_headroom_report,
     resolve_harness_forge_first_source_for_project, resolve_harness_runtime_policy,
     retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
-    CliShimStatusOptions, CliWrapperPlanOptions, HarnessAdoptionPlanOptions,
-    HarnessBootstrapOptions, HarnessDoctorOptions, HarnessHeadroomPlanOptions, HarnessModeOptions,
-    HarnessRuntimePolicyOptions, HeadroomStatsOptions,
+    CliShimStatusOptions, CliWrapperPlanOptions, HarnessActivationProfileOptions,
+    HarnessAdoptionPlanOptions, HarnessBootstrapOptions, HarnessDoctorOptions,
+    HarnessHeadroomPlanOptions, HarnessModeOptions, HarnessRuntimePolicyOptions,
+    HeadroomStatsOptions,
 };
 use forge_core::identity::{
     audit_tenant_index, ensure_operating_context_policy, ensure_workflow_policy,
@@ -108,7 +109,8 @@ use forge_core::interactive::{
     build_interactive_action_registry, build_interactive_addon_capabilities_default,
     build_interactive_architecture_compass, build_interactive_artifacts,
     build_interactive_autocomplete, build_interactive_command_palette,
-    build_interactive_context_memory, build_interactive_event_runtime, build_interactive_harness,
+    build_interactive_context_memory, build_interactive_event_runtime,
+    build_interactive_guided_cockpit, build_interactive_harness,
     build_interactive_home_with_options, build_interactive_identity,
     build_interactive_improvement_loop, build_interactive_multimodal_runtime,
     build_interactive_operating_context, build_interactive_operational_cockpit,
@@ -123,11 +125,11 @@ use forge_core::interactive::{
     render_interactive_architecture_compass, render_interactive_artifacts,
     render_interactive_autocomplete, render_interactive_command_palette,
     render_interactive_context_memory, render_interactive_event_runtime,
-    render_interactive_harness, render_interactive_home, render_interactive_identity,
-    render_interactive_improvement_loop, render_interactive_multimodal_runtime,
-    render_interactive_operating_context, render_interactive_operational_cockpit,
-    render_interactive_patch_workbench, render_interactive_permissions,
-    render_interactive_readiness, render_interactive_release_gates,
+    render_interactive_guided_cockpit, render_interactive_harness, render_interactive_home,
+    render_interactive_identity, render_interactive_improvement_loop,
+    render_interactive_multimodal_runtime, render_interactive_operating_context,
+    render_interactive_operational_cockpit, render_interactive_patch_workbench,
+    render_interactive_permissions, render_interactive_readiness, render_interactive_release_gates,
     render_interactive_replacement_cli, render_interactive_schedules, render_interactive_sessions,
     render_interactive_structured_logs, render_interactive_task_board,
     render_interactive_token_usage, render_interactive_workflow_dag,
@@ -791,6 +793,22 @@ enum HarnessCommands {
         task_id: Option<String>,
         #[arg(long = "run")]
         run_id: Option<String>,
+        #[arg(long = "context-budget")]
+        context_budget: Option<usize>,
+        #[arg(long = "token-headroom")]
+        token_headroom: bool,
+        #[arg(long = "no-token-headroom", conflicts_with = "token_headroom")]
+        no_token_headroom: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ActivationProfile {
+        #[arg(long = "shim-dir")]
+        shim_dir: PathBuf,
+        #[arg(long)]
+        executor: String,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long = "context-budget")]
         context_budget: Option<usize>,
         #[arg(long = "token-headroom")]
@@ -3300,6 +3318,10 @@ enum InteractiveCommands {
     Home {
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    GuidedCockpit {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -6399,6 +6421,38 @@ fn run() -> Result<i32> {
                 print_response(output, &report)?;
                 Ok(0)
             }
+            HarnessCommands::ActivationProfile {
+                shim_dir,
+                executor,
+                project_root,
+                context_budget,
+                token_headroom,
+                no_token_headroom,
+                output,
+            } => {
+                let (token_headroom_input, token_headroom_source) =
+                    harness_cli_token_headroom_input(token_headroom, no_token_headroom);
+                let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+                    project_root: project_root.as_deref(),
+                    context_budget,
+                    context_budget_source: "explicit_flag",
+                    token_headroom: token_headroom_input,
+                    token_headroom_source,
+                    forge_first: true,
+                    default_context_budget: DEFAULT_CONTEXT_BUDGET,
+                });
+                let report = build_harness_activation_profile(HarnessActivationProfileOptions {
+                    shim_dir: &shim_dir,
+                    executor: &executor,
+                    project_root: project_root.as_deref(),
+                    context_budget: runtime_policy.context_budget,
+                    context_budget_source: &runtime_policy.context_budget_source,
+                    token_headroom: runtime_policy.token_headroom,
+                    token_headroom_source: &runtime_policy.token_headroom_source,
+                });
+                print_response(output, &report)?;
+                Ok(0)
+            }
             HarnessCommands::WrapPlan {
                 executor,
                 command,
@@ -8218,6 +8272,17 @@ fn run() -> Result<i32> {
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => println!("{}", render_interactive_home(&report)),
+                }
+                Ok(0)
+            }
+            InteractiveCommands::GuidedCockpit { output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_interactive_guided_cockpit(&store)?;
+                match output {
+                    OutputFormat::Json => print_response(output, &report)?,
+                    OutputFormat::Human => {
+                        println!("{}", render_interactive_guided_cockpit(&report))
+                    }
                 }
                 Ok(0)
             }

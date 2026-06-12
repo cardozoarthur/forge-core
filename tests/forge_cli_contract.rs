@@ -1891,6 +1891,184 @@ fn harness_adoption_plan_models_forge_first_headroom_for_cli_mcp_and_skill() {
     assert!(!fresh_project.join(".forge/harness.json").exists());
 }
 
+#[test]
+fn harness_activation_profile_projects_shell_profile_for_forge_first_cli_defaults() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("project");
+    let shim_dir = temp.path().join("shims");
+    fs::create_dir_all(project.join(".forge")).unwrap();
+    fs::create_dir_all(&shim_dir).unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "activation-profile",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--context-budget",
+            "4096",
+            "--token-headroom",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.harness.activation_profile.v1"
+    );
+    assert_eq!(json["status"], "harness_activation_profile_ready");
+    assert_eq!(json["executor"], "codex");
+    assert_eq!(json["project_root"], project.to_str().unwrap());
+    assert_eq!(json["shim_dir"], shim_dir.to_str().unwrap());
+    assert_eq!(json["mutates_state"], false);
+    assert_eq!(json["executes_child"], false);
+    assert_eq!(json["writes_shell_rc"], false);
+    assert_eq!(json["forge_first"], true);
+    assert_eq!(json["token_headroom"], true);
+    assert_eq!(json["context_budget"], 4096);
+    assert!(json["activation_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap_or("")
+            .contains("FORGE_HARNESS_DEFAULT_MODE=forge_first")));
+    assert!(json["activation_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command.as_str().unwrap_or("").contains("PATH=")
+            && command
+                .as_str()
+                .unwrap_or("")
+                .contains(shim_dir.to_str().unwrap())));
+    assert!(json["deactivation_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap_or("")
+            .contains("FORGE_HARNESS_PREV_PATH")));
+    assert!(json["activation_script"]
+        .as_str()
+        .unwrap()
+        .contains("FORGE_HARNESS=enabled"));
+    assert!(json["activation_script"]
+        .as_str()
+        .unwrap()
+        .contains("FORGE_HARNESS_CONTEXT_BUDGET=4096"));
+    assert!(json["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap_or("")
+            .contains("forge harness shim-status")));
+
+    let adoption_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "adoption-plan",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let adoption: Value = serde_json::from_slice(&adoption_output).unwrap();
+    assert!(adoption["commands"]["activation_profile"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("activation-profile")));
+    assert!(adoption["adoption_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|step| step["id"] == "activate_shell_profile"
+            && step["mutates_state"] == false
+            && step["requires_approval"] == false));
+    assert!(adoption["mcp_tools"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("forge.harness.activation_profile")));
+
+    let tools_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "tools",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tools_json: Value = serde_json::from_slice(&tools_output).unwrap();
+    let tool = find_mcp_tool(&tools_json, "forge.harness.activation_profile");
+    assert_eq!(tool["output_schema"], "forge.harness.activation_profile.v1");
+
+    let mcp_input = serde_json::json!({
+        "shim_dir": shim_dir,
+        "executor": "codex",
+        "project_root": project,
+        "context_budget": 2048,
+        "token_headroom": false
+    });
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.activation_profile",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.harness.activation_profile.v1"
+    );
+    assert_eq!(mcp_json["result"]["context_budget"], 2048);
+    assert_eq!(mcp_json["result"]["token_headroom"], false);
+}
+
 #[cfg(unix)]
 #[test]
 fn harness_bootstrap_applies_project_policy_and_shim_only_with_approval_for_cli_mcp_and_skill() {
@@ -49807,9 +49985,16 @@ fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
     );
     assert!(json["dashboard"]["capability_count"].as_u64().unwrap() >= 1);
     assert!(json["dashboard"]["cost_estimated_usd"].as_f64().unwrap() >= 0.0);
+    assert_eq!(
+        json["dashboard"]["guided_cockpit_step_count"]
+            .as_u64()
+            .unwrap(),
+        8
+    );
 
     for check_id in [
         "opens_useful_tui",
+        "opens_guided_cockpit_by_default",
         "shows_active_workflows",
         "shows_events_and_schedules",
         "shows_event_workflow_lifecycle",
@@ -49835,6 +50020,12 @@ fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("forge")));
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge interactive guided-cockpit --output json"
+        )));
     assert!(json["commands"]
         .as_array()
         .unwrap()
@@ -49894,6 +50085,165 @@ fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
     assert!(text.contains("workflow"));
     assert!(text.contains("checks"));
     assert!(text.contains("forge smoke operational-tui --output json"));
+}
+
+#[test]
+fn interactive_guided_cockpit_is_default_forge_tui_cli_and_mcp_surface() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "smoke",
+            "operational-tui",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "guided-cockpit",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cockpit: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        cockpit["schema_version"],
+        "forge.interactive.guided_cockpit.v1"
+    );
+    assert_eq!(cockpit["total_step_count"].as_u64().unwrap(), 8);
+    assert_eq!(cockpit["layout_panes"].as_array().unwrap().len(), 4);
+    assert!(cockpit["layout_panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|pane| pane["source_panel"] == "task_board_panel"));
+    for step_id in [
+        "create_workflow",
+        "view_dag",
+        "start_run",
+        "tasks_handoffs",
+        "approve_decide",
+        "artifacts",
+        "cost_events",
+        "close_outcome",
+    ] {
+        assert!(
+            cockpit["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|step| step["step_id"] == step_id),
+            "missing guided cockpit step {step_id}"
+        );
+    }
+    assert_eq!(cockpit["steps"][4]["step_id"], "approve_decide");
+    assert_eq!(cockpit["steps"][4]["status"], "needs_confirmation");
+    assert!(cockpit["safe_action_policy"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line.as_str().unwrap().contains("preview")));
+    assert!(cockpit["safe_action_policy"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line.as_str().unwrap().contains("Rollback")));
+
+    let default_output = forge()
+        .current_dir(temp.path())
+        .args(["--store", store.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let default_text = String::from_utf8(default_output).unwrap();
+    assert!(default_text.contains("Forge operational TUI"));
+    assert!(default_text.contains("Guided cockpit:"));
+    assert!(default_text.contains("Guided steps:"));
+    assert!(default_text.contains("Safe actions:"));
+    assert!(default_text.contains("create_workflow"));
+    assert!(default_text.contains("close_outcome"));
+
+    let home_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["guided_cockpit_panel"]["schema_version"],
+        "forge.interactive.guided_cockpit.v1"
+    );
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|region| region["widgets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|widget| widget["widget_id"] == "guided_cockpit_panel")));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.guided_cockpit");
+    assert_eq!(tool["output_schema"], "forge.interactive.guided_cockpit.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .current_dir(temp.path())
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.guided_cockpit"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.guided_cockpit.v1"
+    );
+    assert_eq!(mcp_json["result"]["total_step_count"].as_u64().unwrap(), 8);
 }
 
 #[test]
@@ -50270,14 +50620,14 @@ fn interactive_repl_keyboard_navigation_controls_focus_mode_theme_and_open() {
     let output = child.wait_with_output().unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Focus: operational_cockpit_panel (Operational cockpit) [1/"));
-    assert!(stdout.contains("Focus: task_board_panel (Task board) [2/"));
-    assert!(stdout.contains("Opened focused panel: task_board_panel"));
-    assert!(stdout.contains("Task board:"));
-    assert!(stdout.contains("Display mode: focus"));
-    assert!(stdout.contains("Theme: forge_light"));
+    assert!(stdout.contains("Focus: guided_cockpit_panel (Guided cockpit) [1/"));
+    assert!(stdout.contains("Focus: operational_cockpit_panel (Operational cockpit) [2/"));
     assert!(stdout.contains("Opened focused panel: operational_cockpit_panel"));
     assert!(stdout.contains("Operational cockpit:"));
+    assert!(stdout.contains("Display mode: focus"));
+    assert!(stdout.contains("Theme: forge_light"));
+    assert!(stdout.contains("Opened focused panel: guided_cockpit_panel"));
+    assert!(stdout.contains("Guided cockpit:"));
     assert!(!stdout.contains("Routing: direct_answer"));
     assert!(stdout.contains("goodbye"));
 }
@@ -51877,6 +52227,12 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.home"),
         "the packaged Forge skill should expose interactive home state through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.guided_cockpit")
+            && forge_core::skill::SKILL_MD.contains("forge interactive guided-cockpit")
+            && forge_core::skill::SKILL_MD.contains("dashboard.guided_cockpit_panel"),
+        "the packaged Forge skill should expose the default guided cockpit through MCP, CLI and home"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.task_board"),

@@ -121,6 +121,7 @@ const INTERACTIVE_OPERATIONAL_COCKPIT_SCHEMA_VERSION: &str =
 const INTERACTIVE_OPERATIONAL_MODIFIER_LANE_SCHEMA_VERSION: &str =
     "forge.interactive.operational_modifier_lane.v1";
 const INTERACTIVE_WORKFLOW_MUTATION_SCHEMA_VERSION: &str = "forge.interactive.workflow_mutation.v1";
+const INTERACTIVE_GUIDED_COCKPIT_SCHEMA_VERSION: &str = "forge.interactive.guided_cockpit.v1";
 const INTERACTIVE_ADDON_CAPABILITY_SCHEMA_VERSION: &str = "forge.interactive.addon_capability.v1";
 const INTERACTIVE_ARCHITECTURE_COMPASS_SCHEMA_VERSION: &str =
     "forge.interactive.architecture_compass.v1";
@@ -197,6 +198,7 @@ pub struct InteractiveDashboard {
     pub dag_panel: InteractiveWorkflowDagPanel,
     pub task_board_panel: InteractiveTaskBoardPanel,
     pub workflow_mutation_panel: InteractiveWorkflowMutationPanel,
+    pub guided_cockpit_panel: InteractiveGuidedCockpitPanel,
     pub artifact_panel: InteractiveArtifactPanel,
     pub schedule_panel: InteractiveSchedulePanel,
     pub event_panel: InteractiveEventPanel,
@@ -214,6 +216,51 @@ pub struct InteractiveDashboard {
     pub attention_actions: Vec<String>,
     pub useful_next_commands: Vec<String>,
     pub quick_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveGuidedCockpitPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub title: String,
+    pub visual_mode: String,
+    pub completed_step_count: usize,
+    pub total_step_count: usize,
+    pub blocked_step_count: usize,
+    pub confirmation_step_count: usize,
+    pub current_step_id: String,
+    pub layout_panes: Vec<InteractiveGuidedCockpitPane>,
+    pub steps: Vec<InteractiveGuidedCockpitStep>,
+    pub safe_action_policy: Vec<String>,
+    pub next_command: String,
+    pub next_commands: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveGuidedCockpitPane {
+    pub pane_id: String,
+    pub title: String,
+    pub role: String,
+    pub source_panel: String,
+    pub focus_key: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveGuidedCockpitStep {
+    pub step_id: String,
+    pub order: usize,
+    pub title: String,
+    pub status: String,
+    pub evidence: String,
+    pub primary_panel: String,
+    pub primary_command: String,
+    pub preview_command: String,
+    pub risk_level: String,
+    pub requires_confirmation: bool,
+    pub mutates_workflow: bool,
+    pub can_apply_now: bool,
+    pub rollback_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2584,6 +2631,10 @@ pub struct OperationalTuiSmokeDashboard {
     pub pending_mutation_proposal_count: usize,
     pub ready_handoff_count: usize,
     pub pending_approval_count: usize,
+    pub guided_cockpit_step_count: usize,
+    pub guided_cockpit_completed_step_count: usize,
+    pub guided_cockpit_current_step: String,
+    pub guided_cockpit_confirmation_step_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2972,6 +3023,18 @@ pub fn build_interactive_home_with_options(
         &event_panel,
         &cost_panel,
     );
+    let guided_cockpit_panel = build_guided_cockpit_panel(GuidedCockpitInputs {
+        active_runs,
+        pending_approvals,
+        validation_failures,
+        task_board_panel: &task_board_panel,
+        dag_panel: &dag_panel,
+        workflow_mutation_panel: &workflow_mutation_panel,
+        artifact_panel: &artifact_panel,
+        event_panel: &event_panel,
+        cost_panel: &cost_panel,
+        improvement_loop_panel: &improvement_loop_panel,
+    });
     let ui_composition_panel = build_ui_composition_panel(&addon_renderer_report);
     let architecture_compass_panel = build_architecture_compass_panel(ArchitectureCompassInputs {
         workflows: &workflows,
@@ -3045,6 +3108,7 @@ pub fn build_interactive_home_with_options(
             dag_panel,
             task_board_panel,
             workflow_mutation_panel,
+            guided_cockpit_panel,
             artifact_panel,
             schedule_panel,
             event_panel,
@@ -3060,6 +3124,8 @@ pub fn build_interactive_home_with_options(
             addon_renderer_panel,
             attention_actions,
             useful_next_commands: vec![
+                "forge".to_string(),
+                "forge interactive guided-cockpit --output json".to_string(),
                 "forge list".to_string(),
                 "forge inspect <workflow-id>".to_string(),
                 "forge request list".to_string(),
@@ -3095,6 +3161,8 @@ pub fn build_interactive_home_with_options(
                 "forge interactive identity --output json".to_string(),
             ],
             quick_actions: vec![
+                "/guided-cockpit".to_string(),
+                "/guide".to_string(),
                 "/cockpit".to_string(),
                 "/status".to_string(),
                 "/workflows".to_string(),
@@ -4174,6 +4242,10 @@ pub fn build_operational_tui_smoke(
         pending_mutation_proposal_count: d.workflow_mutation_panel.pending_modifier_proposal_count,
         ready_handoff_count: d.task_board_panel.ready_handoffs,
         pending_approval_count: d.pending_approvals,
+        guided_cockpit_step_count: d.guided_cockpit_panel.total_step_count,
+        guided_cockpit_completed_step_count: d.guided_cockpit_panel.completed_step_count,
+        guided_cockpit_current_step: d.guided_cockpit_panel.current_step_id.clone(),
+        guided_cockpit_confirmation_step_count: d.guided_cockpit_panel.confirmation_step_count,
     };
     let checks = vec![
         operational_tui_smoke_check(
@@ -4192,6 +4264,27 @@ pub fn build_operational_tui_smoke(
                 home.status,
                 d.operational_cockpit_panel.status,
                 d.navigation_panel.keybindings.len(),
+                default_tui_preview.len()
+            ),
+            "forge",
+        ),
+        operational_tui_smoke_check(
+            "opens_guided_cockpit_by_default",
+            "forge opens the advanced guided cockpit by default",
+            d.guided_cockpit_panel.schema_version == INTERACTIVE_GUIDED_COCKPIT_SCHEMA_VERSION
+                && dashboard.guided_cockpit_step_count == 8
+                && default_tui_preview.contains("Guided cockpit:")
+                && default_tui_preview.contains("Guided steps:")
+                && default_tui_preview.contains("Safe actions:")
+                && default_tui_preview.contains("create_workflow")
+                && default_tui_preview.contains("close_outcome"),
+            format!(
+                "{}; steps {}/{}; current {}; confirmations {}; default render {} bytes",
+                d.guided_cockpit_panel.status,
+                dashboard.guided_cockpit_completed_step_count,
+                dashboard.guided_cockpit_step_count,
+                dashboard.guided_cockpit_current_step,
+                dashboard.guided_cockpit_confirmation_step_count,
                 default_tui_preview.len()
             ),
             "forge",
@@ -4381,6 +4474,7 @@ pub fn build_operational_tui_smoke(
         checks,
         commands: vec![
             "forge".to_string(),
+            "forge interactive guided-cockpit --output json".to_string(),
             "forge interactive home --output json".to_string(),
             "forge interactive operational-cockpit --output json".to_string(),
             "forge interactive task-board --output json".to_string(),
@@ -5999,6 +6093,19 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             false,
             "low",
             &["home", "dashboard", "navigation", "tui"],
+        ),
+        command_palette_entry(
+            "navigation.guided_cockpit",
+            "navigation",
+            "Open guided cockpit",
+            "Open the Forge 0.5 guided cockpit with the end-to-end operator checklist, panes, previews and safe actions.",
+            "guided_cockpit_panel",
+            None,
+            &["interactive", "guided-cockpit", "--output", "json"],
+            false,
+            false,
+            "low",
+            &["guide", "guided", "cockpit", "tui", "workflow"],
         ),
         command_palette_entry(
             "navigation.slash_commands",
@@ -8814,6 +8921,13 @@ pub fn build_interactive_workflow_mutation(
     Ok(home.dashboard.workflow_mutation_panel)
 }
 
+pub fn build_interactive_guided_cockpit(
+    store: &ForgeStore,
+) -> Result<InteractiveGuidedCockpitPanel> {
+    let home = build_interactive_home(store)?;
+    Ok(home.dashboard.guided_cockpit_panel)
+}
+
 pub fn build_interactive_workflow_sidebar(
     store: &ForgeStore,
 ) -> Result<InteractiveWorkflowSidebarPanel> {
@@ -11266,6 +11380,14 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
             .join(" | ")
     };
     let workflow_sidebar = render_workflow_sidebar_summary(&d.workflow_sidebar_panel);
+    let guided_cockpit_steps = render_guided_cockpit_step_summary(&d.guided_cockpit_panel);
+    let guided_cockpit_panes = render_guided_cockpit_pane_summary(&d.guided_cockpit_panel);
+    let guided_cockpit_policy = render_guided_cockpit_policy_summary(&d.guided_cockpit_panel);
+    let guided_cockpit_next = if d.guided_cockpit_panel.next_commands.is_empty() {
+        "none".to_string()
+    } else {
+        d.guided_cockpit_panel.next_commands.join(" | ")
+    };
     let replacement_cli_surfaces = render_replacement_cli_surface_summary(&d.replacement_cli_panel);
     let multimodal_runtime_surfaces =
         render_multimodal_runtime_surface_summary(&d.multimodal_runtime_panel);
@@ -11349,6 +11471,9 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     format!(
         "{mark}\n{name}\n\n\
          Forge operational TUI\n\
+         Guided cockpit: {guided_cockpit_status}; visual {guided_cockpit_visual}; steps {guided_completed}/{guided_total}; current {guided_current}; blocked {guided_blocked}; confirmations {guided_confirmations}; panes {guided_panes}; next {guided_next}\n\
+         Guided steps: {guided_steps}\n\
+         Safe actions: {guided_policy}\n\
          Active workflows: {active_workflows}; active runs {active_runs}; focus {workflow_focus}\n\
          Events/schedules: events {event_total}, visible {event_visible}, scheduled {scheduled_workflows}, due {schedule_due}, next {schedule_next}\n\
          Addons/capabilities: addons {addon_count}, enabled {addon_enabled}, capabilities {addon_capabilities_count}, permissions {addon_permissions}, contracts {addon_contracts}, event types {addon_event_types}, triggers {addon_event_triggers}, listeners {addon_event_listeners}, adapters {addon_event_adapters}; {addon_capabilities}; events {addon_event_extensions}\n\
@@ -11416,6 +11541,17 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Useful next commands: {next_commands}\n",
         mark = report.banner.mark,
         name = report.banner.name,
+        guided_cockpit_status = d.guided_cockpit_panel.status,
+        guided_cockpit_visual = d.guided_cockpit_panel.visual_mode,
+        guided_completed = d.guided_cockpit_panel.completed_step_count,
+        guided_total = d.guided_cockpit_panel.total_step_count,
+        guided_current = d.guided_cockpit_panel.current_step_id,
+        guided_blocked = d.guided_cockpit_panel.blocked_step_count,
+        guided_confirmations = d.guided_cockpit_panel.confirmation_step_count,
+        guided_panes = guided_cockpit_panes,
+        guided_next = guided_cockpit_next,
+        guided_steps = guided_cockpit_steps,
+        guided_policy = guided_cockpit_policy,
         active_runs = d.active_runs,
         run_ids_line = run_ids_line,
         cockpit_attention = d.operational_cockpit_panel.attention_level,
@@ -11699,6 +11835,80 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         quick_actions = quick_actions,
         next_commands = next_commands,
     )
+}
+
+pub fn render_interactive_guided_cockpit(panel: &InteractiveGuidedCockpitPanel) -> String {
+    format!(
+        "Guided cockpit: {status}; visual {visual}; steps {completed}/{total}; current {current}; blocked {blocked}; confirmations {confirmations}\nPanes: {panes}\nSteps: {steps}\nSafe actions: {policy}\nNext: {next}\nNotes: {notes}\n",
+        status = panel.status,
+        visual = panel.visual_mode,
+        completed = panel.completed_step_count,
+        total = panel.total_step_count,
+        current = panel.current_step_id,
+        blocked = panel.blocked_step_count,
+        confirmations = panel.confirmation_step_count,
+        panes = render_guided_cockpit_pane_summary(panel),
+        steps = render_guided_cockpit_step_summary(panel),
+        policy = render_guided_cockpit_policy_summary(panel),
+        next = if panel.next_commands.is_empty() {
+            "none".to_string()
+        } else {
+            panel.next_commands.join(" | ")
+        },
+        notes = if panel.notes.is_empty() {
+            "none".to_string()
+        } else {
+            panel.notes.join(" | ")
+        },
+    )
+}
+
+fn render_guided_cockpit_step_summary(panel: &InteractiveGuidedCockpitPanel) -> String {
+    if panel.steps.is_empty() {
+        return "none".to_string();
+    }
+    panel
+        .steps
+        .iter()
+        .map(|step| {
+            format!(
+                "{}. {} [{}] panel {} risk {} apply {} evidence {}",
+                step.order,
+                step.step_id,
+                step.status,
+                step.primary_panel,
+                step.risk_level,
+                step.can_apply_now,
+                step.evidence
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn render_guided_cockpit_pane_summary(panel: &InteractiveGuidedCockpitPanel) -> String {
+    if panel.layout_panes.is_empty() {
+        return "none".to_string();
+    }
+    panel
+        .layout_panes
+        .iter()
+        .map(|pane| {
+            format!(
+                "{}:{}:{} via {}",
+                pane.focus_key, pane.pane_id, pane.role, pane.source_panel
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn render_guided_cockpit_policy_summary(panel: &InteractiveGuidedCockpitPanel) -> String {
+    if panel.safe_action_policy.is_empty() {
+        "none".to_string()
+    } else {
+        panel.safe_action_policy.join(" | ")
+    }
 }
 
 pub fn render_interactive_operational_cockpit(
@@ -14397,6 +14607,378 @@ fn operational_cockpit_section(
     }
 }
 
+struct GuidedCockpitInputs<'a> {
+    active_runs: usize,
+    pending_approvals: usize,
+    validation_failures: usize,
+    task_board_panel: &'a InteractiveTaskBoardPanel,
+    dag_panel: &'a InteractiveWorkflowDagPanel,
+    workflow_mutation_panel: &'a InteractiveWorkflowMutationPanel,
+    artifact_panel: &'a InteractiveArtifactPanel,
+    event_panel: &'a InteractiveEventPanel,
+    cost_panel: &'a InteractiveCostPanel,
+    improvement_loop_panel: &'a InteractiveImprovementLoopPanel,
+}
+
+fn build_guided_cockpit_panel(inputs: GuidedCockpitInputs<'_>) -> InteractiveGuidedCockpitPanel {
+    let workflow_count = inputs.task_board_panel.workflow_count;
+    let task_count = inputs.task_board_panel.task_count;
+    let has_workflow = workflow_count > 0;
+    let has_dag = inputs.dag_panel.node_count > 0;
+    let has_active_run = inputs.active_runs > 0;
+    let has_ready_handoff = inputs.task_board_panel.ready_handoffs > 0;
+    let has_human_wait = inputs.task_board_panel.pending_human_interactions > 0;
+    let has_approval = inputs.pending_approvals > 0 || has_human_wait;
+    let has_artifacts = inputs.artifact_panel.artifact_count > 0;
+    let has_events = inputs.event_panel.total_event_count > 0;
+    let has_costs = inputs.cost_panel.node_count > 0 || inputs.cost_panel.workflow_count > 0;
+    let close_ready = has_workflow
+        && inputs.validation_failures == 0
+        && inputs.improvement_loop_panel.final_outcome_candidate_count == 0;
+
+    let mut steps = vec![
+        guided_step(
+            1,
+            "create_workflow",
+            "Criar workflow",
+            if has_workflow {
+                "completed"
+            } else {
+                "ready"
+            },
+            format!("{workflow_count} workflows tracked by the task board"),
+            "workflow_sidebar_panel",
+            "forge interactive route --input \"<objective>\" --origin forge_cli --output json",
+            "forge plan --goal \"<objective>\" --output json",
+            "medium",
+            !has_workflow,
+            !has_workflow,
+            !has_workflow,
+            Some("forge request cancel --run <run-id> --output json"),
+        ),
+        guided_step(
+            2,
+            "view_dag",
+            "Ver DAG",
+            if has_dag {
+                "completed"
+            } else if has_workflow {
+                "ready"
+            } else {
+                "blocked_until_workflow"
+            },
+            format!(
+                "{} DAG nodes, {} edges, {} human waits",
+                inputs.dag_panel.node_count, inputs.dag_panel.edge_count, inputs.dag_panel.human_wait_count
+            ),
+            "dag_panel",
+            "forge interactive workflow-dag --output json",
+            "forge inspect <workflow-id> --verbose --output json",
+            "low",
+            false,
+            false,
+            has_workflow,
+            None,
+        ),
+        guided_step(
+            3,
+            "start_run",
+            "Iniciar run",
+            if has_active_run {
+                "completed"
+            } else if has_workflow {
+                "ready"
+            } else {
+                "blocked_until_workflow"
+            },
+            format!("{} active runs", inputs.active_runs),
+            "operational_cockpit_panel",
+            "forge request start --goal \"<objective>\" --origin forge_cli --output json",
+            "forge interactive guided-cockpit --output json",
+            "medium",
+            has_workflow && !has_active_run,
+            has_workflow && !has_active_run,
+            has_workflow && !has_active_run,
+            Some("forge request cancel --run <run-id> --output json"),
+        ),
+        guided_step(
+            4,
+            "tasks_handoffs",
+            "Ver tasks/handoffs",
+            if has_ready_handoff {
+                "completed"
+            } else if task_count > 0 {
+                "ready"
+            } else {
+                "blocked_until_task_output"
+            },
+            format!(
+                "{} tasks, {} ready handoffs, {} pending human waits",
+                task_count, inputs.task_board_panel.ready_handoffs, inputs.task_board_panel.pending_human_interactions
+            ),
+            "task_board_panel",
+            "forge interactive task-board --output json",
+            "forge interactive operating-context --output json",
+            "low",
+            false,
+            false,
+            task_count > 0,
+            None,
+        ),
+        guided_step(
+            5,
+            "approve_decide",
+            "Aprovar/decidir",
+            if has_approval {
+                "needs_confirmation"
+            } else if has_workflow {
+                "completed"
+            } else {
+                "blocked_until_workflow"
+            },
+            format!(
+                "{} pending approvals, {} human waits",
+                inputs.pending_approvals, inputs.task_board_panel.pending_human_interactions
+            ),
+            "permissions_panel",
+            "forge interactive permissions --output json",
+            "forge interaction list --output json",
+            "medium",
+            has_approval,
+            has_approval,
+            has_approval,
+            Some("forge interaction expire --workflow <workflow-id> --task <task-id> --origin forge_cli --output json"),
+        ),
+        guided_step(
+            6,
+            "artifacts",
+            "Ver artifacts",
+            if has_artifacts {
+                "completed"
+            } else if task_count > 0 {
+                "ready"
+            } else {
+                "blocked_until_task_output"
+            },
+            format!(
+                "{} artifacts across {} workflows",
+                inputs.artifact_panel.artifact_count, inputs.artifact_panel.workflow_count
+            ),
+            "artifact_panel",
+            "forge interactive artifacts --output json",
+            "forge interactive task-board --output json",
+            "low",
+            false,
+            false,
+            task_count > 0,
+            None,
+        ),
+        guided_step(
+            7,
+            "cost_events",
+            "Ver custo/eventos",
+            if has_events && has_costs {
+                "completed"
+            } else if has_events || has_costs {
+                "partial"
+            } else {
+                "ready"
+            },
+            format!(
+                "{} events, {} cost nodes, estimated ${:.4}",
+                inputs.event_panel.total_event_count,
+                inputs.cost_panel.node_count,
+                inputs.cost_panel.estimated_task_cost_total_usd
+            ),
+            "structured_logs_panel",
+            "forge interactive structured-logs --output json",
+            "forge cost ledger --output json",
+            "low",
+            false,
+            false,
+            true,
+            None,
+        ),
+        guided_step(
+            8,
+            "close_outcome",
+            "Fechar outcome",
+            if close_ready {
+                "completed"
+            } else if has_workflow {
+                "needs_action"
+            } else {
+                "blocked_until_workflow"
+            },
+            format!(
+                "{} validation failures, {} final-outcome candidates, {} mutation proposals",
+                inputs.validation_failures,
+                inputs.improvement_loop_panel.final_outcome_candidate_count,
+                inputs.workflow_mutation_panel.pending_modifier_proposal_count
+            ),
+            "improvement_loop_panel",
+            "forge workflow validate --workflow <workflow-id> --output json",
+            "forge interactive improvement-loop --output json",
+            "medium",
+            has_workflow && !close_ready,
+            has_workflow && !close_ready,
+            has_workflow && !close_ready,
+            Some("forge workflow ensure-final-audit --workflow <workflow-id> --output json"),
+        ),
+    ];
+
+    let completed_step_count = steps
+        .iter()
+        .filter(|step| step.status == "completed")
+        .count();
+    let blocked_step_count = steps
+        .iter()
+        .filter(|step| step.status.starts_with("blocked"))
+        .count();
+    let confirmation_step_count = steps
+        .iter()
+        .filter(|step| step.status == "needs_confirmation")
+        .count();
+    let current_step_id = steps
+        .iter()
+        .find(|step| step.status != "completed")
+        .map(|step| step.step_id.clone())
+        .unwrap_or_else(|| "done".to_string());
+    let current_commands = steps
+        .iter()
+        .find(|step| step.step_id == current_step_id)
+        .map(|step| {
+            let mut commands = vec![step.preview_command.clone(), step.primary_command.clone()];
+            if let Some(rollback) = &step.rollback_command {
+                commands.push(rollback.clone());
+            }
+            commands
+        })
+        .unwrap_or_else(|| vec!["forge smoke operational-tui --output json".to_string()]);
+    let next_command = current_commands
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "forge smoke operational-tui --output json".to_string());
+    let status = if confirmation_step_count > 0 {
+        "guided_cockpit_waiting_confirmation"
+    } else if blocked_step_count > 0 {
+        "guided_cockpit_in_progress"
+    } else if completed_step_count == steps.len() {
+        "guided_cockpit_complete"
+    } else {
+        "guided_cockpit_ready"
+    };
+    let total_step_count = steps.len();
+
+    InteractiveGuidedCockpitPanel {
+        schema_version: INTERACTIVE_GUIDED_COCKPIT_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        title: "Forge 0.5 guided cockpit".to_string(),
+        visual_mode: "three_column_focus_timeline".to_string(),
+        completed_step_count,
+        total_step_count,
+        blocked_step_count,
+        confirmation_step_count,
+        current_step_id,
+        layout_panes: vec![
+            guided_pane(
+                "left_workflows",
+                "Workflows",
+                "navigation",
+                "workflow_sidebar_panel",
+                "1",
+            ),
+            guided_pane(
+                "center_execution",
+                "Execution",
+                "primary",
+                "task_board_panel",
+                "2",
+            ),
+            guided_pane(
+                "right_timeline",
+                "Timeline",
+                "observability",
+                "structured_logs_panel",
+                "3",
+            ),
+            guided_pane(
+                "bottom_actions",
+                "Safe actions",
+                "command_bar",
+                "command_palette_panel",
+                "/",
+            ),
+        ],
+        steps: {
+            steps.shrink_to_fit();
+            steps
+        },
+        safe_action_policy: vec![
+            "Read-only panels open without confirmation.".to_string(),
+            "Mutating actions require preview plus explicit confirmation.".to_string(),
+            "Rollback or recovery command is visible for mutation, approval and close-out steps.".to_string(),
+            "Failed actions must be inspectable through structured logs and the event timeline.".to_string(),
+        ],
+        next_command,
+        next_commands: current_commands,
+        notes: vec![
+            "`forge` opens this cockpit first, like opencode/gemini style entrypoints.".to_string(),
+            "The eight steps turn the README five-minute flow into an operator checklist.".to_string(),
+            "The panel is read-only; actions are surfaced as explicit commands with preview and recovery.".to_string(),
+        ],
+    }
+}
+
+fn guided_pane(
+    pane_id: &str,
+    title: &str,
+    role: &str,
+    source_panel: &str,
+    focus_key: &str,
+) -> InteractiveGuidedCockpitPane {
+    InteractiveGuidedCockpitPane {
+        pane_id: pane_id.to_string(),
+        title: title.to_string(),
+        role: role.to_string(),
+        source_panel: source_panel.to_string(),
+        focus_key: focus_key.to_string(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn guided_step(
+    order: usize,
+    step_id: &str,
+    title: &str,
+    status: &str,
+    evidence: String,
+    primary_panel: &str,
+    primary_command: &str,
+    preview_command: &str,
+    risk_level: &str,
+    requires_confirmation: bool,
+    mutates_workflow: bool,
+    can_apply_now: bool,
+    rollback_command: Option<&str>,
+) -> InteractiveGuidedCockpitStep {
+    InteractiveGuidedCockpitStep {
+        step_id: step_id.to_string(),
+        order,
+        title: title.to_string(),
+        status: status.to_string(),
+        evidence,
+        primary_panel: primary_panel.to_string(),
+        primary_command: primary_command.to_string(),
+        preview_command: preview_command.to_string(),
+        risk_level: risk_level.to_string(),
+        requires_confirmation,
+        mutates_workflow,
+        can_apply_now,
+        rollback_command: rollback_command.map(ToString::to_string),
+    }
+}
+
 fn build_ui_composition_panel(
     addon_renderer_report: &OpsAddonViewRendererReport,
 ) -> InteractiveUiCompositionPanel {
@@ -14551,6 +15133,15 @@ fn build_ui_composition_panel(
             "primary_work_area",
             20,
             vec![
+                core_ui_widget(
+                    "guided_cockpit_panel",
+                    "Guided cockpit",
+                    "guided_cockpit_panel",
+                    "guided_cockpit_renderer",
+                    "detailed",
+                    "full",
+                    vec!["forge interactive guided-cockpit --output json".to_string()],
+                ),
                 core_ui_widget(
                     "workflow_sidebar_panel",
                     "Workflow sidebar",
@@ -17165,6 +17756,22 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/guided-cockpit",
+            "Guided Cockpit",
+            "Show the Forge 0.5 guided cockpit with the end-to-end operator checklist.",
+            &["forge", "interactive", "guided-cockpit"],
+            false,
+            "low",
+        ),
+        slash(
+            "/guide",
+            "Guide",
+            "Alias for the guided cockpit.",
+            &["forge", "interactive", "guided-cockpit"],
+            false,
+            "low",
+        ),
+        slash(
             "/status",
             "Status",
             "Show workflow or runtime status.",
@@ -18134,6 +18741,10 @@ impl InteractiveReplState {
 fn repl_focus_panels() -> Vec<InteractiveReplFocusPanel> {
     vec![
         InteractiveReplFocusPanel {
+            panel_id: "guided_cockpit_panel",
+            title: "Guided cockpit",
+        },
+        InteractiveReplFocusPanel {
             panel_id: "operational_cockpit_panel",
             title: "Operational cockpit",
         },
@@ -18241,6 +18852,10 @@ fn dispatch_repl_navigation_key(
 
 fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<String> {
     match panel_id {
+        "guided_cockpit_panel" => {
+            let panel = build_interactive_guided_cockpit(store)?;
+            Ok(render_interactive_guided_cockpit(&panel))
+        }
         "operational_cockpit_panel" => {
             let panel = build_interactive_operational_cockpit(store)?;
             Ok(render_interactive_operational_cockpit(&panel))
@@ -18341,6 +18956,11 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
 
 fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<bool> {
     match input.trim() {
+        "/guided-cockpit" | "/guide" => {
+            let panel = build_interactive_guided_cockpit(store)?;
+            println!("{}", render_interactive_guided_cockpit(&panel));
+            Ok(true)
+        }
         "/cockpit" => {
             let panel = build_interactive_operational_cockpit(store)?;
             println!("{}", render_interactive_operational_cockpit(&panel));

@@ -22,6 +22,8 @@ pub const CLI_HARNESS_HEADROOM_PLAN_SCHEMA_VERSION: &str = "forge.harness.headro
 pub const CLI_HARNESS_HEADROOM_RUNTIME_PLAN_SCHEMA_VERSION: &str =
     "forge.harness.headroom_runtime_plan.v1";
 pub const CLI_HARNESS_ADOPTION_PLAN_SCHEMA_VERSION: &str = "forge.harness.adoption_plan.v1";
+pub const CLI_HARNESS_ACTIVATION_PROFILE_SCHEMA_VERSION: &str =
+    "forge.harness.activation_profile.v1";
 pub const CLI_HARNESS_EXECUTOR_COMPATIBILITY_SCHEMA_VERSION: &str =
     "forge.harness.executor_compatibility.v1";
 pub const CLI_HARNESS_BOOTSTRAP_SCHEMA_VERSION: &str = "forge.harness.bootstrap.v1";
@@ -325,10 +327,36 @@ pub struct HarnessAdoptionCommands {
     pub mode: Vec<String>,
     pub headroom_plan: Vec<String>,
     pub doctor: Vec<String>,
+    pub activation_profile: Vec<String>,
     pub install_shims: Vec<String>,
     pub sync_executors: Vec<String>,
     pub wrap_plan: Vec<String>,
     pub exec_with_lineage: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessActivationProfileReport {
+    pub schema_version: String,
+    pub status: String,
+    pub executor: String,
+    pub shim_dir: String,
+    pub project_root: String,
+    pub mutates_state: bool,
+    pub executes_child: bool,
+    pub writes_shell_rc: bool,
+    pub forge_first: bool,
+    pub context_budget: usize,
+    pub context_budget_source: String,
+    pub token_headroom: bool,
+    pub token_headroom_source: String,
+    pub path_prepend: String,
+    pub env: Vec<CliWrapperEnvVar>,
+    pub activation_commands: Vec<String>,
+    pub deactivation_commands: Vec<String>,
+    pub activation_script: String,
+    pub deactivation_script: String,
+    pub next_commands: Vec<String>,
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -464,6 +492,16 @@ pub struct HarnessAdoptionPlanOptions<'a> {
     pub token_headroom: bool,
     pub token_headroom_source: &'a str,
     pub require_token_headroom_for_forge_first: bool,
+}
+
+pub struct HarnessActivationProfileOptions<'a> {
+    pub shim_dir: &'a Path,
+    pub executor: &'a str,
+    pub project_root: Option<&'a Path>,
+    pub context_budget: usize,
+    pub context_budget_source: &'a str,
+    pub token_headroom: bool,
+    pub token_headroom_source: &'a str,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1396,6 +1434,139 @@ pub fn build_harness_headroom_plan(
     }
 }
 
+pub fn build_harness_activation_profile(
+    options: HarnessActivationProfileOptions<'_>,
+) -> HarnessActivationProfileReport {
+    let executor = normalize_executor(options.executor);
+    let shim_dir = options
+        .shim_dir
+        .canonicalize()
+        .unwrap_or_else(|_| options.shim_dir.to_path_buf());
+    let project_root = options
+        .project_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            options
+                .project_root
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+        });
+    let shim_dir_display = shim_dir.display().to_string();
+    let project_root_display = project_root.display().to_string();
+    let token_headroom_value = if options.token_headroom {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let env = vec![
+        env_var(
+            "FORGE_HARNESS",
+            "enabled",
+            "marks the shell as intentionally routed through Forge harness controls",
+        ),
+        env_var(
+            "FORGE_HARNESS_DEFAULT_MODE",
+            "forge_first",
+            "makes compatible CLI wrappers prefer Forge infrastructure by default",
+        ),
+        env_var(
+            "FORGE_HARNESS_PROJECT_ROOT",
+            &project_root_display,
+            "binds wrapper and mode resolution to this project policy root",
+        ),
+        env_var(
+            "FORGE_HARNESS_CONTEXT_BUDGET",
+            &options.context_budget.to_string(),
+            "sets the default bounded context budget for wrapper planning",
+        ),
+        env_var(
+            "FORGE_HARNESS_TOKEN_HEADROOM",
+            token_headroom_value,
+            "documents whether token-headroom should be active in this shell",
+        ),
+        env_var(
+            "FORGE_HARNESS_EXECUTOR",
+            &executor,
+            "records which brain CLI this activation profile is meant to inspect first",
+        ),
+    ];
+    let activation_commands = vec![
+        r#"export FORGE_HARNESS_PREV_PATH="${PATH}""#.to_string(),
+        format!("export PATH={}:$PATH", shell_quote(&shim_dir_display)),
+        "export FORGE_HARNESS=enabled".to_string(),
+        "export FORGE_HARNESS_DEFAULT_MODE=forge_first".to_string(),
+        format!(
+            "export FORGE_HARNESS_PROJECT_ROOT={}",
+            shell_quote(&project_root_display)
+        ),
+        format!(
+            "export FORGE_HARNESS_CONTEXT_BUDGET={}",
+            options.context_budget
+        ),
+        format!("export FORGE_HARNESS_TOKEN_HEADROOM={token_headroom_value}"),
+        format!("export FORGE_HARNESS_EXECUTOR={}", shell_quote(&executor)),
+    ];
+    let deactivation_commands = vec![
+        r#"if [ -n "${FORGE_HARNESS_PREV_PATH:-}" ]; then export PATH="${FORGE_HARNESS_PREV_PATH}"; fi"#.to_string(),
+        "unset FORGE_HARNESS_PREV_PATH".to_string(),
+        "unset FORGE_HARNESS".to_string(),
+        "unset FORGE_HARNESS_DEFAULT_MODE".to_string(),
+        "unset FORGE_HARNESS_PROJECT_ROOT".to_string(),
+        "unset FORGE_HARNESS_CONTEXT_BUDGET".to_string(),
+        "unset FORGE_HARNESS_TOKEN_HEADROOM".to_string(),
+        "unset FORGE_HARNESS_EXECUTOR".to_string(),
+    ];
+    let activation_script = format!("{}\n", activation_commands.join("\n"));
+    let deactivation_script = format!("{}\n", deactivation_commands.join("\n"));
+
+    HarnessActivationProfileReport {
+        schema_version: CLI_HARNESS_ACTIVATION_PROFILE_SCHEMA_VERSION.to_string(),
+        status: "harness_activation_profile_ready".to_string(),
+        executor: executor.clone(),
+        shim_dir: shim_dir_display.clone(),
+        project_root: project_root_display.clone(),
+        mutates_state: false,
+        executes_child: false,
+        writes_shell_rc: false,
+        forge_first: true,
+        context_budget: options.context_budget,
+        context_budget_source: options.context_budget_source.to_string(),
+        token_headroom: options.token_headroom,
+        token_headroom_source: options.token_headroom_source.to_string(),
+        path_prepend: shim_dir_display.clone(),
+        env,
+        activation_commands,
+        deactivation_commands,
+        activation_script,
+        deactivation_script,
+        next_commands: vec![
+            format!(
+                "forge harness shim-status --shim-dir {} --executor {} --output json",
+                shell_quote(&shim_dir_display),
+                shell_quote(&executor)
+            ),
+            format!(
+                "forge harness doctor --shim-dir {} --executor {} --project-root {} --output json",
+                shell_quote(&shim_dir_display),
+                shell_quote(&executor),
+                shell_quote(&project_root_display)
+            ),
+            format!(
+                "forge sync executors --shim-dir {} --allow {} --output json",
+                shell_quote(&shim_dir_display),
+                shell_quote(&executor)
+            ),
+        ],
+        notes: vec![
+            "Activation profile is read-only: it prints shell commands but never edits shell startup files.".to_string(),
+            "Source the activation script only in shells where selected CLIs should prefer Forge infrastructure.".to_string(),
+            "Deactivate by running the deactivation commands or starting a fresh shell.".to_string(),
+        ],
+    }
+}
+
 pub fn build_harness_adoption_plan(
     options: HarnessAdoptionPlanOptions<'_>,
 ) -> Result<HarnessAdoptionPlanReport> {
@@ -1515,6 +1686,19 @@ pub fn build_harness_adoption_plan(
             "--output".to_string(),
             "json".to_string(),
         ],
+        activation_profile: vec![
+            "forge".to_string(),
+            "harness".to_string(),
+            "activation-profile".to_string(),
+            "--shim-dir".to_string(),
+            shim_dir_display.clone(),
+            "--executor".to_string(),
+            executor.clone(),
+            "--project-root".to_string(),
+            project_root_display.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
         install_shims: vec![
             "forge".to_string(),
             "harness".to_string(),
@@ -1568,11 +1752,23 @@ pub fn build_harness_adoption_plan(
             executor.clone(),
         ],
     };
+    let shim_file_ready = doctor.shim_status.shim_exists
+        && doctor.shim_status.forge_owned
+        && doctor.shim_status.executable;
+    let shim_installed_but_not_active =
+        shim_file_ready && doctor.shim_status.path_precedence != "shim_first";
     let next_action = if mode.project_config_status != "loaded" {
         format!(
             "forge harness bootstrap --executor {} --shim-dir {} --project-root {} --apply --approved-by <operator> --output json",
             shell_quote(&executor),
             shell_quote(&shim_dir_display),
+            shell_quote(&project_root_display)
+        )
+    } else if shim_installed_but_not_active {
+        format!(
+            "forge harness activation-profile --shim-dir {} --executor {} --project-root {} --output json",
+            shell_quote(&shim_dir_display),
+            shell_quote(&executor),
             shell_quote(&project_root_display)
         )
     } else if !doctor.shim_ready {
@@ -1651,6 +1847,8 @@ pub fn build_harness_adoption_plan(
                 title: "Install Forge-first shims",
                 status: if doctor.shim_ready {
                     "already_ready"
+                } else if shim_file_ready {
+                    "already_installed_needs_activation"
                 } else {
                     "recommended"
                 },
@@ -1661,6 +1859,24 @@ pub fn build_harness_adoption_plan(
                 requires_approval: true,
                 approval_reason: "PATH shims alter how selected CLIs enter Forge infrastructure and must be approved before writing files.",
                 rationale: "Shims make the selected CLI enter through Forge harness controls without replacing the native executable.",
+            }),
+            harness_adoption_step(HarnessAdoptionStepInput {
+                id: "activate_shell_profile",
+                title: "Activate Forge-first shell profile",
+                status: if doctor.shim_ready {
+                    "already_active"
+                } else if shim_file_ready {
+                    "recommended"
+                } else {
+                    "ready_after_shim_install"
+                },
+                command_key: "activation_profile",
+                risk_level: "low",
+                mutates_state: false,
+                executes_child: false,
+                requires_approval: false,
+                approval_reason: "",
+                rationale: "Activation profile prints reversible shell exports so the operator can make selected CLIs prefer Forge infrastructure without editing shell startup files automatically.",
             }),
             harness_adoption_step(HarnessAdoptionStepInput {
                 id: "sync_executor_inventory",
@@ -1714,6 +1930,7 @@ pub fn build_harness_adoption_plan(
             "forge.harness.mode".to_string(),
             "forge.harness.headroom_plan".to_string(),
             "forge.harness.doctor".to_string(),
+            "forge.harness.activation_profile".to_string(),
             "forge.harness.install_shims".to_string(),
             "forge.harness.exec".to_string(),
         ],

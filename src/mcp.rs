@@ -64,15 +64,16 @@ use crate::executor::{
 };
 use crate::handoff::build_task_handoff_with_project;
 use crate::harness::{
-    analyze_token_headroom, build_cli_wrapper_plan, build_harness_adoption_plan,
-    build_harness_bootstrap_report, build_harness_doctor_report, build_harness_headroom_plan,
-    build_harness_mode_report, build_headroom_stats_report, inspect_cli_harness_shim_status,
-    install_cli_harness_shim, persist_token_headroom_report,
+    analyze_token_headroom, build_cli_wrapper_plan, build_harness_activation_profile,
+    build_harness_adoption_plan, build_harness_bootstrap_report, build_harness_doctor_report,
+    build_harness_headroom_plan, build_harness_mode_report, build_headroom_stats_report,
+    inspect_cli_harness_shim_status, install_cli_harness_shim, persist_token_headroom_report,
     resolve_harness_forge_first_source_for_project, resolve_harness_runtime_policy,
     retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
-    CliShimStatusOptions, CliWrapperPlanOptions, HarnessAdoptionPlanOptions,
-    HarnessBootstrapOptions, HarnessDoctorOptions, HarnessHeadroomPlanOptions, HarnessModeOptions,
-    HarnessRuntimePolicyOptions, HeadroomStatsOptions,
+    CliShimStatusOptions, CliWrapperPlanOptions, HarnessActivationProfileOptions,
+    HarnessAdoptionPlanOptions, HarnessBootstrapOptions, HarnessDoctorOptions,
+    HarnessHeadroomPlanOptions, HarnessModeOptions, HarnessRuntimePolicyOptions,
+    HeadroomStatsOptions,
 };
 use crate::identity::{
     audit_tenant_index, ensure_workflow_policy, evaluate_tenant_policy_for_action,
@@ -95,7 +96,7 @@ use crate::interactive::{
     build_interactive_action_invocation, build_interactive_action_registry,
     build_interactive_addon_capabilities_default, build_interactive_architecture_compass,
     build_interactive_artifacts, build_interactive_autocomplete, build_interactive_command_palette,
-    build_interactive_context_memory, build_interactive_harness,
+    build_interactive_context_memory, build_interactive_guided_cockpit, build_interactive_harness,
     build_interactive_home_with_options, build_interactive_identity,
     build_interactive_improvement_loop, build_interactive_multimodal_runtime,
     build_interactive_operating_context, build_interactive_operational_cockpit,
@@ -597,6 +598,15 @@ struct HarnessAdoptionPlanInput {
     task_id: Option<String>,
     run: Option<String>,
     run_id: Option<String>,
+    context_budget: Option<usize>,
+    token_headroom: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HarnessActivationProfileInput {
+    shim_dir: String,
+    executor: String,
+    project_root: Option<String>,
     context_budget: Option<usize>,
     token_headroom: Option<bool>,
 }
@@ -3126,6 +3136,21 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "home",
                     "--project-root",
                     "<project-root>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.guided_cockpit",
+                "Inspect Guided Cockpit",
+                "Return the Forge 0.5 guided cockpit that opens by default from `forge`, including panes, eight operator steps, previews, confirmations and rollback hints without mutating state.",
+                object_schema(&[], &[]),
+                "forge.interactive.guided_cockpit.v1",
+                &[
+                    "forge",
+                    "interactive",
+                    "guided-cockpit",
                     "--output",
                     "json",
                 ],
@@ -5986,6 +6011,21 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.harness.activation_profile",
+                "Project Forge-First Shell Activation",
+                "Return a read-only shell activation/deactivation profile that puts Forge-owned CLI shims first in PATH and exports Forge-first harness defaults without editing shell startup files or launching child CLIs.",
+                object_schema(&[
+                    ("executor", "string", "codex|claude|gemini|opencode"),
+                    ("shim_dir", "string", "directory where Forge-owned shims should live"),
+                    ("project_root", "string", "optional project root containing .forge/harness.json"),
+                    ("context_budget", "integer", "context byte budget"),
+                    ("token_headroom", "boolean", "enable token-headroom defaults"),
+                ], &["executor", "shim_dir"]),
+                "forge.harness.activation_profile.v1",
+                &["forge", "harness", "activation-profile", "--executor", "<executor>", "--shim-dir", "<dir>", "--project-root", "<project-root>", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.harness.bootstrap",
                 "Bootstrap Forge-First Harness",
                 "Plan by default, or with explicit approval write project .forge/harness.json and install Forge-owned CLI shims for one executor. It keeps dry-run safe by default and reports the adoption plan, config write and shim install evidence.",
@@ -7634,6 +7674,9 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     project_root: input.project_root.map(PathBuf::from),
                 },
             )?)?
+        }
+        "forge.interactive.guided_cockpit" => {
+            serde_json::to_value(build_interactive_guided_cockpit(store)?)?
         }
         "forge.interactive.readiness" => serde_json::to_value(build_interactive_readiness(store)?)?,
         "forge.interactive.operational_cockpit" => {
@@ -9452,6 +9495,30 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 require_token_headroom_for_forge_first: runtime_policy
                     .require_token_headroom_for_forge_first,
             })?)?
+        }
+        "forge.harness.activation_profile" => {
+            let input: HarnessActivationProfileInput = parse_input(input)?;
+            let project_root = input.project_root.as_deref().map(std::path::Path::new);
+            let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+                project_root,
+                context_budget: input.context_budget,
+                context_budget_source: "mcp_input",
+                token_headroom: input.token_headroom,
+                token_headroom_source: "mcp_input",
+                forge_first: true,
+                default_context_budget: DEFAULT_CONTEXT_BUDGET,
+            });
+            serde_json::to_value(build_harness_activation_profile(
+                HarnessActivationProfileOptions {
+                    shim_dir: std::path::Path::new(&input.shim_dir),
+                    executor: &input.executor,
+                    project_root,
+                    context_budget: runtime_policy.context_budget,
+                    context_budget_source: &runtime_policy.context_budget_source,
+                    token_headroom: runtime_policy.token_headroom,
+                    token_headroom_source: &runtime_policy.token_headroom_source,
+                },
+            ))?
         }
         "forge.harness.bootstrap" => {
             let input: HarnessBootstrapInput = parse_input(input)?;
