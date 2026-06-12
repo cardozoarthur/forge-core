@@ -48109,6 +48109,189 @@ fn interactive_task_board_lanes_include_operable_task_cards() {
 }
 
 #[test]
+fn interactive_workflow_sidebar_groups_workflows_for_operator_navigation() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let persistent_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Operate recurring support inbox every Friday at 09:00 and keep listening for customer events",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let persistent: Value = serde_json::from_slice(&persistent_output).unwrap();
+    let persistent_workflow_id = persistent["workflow_id"].as_str().unwrap();
+
+    let active_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Build a release checklist for the operational sidebar",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let active: Value = serde_json::from_slice(&active_output).unwrap();
+    let active_workflow_id = active["workflow_id"].as_str().unwrap();
+
+    let sidebar_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "workflow-sidebar",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let sidebar: Value = serde_json::from_slice(&sidebar_output).unwrap();
+    assert_eq!(
+        sidebar["schema_version"],
+        "forge.interactive.workflow_sidebar.v1"
+    );
+    assert_eq!(sidebar["status"], "workflow_sidebar_ready");
+    assert_eq!(sidebar["workflow_count"], 2);
+    assert_eq!(sidebar["selected_workflow_id"], active_workflow_id);
+    assert!(sidebar["groups"].as_array().unwrap().iter().any(|group| {
+        group["group_id"] == "active"
+            && group["items"].as_array().unwrap().iter().any(|item| {
+                item["workflow_id"] == active_workflow_id
+                    && item["selected"] == true
+                    && item["commands"]["inspect"]
+                        == serde_json::json!(["inspect", active_workflow_id])
+                    && item["commands"]["task_board"]
+                        == serde_json::json!(["interactive", "task-board", "--output", "json"])
+            })
+    }));
+    assert!(sidebar["groups"].as_array().unwrap().iter().any(|group| {
+        group["group_id"] == "event_driven"
+            && group["items"].as_array().unwrap().iter().any(|item| {
+                item["workflow_id"] == persistent_workflow_id
+                    && item["runtime"]["persistent"] == true
+                    && item["runtime"]["scale_to_zero_policy"] == "idle_waiting_for_events"
+            })
+    }));
+    assert!(sidebar["groups"].as_array().unwrap().iter().any(|group| {
+        group["group_id"] == "scheduled"
+            && group["items"].as_array().unwrap().iter().any(|item| {
+                item["workflow_id"] == persistent_workflow_id
+                    && item["schedule_summary"]["scheduled_nodes"]
+                        .as_u64()
+                        .unwrap()
+                        > 0
+            })
+    }));
+    assert!(sidebar["keyboard_hints"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("j/k move selection")));
+    assert!(sidebar["commands"]["refresh"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("workflow-sidebar")));
+
+    let home_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["workflow_sidebar_panel"]["schema_version"],
+        "forge.interactive.workflow_sidebar.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["workflow_sidebar_panel"]["selected_workflow_id"],
+        active_workflow_id
+    );
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "workflow-sidebar",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Workflow sidebar:"));
+    assert!(text.contains("active"));
+    assert!(text.contains("event_driven"));
+    assert!(text.contains(active_workflow_id));
+    assert!(text.contains(persistent_workflow_id));
+
+    let manifest_output = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest_output).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.workflow_sidebar");
+    assert_eq!(
+        tool["output_schema"],
+        "forge.interactive.workflow_sidebar.v1"
+    );
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.interactive.workflow_sidebar",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp["result"]["schema_version"],
+        "forge.interactive.workflow_sidebar.v1"
+    );
+    assert_eq!(mcp["result"]["workflow_count"], 2);
+}
+
+#[test]
 fn no_args_non_tty_stays_script_safe_and_does_not_open_dashboard() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -49499,6 +49682,11 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.task_board"),
         "the packaged Forge skill should expose the dedicated interactive task board through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.workflow_sidebar")
+            && forge_core::skill::SKILL_MD.contains("forge interactive workflow-sidebar"),
+        "the packaged Forge skill should expose the dedicated workflow sidebar through MCP and CLI"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.workflow_dag"),

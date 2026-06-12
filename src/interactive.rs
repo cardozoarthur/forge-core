@@ -67,6 +67,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
+const INTERACTIVE_WORKFLOW_SIDEBAR_SCHEMA_VERSION: &str = "forge.interactive.workflow_sidebar.v1";
 const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_board.v1";
 const INTERACTIVE_ARTIFACTS_SCHEMA_VERSION: &str = "forge.interactive.artifacts.v1";
 const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
@@ -156,6 +157,7 @@ pub struct InteractiveDashboard {
     pub estimated_costs: String,
     pub scheduler_worker_status: String,
     pub workflow_focus: Vec<InteractiveWorkflowCard>,
+    pub workflow_sidebar_panel: InteractiveWorkflowSidebarPanel,
     pub navigation_panel: InteractiveNavigationPanel,
     pub ui_composition_panel: InteractiveUiCompositionPanel,
     pub patch_workbench_panel: InteractivePatchWorkbenchPanel,
@@ -407,6 +409,67 @@ pub struct InteractiveUiCompositionCommands {
     pub refresh: Vec<String>,
     pub inspect_addons: Vec<String>,
     pub open_task_board: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowSidebarPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub workflow_count: usize,
+    pub group_count: usize,
+    pub selected_workflow_id: String,
+    pub selected_group_id: String,
+    pub selected_index: usize,
+    pub active_count: usize,
+    pub attention_count: usize,
+    pub event_driven_count: usize,
+    pub scheduled_count: usize,
+    pub completed_count: usize,
+    pub groups: Vec<InteractiveWorkflowSidebarGroup>,
+    pub keyboard_hints: Vec<String>,
+    pub commands: InteractiveWorkflowSidebarCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowSidebarGroup {
+    pub group_id: String,
+    pub title: String,
+    pub item_count: usize,
+    pub items: Vec<InteractiveWorkflowSidebarItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowSidebarItem {
+    pub workflow_id: String,
+    pub selected: bool,
+    pub title: String,
+    pub lifecycle_state: String,
+    pub current_goal: String,
+    pub active_run_count: usize,
+    pub ready_handoff_count: usize,
+    pub pending_human_interaction_count: usize,
+    pub due_schedule_count: usize,
+    pub artifact_count: usize,
+    pub runtime: crate::registry::RegistryWorkflowRuntimeState,
+    pub schedule_summary: crate::schedule::ScheduleSummary,
+    pub commands: InteractiveWorkflowSidebarItemCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowSidebarItemCommands {
+    pub inspect: Vec<String>,
+    pub task_board: Vec<String>,
+    pub workflow_dag: Vec<String>,
+    pub events: Vec<String>,
+    pub validate: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowSidebarCommands {
+    pub refresh: Vec<String>,
+    pub list: Vec<String>,
+    pub task_board: Vec<String>,
+    pub workflow_dag: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1907,6 +1970,7 @@ pub fn build_interactive_home_with_options(
             ),
         })
         .collect::<Vec<_>>();
+    let workflow_sidebar_panel = build_workflow_sidebar_panel(&workflows.workflows);
     let dag_panel = build_workflow_dag_panel(store, &workflows.workflows)?;
     let task_board_panel = build_task_board_panel(store, &workflows.workflows)?;
     let artifact_panel = build_artifact_panel(store, &workflows.workflows)?;
@@ -2046,6 +2110,7 @@ pub fn build_interactive_home_with_options(
                 .to_string(),
             scheduler_worker_status,
             workflow_focus,
+            workflow_sidebar_panel,
             navigation_panel: build_navigation_panel(),
             ui_composition_panel,
             patch_workbench_panel,
@@ -2069,6 +2134,7 @@ pub fn build_interactive_home_with_options(
                 "forge list".to_string(),
                 "forge inspect <workflow-id>".to_string(),
                 "forge request list".to_string(),
+                "forge interactive workflow-sidebar --output json".to_string(),
                 "forge schedule list".to_string(),
                 "forge interactive schedules --output json".to_string(),
                 "forge schedule worker-status".to_string(),
@@ -2096,6 +2162,7 @@ pub fn build_interactive_home_with_options(
                 "/cockpit".to_string(),
                 "/status".to_string(),
                 "/workflows".to_string(),
+                "/workflow-sidebar".to_string(),
                 "/runs".to_string(),
                 "/artifacts".to_string(),
                 "/task-board".to_string(),
@@ -3466,6 +3533,19 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             false,
             "low",
             &["workflow", "task", "board", "handoff", "checkpoint"],
+        ),
+        command_palette_entry(
+            "workflow.sidebar",
+            "workflow",
+            "Open workflow sidebar",
+            "Inspect grouped workflow navigation with selected workflow, runtime state and drill-down commands.",
+            "workflow_sidebar_panel",
+            None,
+            &["interactive", "workflow-sidebar", "--output", "json"],
+            false,
+            false,
+            "low",
+            &["workflow", "sidebar", "navigation", "active", "event-driven"],
         ),
         command_palette_entry(
             "workflow.dag",
@@ -5984,6 +6064,16 @@ pub fn build_interactive_task_board(store: &ForgeStore) -> Result<InteractiveTas
     build_task_board_panel(store, &workflows.workflows)
 }
 
+pub fn build_interactive_workflow_sidebar(
+    store: &ForgeStore,
+) -> Result<InteractiveWorkflowSidebarPanel> {
+    let workflows = list_workflows_with_filters(
+        store,
+        WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
+    )?;
+    Ok(build_workflow_sidebar_panel(&workflows.workflows))
+}
+
 pub fn build_interactive_token_usage(store: &ForgeStore) -> Result<InteractiveTokenUsagePanel> {
     build_token_usage_panel(store)
 }
@@ -7271,6 +7361,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
             .collect::<Vec<_>>()
             .join(" | ")
     };
+    let workflow_sidebar = render_workflow_sidebar_summary(&d.workflow_sidebar_panel);
     let navigation_keys = render_navigation_keybindings(&d.navigation_panel);
     let command_palette_entries = render_command_palette_entry_summary(&d.command_palette_panel);
     let autocomplete_suggestions = render_autocomplete_suggestion_summary(&d.autocomplete_panel);
@@ -7365,6 +7456,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Harness doctor: {harness_doctor_status} for {harness_doctor_executor}; shim {harness_doctor_shim_dir}; checks {harness_doctor_checks}; audit {harness_doctor_command}\n\
          Runtime/node status: {runtime_node_status}\n\
          Scheduler worker status: {scheduler_worker_status}\n\
+         Workflow sidebar: {workflow_sidebar}\n\
          Workflow focus: {workflow_focus}\n\
          Navigation panel: {navigation_status}; default {navigation_default_mode}, theme {navigation_theme}, modes {navigation_modes}, keys {navigation_keys}\n\
          Command palette: {command_palette_status}; query {command_palette_query}, groups {command_palette_groups}, entries {command_palette_entry_count}; {command_palette_entries}\n\
@@ -7448,6 +7540,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         harness_doctor_command = "forge harness doctor --executor codex --shim-dir $HOME/.forge/bin --project-root . --output json",
         runtime_node_status = d.runtime_node_status,
         scheduler_worker_status = d.scheduler_worker_status,
+        workflow_sidebar = workflow_sidebar,
         workflow_focus = workflow_focus,
         navigation_status = d.navigation_panel.status,
         navigation_default_mode = d.navigation_panel.default_display_mode,
@@ -7708,6 +7801,63 @@ pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> Strin
         lanes = render_task_board_lane_summary(panel),
         cards = render_task_board_card_summary(panel),
     )
+}
+
+pub fn render_interactive_workflow_sidebar(panel: &InteractiveWorkflowSidebarPanel) -> String {
+    format!(
+        "Workflow sidebar: {status}; workflows {workflow_count}, groups {group_count}, selected {selected_workflow_id} in {selected_group_id}, active {active_count}, attention {attention_count}, event_driven {event_driven_count}, scheduled {scheduled_count}, completed {completed_count}\nGroups: {groups}\nKeyboard: {keyboard}\nCommands: {commands}\n",
+        status = panel.status,
+        workflow_count = panel.workflow_count,
+        group_count = panel.group_count,
+        selected_workflow_id = panel.selected_workflow_id,
+        selected_group_id = panel.selected_group_id,
+        active_count = panel.active_count,
+        attention_count = panel.attention_count,
+        event_driven_count = panel.event_driven_count,
+        scheduled_count = panel.scheduled_count,
+        completed_count = panel.completed_count,
+        groups = render_workflow_sidebar_summary(panel),
+        keyboard = panel.keyboard_hints.join(", "),
+        commands = [
+            panel.commands.refresh.join(" "),
+            panel.commands.list.join(" "),
+            panel.commands.task_board.join(" "),
+            panel.commands.workflow_dag.join(" "),
+        ]
+        .join(" | "),
+    )
+}
+
+fn render_workflow_sidebar_summary(panel: &InteractiveWorkflowSidebarPanel) -> String {
+    if panel.groups.is_empty() {
+        return "none".to_string();
+    }
+    panel
+        .groups
+        .iter()
+        .map(|group| {
+            let items = group
+                .items
+                .iter()
+                .take(6)
+                .map(|item| {
+                    format!(
+                        "{}{} [{}] {} action {} handoffs {} due {}",
+                        if item.selected { "*" } else { "" },
+                        item.workflow_id,
+                        item.lifecycle_state,
+                        item.title,
+                        item.runtime.operator_action,
+                        item.ready_handoff_count,
+                        item.due_schedule_count
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}({}): {}", group.group_id, group.item_count, items)
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 pub fn render_interactive_artifacts(panel: &InteractiveArtifactPanel) -> String {
@@ -9805,6 +9955,15 @@ fn build_ui_composition_panel(
             20,
             vec![
                 core_ui_widget(
+                    "workflow_sidebar_panel",
+                    "Workflow sidebar",
+                    "workflow_sidebar_panel",
+                    "navigation_list_renderer",
+                    "compact",
+                    "third",
+                    vec!["forge interactive workflow-sidebar --output json".to_string()],
+                ),
+                core_ui_widget(
                     "operational_cockpit_panel",
                     "Operational cockpit",
                     "operational_cockpit_panel",
@@ -10633,6 +10792,236 @@ fn render_workflow_dag_command_summary(panel: &InteractiveWorkflowDagPanel) -> S
         "none".to_string()
     } else {
         commands.join(" | ")
+    }
+}
+
+fn build_workflow_sidebar_panel(rows: &[WorkflowRegistryRow]) -> InteractiveWorkflowSidebarPanel {
+    let selected_workflow_id = select_sidebar_workflow(rows);
+    let group_specs = [
+        ("active", "Active workflows"),
+        ("attention", "Needs attention"),
+        ("event_driven", "Event-driven"),
+        ("scheduled", "Scheduled"),
+        ("completed", "Completed or scaled down"),
+        ("other", "Other workflows"),
+    ];
+    let groups = group_specs
+        .iter()
+        .filter_map(|(group_id, title)| {
+            let mut items = rows
+                .iter()
+                .filter(|row| workflow_sidebar_group_matches(row, group_id))
+                .map(|row| workflow_sidebar_item(row, &selected_workflow_id))
+                .collect::<Vec<_>>();
+            items.sort_by(|left, right| {
+                right
+                    .selected
+                    .cmp(&left.selected)
+                    .then_with(|| right.active_run_count.cmp(&left.active_run_count))
+                    .then_with(|| right.ready_handoff_count.cmp(&left.ready_handoff_count))
+                    .then_with(|| right.due_schedule_count.cmp(&left.due_schedule_count))
+                    .then_with(|| left.workflow_id.cmp(&right.workflow_id))
+            });
+            (!items.is_empty()).then(|| InteractiveWorkflowSidebarGroup {
+                group_id: (*group_id).to_string(),
+                title: (*title).to_string(),
+                item_count: items.len(),
+                items,
+            })
+        })
+        .collect::<Vec<_>>();
+    let selected_group_id = groups
+        .iter()
+        .find(|group| {
+            group
+                .items
+                .iter()
+                .any(|item| item.workflow_id == selected_workflow_id)
+        })
+        .map(|group| group.group_id.clone())
+        .unwrap_or_else(|| "none".to_string());
+    let selected_index = groups
+        .iter()
+        .flat_map(|group| group.items.iter())
+        .position(|item| item.workflow_id == selected_workflow_id)
+        .unwrap_or(0);
+    let active_count = rows
+        .iter()
+        .filter(|row| workflow_sidebar_group_matches(row, "active"))
+        .count();
+    let attention_count = rows
+        .iter()
+        .filter(|row| workflow_sidebar_group_matches(row, "attention"))
+        .count();
+    let event_driven_count = rows
+        .iter()
+        .filter(|row| workflow_sidebar_group_matches(row, "event_driven"))
+        .count();
+    let scheduled_count = rows
+        .iter()
+        .filter(|row| workflow_sidebar_group_matches(row, "scheduled"))
+        .count();
+    let completed_count = rows
+        .iter()
+        .filter(|row| workflow_sidebar_group_matches(row, "completed"))
+        .count();
+
+    InteractiveWorkflowSidebarPanel {
+        schema_version: INTERACTIVE_WORKFLOW_SIDEBAR_SCHEMA_VERSION.to_string(),
+        status: "workflow_sidebar_ready".to_string(),
+        workflow_count: rows.len(),
+        group_count: groups.len(),
+        selected_workflow_id,
+        selected_group_id,
+        selected_index,
+        active_count,
+        attention_count,
+        event_driven_count,
+        scheduled_count,
+        completed_count,
+        groups,
+        keyboard_hints: vec![
+            "j/k move selection".to_string(),
+            "enter inspect selected workflow".to_string(),
+            "d open DAG".to_string(),
+            "t open task board".to_string(),
+            "e open event timeline".to_string(),
+        ],
+        commands: InteractiveWorkflowSidebarCommands {
+            refresh: vec![
+                "interactive".to_string(),
+                "workflow-sidebar".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            list: vec![
+                "list".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            task_board: vec![
+                "interactive".to_string(),
+                "task-board".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            workflow_dag: vec![
+                "interactive".to_string(),
+                "workflow-dag".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        },
+    }
+}
+
+fn select_sidebar_workflow(rows: &[WorkflowRegistryRow]) -> String {
+    rows.iter()
+        .find(|row| workflow_sidebar_row_is_active(row))
+        .or_else(|| {
+            rows.iter()
+                .find(|row| workflow_sidebar_group_matches(row, "attention"))
+        })
+        .or_else(|| {
+            rows.iter()
+                .find(|row| workflow_sidebar_group_matches(row, "event_driven"))
+        })
+        .or_else(|| rows.first())
+        .map(|row| row.workflow_id.clone())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn workflow_sidebar_group_matches(row: &WorkflowRegistryRow, group_id: &str) -> bool {
+    match group_id {
+        "active" => workflow_sidebar_row_is_active(row),
+        "attention" => {
+            matches!(
+                row.runtime.operator_action.as_str(),
+                "repair_workflow" | "run_due_schedule"
+            ) || row.task_summary.blocked > 0
+                || row.task_summary.failed > 0
+                || row.human_interaction_summary.pending_required > 0
+        }
+        "event_driven" => {
+            row.runtime.persistent
+                && (row.runtime.scale_to_zero_policy == "idle_waiting_for_events"
+                    || matches!(
+                        row.runtime.operator_action.as_str(),
+                        "keep_event_listener_ready" | "wake_on_event"
+                    ))
+        }
+        "scheduled" => row.schedule_summary.scheduled_nodes > 0,
+        "completed" => matches!(
+            row.runtime.operational_state.as_str(),
+            "completed" | "scaled_to_zero"
+        ),
+        "other" => {
+            !workflow_sidebar_group_matches(row, "active")
+                && !workflow_sidebar_group_matches(row, "attention")
+                && !workflow_sidebar_group_matches(row, "event_driven")
+                && !workflow_sidebar_group_matches(row, "scheduled")
+                && !workflow_sidebar_group_matches(row, "completed")
+        }
+        _ => false,
+    }
+}
+
+fn workflow_sidebar_row_is_active(row: &WorkflowRegistryRow) -> bool {
+    row.active_run_count > 0
+        || row.running
+        || row
+            .run_statuses
+            .iter()
+            .any(|status| matches!(status.as_str(), "accepted" | "resumed" | "running"))
+}
+
+fn workflow_sidebar_item(
+    row: &WorkflowRegistryRow,
+    selected_workflow_id: &str,
+) -> InteractiveWorkflowSidebarItem {
+    InteractiveWorkflowSidebarItem {
+        workflow_id: row.workflow_id.clone(),
+        selected: row.workflow_id == selected_workflow_id,
+        title: truncate_display(&row.current_goal, 72),
+        lifecycle_state: row.lifecycle_state.clone(),
+        current_goal: row.current_goal.clone(),
+        active_run_count: row.active_run_count,
+        ready_handoff_count: row.context_actions.ready_for_handoff,
+        pending_human_interaction_count: row.human_interaction_summary.pending_required,
+        due_schedule_count: row.schedule_summary.due_nodes,
+        artifact_count: row.artifact_count,
+        runtime: row.runtime.clone(),
+        schedule_summary: row.schedule_summary.clone(),
+        commands: InteractiveWorkflowSidebarItemCommands {
+            inspect: vec!["inspect".to_string(), row.workflow_id.clone()],
+            task_board: vec![
+                "interactive".to_string(),
+                "task-board".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            workflow_dag: vec![
+                "interactive".to_string(),
+                "workflow-dag".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            events: vec![
+                "events".to_string(),
+                "timeline".to_string(),
+                "--workflow".to_string(),
+                row.workflow_id.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            validate: vec![
+                "validate".to_string(),
+                "--workflow".to_string(),
+                row.workflow_id.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        },
     }
 }
 
@@ -11653,8 +12042,16 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
         slash(
             "/workflows",
             "Workflows",
-            "List workflow registry.",
-            &["forge", "list"],
+            "Show the workflow sidebar for operator navigation.",
+            &["forge", "interactive", "workflow-sidebar"],
+            false,
+            "low",
+        ),
+        slash(
+            "/workflow-sidebar",
+            "Workflow Sidebar",
+            "Show grouped workflow navigation with selected workflow and drill-down commands.",
+            &["forge", "interactive", "workflow-sidebar"],
             false,
             "low",
         ),
@@ -12675,6 +13072,10 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
             let panel = build_interactive_workflow_dag(store)?;
             Ok(render_interactive_workflow_dag(&panel))
         }
+        "workflow_sidebar_panel" => {
+            let panel = build_interactive_workflow_sidebar(store)?;
+            Ok(render_interactive_workflow_sidebar(&panel))
+        }
         "patch_workbench_panel" => {
             let panel = build_interactive_patch_workbench(store)?;
             Ok(render_interactive_patch_workbench(&panel))
@@ -12693,6 +13094,11 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
         "/task-board" => {
             let panel = build_interactive_task_board(store)?;
             println!("{}", render_interactive_task_board(&panel));
+            Ok(true)
+        }
+        "/workflows" | "/workflow-sidebar" | "/sidebar" => {
+            let panel = build_interactive_workflow_sidebar(store)?;
+            println!("{}", render_interactive_workflow_sidebar(&panel));
             Ok(true)
         }
         "/artifacts" => {

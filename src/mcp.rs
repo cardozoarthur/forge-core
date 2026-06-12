@@ -101,8 +101,8 @@ use crate::interactive::{
     build_interactive_permissions, build_interactive_readiness, build_interactive_release_gates,
     build_interactive_schedules, build_interactive_sessions, build_interactive_structured_logs,
     build_interactive_task_board, build_interactive_token_usage, build_interactive_workflow_dag,
-    route_interactive_input, slash_command_catalog, InteractiveHarnessOptions,
-    InteractiveHomeOptions, InteractiveSessionsOptions,
+    build_interactive_workflow_sidebar, route_interactive_input, slash_command_catalog,
+    InteractiveHarnessOptions, InteractiveHomeOptions, InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -3291,6 +3291,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.task_board.v1",
                 &["forge", "interactive", "task-board", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.workflow_sidebar",
+                "Inspect Interactive Workflow Sidebar",
+                "Return the Forge interactive workflow sidebar with grouped workflow navigation, selected workflow state, runtime/schedule summaries and drill-down commands without launching a TTY.",
+                object_schema(&[], &[]),
+                "forge.interactive.workflow_sidebar.v1",
+                &["forge", "interactive", "workflow-sidebar", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7657,6 +7666,9 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.interactive.task_board" => {
             serde_json::to_value(build_interactive_task_board(store)?)?
+        }
+        "forge.interactive.workflow_sidebar" => {
+            serde_json::to_value(build_interactive_workflow_sidebar(store)?)?
         }
         "forge.interactive.artifacts" => serde_json::to_value(build_interactive_artifacts(store)?)?,
         "forge.interactive.token_usage" => {
