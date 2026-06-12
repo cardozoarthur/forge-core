@@ -3233,6 +3233,8 @@ enum InteractiveCommands {
     ReleaseGates {
         #[arg(long, default_value = "0.5")]
         version: String,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -7933,9 +7935,14 @@ fn run() -> Result<i32> {
                 }
                 Ok(0)
             }
-            InteractiveCommands::ReleaseGates { version, output } => {
+            InteractiveCommands::ReleaseGates {
+                version,
+                project_root,
+                output,
+            } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = build_interactive_release_gates(&store, &version)?;
+                let report =
+                    build_interactive_release_gates(&store, &version, project_root.as_deref())?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => {

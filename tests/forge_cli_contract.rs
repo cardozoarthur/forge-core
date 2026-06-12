@@ -42467,6 +42467,8 @@ tenant_policy_mode: enforce
 fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("release-gates-project");
+    fs::create_dir_all(project.join(".forge")).unwrap();
     let receipt = temp.path().join("release-gate-runtime-receipt.json");
     fs::write(
         &receipt,
@@ -42511,6 +42513,8 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
             "release-gates",
             "--version",
             "0.5",
+            "--project-root",
+            project.to_str().unwrap(),
             "--output",
             "json",
         ])
@@ -42557,6 +42561,20 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
                 .as_str()
                 .unwrap()
                 .contains("forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli"))
+            && gate["evidence_plan"]["status"] == "missing_project_evidence_inputs"
+            && gate["evidence_plan"]["ready_to_collect_evidence"] == false
+            && gate["evidence_plan"]["project_root"] == project.display().to_string()
+            && gate["evidence_plan"]["manifest_template_count"] == 1
+            && gate["evidence_plan"]["manifest_templates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|template| template["id"] == "connected_brain_runtime_manifest"
+                    && template["target_path"]
+                        == project
+                            .join(".forge/connected-brain-runtimes.json")
+                            .display()
+                            .to_string())
     }));
     assert!(json["gate_cards"].as_array().unwrap().iter().any(|gate| {
         gate["capability_id"] == "experimental_multimodal_runtime"
@@ -42594,6 +42612,26 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
                 .as_str()
                 .unwrap()
                 .contains("forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime"))
+            && gate["evidence_plan"]["status"] == "missing_project_evidence_inputs"
+            && gate["evidence_plan"]["ready_to_collect_evidence"] == false
+            && gate["evidence_plan"]["manifest_template_count"] == 2
+            && gate["evidence_plan"]["manifest_templates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|template| template["id"] == "multimodal_feature_flag"
+                    && template["target_path"]
+                        == project.join(".forge/multimodal.json").display().to_string())
+            && gate["evidence_plan"]["manifest_templates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|template| template["id"] == "multimodal_runtime_manifest"
+                    && template["target_path"]
+                        == project
+                            .join(".forge/multimodal-runtimes.json")
+                            .display()
+                            .to_string())
     }));
     assert!(json["commands"]["refresh"]
         .as_array()
@@ -42680,7 +42718,10 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
         .arg(store.to_str().unwrap())
         .args(["mcp", "call", "forge.interactive.release_gates"])
         .arg("--input")
-        .arg(r#"{"version":"0.5"}"#)
+        .arg(format!(
+            r#"{{"version":"0.5","project_root":{}}}"#,
+            serde_json::to_string(project.to_str().unwrap()).unwrap()
+        ))
         .args(["--output", "json"])
         .assert()
         .success()

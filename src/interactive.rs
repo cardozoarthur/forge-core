@@ -27,8 +27,9 @@ use crate::identity::{
 use crate::interaction::list_human_interactions;
 use crate::memory::memory_policy_report;
 use crate::milestone::{
-    build_milestone_manifest_with_store, build_milestone_status,
+    build_milestone_evidence_plan, build_milestone_manifest_with_store, build_milestone_status,
     milestone_required_attached_evidence_kinds, MilestoneAttachedEvidence,
+    MilestoneEvidencePlanManifestTemplate, MilestoneEvidencePlanOptions,
     MilestonePromotionDecision, MilestoneStatusSummary,
 };
 use crate::ops::{
@@ -286,8 +287,25 @@ pub struct InteractiveReleaseGateCard {
     pub missing_attached_evidence_kinds: Vec<String>,
     pub attached_evidence_count: usize,
     pub attached_evidence: Vec<MilestoneAttachedEvidence>,
+    pub evidence_plan: InteractiveReleaseGateEvidencePlan,
     pub gap_before_promotion: String,
     pub next_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveReleaseGateEvidencePlan {
+    pub schema_version: String,
+    pub status: String,
+    pub ready_to_collect_evidence: bool,
+    pub project_root: Option<String>,
+    pub config_check_count: usize,
+    pub missing_config_check_count: usize,
+    pub manifest_template_count: usize,
+    pub manifest_template_ids: Vec<String>,
+    pub manifest_template_paths: Vec<String>,
+    pub manifest_templates: Vec<MilestoneEvidencePlanManifestTemplate>,
+    pub evidence_collection_commands: Vec<String>,
+    pub next_action: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1398,7 +1416,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
     let command_palette_panel = build_interactive_command_palette(store, None)?;
     let action_registry_panel = build_action_registry_from_palette(&command_palette_panel);
     let autocomplete_panel = build_interactive_autocomplete(store, "")?;
-    let release_gates_panel = build_interactive_release_gates(store, "0.5")?;
+    let release_gates_panel = build_interactive_release_gates(store, "0.5", None)?;
     let harness_mode_panel = harness_panel.mode.clone();
     let harness_doctor_panel = harness_panel.doctor.clone();
     let runtime_node_status = if runtimes.usable.is_empty() {
@@ -1924,6 +1942,7 @@ pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveRead
 pub fn build_interactive_release_gates(
     store: &ForgeStore,
     version: &str,
+    project_root: Option<&Path>,
 ) -> Result<InteractiveReleaseGatesPanel> {
     let status = build_milestone_status(version)?;
     let manifest = build_milestone_manifest_with_store(version, Some(store))?;
@@ -1982,7 +2001,13 @@ pub fn build_interactive_release_gates(
                 &missing_attached_evidence_kinds,
                 attached_evidence_count,
             );
-            InteractiveReleaseGateCard {
+            let evidence_plan = interactive_release_gate_evidence_plan(
+                store,
+                version,
+                &capability.id,
+                project_root,
+            )?;
+            Ok(InteractiveReleaseGateCard {
                 capability_id: capability.id.clone(),
                 title: capability.title.clone(),
                 status: capability.status.clone(),
@@ -1998,11 +2023,12 @@ pub fn build_interactive_release_gates(
                 missing_attached_evidence_kinds,
                 attached_evidence_count,
                 attached_evidence,
+                evidence_plan,
                 gap_before_promotion: capability.gap_before_promotion.clone(),
                 next_commands: release_gate_next_commands(&capability.id),
-            }
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let blocked_gate_count = gate_cards
         .iter()
         .filter(|gate| !gate.promotion_ready)
@@ -2032,6 +2058,53 @@ pub fn build_interactive_release_gates(
         gate_cards,
         commands,
         next_actions,
+    })
+}
+
+fn interactive_release_gate_evidence_plan(
+    store: &ForgeStore,
+    version: &str,
+    capability_id: &str,
+    project_root: Option<&Path>,
+) -> Result<InteractiveReleaseGateEvidencePlan> {
+    let plan = build_milestone_evidence_plan(
+        store,
+        MilestoneEvidencePlanOptions {
+            version,
+            capability_id,
+            project_root,
+            connected_brain: None,
+            connected_runtime: None,
+        },
+    )?;
+    let missing_config_check_count = plan
+        .config_checks
+        .iter()
+        .filter(|check| matches!(check.status.as_str(), "missing" | "blocked" | "invalid"))
+        .count();
+    let manifest_template_ids = plan
+        .manifest_templates
+        .iter()
+        .map(|template| template.id.clone())
+        .collect::<Vec<_>>();
+    let manifest_template_paths = plan
+        .manifest_templates
+        .iter()
+        .map(|template| template.target_path.clone())
+        .collect::<Vec<_>>();
+    Ok(InteractiveReleaseGateEvidencePlan {
+        schema_version: "forge.interactive.release_gate_evidence_plan.v1".to_string(),
+        status: plan.status,
+        ready_to_collect_evidence: plan.ready_to_collect_evidence,
+        project_root: plan.project_root,
+        config_check_count: plan.config_checks.len(),
+        missing_config_check_count,
+        manifest_template_count: plan.manifest_templates.len(),
+        manifest_template_ids,
+        manifest_template_paths,
+        manifest_templates: plan.manifest_templates,
+        evidence_collection_commands: plan.evidence_collection_commands,
+        next_action: plan.next_action,
     })
 }
 

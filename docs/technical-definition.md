@@ -203,6 +203,9 @@ and MCP `forge.milestone.evidence_plan` report attached-evidence gaps, project `
 secret-free `manifest_templates` for missing inputs such as `.forge/connected-brain-runtimes.json`,
 `.forge/multimodal.json` and `.forge/multimodal-runtimes.json`,
 and exact collection/attach commands before any real provider or runtime evidence is executed.
+`forge interactive release-gates --project-root <project-root>` and MCP `forge.interactive.release_gates`
+embed the same evidence-plan status, missing config counts and secret-free manifest templates per gate card,
+so TUI/web/agent release panels can guide operators without executing providers, models or devices.
 `forge.schedule.scan_due` returns `forge.worker_pool.v1` evidence when bounded
 parallel dispatch is used, and it reconciles idle scheduled workflows into
 Forge-owned scale-to-zero state instead of leaving that behavior to external

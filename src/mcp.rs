@@ -1718,6 +1718,7 @@ struct ArtifactFetchInput {
 #[derive(Debug, Deserialize)]
 struct MilestoneStatusInput {
     version: Option<String>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3023,9 +3024,10 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.interactive.release_gates",
                 "Inspect Interactive Release Gates",
-                "Return the Forge interactive release-gates panel for one milestone, including promotion decision, blocked capabilities, required evidence, current evidence and next commands without mutating state.",
+                "Return the Forge interactive release-gates panel for one milestone, including promotion decision, blocked capabilities, required evidence, current evidence, missing project manifests, secret-free manifest templates and next commands without mutating state.",
                 object_schema(&[
                     ("version", "string", "milestone version, currently 0.5"),
+                    ("project_root", "string", "optional project root whose .forge manifests should be inspected for evidence planning"),
                 ], &[]),
                 "forge.interactive.release_gates.v1",
                 &[
@@ -3034,6 +3036,8 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "release-gates",
                     "--version",
                     "0.5",
+                    "--project-root",
+                    "<project-root>",
                     "--output",
                     "json",
                 ],
@@ -7218,13 +7222,18 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         "forge.interactive.readiness" => serde_json::to_value(build_interactive_readiness(store)?)?,
         "forge.interactive.release_gates" => {
             let input: MilestoneStatusInput = if input.is_null() {
-                MilestoneStatusInput { version: None }
+                MilestoneStatusInput {
+                    version: None,
+                    project_root: None,
+                }
             } else {
                 parse_input(input)?
             };
+            let project_root = input.project_root.map(PathBuf::from);
             serde_json::to_value(build_interactive_release_gates(
                 store,
                 input.version.as_deref().unwrap_or("0.5"),
+                project_root.as_deref(),
             )?)?
         }
         "forge.interactive.harness" => {
