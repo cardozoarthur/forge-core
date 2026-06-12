@@ -6991,6 +6991,14 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
         "validated"
     );
     assert_eq!(
+        real_project["real_project"]["stdout_headroom_status"],
+        "token_headroom_ready"
+    );
+    assert!(real_project["real_project"]["stdout_retrieval_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("forge://harness/headroom/"));
+    assert_eq!(
         real_project["real_project"]["external_resources_mutated"],
         false
     );
@@ -7012,11 +7020,21 @@ fn milestone_cli_demo_generates_replacement_grade_cli_flow_evidence() {
         .contains(&serde_json::json!(
             "multi_file_code_and_research_artifacts_generated"
         )));
+    assert!(real_project["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("stdout_headroom_retrieval_available")));
     assert!(real_project["commands"]
         .as_array()
         .unwrap()
         .contains(&serde_json::json!(
             "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --output json"
+        )));
+    assert!(real_project["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge harness retrieve-headroom --ref <stdout-retrieval-ref> --output json"
         )));
 
     let connected_external_brain = flows

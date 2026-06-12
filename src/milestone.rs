@@ -2786,6 +2786,19 @@ EOF
 grep -q 'classify_request' src/lib.rs
 grep -q "$FORGE_WORKFLOW_ID" tests/workflow_contract.txt
 grep -q 'research artifacts' docs/research/findings.md
+{
+  printf 'forge_real_project_demo\n'
+  printf 'workflow=%s\n' "$FORGE_WORKFLOW_ID"
+  printf 'task=%s\n' "$FORGE_TASK_ID"
+  printf 'run=%s\n' "$FORGE_RUN_ID"
+  printf 'brain=codex\n'
+  printf 'harness=%s\n' "$FORGE_HARNESS"
+  printf 'mode=%s\n' "$FORGE_HARNESS_MODE"
+  printf 'token_headroom=%s\n' "$FORGE_TOKEN_HEADROOM"
+  printf 'artifacts=src/lib.rs,tests/workflow_contract.txt,docs/research/findings.md\n'
+  printf 'validation=code_and_research_markers_verified\n'
+  printf 'research_summary=Forge routed coding and research through one lineage-preserving workflow.\n'
+}
 "#;
     let command = vec![
         "/bin/sh".to_string(),
@@ -2897,6 +2910,7 @@ grep -q 'research artifacts' docs/research/findings.md
             "forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --project-root <project-root> --output json".to_string(),
             "forge harness bootstrap --executor sh --shim-dir <project-root>/.forge/shims --project-root <project-root> --apply --approved-by forge_cli_demo --output json".to_string(),
             "forge harness exec --executor sh --project-root <project-root> --workflow <workflow-id> --task <task-id> --run <run-id> --forge-first --execute --allow-exec -- /bin/sh -c <real-project-code-and-research-script>".to_string(),
+            "forge harness retrieve-headroom --ref <stdout-retrieval-ref> --output json".to_string(),
         ],
         artifact_refs: target_paths
             .iter()
