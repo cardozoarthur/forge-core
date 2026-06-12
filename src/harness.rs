@@ -1596,6 +1596,7 @@ pub fn build_harness_adoption_plan(
         commands,
         mcp_tools: vec![
             "forge.harness.adoption_plan".to_string(),
+            "forge.harness.bootstrap".to_string(),
             "forge.harness.mode".to_string(),
             "forge.harness.headroom_plan".to_string(),
             "forge.harness.doctor".to_string(),

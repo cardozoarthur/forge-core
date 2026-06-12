@@ -1729,6 +1729,10 @@ fn harness_adoption_plan_models_forge_first_headroom_for_cli_mcp_and_skill() {
         .as_str()
         .unwrap()
         .contains("forge harness install-shims"));
+    assert!(json["mcp_tools"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("forge.harness.bootstrap")));
 
     let tools_output = forge()
         .args([
