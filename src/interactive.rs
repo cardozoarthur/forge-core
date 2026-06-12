@@ -20,7 +20,8 @@ use crate::harness::{
     CliWrapperPlanReport, HarnessAdoptionPlanOptions, HarnessAdoptionPlanReport,
     HarnessDoctorOptions, HarnessDoctorReport, HarnessHeadroomPlanOptions,
     HarnessHeadroomPlanReport, HarnessModeOptions, HarnessModeReport, HarnessRuntimePolicyOptions,
-    HarnessSessionLifecyclePlan, HeadroomStatsOptions, HeadroomStatsReport, TokenHeadroomReport,
+    HarnessSessionLifecyclePlan, HeadroomStatsContentKindBucket, HeadroomStatsOptions,
+    HeadroomStatsReport, HeadroomStatsSourceBucket, TokenHeadroomReport,
 };
 use crate::identity::{
     audit_tenant_index, inspect_project_operating_context, list_identity_links,
@@ -69,6 +70,7 @@ const INTERACTIVE_CONTEXT_MEMORY_SCHEMA_VERSION: &str = "forge.interactive.conte
 const INTERACTIVE_READINESS_SCHEMA_VERSION: &str = "forge.interactive.readiness.v1";
 const INTERACTIVE_RELEASE_GATES_SCHEMA_VERSION: &str = "forge.interactive.release_gates.v1";
 const INTERACTIVE_HARNESS_SCHEMA_VERSION: &str = "forge.interactive.harness.v1";
+const INTERACTIVE_TOKEN_USAGE_SCHEMA_VERSION: &str = "forge.interactive.token_usage.v1";
 const INTERACTIVE_SESSIONS_SCHEMA_VERSION: &str = "forge.interactive.sessions.v1";
 const INTERACTIVE_COMMAND_PALETTE_SCHEMA_VERSION: &str = "forge.interactive.command_palette.v1";
 const INTERACTIVE_COMMAND_PALETTE_ACTION_PLAN_SCHEMA_VERSION: &str =
@@ -133,6 +135,7 @@ pub struct InteractiveDashboard {
     pub forge_controlled_surfaces: Vec<String>,
     pub shell_entrypoints: Vec<String>,
     pub harness_panel: InteractiveHarnessPanel,
+    pub token_usage_panel: InteractiveTokenUsagePanel,
     pub sessions_panel: InteractiveSessionsPanel,
     pub command_palette_panel: InteractiveCommandPalettePanel,
     pub action_registry_panel: InteractiveActionRegistryPanel,
@@ -646,6 +649,37 @@ pub struct InteractiveHarnessCommands {
     pub exec: Vec<String>,
     pub sessions: Vec<String>,
     pub sync: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveTokenUsagePanel {
+    pub schema_version: String,
+    pub status: String,
+    pub operational_status: String,
+    pub recommended_action: String,
+    pub total_headroom_blobs: usize,
+    pub total_original_tokens: i64,
+    pub total_compressed_tokens: i64,
+    pub estimated_saved_tokens: i64,
+    pub average_savings_percent: f64,
+    pub over_budget_after_headroom_count: usize,
+    pub primary_source: String,
+    pub primary_content_kind: String,
+    pub retrieve_commands: Vec<String>,
+    pub source_buckets: Vec<HeadroomStatsSourceBucket>,
+    pub content_kind_buckets: Vec<HeadroomStatsContentKindBucket>,
+    pub headroom_stats: HeadroomStatsReport,
+    pub commands: InteractiveTokenUsageCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveTokenUsageCommands {
+    pub refresh: Vec<String>,
+    pub headroom_stats: Vec<String>,
+    pub analyze_payload: Vec<String>,
+    pub retrieve_top: Vec<String>,
+    pub harness: Vec<String>,
+    pub cost_ledger: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1691,6 +1725,7 @@ pub fn build_interactive_home_with_options(
             token_headroom: None,
         },
     )?;
+    let token_usage_panel = build_token_usage_panel(store)?;
     let sessions_panel = build_interactive_sessions(store, InteractiveSessionsOptions::default())?;
     let command_palette_panel = build_interactive_command_palette(store, None)?;
     let action_registry_panel = build_action_registry_from_palette(&command_palette_panel);
@@ -1881,6 +1916,7 @@ pub fn build_interactive_home_with_options(
             forge_controlled_surfaces,
             shell_entrypoints,
             harness_panel,
+            token_usage_panel,
             sessions_panel,
             command_palette_panel,
             action_registry_panel,
@@ -1920,6 +1956,7 @@ pub fn build_interactive_home_with_options(
                 "forge interactive schedules --output json".to_string(),
                 "forge schedule worker-status".to_string(),
                 "forge interactive harness --output json".to_string(),
+                "forge interactive token-usage --output json".to_string(),
                 "forge harness headroom-plan --executor codex --project-root . --output json"
                     .to_string(),
                 "forge harness headroom-stats --output json".to_string(),
@@ -1954,6 +1991,7 @@ pub fn build_interactive_home_with_options(
                 "/sessions".to_string(),
                 "/shells".to_string(),
                 "/harness".to_string(),
+                "/tokens".to_string(),
                 "/harness doctor".to_string(),
                 "/harness headroom-plan".to_string(),
                 "/harness headroom-stats".to_string(),
@@ -5816,6 +5854,10 @@ pub fn build_interactive_task_board(store: &ForgeStore) -> Result<InteractiveTas
     build_task_board_panel(store, &workflows.workflows)
 }
 
+pub fn build_interactive_token_usage(store: &ForgeStore) -> Result<InteractiveTokenUsagePanel> {
+    build_token_usage_panel(store)
+}
+
 pub fn build_interactive_artifacts(store: &ForgeStore) -> Result<InteractiveArtifactPanel> {
     let workflows = list_workflows_with_filters(
         store,
@@ -6955,6 +6997,8 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     } else {
         d.harness_doctor_panel.readiness_checks.join(", ")
     };
+    let token_usage_sources = render_token_usage_source_summary(&d.token_usage_panel);
+    let token_usage_retrieve = render_token_usage_retrieve_summary(&d.token_usage_panel);
     let workflow_focus = if d.workflow_focus.is_empty() {
         "none".to_string()
     } else {
@@ -7059,6 +7103,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Forge-controlled surfaces: {forge_controlled_surfaces}\n\
          Shell entrypoints: {shell_entrypoints}\n\
          Harness center: {harness_center_status}; executor {harness_center_executor}; forge-first {harness_center_forge_first}; token headroom {harness_center_token_headroom}; shim {harness_center_shim}; action {harness_center_command}\n\
+         Token usage panel: {token_usage_status}; blobs {token_usage_blobs}, original tokens {token_usage_original_tokens}, compressed tokens {token_usage_compressed_tokens}, saved tokens {token_usage_saved_tokens}, savings {token_usage_savings:.2}%, over budget {token_usage_over_budget}; primary {token_usage_primary_source}/{token_usage_primary_kind}; sources {token_usage_sources}; retrieve {token_usage_retrieve}\n\
          Session center: {sessions_status}; sessions {sessions_count}, ready {sessions_ready}, planned events {sessions_planned_events}, lifecycle events {sessions_lifecycle_events}; {session_cards}\n\
          Harness mode: {harness_effective_mode} from {harness_source}; project config {harness_project_status}; audit {harness_audit_command}\n\
          Harness doctor: {harness_doctor_status} for {harness_doctor_executor}; shim {harness_doctor_shim_dir}; checks {harness_doctor_checks}; audit {harness_doctor_command}\n\
@@ -7118,6 +7163,17 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         harness_center_token_headroom = d.harness_panel.token_headroom_ready,
         harness_center_shim = d.harness_panel.shim_status.status,
         harness_center_command = "forge interactive harness --output json",
+        token_usage_status = d.token_usage_panel.status,
+        token_usage_blobs = d.token_usage_panel.total_headroom_blobs,
+        token_usage_original_tokens = d.token_usage_panel.total_original_tokens,
+        token_usage_compressed_tokens = d.token_usage_panel.total_compressed_tokens,
+        token_usage_saved_tokens = d.token_usage_panel.estimated_saved_tokens,
+        token_usage_savings = d.token_usage_panel.average_savings_percent,
+        token_usage_over_budget = d.token_usage_panel.over_budget_after_headroom_count,
+        token_usage_primary_source = d.token_usage_panel.primary_source,
+        token_usage_primary_kind = d.token_usage_panel.primary_content_kind,
+        token_usage_sources = token_usage_sources,
+        token_usage_retrieve = token_usage_retrieve,
         sessions_status = d.sessions_panel.status,
         sessions_count = d.sessions_panel.session_count,
         sessions_ready = d.sessions_panel.ready_session_count,
@@ -7333,6 +7389,31 @@ pub fn render_interactive_artifacts(panel: &InteractiveArtifactPanel) -> String 
         refresh = panel.commands.refresh.join(" "),
         task_board = panel.commands.task_board.join(" "),
         workflow_list = panel.commands.workflow_list.join(" "),
+    )
+}
+
+pub fn render_interactive_token_usage(panel: &InteractiveTokenUsagePanel) -> String {
+    format!(
+        "Token usage: {status}; operational {operational_status}; action {recommended_action}; blobs {total_headroom_blobs}; original tokens {total_original_tokens}; compressed tokens {total_compressed_tokens}; saved tokens {estimated_saved_tokens}; savings {average_savings_percent:.2}%; over budget {over_budget}\nPrimary: {primary_source}/{primary_content_kind}\nSources: {sources}\nContent kinds: {content_kinds}\nRetrieve: {retrieve}\nCommands: refresh {refresh}; stats {stats}; analyze {analyze}; harness {harness}; costs {costs}\n",
+        status = panel.status,
+        operational_status = panel.operational_status,
+        recommended_action = panel.recommended_action,
+        total_headroom_blobs = panel.total_headroom_blobs,
+        total_original_tokens = panel.total_original_tokens,
+        total_compressed_tokens = panel.total_compressed_tokens,
+        estimated_saved_tokens = panel.estimated_saved_tokens,
+        average_savings_percent = panel.average_savings_percent,
+        over_budget = panel.over_budget_after_headroom_count,
+        primary_source = panel.primary_source,
+        primary_content_kind = panel.primary_content_kind,
+        sources = render_token_usage_source_summary(panel),
+        content_kinds = render_token_usage_kind_summary(panel),
+        retrieve = render_token_usage_retrieve_summary(panel),
+        refresh = panel.commands.refresh.join(" "),
+        stats = panel.commands.headroom_stats.join(" "),
+        analyze = panel.commands.analyze_payload.join(" "),
+        harness = panel.commands.harness.join(" "),
+        costs = panel.commands.cost_ledger.join(" "),
     )
 }
 
@@ -8976,6 +9057,15 @@ fn build_ui_composition_panel(
                     vec!["forge interactive structured-logs --output json".to_string()],
                 ),
                 core_ui_widget(
+                    "token_usage_panel",
+                    "Token usage",
+                    "token_usage_panel",
+                    "token_usage_renderer",
+                    "standard",
+                    "half",
+                    vec!["forge interactive token-usage --output json".to_string()],
+                ),
+                core_ui_widget(
                     "artifact_panel",
                     "Artifact panel",
                     "artifact_panel",
@@ -9547,6 +9637,64 @@ fn render_artifact_entry_summary(panel: &InteractiveArtifactPanel) -> String {
     }
 }
 
+fn render_token_usage_source_summary(panel: &InteractiveTokenUsagePanel) -> String {
+    if panel.source_buckets.is_empty() {
+        return "none".to_string();
+    }
+
+    panel
+        .source_buckets
+        .iter()
+        .take(8)
+        .map(|bucket| {
+            format!(
+                "{} blobs {}, saved {} tokens ({:.2}%)",
+                bucket.source,
+                bucket.blob_count,
+                bucket.estimated_saved_tokens,
+                bucket.savings_percent
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn render_token_usage_kind_summary(panel: &InteractiveTokenUsagePanel) -> String {
+    if panel.content_kind_buckets.is_empty() {
+        return "none".to_string();
+    }
+
+    panel
+        .content_kind_buckets
+        .iter()
+        .take(8)
+        .map(|bucket| {
+            format!(
+                "{} blobs {}, saved {} tokens ({:.2}%)",
+                bucket.content_kind,
+                bucket.blob_count,
+                bucket.estimated_saved_tokens,
+                bucket.savings_percent
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn render_token_usage_retrieve_summary(panel: &InteractiveTokenUsagePanel) -> String {
+    if panel.retrieve_commands.is_empty() {
+        "none".to_string()
+    } else {
+        panel
+            .retrieve_commands
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+}
+
 fn render_workflow_dag_summary(panel: &InteractiveWorkflowDagPanel) -> String {
     if panel.workflows.is_empty() {
         return "none".to_string();
@@ -9768,6 +9916,126 @@ fn build_artifact_panel(
             ],
             workflow_list: vec![
                 "list".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        },
+    })
+}
+
+fn build_token_usage_panel(store: &ForgeStore) -> Result<InteractiveTokenUsagePanel> {
+    let headroom_stats = build_headroom_stats_report(
+        store,
+        HeadroomStatsOptions {
+            source: None,
+            content_kind: None,
+            limit: 10,
+        },
+    )?;
+    let primary_source = headroom_stats
+        .primary_savings_source
+        .clone()
+        .or_else(|| {
+            headroom_stats
+                .by_source
+                .first()
+                .map(|bucket| bucket.source.clone())
+        })
+        .unwrap_or_else(|| "none".to_string());
+    let primary_content_kind = headroom_stats
+        .primary_savings_content_kind
+        .clone()
+        .or_else(|| {
+            headroom_stats
+                .by_content_kind
+                .first()
+                .map(|bucket| bucket.content_kind.clone())
+        })
+        .unwrap_or_else(|| "none".to_string());
+    let retrieve_commands = headroom_stats
+        .next_commands
+        .iter()
+        .filter(|command| command.contains("retrieve-headroom"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let retrieve_top = retrieve_commands
+        .first()
+        .and_then(|_| headroom_stats.top_saved_blobs.first())
+        .map(|blob| {
+            vec![
+                "harness".to_string(),
+                "retrieve-headroom".to_string(),
+                "--ref".to_string(),
+                blob.retrieval_ref.clone(),
+                "--include-content".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]
+        })
+        .unwrap_or_else(|| {
+            vec![
+                "harness".to_string(),
+                "retrieve-headroom".to_string(),
+                "--ref".to_string(),
+                "<retrieval-ref>".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]
+        });
+
+    Ok(InteractiveTokenUsagePanel {
+        schema_version: INTERACTIVE_TOKEN_USAGE_SCHEMA_VERSION.to_string(),
+        status: "token_usage_ready".to_string(),
+        operational_status: headroom_stats.operational_status.clone(),
+        recommended_action: headroom_stats.recommended_action.clone(),
+        total_headroom_blobs: headroom_stats.total_blobs,
+        total_original_tokens: headroom_stats.total_estimated_original_tokens,
+        total_compressed_tokens: headroom_stats.total_estimated_compressed_tokens,
+        estimated_saved_tokens: headroom_stats.total_estimated_saved_tokens,
+        average_savings_percent: headroom_stats.average_savings_percent,
+        over_budget_after_headroom_count: headroom_stats.over_budget_after_headroom_count,
+        primary_source,
+        primary_content_kind,
+        retrieve_commands,
+        source_buckets: headroom_stats.by_source.clone(),
+        content_kind_buckets: headroom_stats.by_content_kind.clone(),
+        headroom_stats,
+        commands: InteractiveTokenUsageCommands {
+            refresh: vec![
+                "interactive".to_string(),
+                "token-usage".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            headroom_stats: vec![
+                "harness".to_string(),
+                "headroom-stats".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            analyze_payload: vec![
+                "harness".to_string(),
+                "token-headroom".to_string(),
+                "--content".to_string(),
+                "<payload>".to_string(),
+                "--kind".to_string(),
+                "log".to_string(),
+                "--budget-tokens".to_string(),
+                "<n>".to_string(),
+                "--persist".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            retrieve_top,
+            harness: vec![
+                "interactive".to_string(),
+                "harness".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            cost_ledger: vec![
+                "cost".to_string(),
+                "ledger".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -10567,6 +10835,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Artifacts",
             "Show workflow artifacts and evidence from the interactive panel.",
             &["forge", "interactive", "artifacts"],
+            false,
+            "low",
+        ),
+        slash(
+            "/tokens",
+            "Tokens",
+            "Show token usage, context compression and headroom savings.",
+            &["forge", "interactive", "token-usage"],
             false,
             "low",
         ),
@@ -11448,6 +11724,10 @@ fn repl_focus_panels() -> Vec<InteractiveReplFocusPanel> {
             title: "Harness",
         },
         InteractiveReplFocusPanel {
+            panel_id: "token_usage_panel",
+            title: "Token usage",
+        },
+        InteractiveReplFocusPanel {
             panel_id: "structured_logs_panel",
             title: "Structured logs",
         },
@@ -11538,6 +11818,10 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
             )?;
             Ok(render_interactive_harness(&panel))
         }
+        "token_usage_panel" => {
+            let panel = build_interactive_token_usage(store)?;
+            Ok(render_interactive_token_usage(&panel))
+        }
         "structured_logs_panel" => {
             let panel = build_interactive_structured_logs(store)?;
             Ok(render_interactive_structured_logs(&panel))
@@ -11609,6 +11893,11 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
                 InteractiveHarnessOptions::default_for_current_dir(),
             )?;
             println!("{}", render_interactive_harness(&panel));
+            Ok(true)
+        }
+        "/tokens" | "/token-usage" => {
+            let panel = build_interactive_token_usage(store)?;
+            println!("{}", render_interactive_token_usage(&panel));
             Ok(true)
         }
         "/logs" => {

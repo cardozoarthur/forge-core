@@ -100,9 +100,9 @@ use crate::interactive::{
     build_interactive_operational_cockpit, build_interactive_patch_workbench,
     build_interactive_permissions, build_interactive_readiness, build_interactive_release_gates,
     build_interactive_schedules, build_interactive_sessions, build_interactive_structured_logs,
-    build_interactive_task_board, build_interactive_workflow_dag, route_interactive_input,
-    slash_command_catalog, InteractiveHarnessOptions, InteractiveHomeOptions,
-    InteractiveSessionsOptions,
+    build_interactive_task_board, build_interactive_token_usage, build_interactive_workflow_dag,
+    route_interactive_input, slash_command_catalog, InteractiveHarnessOptions,
+    InteractiveHomeOptions, InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -3289,6 +3289,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.artifacts.v1",
                 &["forge", "interactive", "artifacts", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.token_usage",
+                "Inspect Interactive Token Usage",
+                "Return the Forge interactive token/headroom usage panel with persisted headroom receipts, saved-token totals, context-compression buckets, retrieval commands and harness drill-downs without launching a TTY.",
+                object_schema(&[], &[]),
+                "forge.interactive.token_usage.v1",
+                &["forge", "interactive", "token-usage", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7613,6 +7622,9 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(build_interactive_task_board(store)?)?
         }
         "forge.interactive.artifacts" => serde_json::to_value(build_interactive_artifacts(store)?)?,
+        "forge.interactive.token_usage" => {
+            serde_json::to_value(build_interactive_token_usage(store)?)?
+        }
         "forge.interactive.workflow_dag" => {
             serde_json::to_value(build_interactive_workflow_dag(store)?)?
         }

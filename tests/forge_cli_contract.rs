@@ -45227,6 +45227,165 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     );
 }
 
+#[test]
+fn interactive_token_usage_panel_exposes_headroom_consumption_for_tui_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let content = (0..90)
+        .map(|index| format!("line {index}: verbose tool output with repeated context pressure"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "token-headroom",
+            "--content",
+            &content,
+            "--kind",
+            "log",
+            "--budget-tokens",
+            "80",
+            "--source",
+            "interactive-token-usage-test",
+            "--persist",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "token-usage",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.interactive.token_usage.v1");
+    assert_eq!(json["status"], "token_usage_ready");
+    assert_eq!(
+        json["headroom_stats"]["schema_version"],
+        "forge.harness.headroom_stats.v1"
+    );
+    assert_eq!(json["total_headroom_blobs"], 1);
+    assert!(
+        json["estimated_saved_tokens"].as_u64().unwrap() > 0,
+        "token usage panel should expose saved-token evidence from persisted headroom receipts"
+    );
+    assert_eq!(json["primary_source"], "interactive-token-usage-test");
+    assert_eq!(json["primary_content_kind"], "log");
+    assert!(json["retrieve_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("forge harness retrieve-headroom --ref")));
+    assert!(json["commands"]["headroom_stats"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("headroom-stats")));
+
+    let home_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["token_usage_panel"]["schema_version"],
+        "forge.interactive.token_usage.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["token_usage_panel"]["total_headroom_blobs"],
+        1
+    );
+    assert!(home["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/tokens")));
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|region| region["region_id"] == "observability"
+            && region["widgets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|widget| widget["widget_id"] == "token_usage_panel")));
+
+    let text = String::from_utf8(
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "interactive",
+                "token-usage",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .unwrap();
+    assert!(text.contains("Token usage"));
+    assert!(text.contains("interactive-token-usage-test"));
+    assert!(text.contains("retrieve-headroom"));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.token_usage");
+    assert_eq!(tool["output_schema"], "forge.interactive.token_usage.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.token_usage"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.token_usage.v1"
+    );
+    assert_eq!(mcp_json["result"]["total_headroom_blobs"], 1);
+}
+
 #[cfg(unix)]
 #[test]
 fn interactive_sessions_command_and_mcp_surface_are_dedicated() {
