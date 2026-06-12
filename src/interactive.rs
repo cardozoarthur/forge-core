@@ -432,6 +432,11 @@ pub struct InteractiveActionInvocationReport {
     pub not_executed: bool,
     pub selected_command: Vec<String>,
     pub selected_command_text: String,
+    pub source_panel: String,
+    pub risk_level: String,
+    pub mutates_workflow: bool,
+    pub requires_approval: bool,
+    pub execution_boundary: String,
     pub blocked_reason: String,
     pub recommended_action: String,
     pub next_commands: Vec<Vec<String>>,
@@ -2303,6 +2308,26 @@ pub fn build_interactive_action_invocation(
     let selected_command_text = selected_command.join(" ");
     let next_commands = operation_plan.next_commands.clone();
     let recommended_action = operation_plan.recommended_action.clone();
+    let source_panel = action
+        .as_ref()
+        .map(|action| action.source_panel.clone())
+        .unwrap_or_else(|| "none".to_string());
+    let risk_level = action
+        .as_ref()
+        .map(|action| action.risk_level.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let mutates_workflow = action
+        .as_ref()
+        .is_some_and(|action| action.mutates_workflow);
+    let requires_approval = action
+        .as_ref()
+        .is_some_and(|action| action.requires_approval);
+    let execution_boundary = if can_execute {
+        "external_command_not_executed"
+    } else {
+        "diagnostic_only_not_executed"
+    }
+    .to_string();
 
     Ok(InteractiveActionInvocationReport {
         schema_version: INTERACTIVE_ACTION_INVOCATION_SCHEMA_VERSION.to_string(),
@@ -2314,6 +2339,11 @@ pub fn build_interactive_action_invocation(
         not_executed: true,
         selected_command,
         selected_command_text,
+        source_panel,
+        risk_level,
+        mutates_workflow,
+        requires_approval,
+        execution_boundary,
         blocked_reason,
         recommended_action,
         next_commands,
@@ -6460,18 +6490,6 @@ pub fn render_interactive_action_invocation(report: &InteractiveActionInvocation
     } else {
         report.selected_command_text.clone()
     };
-    let (source_panel, risk_level, mutates_workflow, requires_approval) = report
-        .action
-        .as_ref()
-        .map(|action| {
-            (
-                action.source_panel.as_str(),
-                action.risk_level.as_str(),
-                action.mutates_workflow,
-                action.requires_approval,
-            )
-        })
-        .unwrap_or(("none", "unknown", false, false));
     format!(
         "Action invocation: {status}; action {action_id}; matches {match_count}; can_execute {can_execute}; diagnostic_only {diagnostic_only}; not executed\nSelected command: {command}\nSource: source {source_panel}; risk {risk_level}; mutates_workflow {mutates_workflow}; requires_approval {requires_approval}\nRecommended action: {recommended_action}; blocked_reason {blocked_reason}\n",
         status = report.status,
@@ -6480,10 +6498,10 @@ pub fn render_interactive_action_invocation(report: &InteractiveActionInvocation
         can_execute = report.can_execute,
         diagnostic_only = report.diagnostic_only,
         command = command,
-        source_panel = source_panel,
-        risk_level = risk_level,
-        mutates_workflow = mutates_workflow,
-        requires_approval = requires_approval,
+        source_panel = report.source_panel,
+        risk_level = report.risk_level,
+        mutates_workflow = report.mutates_workflow,
+        requires_approval = report.requires_approval,
         recommended_action = report.recommended_action,
         blocked_reason = report.blocked_reason,
     )

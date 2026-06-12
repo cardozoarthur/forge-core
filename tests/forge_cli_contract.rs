@@ -42250,6 +42250,11 @@ views:
     assert_eq!(ready["diagnostic_only"], false);
     assert_eq!(ready["selected_command"][0], "patch");
     assert_eq!(ready["selected_command"][1], "diff");
+    assert_eq!(ready["source_panel"], "patch_workbench_panel");
+    assert_eq!(ready["risk_level"], "low");
+    assert_eq!(ready["mutates_workflow"], false);
+    assert_eq!(ready["requires_approval"], false);
+    assert_eq!(ready["execution_boundary"], "external_command_not_executed");
     assert_eq!(ready["operation_plan"]["status"], "ready");
     assert_eq!(
         ready["operation_plan"]["recommended_action"],
@@ -42287,6 +42292,14 @@ views:
         headroom["selected_command_text"],
         "harness headroom-stats --output json"
     );
+    assert_eq!(headroom["source_panel"], "harness_panel");
+    assert_eq!(headroom["risk_level"], "low");
+    assert_eq!(headroom["mutates_workflow"], false);
+    assert_eq!(headroom["requires_approval"], false);
+    assert_eq!(
+        headroom["execution_boundary"],
+        "external_command_not_executed"
+    );
     assert_eq!(headroom["action"]["source_panel"], "harness_panel");
     assert_eq!(headroom["operation_plan"]["status"], "ready");
 
@@ -42314,6 +42327,14 @@ views:
     assert_eq!(blocked["can_execute"], false);
     assert_eq!(blocked["diagnostic_only"], true);
     assert_eq!(blocked["selected_command"], serde_json::json!([]));
+    assert_eq!(blocked["source_panel"], "zzi_ops_panel");
+    assert_eq!(blocked["risk_level"], "low");
+    assert_eq!(blocked["mutates_workflow"], false);
+    assert_eq!(blocked["requires_approval"], false);
+    assert_eq!(
+        blocked["execution_boundary"],
+        "diagnostic_only_not_executed"
+    );
     assert_eq!(
         blocked["blocked_reason"],
         "permission_gate_undeclared_permission"
@@ -42359,6 +42380,14 @@ views:
     assert_eq!(missing["status"], "action_invocation_not_found");
     assert_eq!(missing["can_execute"], false);
     assert_eq!(missing["diagnostic_only"], true);
+    assert_eq!(missing["source_panel"], "none");
+    assert_eq!(missing["risk_level"], "unknown");
+    assert_eq!(missing["mutates_workflow"], false);
+    assert_eq!(missing["requires_approval"], false);
+    assert_eq!(
+        missing["execution_boundary"],
+        "diagnostic_only_not_executed"
+    );
     assert_eq!(
         missing["operation_plan"]["recommended_action"],
         "inspect_action_registry"
