@@ -7307,11 +7307,12 @@ fn render_autocomplete_suggestion_summary(panel: &InteractiveAutocompletePanel) 
         .take(12)
         .map(|suggestion| {
             format!(
-                "{} [{}] {} score={} mutates={} approval={}",
+                "{} [{}] {} score={} risk={} mutates={} approval={}",
                 suggestion.label,
                 suggestion.kind,
                 suggestion.source_panel,
                 suggestion.score,
+                suggestion.risk_level,
                 suggestion.mutates_workflow,
                 suggestion.requires_approval
             )

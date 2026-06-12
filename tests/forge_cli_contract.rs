@@ -43128,6 +43128,7 @@ fn interactive_autocomplete_suggests_slash_and_palette_actions_for_replacement_c
     let text = String::from_utf8(text_output).unwrap();
     assert!(text.contains("Autocomplete"));
     assert!(text.contains("/harness"));
+    assert!(text.contains("risk=low"));
 
     let home_output = forge()
         .args([
