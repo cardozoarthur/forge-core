@@ -46374,6 +46374,58 @@ fn no_args_tty_enters_repl_and_shows_dashboard_when_pseudo_terminal_is_available
 }
 
 #[test]
+fn interactive_repl_slash_commands_render_operational_panels_in_place() {
+    let script = if Path::new("/usr/bin/script").exists() {
+        "/usr/bin/script"
+    } else if Path::new("/bin/script").exists() {
+        "/bin/script"
+    } else {
+        return;
+    };
+    let timeout = if Path::new("/usr/bin/timeout").exists() {
+        "/usr/bin/timeout"
+    } else if Path::new("/bin/timeout").exists() {
+        "/bin/timeout"
+    } else {
+        return;
+    };
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let binary = assert_cmd::cargo::cargo_bin("forge");
+    let command = format!("{} --store {}", binary.display(), store.display());
+
+    let mut child = std::process::Command::new(timeout)
+        .args(["3", script, "-q", "-c", &command, "/dev/null"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin
+            .write_all(b"/cockpit\n/task-board\n/readiness\n/exit\n")
+            .unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.matches("Operational cockpit:").count() >= 2);
+    assert!(stdout.matches("Task board:").count() >= 2);
+    assert!(stdout.contains("Interactive readiness:"));
+    assert!(
+        !stdout.contains("Equivalent: forge interactive operational-cockpit"),
+        "/cockpit should render the operational cockpit inside the REPL, not ask the operator to run another command"
+    );
+    assert!(
+        !stdout.contains("Equivalent: forge interactive task-board"),
+        "/task-board should render the task board inside the REPL"
+    );
+    assert!(stdout.contains("goodbye"));
+}
+
+#[test]
 fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

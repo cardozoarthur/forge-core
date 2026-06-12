@@ -1770,11 +1770,13 @@ pub fn build_interactive_home_with_options(
                 "forge interactive identity --output json".to_string(),
             ],
             quick_actions: vec![
+                "/cockpit".to_string(),
                 "/status".to_string(),
                 "/workflows".to_string(),
                 "/runs".to_string(),
                 "/artifacts".to_string(),
                 "/task-board".to_string(),
+                "/readiness".to_string(),
                 "/milestone".to_string(),
                 "/sync".to_string(),
                 "/brains".to_string(),
@@ -7856,7 +7858,7 @@ fn build_ui_composition_panel(
                     "cockpit_renderer",
                     "detailed",
                     "full",
-                    vec!["forge interactive home --output json".to_string()],
+                    vec!["forge interactive operational-cockpit --output json".to_string()],
                 ),
                 core_ui_widget(
                     "digital_twin_panel",
@@ -9315,6 +9317,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/readiness",
+            "Readiness",
+            "Show executor, brain, shell and harness readiness before operational handoff.",
+            &["forge", "interactive", "readiness"],
+            false,
+            "low",
+        ),
+        slash(
             "/costs",
             "Costs",
             "Inspect or simulate workflow costs.",
@@ -9960,6 +9970,9 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
                 dispatch_action_command(&store, trimmed)?;
                 continue;
             }
+            if dispatch_read_only_panel_command(&store, trimmed)? {
+                continue;
+            }
 
             if route.recognized {
                 println!(
@@ -10002,6 +10015,60 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
     }
 
     Ok(0)
+}
+
+fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<bool> {
+    match input.trim() {
+        "/cockpit" => {
+            let panel = build_interactive_operational_cockpit(store)?;
+            println!("{}", render_interactive_operational_cockpit(&panel));
+            Ok(true)
+        }
+        "/task-board" => {
+            let panel = build_interactive_task_board(store)?;
+            println!("{}", render_interactive_task_board(&panel));
+            Ok(true)
+        }
+        "/readiness" => {
+            let panel = build_interactive_readiness(store)?;
+            println!("{}", render_interactive_readiness(&panel));
+            Ok(true)
+        }
+        "/sessions" => {
+            let panel = build_interactive_sessions(store, InteractiveSessionsOptions::default())?;
+            println!("{}", render_interactive_sessions(&panel));
+            Ok(true)
+        }
+        "/harness" => {
+            let panel = build_interactive_harness(
+                store,
+                InteractiveHarnessOptions::default_for_current_dir(),
+            )?;
+            println!("{}", render_interactive_harness(&panel));
+            Ok(true)
+        }
+        "/logs" => {
+            let panel = build_interactive_structured_logs(store)?;
+            println!("{}", render_interactive_structured_logs(&panel));
+            Ok(true)
+        }
+        "/permissions" => {
+            let panel = build_interactive_permissions(store)?;
+            println!("{}", render_interactive_permissions(&panel));
+            Ok(true)
+        }
+        "/identity" => {
+            let panel = build_interactive_identity(store, std::path::Path::new("."))?;
+            println!("{}", render_interactive_identity(&panel));
+            Ok(true)
+        }
+        "/workflow-dag" | "/dag" => {
+            let panel = build_interactive_workflow_dag(store)?;
+            println!("{}", render_interactive_workflow_dag(&panel));
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn dispatch_actions_command(store: &ForgeStore, input: &str) -> Result<()> {
