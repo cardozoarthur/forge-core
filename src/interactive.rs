@@ -6657,7 +6657,7 @@ fn render_permission_approval_summary(panel: &InteractivePermissionsPanel) -> St
 
 pub fn render_interactive_workflow_dag(panel: &InteractiveWorkflowDagPanel) -> String {
     format!(
-        "Workflow DAG: {status}; workflows {workflow_count}, nodes {node_count}, edges {edge_count}, running {running}, blocked {blocked}, waits {waits}, human waits {human_waits}\nWorkflows: {workflows}\n",
+        "Workflow DAG: {status}; workflows {workflow_count}, nodes {node_count}, edges {edge_count}, running {running}, blocked {blocked}, waits {waits}, human waits {human_waits}\nWorkflows: {workflows}\nNodes: {nodes}\nEdges: {edges}\nCommands: {commands}\n",
         status = panel.status,
         workflow_count = panel.workflow_count,
         node_count = panel.node_count,
@@ -6667,6 +6667,9 @@ pub fn render_interactive_workflow_dag(panel: &InteractiveWorkflowDagPanel) -> S
         waits = panel.wait_node_count,
         human_waits = panel.human_wait_count,
         workflows = render_workflow_dag_summary(panel),
+        nodes = render_workflow_dag_node_summary(panel),
+        edges = render_workflow_dag_edge_summary(panel),
+        commands = render_workflow_dag_command_summary(panel),
     )
 }
 
@@ -7483,6 +7486,94 @@ fn render_workflow_dag_summary(panel: &InteractiveWorkflowDagPanel) -> String {
         })
         .collect::<Vec<_>>()
         .join(" | ")
+}
+
+fn render_workflow_dag_node_summary(panel: &InteractiveWorkflowDagPanel) -> String {
+    let nodes = panel
+        .workflows
+        .iter()
+        .flat_map(|workflow| {
+            workflow
+                .nodes
+                .iter()
+                .map(move |node| (workflow.workflow_id.as_str(), node))
+        })
+        .take(20)
+        .map(|(workflow_id, node)| {
+            format!(
+                "{}/{} [{}] exec {} deps {}/{} ready {} human {}/{} title {}",
+                workflow_id,
+                node.task_id,
+                node.status,
+                node.executor,
+                node.dependency_count,
+                node.dependent_count,
+                node.ready_for_execution,
+                node.human_required,
+                node.human_interaction_state,
+                node.title
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if nodes.is_empty() {
+        "none".to_string()
+    } else {
+        nodes.join(" | ")
+    }
+}
+
+fn render_workflow_dag_edge_summary(panel: &InteractiveWorkflowDagPanel) -> String {
+    let edges = panel
+        .workflows
+        .iter()
+        .flat_map(|workflow| {
+            workflow
+                .edges
+                .iter()
+                .map(move |edge| (workflow.workflow_id.as_str(), edge))
+        })
+        .take(20)
+        .map(|(workflow_id, edge)| {
+            format!(
+                "{}/{} -> {} kind {} dependency_status {}",
+                workflow_id,
+                edge.from_task_id,
+                edge.to_task_id,
+                edge.edge_kind,
+                edge.dependency_status
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if edges.is_empty() {
+        "none".to_string()
+    } else {
+        edges.join(" | ")
+    }
+}
+
+fn render_workflow_dag_command_summary(panel: &InteractiveWorkflowDagPanel) -> String {
+    let commands = panel
+        .workflows
+        .iter()
+        .take(12)
+        .map(|workflow| {
+            format!(
+                "{} inspect {}; task_board {}; validate {}",
+                workflow.workflow_id,
+                workflow.commands.inspect.join(" "),
+                workflow.commands.task_board.join(" "),
+                workflow.commands.validate.join(" ")
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if commands.is_empty() {
+        "none".to_string()
+    } else {
+        commands.join(" | ")
+    }
 }
 
 fn build_workflow_dag_panel(

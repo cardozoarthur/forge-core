@@ -41821,6 +41821,15 @@ fn interactive_workflow_dag_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("Workflow DAG"));
     assert!(text.contains(workflow_id));
     assert!(text.contains("human waits"));
+    assert!(text.contains("Nodes:"));
+    assert!(text.contains(&format!("{workflow_id}/{task_id}")));
+    assert!(text.contains("human true/pending"));
+    assert!(text.contains("Edges:"));
+    assert!(text.contains("dependency"));
+    assert!(text.contains("Commands:"));
+    assert!(text.contains(&format!("inspect {workflow_id}")));
+    assert!(text.contains("interactive task-board"));
+    assert!(text.contains(&format!("validate --workflow {workflow_id}")));
 
     let manifest = forge()
         .args(["mcp", "tools", "--output", "json"])
