@@ -31,7 +31,7 @@ use crate::workflow::{
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -168,6 +168,45 @@ pub struct MilestoneAttachEvidenceOptions<'a> {
     pub artifact_path: &'a Path,
     pub approved_by: &'a str,
     pub origin: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MilestoneEvidencePlanOptions<'a> {
+    pub version: &'a str,
+    pub capability_id: &'a str,
+    pub project_root: Option<&'a Path>,
+    pub connected_brain: Option<&'a str>,
+    pub connected_runtime: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneEvidencePlanReport {
+    pub schema_version: String,
+    pub milestone: String,
+    pub capability_id: String,
+    pub status: String,
+    pub project_root: Option<String>,
+    pub ready_to_collect_evidence: bool,
+    pub required_attached_evidence_kinds: Vec<String>,
+    pub attached_evidence_kinds: Vec<String>,
+    pub missing_attached_evidence_kinds: Vec<String>,
+    pub config_checks: Vec<MilestoneEvidencePlanConfigCheck>,
+    pub configured_evidence_sources: Vec<String>,
+    pub evidence_collection_commands: Vec<String>,
+    pub attach_commands: Vec<String>,
+    pub next_action: String,
+    pub promotion_impact: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneEvidencePlanConfigCheck {
+    pub id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_id: Option<String>,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -514,6 +553,430 @@ pub fn load_milestone_attached_evidence(
     }
     evidence.sort_by_key(|item| item.global_event_id.unwrap_or_default());
     Ok(evidence)
+}
+
+pub fn build_milestone_evidence_plan(
+    store: &ForgeStore,
+    options: MilestoneEvidencePlanOptions<'_>,
+) -> Result<MilestoneEvidencePlanReport> {
+    let version = normalize_required(options.version, "version")?;
+    if version != SUPPORTED_MILESTONE {
+        bail!("unsupported milestone {version}; currently supported: {SUPPORTED_MILESTONE}");
+    }
+    let capability_id = normalize_required(options.capability_id, "capability")?;
+    if !forge_05_capabilities()
+        .iter()
+        .any(|capability| capability.id == capability_id)
+    {
+        bail!("unknown milestone capability `{capability_id}` for milestone {version}");
+    }
+
+    let project_root = options
+        .project_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let required_attached_evidence_kinds =
+        milestone_required_attached_evidence_kinds(&capability_id);
+    let attached_evidence = load_milestone_attached_evidence(store, &version)?
+        .into_iter()
+        .filter(|evidence| evidence.capability_id == capability_id)
+        .collect::<Vec<_>>();
+    let attached_evidence_kinds = attached_evidence
+        .iter()
+        .map(|evidence| evidence.kind.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let attached_evidence_kind_set = attached_evidence_kinds
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let missing_attached_evidence_kinds = required_attached_evidence_kinds
+        .iter()
+        .filter(|kind| !attached_evidence_kind_set.contains(*kind))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut config_checks = Vec::new();
+    let mut configured_evidence_sources = Vec::new();
+    let mut evidence_collection_commands = Vec::new();
+    let mut attach_commands = Vec::new();
+
+    match capability_id.as_str() {
+        "replacement_grade_cli" => {
+            plan_replacement_grade_cli_evidence(
+                &project_root,
+                options.connected_brain,
+                &mut config_checks,
+                &mut configured_evidence_sources,
+                &mut evidence_collection_commands,
+            )?;
+            attach_commands.extend(
+                required_attached_evidence_kinds
+                    .iter()
+                    .map(|kind| milestone_attach_command(&version, &capability_id, kind)),
+            );
+        }
+        "experimental_multimodal_runtime" => {
+            plan_experimental_multimodal_evidence(
+                &project_root,
+                options.connected_runtime,
+                &mut config_checks,
+                &mut configured_evidence_sources,
+                &mut evidence_collection_commands,
+            )?;
+            attach_commands.extend(
+                required_attached_evidence_kinds
+                    .iter()
+                    .map(|kind| milestone_attach_command(&version, &capability_id, kind)),
+            );
+        }
+        _ => {
+            config_checks.push(MilestoneEvidencePlanConfigCheck {
+                id: "no_project_specific_evidence_inputs".to_string(),
+                status: "not_required".to_string(),
+                path: None,
+                selected_id: None,
+                summary: "This milestone capability has no project-specific evidence input plan."
+                    .to_string(),
+            });
+        }
+    }
+
+    let ready_to_collect_evidence = config_checks
+        .iter()
+        .filter(|check| check.status != "not_required")
+        .all(|check| check.status == "ready");
+    let status = if ready_to_collect_evidence {
+        "evidence_inputs_ready"
+    } else if config_checks
+        .iter()
+        .any(|check| matches!(check.status.as_str(), "blocked" | "invalid"))
+    {
+        "blocked_project_evidence_inputs"
+    } else {
+        "missing_project_evidence_inputs"
+    };
+    let next_action = if ready_to_collect_evidence {
+        "Run the evidence collection command, inspect the generated receipt, then attach it with the matching milestone evidence kind.".to_string()
+    } else {
+        "Create or fix the required project .forge manifests before collecting milestone evidence."
+            .to_string()
+    };
+
+    Ok(MilestoneEvidencePlanReport {
+        schema_version: "forge.milestone.evidence_plan.v1".to_string(),
+        milestone: version,
+        capability_id,
+        status: status.to_string(),
+        project_root: Some(project_root.display().to_string()),
+        ready_to_collect_evidence,
+        required_attached_evidence_kinds,
+        attached_evidence_kinds,
+        missing_attached_evidence_kinds,
+        config_checks,
+        configured_evidence_sources,
+        evidence_collection_commands,
+        attach_commands,
+        next_action,
+        promotion_impact: "planning_only_not_auto_promoted".to_string(),
+    })
+}
+
+pub fn milestone_required_attached_evidence_kinds(capability_id: &str) -> Vec<String> {
+    match capability_id {
+        "replacement_grade_cli" => vec![
+            "external_brain_provider_execution".to_string(),
+            "broader_project_coding_research_workflow".to_string(),
+            "terminal_file_editing_ux".to_string(),
+        ],
+        "experimental_multimodal_runtime" => vec!["production_runtime_benchmark".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+fn plan_replacement_grade_cli_evidence(
+    project_root: &Path,
+    connected_brain: Option<&str>,
+    config_checks: &mut Vec<MilestoneEvidencePlanConfigCheck>,
+    configured_evidence_sources: &mut Vec<String>,
+    evidence_collection_commands: &mut Vec<String>,
+) -> Result<()> {
+    let manifest_path = project_root.join(CONNECTED_BRAIN_RUNTIMES_RELATIVE_PATH);
+    if !manifest_path.is_file() {
+        config_checks.push(MilestoneEvidencePlanConfigCheck {
+            id: "connected_brain_manifest".to_string(),
+            status: "missing".to_string(),
+            path: Some(manifest_path.display().to_string()),
+            selected_id: connected_brain.map(ToString::to_string),
+            summary: format!(
+                "Create {} with a provider for replacement_grade_cli.",
+                CONNECTED_BRAIN_RUNTIMES_RELATIVE_PATH
+            ),
+        });
+        evidence_collection_commands.push(format!(
+            "forge milestone cli-demo --origin codex --project-root {} --connected-brain <provider-id> --output json",
+            project_root.display()
+        ));
+        return Ok(());
+    }
+
+    let manifest: ConnectedBrainRuntimeManifest =
+        serde_json::from_slice(&fs::read(&manifest_path)?).with_context(|| {
+            format!(
+                "invalid connected brain runtime manifest {}",
+                manifest_path.display()
+            )
+        })?;
+    config_checks.push(MilestoneEvidencePlanConfigCheck {
+        id: "connected_brain_manifest".to_string(),
+        status: "ready".to_string(),
+        path: Some(manifest_path.display().to_string()),
+        selected_id: None,
+        summary: "Connected brain runtime manifest is present and parseable.".to_string(),
+    });
+
+    let selected = manifest.providers.into_iter().find(|provider| {
+        let id_matches = connected_brain
+            .map(|connected_brain| provider.id == connected_brain)
+            .unwrap_or(true);
+        id_matches
+            && provider
+                .capabilities
+                .iter()
+                .any(|capability| capability == "replacement_grade_cli")
+    });
+    let Some(provider) = selected else {
+        config_checks.push(MilestoneEvidencePlanConfigCheck {
+            id: "connected_brain_provider".to_string(),
+            status: "missing".to_string(),
+            path: Some(manifest_path.display().to_string()),
+            selected_id: connected_brain.map(ToString::to_string),
+            summary: "No provider in connected-brain-runtimes.json declares replacement_grade_cli."
+                .to_string(),
+        });
+        return Ok(());
+    };
+
+    let provider_ready = !provider.command.is_empty()
+        && !provider.network_access
+        && !provider.device_access
+        && !provider.external_resources_mutated
+        && provider
+            .capabilities
+            .iter()
+            .any(|capability| capability == "replacement_grade_cli");
+    let status = if provider_ready { "ready" } else { "blocked" };
+    let summary = if provider_ready {
+        "Connected brain provider is declared, approved for guarded execution and safe to probe."
+            .to_string()
+    } else {
+        "Connected brain provider must have a command, replacement_grade_cli capability and no network/device/external-resource mutation declarations."
+            .to_string()
+    };
+    config_checks.push(MilestoneEvidencePlanConfigCheck {
+        id: "connected_brain_provider".to_string(),
+        status: status.to_string(),
+        path: Some(manifest_path.display().to_string()),
+        selected_id: Some(provider.id.clone()),
+        summary,
+    });
+    configured_evidence_sources.push(format!("connected_brain_provider:{}", provider.id));
+    evidence_collection_commands.push(format!(
+        "forge milestone cli-demo --origin codex --project-root {} --connected-brain {} --output json",
+        project_root.display(),
+        provider.id
+    ));
+    Ok(())
+}
+
+fn plan_experimental_multimodal_evidence(
+    project_root: &Path,
+    connected_runtime: Option<&str>,
+    config_checks: &mut Vec<MilestoneEvidencePlanConfigCheck>,
+    configured_evidence_sources: &mut Vec<String>,
+    evidence_collection_commands: &mut Vec<String>,
+) -> Result<()> {
+    let feature_path = project_root.join(".forge/multimodal.json");
+    let feature_enabled = if !feature_path.is_file() {
+        config_checks.push(MilestoneEvidencePlanConfigCheck {
+            id: "multimodal_feature_flag".to_string(),
+            status: "missing".to_string(),
+            path: Some(feature_path.display().to_string()),
+            selected_id: None,
+            summary: "Create .forge/multimodal.json with experimental_enabled=true and approval metadata."
+                .to_string(),
+        });
+        false
+    } else {
+        let feature: serde_json::Value = serde_json::from_slice(&fs::read(&feature_path)?)
+            .with_context(|| {
+                format!("invalid multimodal feature flag {}", feature_path.display())
+            })?;
+        let enabled = feature
+            .get("experimental_enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        config_checks.push(MilestoneEvidencePlanConfigCheck {
+            id: "multimodal_feature_flag".to_string(),
+            status: if enabled { "ready" } else { "blocked" }.to_string(),
+            path: Some(feature_path.display().to_string()),
+            selected_id: None,
+            summary: if enabled {
+                "Multimodal experimental feature flag is enabled for this project.".to_string()
+            } else {
+                "Multimodal feature flag exists but experimental_enabled is not true.".to_string()
+            },
+        });
+        enabled
+    };
+
+    let manifest_path = project_root.join(".forge/multimodal-runtimes.json");
+    if !manifest_path.is_file() {
+        config_checks.push(MilestoneEvidencePlanConfigCheck {
+            id: "multimodal_runtime_manifest".to_string(),
+            status: "missing".to_string(),
+            path: Some(manifest_path.display().to_string()),
+            selected_id: connected_runtime.map(ToString::to_string),
+            summary: "Create .forge/multimodal-runtimes.json with a production connected runtime."
+                .to_string(),
+        });
+        evidence_collection_commands.push(format!(
+            "forge multimodal runtime-benchmark --capability image_understanding --fixture static_image_labels --project-root {} --connected-runtime <runtime-id> --approved-by <operator> --confirm-runtime-execution --allow-model --output json",
+            project_root.display()
+        ));
+        return Ok(());
+    }
+
+    let manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path)?)
+        .with_context(|| {
+            format!(
+                "invalid multimodal runtime manifest {}",
+                manifest_path.display()
+            )
+        })?;
+    config_checks.push(MilestoneEvidencePlanConfigCheck {
+        id: "multimodal_runtime_manifest".to_string(),
+        status: "ready".to_string(),
+        path: Some(manifest_path.display().to_string()),
+        selected_id: None,
+        summary: "Multimodal runtime manifest is present and parseable.".to_string(),
+    });
+    let runtimes = manifest
+        .get("runtimes")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let selected = runtimes.into_iter().find(|runtime| {
+        let id = runtime
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        connected_runtime
+            .map(|connected_runtime| id == connected_runtime)
+            .unwrap_or_else(|| runtime.get("production").is_some())
+    });
+    let Some(runtime) = selected else {
+        config_checks.push(MilestoneEvidencePlanConfigCheck {
+            id: "multimodal_connected_runtime".to_string(),
+            status: "missing".to_string(),
+            path: Some(manifest_path.display().to_string()),
+            selected_id: connected_runtime.map(ToString::to_string),
+            summary: "No selected runtime with production evidence metadata was found.".to_string(),
+        });
+        return Ok(());
+    };
+    let runtime_id = runtime
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<runtime-id>")
+        .to_string();
+    let capabilities = runtime
+        .get("capabilities")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let capability = capabilities
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .next()
+        .unwrap_or("image_understanding")
+        .to_string();
+    let probe_command_ready = runtime
+        .get("probe_command")
+        .and_then(serde_json::Value::as_array)
+        .map(|command| !command.is_empty())
+        .unwrap_or(false);
+    let no_network = !runtime
+        .get("network_access")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let no_device = !runtime
+        .get("device_access")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let production = runtime
+        .get("production")
+        .unwrap_or(&serde_json::Value::Null);
+    let production_ready = production
+        .get("approved_by")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+        && production
+            .get("approval_ref")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        && production
+            .get("runtime_version")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        && production
+            .get("model_manifest_sha256")
+            .and_then(serde_json::Value::as_str)
+            .map(|value| value.len() == 64)
+            .unwrap_or(false)
+        && production
+            .get("model_license")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        && production
+            .get("evidence_artifacts")
+            .and_then(serde_json::Value::as_array)
+            .map(|artifacts| !artifacts.is_empty())
+            .unwrap_or(false);
+    let runtime_ready = feature_enabled
+        && probe_command_ready
+        && no_network
+        && no_device
+        && production_ready
+        && !capabilities.is_empty();
+    config_checks.push(MilestoneEvidencePlanConfigCheck {
+        id: "multimodal_connected_runtime".to_string(),
+        status: if runtime_ready { "ready" } else { "blocked" }.to_string(),
+        path: Some(manifest_path.display().to_string()),
+        selected_id: Some(runtime_id.clone()),
+        summary: if runtime_ready {
+            "Connected multimodal runtime has production metadata, safe probe flags and a declared capability."
+                .to_string()
+        } else {
+            "Connected multimodal runtime needs a probe command, capability, production metadata and no network/device access declarations."
+                .to_string()
+        },
+    });
+    configured_evidence_sources.push(format!("connected_multimodal_runtime:{runtime_id}"));
+    evidence_collection_commands.push(format!(
+        "forge multimodal runtime-benchmark --capability {} --fixture static_image_labels --project-root {} --connected-runtime {} --approved-by <operator> --confirm-runtime-execution --allow-model --output json",
+        capability,
+        project_root.display(),
+        runtime_id
+    ));
+    Ok(())
+}
+
+fn milestone_attach_command(version: &str, capability_id: &str, kind: &str) -> String {
+    format!(
+        "forge milestone attach-evidence --version {version} --capability {capability_id} --kind {kind} --summary \"Operator-approved {kind} receipt.\" --artifact <path> --approved-by <operator> --output json"
+    )
 }
 
 fn normalize_required(value: &str, field: &str) -> Result<String> {

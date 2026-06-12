@@ -3478,6 +3478,12 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
             && tool["async_safe"] == true
             && tool["mutates_workflow"] == true
     }));
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.milestone.evidence_plan"
+            && tool["output_schema"] == "forge.milestone.evidence_plan.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == false
+    }));
 
     let call = forge()
         .arg("--store")
@@ -3531,6 +3537,29 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
             |capability| capability["id"] == "experimental_multimodal_runtime"
                 && capability["status"] == "groundwork"
         ));
+
+    let evidence_plan = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.milestone.evidence_plan"])
+        .arg("--input")
+        .arg(r#"{"version":"0.5","capability_id":"replacement_grade_cli"}"#)
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let evidence_plan_json: Value = serde_json::from_slice(&evidence_plan).unwrap();
+    assert_eq!(evidence_plan_json["status"], "ok");
+    assert_eq!(
+        evidence_plan_json["result"]["schema_version"],
+        "forge.milestone.evidence_plan.v1"
+    );
+    assert_eq!(
+        evidence_plan_json["result"]["capability_id"],
+        "replacement_grade_cli"
+    );
 }
 
 #[test]
@@ -3771,6 +3800,220 @@ fn milestone_attach_evidence_persists_receipts_without_auto_promotion() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("experimental_multimodal_runtime")));
+}
+
+#[test]
+fn milestone_evidence_plan_inspects_project_inputs_without_collecting_evidence() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("evidence-project");
+    let forge_dir = project.join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+
+    let missing_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "evidence-plan",
+            "--version",
+            "0.5",
+            "--capability",
+            "replacement_grade_cli",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args(["--connected-brain", "project-provider", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let missing_json: Value = serde_json::from_slice(&missing_output).unwrap();
+    assert_eq!(
+        missing_json["schema_version"],
+        "forge.milestone.evidence_plan.v1"
+    );
+    assert_eq!(missing_json["capability_id"], "replacement_grade_cli");
+    assert_eq!(missing_json["status"], "missing_project_evidence_inputs");
+    assert_eq!(missing_json["ready_to_collect_evidence"], false);
+    assert!(missing_json["required_attached_evidence_kinds"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("external_brain_provider_execution")));
+    assert!(missing_json["missing_attached_evidence_kinds"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("external_brain_provider_execution")));
+    assert!(missing_json["config_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["id"] == "connected_brain_manifest" && check["status"] == "missing"));
+    assert!(missing_json["evidence_collection_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("forge milestone cli-demo --origin codex --project-root")));
+
+    let provider_script = temp.path().join("project-provider.sh");
+    fs::write(
+        &provider_script,
+        "#!/bin/sh\nprintf '{\"schema_version\":\"forge.connected_external_brain.provider_output.v1\",\"provider_id\":\"project-provider\",\"quality_score\":0.98,\"latency_ms\":10,\"model_execution_performed\":true,\"real_provider_execution_performed\":true}'\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&provider_script).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&provider_script, perms).unwrap();
+
+    fs::write(
+        forge_dir.join("connected-brain-runtimes.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "providers": [{
+                "id": "project-provider",
+                "brain_id": "project-provider",
+                "model_id": "project-real-model",
+                "provider_class": "external_cli",
+                "capabilities": ["replacement_grade_cli"],
+                "command": [provider_script.display().to_string()],
+                "approved_by": "arthur",
+                "approval_ref": "provider-approval-001",
+                "allow_model_execution": true,
+                "network_access": false,
+                "device_access": false,
+                "external_resources_mutated": false
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        forge_dir.join("multimodal.json"),
+        r#"{"experimental_enabled":true,"approved_by":"arthur","reason":"production runtime evidence","scope":"project"}"#,
+    )
+    .unwrap();
+    fs::write(
+        forge_dir.join("multimodal-runtimes.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "runtimes": [{
+                "id": "production-vision-runtime",
+                "model_id": "vision-prod-model-v3",
+                "capabilities": ["image_understanding"],
+                "probe_command": [
+                    "/bin/sh",
+                    "-c",
+                    "printf '{\"quality_score\":0.97,\"latency_ms\":12}'"
+                ],
+                "network_access": false,
+                "device_access": false,
+                "production": {
+                    "approved_by": "arthur",
+                    "approval_ref": "runtime-approval-001",
+                    "runtime_version": "vision-runtime 3.2.1",
+                    "model_manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "model_license": "internal-production-approved",
+                    "evidence_artifacts": ["benchmarks/vision-prod.json"],
+                    "min_quality_score": 0.95,
+                    "max_latency_ms": 20
+                }
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let provider_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "evidence-plan",
+            "--version",
+            "0.5",
+            "--capability",
+            "replacement_grade_cli",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args(["--connected-brain", "project-provider", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let provider_json: Value = serde_json::from_slice(&provider_output).unwrap();
+    assert_eq!(provider_json["status"], "evidence_inputs_ready");
+    assert_eq!(provider_json["ready_to_collect_evidence"], true);
+    assert!(provider_json["config_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["id"] == "connected_brain_provider"
+            && check["status"] == "ready"
+            && check["selected_id"] == "project-provider"));
+    assert!(provider_json["attach_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("--kind external_brain_provider_execution")));
+
+    let multimodal_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "evidence-plan",
+            "--version",
+            "0.5",
+            "--capability",
+            "experimental_multimodal_runtime",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args([
+            "--connected-runtime",
+            "production-vision-runtime",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let multimodal_json: Value = serde_json::from_slice(&multimodal_output).unwrap();
+    assert_eq!(multimodal_json["status"], "evidence_inputs_ready");
+    assert_eq!(multimodal_json["ready_to_collect_evidence"], true);
+    assert!(multimodal_json["config_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["id"] == "multimodal_connected_runtime"
+            && check["status"] == "ready"
+            && check["selected_id"] == "production-vision-runtime"));
+    assert!(multimodal_json["evidence_collection_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("forge multimodal runtime-benchmark")));
+    assert!(multimodal_json["attach_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("--kind production_runtime_benchmark")));
 }
 
 #[test]
@@ -41031,6 +41274,10 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
                 .contains(&serde_json::json!(
                     "forge milestone cli-demo --origin codex --output json"
                 ))
+            && gate["next_commands"].as_array().unwrap().iter().any(|command| command
+                .as_str()
+                .unwrap()
+                .contains("forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli"))
     }));
     assert!(json["gate_cards"].as_array().unwrap().iter().any(|gate| {
         gate["capability_id"] == "experimental_multimodal_runtime"
@@ -41060,6 +41307,10 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
                 .contains(&serde_json::json!(
                     "forge multimodal readiness --capability image_understanding --output json"
                 ))
+            && gate["next_commands"].as_array().unwrap().iter().any(|command| command
+                .as_str()
+                .unwrap()
+                .contains("forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime"))
     }));
     assert!(json["commands"]["refresh"]
         .as_array()

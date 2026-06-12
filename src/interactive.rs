@@ -24,7 +24,8 @@ use crate::identity::list_identity_memberships;
 use crate::interaction::list_human_interactions;
 use crate::memory::memory_policy_report;
 use crate::milestone::{
-    build_milestone_manifest_with_store, build_milestone_status, MilestoneAttachedEvidence,
+    build_milestone_manifest_with_store, build_milestone_status,
+    milestone_required_attached_evidence_kinds, MilestoneAttachedEvidence,
     MilestonePromotionDecision, MilestoneStatusSummary,
 };
 use crate::ops::{
@@ -1853,7 +1854,7 @@ pub fn build_interactive_release_gates(
                 .unwrap_or_default();
             let attached_evidence_count = attached_evidence.len();
             let required_attached_evidence_kinds =
-                release_gate_required_attached_evidence_kinds(&capability.id);
+                milestone_required_attached_evidence_kinds(&capability.id);
             let attached_evidence_kinds = attached_evidence
                 .iter()
                 .map(|evidence| evidence.kind.clone())
@@ -4981,12 +4982,14 @@ fn release_gate_commands(version: &str) -> InteractiveReleaseGateCommands {
 fn release_gate_next_commands(capability_id: &str) -> Vec<String> {
     match capability_id {
         "replacement_grade_cli" => vec![
+            "forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root <project-root> --connected-brain <provider-id> --output json".to_string(),
             "forge milestone cli-demo --origin codex --output json".to_string(),
             "forge milestone attach-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --summary \"Operator-approved provider receipt.\" --artifact <path> --approved-by <operator> --output json".to_string(),
             "forge interactive harness --output json".to_string(),
             "forge interactive patch-workbench --output json".to_string(),
         ],
         "experimental_multimodal_runtime" => vec![
+            "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --output json".to_string(),
             "forge multimodal status --output json".to_string(),
             "forge multimodal readiness --capability image_understanding --output json".to_string(),
             "forge multimodal benchmark-template --capability image_understanding --output json"
@@ -4997,18 +5000,6 @@ fn release_gate_next_commands(capability_id: &str) -> Vec<String> {
             "forge milestone status --version 0.5 --output json".to_string(),
             "forge milestone manifest --version 0.5 --output json".to_string(),
         ],
-    }
-}
-
-fn release_gate_required_attached_evidence_kinds(capability_id: &str) -> Vec<String> {
-    match capability_id {
-        "replacement_grade_cli" => vec![
-            "external_brain_provider_execution".to_string(),
-            "broader_project_coding_research_workflow".to_string(),
-            "terminal_file_editing_ux".to_string(),
-        ],
-        "experimental_multimodal_runtime" => vec!["production_runtime_benchmark".to_string()],
-        _ => Vec::new(),
     }
 }
 

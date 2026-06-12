@@ -75,7 +75,7 @@ This is the first functional CLI + Skill version:
 - MCP tool manifest and call surface for agent workflows: list, inspect, interactive home/slash/route, start/resume/status, schedule create/update/list/summary, loop inspect/summary, task handoff, context request, validation status and bounded artifact fetch
 - interactive home dashboard through `forge interactive home` and MCP `forge.interactive.home`, including `harness_mode_panel` and `/harness` quick action so TUI/web/agent dashboards can see the effective Forge-first mode, source and project config status before opening brain shells
 - interactive task board through `forge interactive task-board` and MCP `forge.interactive.task_board`, using `forge.interactive.task_board.v1` to expose workflow lanes, operable per-task cards, ready handoffs, blocked/failed/running task counts, checkpoint resume candidates, pending human interactions, artifact counts and direct next-action commands for TUI/web/agent dashboards
-- 0.5 milestone status, promotion manifest and attached-evidence ledger surfaces for release-gate inspection
+- 0.5 milestone status, promotion manifest, evidence-plan and attached-evidence ledger surfaces for release-gate inspection
 - native daily Goal research workflow planning and smoke execution for `hackathon` reports with Markdown/PDF artifacts and redacted Telegram delivery records
 - scheduler worker status includes a deterministic assignment plan that shows which due scheduled workflows fit the current bounded worker pool and which remain queued under backpressure
 - bounded parallel schedule scanning reports `forge.worker_pool.v1` execution evidence and still reconciles idle scheduled workflows into persisted scale-to-zero state
@@ -259,6 +259,7 @@ forge improve candidates --output json
 forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 forge milestone manifest --version 0.5 --output json
+forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root . --connected-runtime <runtime-id> --output json
 forge milestone attach-evidence --version 0.5 --capability experimental_multimodal_runtime --kind production_runtime_benchmark --summary "Operator-approved runtime receipt." --artifact ./runtime-receipt.json --approved-by arthur --output json
 forge multimodal benchmark-template --capability image_understanding --output json
 forge multimodal demo-plan --demo local_image_recognition --output json

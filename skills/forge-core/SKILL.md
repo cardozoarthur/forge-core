@@ -23,7 +23,7 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 7. Use `forge context --workflow <id> --task <task-id> --budget <bytes> --strict --output json` before giving an agent task-specific context.
 8. Run `forge validate --workflow <id> --output json` before promotion. If `rework_tasks` is not empty, return those tasks to work.
 9. Run `forge improve --workflow <id> --target-version <version> --output json` only to generate a controlled experiment and changelog. Do not auto-promote without benchmark and validation evidence.
-10. Run `forge milestone status --version 0.5 --output json` and `forge milestone manifest --version 0.5 --output json` before claiming Forge 0.5 creative-runtime readiness; planned or groundwork capabilities block promotion. Use `forge milestone attach-evidence --capability <capability-id> --kind <kind> --artifact <path> --approved-by <operator> --output json` or MCP `forge.milestone.attach_evidence` only to attach operator-approved release evidence; attached evidence is surfaced in the manifest and does not auto-promote a capability.
+10. Run `forge milestone status --version 0.5 --output json` and `forge milestone manifest --version 0.5 --output json` before claiming Forge 0.5 creative-runtime readiness; planned or groundwork capabilities block promotion. Use `forge milestone evidence-plan --capability <capability-id> --project-root <project-root> --output json` or MCP `forge.milestone.evidence_plan` to inspect project manifests and collection commands before running real provider/runtime evidence. Use `forge milestone attach-evidence --capability <capability-id> --kind <kind> --artifact <path> --approved-by <operator> --output json` or MCP `forge.milestone.attach_evidence` only to attach operator-approved release evidence; attached evidence is surfaced in the manifest and does not auto-promote a capability.
 
 ## MCP Agent Surface
 
@@ -156,6 +156,7 @@ forge validate --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 forge milestone status --version 0.5 --output json
 forge milestone manifest --version 0.5 --output json
+forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root . --connected-runtime <runtime-id> --output json
 forge milestone attach-evidence --version 0.5 --capability experimental_multimodal_runtime --kind production_runtime_benchmark --summary "Operator-approved runtime receipt." --artifact ./runtime-receipt.json --approved-by arthur --output json
 forge milestone export-demo --origin codex --output json
 forge milestone cli-demo --origin codex --output json
