@@ -2239,8 +2239,12 @@ fn harness_executor_compatibility(
     };
     let compatibility_status = harness_executor_compatibility_status(selected, &readiness);
     let surface_summary = harness_executor_surface_summary(&readiness);
-    let adoption_posture =
-        harness_executor_adoption_posture(selected, &surface_summary, &compatibility_status);
+    let adoption_posture = harness_executor_adoption_posture(
+        selected,
+        &readiness,
+        &surface_summary,
+        &compatibility_status,
+    );
     let ready_as_forge_first_default =
         selected && adoption_posture == "ready_as_forge_first_default";
     let readiness_score_percent = harness_executor_readiness_score(&readiness);
@@ -2320,6 +2324,7 @@ fn harness_executor_readiness_score(readiness: &[HarnessExecutorSurfaceReadiness
 
 fn harness_executor_adoption_posture(
     selected: bool,
+    readiness: &[HarnessExecutorSurfaceReadiness],
     summary: &HarnessExecutorSurfaceSummary,
     compatibility_status: &str,
 ) -> String {
@@ -2327,6 +2332,13 @@ fn harness_executor_adoption_posture(
         return "inspect_required".to_string();
     }
     if summary.blocked.iter().any(|surface| surface == "path_shim") {
+        if readiness.iter().any(|item| {
+            item.surface == "path_shim"
+                && item.status == "blocked"
+                && item.source == "harness_doctor.shim_status.path_precedence"
+        }) {
+            return "needs_path_activation".to_string();
+        }
         return "needs_forge_owned_path_shim".to_string();
     }
     if summary
@@ -2391,6 +2403,10 @@ fn selected_harness_executor_readiness(
         .env
         .iter()
         .any(|item| item.name == "FORGE_EVENT_RECEIPTS" && item.value == "required");
+    let shim_file_ready_for_activation = doctor.shim_status.shim_exists
+        && doctor.shim_status.forge_owned
+        && doctor.shim_status.executable
+        && !doctor.shim_status.would_recurse;
 
     vec![
         executor_surface_readiness(
@@ -2413,12 +2429,28 @@ fn selected_harness_executor_readiness(
         executor_surface_readiness(
             "path_shim",
             if doctor.shim_ready { "ready" } else { "blocked" },
-            "harness_doctor.shim_ready",
-            "PATH shim must prefer the Forge-owned wrapper before native CLI defaults can be intercepted.",
+            if doctor.shim_ready {
+                "harness_doctor.shim_ready"
+            } else if shim_file_ready_for_activation {
+                "harness_doctor.shim_status.path_precedence"
+            } else {
+                "harness_doctor.shim_ready"
+            },
+            if doctor.shim_ready {
+                "PATH resolves to the Forge-owned wrapper before native CLI defaults."
+            } else if shim_file_ready_for_activation {
+                "Forge-owned shim is installed and executable, but the shim directory is not first on PATH for this shell."
+            } else {
+                "PATH shim must prefer the Forge-owned wrapper before native CLI defaults can be intercepted."
+            },
             vec![
                 "forge".to_string(),
                 "harness".to_string(),
-                "install-shims".to_string(),
+                if shim_file_ready_for_activation {
+                    "activation-profile".to_string()
+                } else {
+                    "install-shims".to_string()
+                },
                 "--shim-dir".to_string(),
                 shim_dir_display.clone(),
                 "--executor".to_string(),
@@ -2701,7 +2733,18 @@ fn harness_executor_next_commands(
     }
 
     let mut commands = Vec::new();
-    if readiness
+    if readiness.iter().any(|item| {
+        item.surface == "path_shim"
+            && item.status == "blocked"
+            && item.source == "harness_doctor.shim_status.path_precedence"
+    }) {
+        commands.push(format!(
+            "forge harness activation-profile --shim-dir {} --executor {} --project-root {} --output json",
+            shell_quote(&shim_dir_display),
+            shell_quote(&family.executor),
+            shell_quote(&project_root_display)
+        ));
+    } else if readiness
         .iter()
         .any(|item| item.surface == "path_shim" && item.status == "blocked")
     {

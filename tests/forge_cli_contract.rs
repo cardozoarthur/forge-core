@@ -3860,6 +3860,76 @@ printf 'native:%s\n' "$*"
         .iter()
         .any(|item| item.as_str().unwrap().contains("install-shims")));
 
+    let project_root = temp.path().join("project");
+    fs::create_dir_all(project_root.join(".forge")).unwrap();
+    fs::write(
+        project_root.join(".forge/harness.json"),
+        r#"{
+  "default_context_budget": 768,
+  "default_mode": "forge_first",
+  "default_token_headroom": true,
+  "require_lineage_for_exec": true,
+  "require_token_headroom_for_forge_first": true
+}"#,
+    )
+    .unwrap();
+    let native_only_path = format!(
+        "{}:{}",
+        real_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let inactive_output = forge()
+        .env("PATH", &native_only_path)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "harness",
+            "--executor",
+            "codex",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inactive: Value = serde_json::from_slice(&inactive_output).unwrap();
+    assert_eq!(
+        inactive["shim_status"]["path_precedence"],
+        "shim_not_on_path"
+    );
+    assert_eq!(
+        inactive["forge_first_adoption_readiness"]["blocked_reasons"],
+        serde_json::json!(["forge_shim_installed_but_path_not_active"])
+    );
+    assert!(inactive["forge_first_adoption_readiness"]["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("harness activation-profile")));
+    let inactive_compatibility = &inactive["executor_compatibility"]["selected_compatibility"];
+    assert_eq!(
+        inactive_compatibility["adoption_posture"],
+        "needs_path_activation"
+    );
+    assert!(inactive_compatibility["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("harness activation-profile")));
+
     let mcp_input = serde_json::json!({
         "shim_dir": shim_dir,
         "executor": "codex"

@@ -1214,6 +1214,7 @@ pub struct InteractiveHarnessCommands {
     pub headroom_plan: Vec<String>,
     pub headroom_stats: Vec<String>,
     pub adoption_plan: Vec<String>,
+    pub activation_profile: Vec<String>,
     pub bootstrap_project_harness: Vec<String>,
     pub install_shims: Vec<String>,
     pub exec: Vec<String>,
@@ -5491,7 +5492,11 @@ fn build_interactive_harness_forge_first_adoption_readiness(
         blocked_reasons.push("token_headroom_required_but_disabled".to_string());
     }
     if !doctor.shim_ready {
-        blocked_reasons.push("forge_owned_path_shim_not_ready".to_string());
+        if harness_shim_file_ready_for_activation(doctor) {
+            blocked_reasons.push("forge_shim_installed_but_path_not_active".to_string());
+        } else {
+            blocked_reasons.push("forge_owned_path_shim_not_ready".to_string());
+        }
     }
     if !doctor.lineage_policy_ready {
         blocked_reasons.push("lineage_policy_not_ready".to_string());
@@ -5511,7 +5516,9 @@ fn build_interactive_harness_forge_first_adoption_readiness(
         next_commands.push(commands.adoption_plan.join(" "));
         next_commands.push(commands.bootstrap_project_harness.join(" "));
     }
-    if !doctor.shim_ready {
+    if !doctor.shim_ready && harness_shim_file_ready_for_activation(doctor) {
+        next_commands.push(commands.activation_profile.join(" "));
+    } else if !doctor.shim_ready {
         next_commands.push(commands.install_shims.join(" "));
     }
     if mode.require_lineage_for_exec && !session_lifecycle_plan.lineage_complete {
@@ -5573,6 +5580,13 @@ fn build_interactive_harness_forge_first_adoption_readiness(
                 .to_string(),
         ],
     }
+}
+
+fn harness_shim_file_ready_for_activation(doctor: &HarnessDoctorReport) -> bool {
+    doctor.shim_status.shim_exists
+        && doctor.shim_status.forge_owned
+        && doctor.shim_status.executable
+        && !doctor.shim_status.would_recurse
 }
 
 pub fn build_interactive_sessions(
@@ -11838,6 +11852,18 @@ fn interactive_harness_commands(
             } else {
                 "--no-token-headroom".to_string()
             },
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        activation_profile: vec![
+            "harness".to_string(),
+            "activation-profile".to_string(),
+            "--executor".to_string(),
+            executor.to_string(),
+            "--shim-dir".to_string(),
+            shim_dir.clone(),
+            "--project-root".to_string(),
+            project_root.clone(),
             "--output".to_string(),
             "json".to_string(),
         ],
