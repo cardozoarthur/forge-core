@@ -45005,6 +45005,34 @@ fn interactive_home_surfaces_operational_cockpit_for_operator_focus() {
 fn interactive_operational_cockpit_is_dedicated_cli_slash_and_mcp_surface() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    fs::create_dir_all(temp.path().join(".forge")).unwrap();
+    fs::write(
+        temp.path().join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: digital-directive
+  label: Digital Directive
+brand:
+  scope: brand
+  id: forge
+  label: Forge
+product:
+  scope: product
+  id: core
+  label: Forge Core
+user:
+  scope: user
+  id: operator
+  label: Operator
+channel:
+  scope: channel
+  id: operational_tui
+  label: Operational TUI
+tenant_policy_mode: audit
+"#,
+    )
+    .unwrap();
     let started = forge()
         .args([
             "--store",
@@ -45044,8 +45072,79 @@ fn interactive_operational_cockpit_is_dedicated_cli_slash_and_mcp_surface() {
     )
     .unwrap();
     let proposal_id = proposal_report.proposal.proposal_id.clone();
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "ingest",
+            "--origin",
+            "telegram",
+            "--action",
+            "modify_workflow",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--input",
+            &format!(
+                r#"{{"workflow_id":"{workflow_id}","goal":"Reorientar workflow a partir de evento operacional","identity":{{"scope":"telegram","id":"operator"}}}}"#
+            ),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let home_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["event_runtime_panel"]["schema_version"],
+        "forge.interactive.event_runtime.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["event_runtime_panel"]["status"],
+        "event_runtime_action_required"
+    );
+    assert_eq!(
+        home["dashboard"]["event_runtime_panel"]["pending_event_count"],
+        1
+    );
+    assert_eq!(
+        home["dashboard"]["event_runtime_panel"]["recommended_action"],
+        "start_event_worker_supervisor"
+    );
+    assert_eq!(
+        home["dashboard"]["event_runtime_panel"]["commands"]["runtime_reconcile"],
+        serde_json::json!([
+            "forge",
+            "events",
+            "runtime-reconcile",
+            "--project-root",
+            temp.path().display().to_string(),
+            "--recover-stale-services",
+            "--scan-schedules",
+            "--output",
+            "json"
+        ])
+    );
 
     let cockpit_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -45079,6 +45178,24 @@ fn interactive_operational_cockpit_is_dedicated_cli_slash_and_mcp_surface() {
                 && section["status"] == "pending_strategy"
                 && section["signal_count"] == 1
         }));
+    assert!(cockpit["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|section| {
+            section["section_id"] == "event_runtime"
+                && section["status"] == "action_required"
+                && section["signal_count"] == 1
+        }));
+    assert_eq!(
+        cockpit["event_runtime"]["schema_version"],
+        "forge.interactive.event_runtime.v1"
+    );
+    assert_eq!(cockpit["event_runtime"]["pending_event_count"], 1);
+    assert_eq!(
+        cockpit["event_runtime"]["recommended_action"],
+        "start_event_worker_supervisor"
+    );
     assert_eq!(
         cockpit["modifier_lane"]["schema_version"],
         "forge.interactive.operational_modifier_lane.v1"
@@ -45133,6 +45250,7 @@ fn interactive_operational_cockpit_is_dedicated_cli_slash_and_mcp_surface() {
         )));
 
     let text_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -45150,6 +45268,8 @@ fn interactive_operational_cockpit_is_dedicated_cli_slash_and_mcp_surface() {
     assert!(text.contains("modifier lane"));
     assert!(text.contains("pending proposals 1"));
     assert!(text.contains(&proposal_id));
+    assert!(text.contains("event runtime"));
+    assert!(text.contains("pending events 1"));
 
     let registry_output = forge()
         .args([
@@ -49391,6 +49511,11 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.structured_logs"),
         "the packaged Forge skill should expose the dedicated structured logs surface through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.event_runtime.v1")
+            && forge_core::skill::SKILL_MD.contains("dashboard.event_runtime_panel"),
+        "the packaged Forge skill should teach agents to inspect the read-only event runtime panel"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.identity"),

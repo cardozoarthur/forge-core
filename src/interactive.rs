@@ -7,7 +7,10 @@ use crate::addon::{
 use crate::artifact::list_workflow_artifacts;
 use crate::checkpoint::TaskCheckpoint;
 use crate::cost::build_cost_ledger;
-use crate::event::{build_global_event_timeline, GlobalEventTimelineReport, WorkflowEventEnvelope};
+use crate::event::{
+    build_global_event_timeline, list_event_services, list_inbound_event_inbox_for_context,
+    GlobalEventTimelineReport, WorkflowEventEnvelope,
+};
 use crate::executor::{
     build_brain_sessions_report_with_options, load_executors, BrainSessionOperationPlan,
     BrainSessionState, BrainSessionsReport, BrainSessionsReportOptions,
@@ -27,7 +30,7 @@ use crate::harness::{
 };
 use crate::identity::{
     audit_tenant_index, inspect_project_operating_context, list_identity_links,
-    list_identity_memberships, list_identity_registry,
+    list_identity_memberships, list_identity_registry, load_project_operating_context,
 };
 use crate::interaction::{
     create_choice_interaction, list_human_interactions, CreateChoiceInteractionRequest,
@@ -99,6 +102,7 @@ const INTERACTIVE_ADDON_CAPABILITY_SCHEMA_VERSION: &str = "forge.interactive.add
 const OPERATIONAL_TUI_SMOKE_SCHEMA_VERSION: &str = "forge.smoke.operational_tui.v1";
 const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
 const INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION: &str = "forge.interactive.structured_logs.v1";
+const INTERACTIVE_EVENT_RUNTIME_SCHEMA_VERSION: &str = "forge.interactive.event_runtime.v1";
 const SLASH_COMMANDS_SCHEMA_VERSION: &str = "forge.interactive.slash_commands.v1";
 const INTERACTIVE_ROUTE_SCHEMA_VERSION: &str = "forge.interactive.route.v1";
 
@@ -162,6 +166,7 @@ pub struct InteractiveDashboard {
     pub artifact_panel: InteractiveArtifactPanel,
     pub schedule_panel: InteractiveSchedulePanel,
     pub event_panel: InteractiveEventPanel,
+    pub event_runtime_panel: InteractiveEventRuntimePanel,
     pub structured_logs_panel: InteractiveStructuredLogsPanel,
     pub cost_panel: InteractiveCostPanel,
     pub context_memory_panel: InteractiveContextMemoryPanel,
@@ -186,6 +191,7 @@ pub struct InteractiveOperationalCockpitPanel {
     pub pending_human_wait_count: usize,
     pub pending_approval_count: usize,
     pub pending_modifier_proposal_count: usize,
+    pub pending_event_count: usize,
     pub validation_failure_count: usize,
     pub due_workflow_count: usize,
     pub selected_brain: String,
@@ -196,6 +202,7 @@ pub struct InteractiveOperationalCockpitPanel {
     pub estimated_cost_total_usd: f64,
     pub sections: Vec<InteractiveOperationalCockpitSection>,
     pub modifier_lane: InteractiveOperationalModifierLanePanel,
+    pub event_runtime: InteractiveEventRuntimePanel,
     pub next_actions: Vec<String>,
 }
 
@@ -251,6 +258,54 @@ pub struct InteractiveOperationalModifierLaneCommands {
     pub propose_goal_route: String,
     pub propose_task_route: String,
     pub apply_proposal_route: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveEventRuntimePanel {
+    pub schema_version: String,
+    pub status: String,
+    pub project_root: String,
+    pub pending_event_count: usize,
+    pub sampled_event_count: usize,
+    pub service_count: usize,
+    pub running_service_count: usize,
+    pub persistent_workflow_count: usize,
+    pub wakeable_workflow_count: usize,
+    pub action_required: bool,
+    pub recommended_action: String,
+    pub recommendation_reason: String,
+    pub event_cards: Vec<InteractiveEventRuntimeEventCard>,
+    pub service_cards: Vec<InteractiveEventRuntimeServiceCard>,
+    pub commands: InteractiveEventRuntimeCommands,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveEventRuntimeEventCard {
+    pub event_id: String,
+    pub origin: String,
+    pub action: String,
+    pub status: String,
+    pub workflow_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveEventRuntimeServiceCard {
+    pub service_id: String,
+    pub service_kind: String,
+    pub status: String,
+    pub lease_owner: String,
+    pub lease_expires_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveEventRuntimeCommands {
+    pub inbox: Vec<String>,
+    pub runtime_reconcile: Vec<String>,
+    pub service_supervise: Vec<String>,
+    pub webhook_ingress: Vec<String>,
+    pub services: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1867,6 +1922,8 @@ pub fn build_interactive_home_with_options(
             visible_event_count: 0,
             latest_events: Vec::new(),
         });
+    let event_runtime_panel =
+        build_event_runtime_panel(store, &repository_context_path, &workflows.workflows);
     let structured_logs_panel = timeline
         .as_ref()
         .map(build_structured_logs_panel)
@@ -1948,6 +2005,7 @@ pub fn build_interactive_home_with_options(
         &cost_panel,
         &context_memory_panel,
         &modifier_lane,
+        &event_runtime_panel,
     );
     let ui_composition_panel = build_ui_composition_panel(&addon_renderer_report);
 
@@ -1998,6 +2056,7 @@ pub fn build_interactive_home_with_options(
             artifact_panel,
             schedule_panel,
             event_panel,
+            event_runtime_panel,
             structured_logs_panel,
             cost_panel,
             context_memory_panel,
@@ -7259,6 +7318,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     } else {
         d.event_panel.latest_events.join(" | ")
     };
+    let event_runtime_summary = render_event_runtime_panel(&d.event_runtime_panel);
     let structured_logs = render_structured_log_summary(&d.structured_logs_panel);
     let operational_cockpit_sections =
         render_operational_cockpit_sections(&d.operational_cockpit_panel);
@@ -7319,6 +7379,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Artifact panel: {artifact_status}; workflows {artifact_workflows_count}, artifacts {artifact_count}, bytes {artifact_bytes}; workflows {artifact_workflows}; entries {artifact_entries}\n\
          Schedule panel: {schedule_status}; due {schedule_due}, runnable {schedule_runnable}, cron {schedule_cron}, wait_until {schedule_wait_until}, next {schedule_next}\n\
          Event timeline: {event_status}; visible {event_visible}/{event_total}; latest {latest_events}\n\
+         Event runtime: {event_runtime_summary}\n\
          Structured logs: {structured_logs_status}; logs {structured_logs_count}/{structured_logs_total}, next cursor {structured_logs_next_cursor}, has more {structured_logs_has_more}; {structured_logs}\n\
          Cost panel: {cost_status}; workflows {cost_workflows}, nodes {cost_nodes}, estimated ${cost_estimated:.4}, observed ${cost_observed:.4}\n\
          Context/memory panel: ready {context_ready}, blocked {context_blocked}, budget pressure {context_budget_pressure}, memory {memory_policy_status}\n\
@@ -7489,6 +7550,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         event_visible = d.event_panel.visible_event_count,
         event_total = d.event_panel.total_event_count,
         latest_events = latest_events,
+        event_runtime_summary = event_runtime_summary,
         structured_logs_status = d.structured_logs_panel.status,
         structured_logs_count = d.structured_logs_panel.log_count,
         structured_logs_total = d.structured_logs_panel.total_event_count,
@@ -7547,7 +7609,7 @@ pub fn render_interactive_operational_cockpit(
     panel: &InteractiveOperationalCockpitPanel,
 ) -> String {
     format!(
-        "Operational cockpit: {attention}; {priority}; active work {active_work}, ready handoffs {ready_handoffs}, human waits {human_waits}, due workflows {due_workflows}, brain {selected_brain}; sections {sections}; modifier lane {modifier_lane}; next {next_actions}",
+        "Operational cockpit: {attention}; {priority}; active work {active_work}, ready handoffs {ready_handoffs}, human waits {human_waits}, due workflows {due_workflows}, brain {selected_brain}; sections {sections}; modifier lane {modifier_lane}; event runtime {event_runtime}; next {next_actions}",
         attention = panel.attention_level,
         priority = panel.priority_summary,
         active_work = panel.active_work_count,
@@ -7557,11 +7619,53 @@ pub fn render_interactive_operational_cockpit(
         selected_brain = panel.selected_brain,
         sections = render_operational_cockpit_sections(panel),
         modifier_lane = render_operational_modifier_lane(&panel.modifier_lane),
+        event_runtime = render_event_runtime_panel(&panel.event_runtime),
         next_actions = if panel.next_actions.is_empty() {
             "none".to_string()
         } else {
             panel.next_actions.join(" | ")
         },
+    )
+}
+
+fn render_event_runtime_panel(panel: &InteractiveEventRuntimePanel) -> String {
+    let events = panel
+        .event_cards
+        .iter()
+        .take(5)
+        .map(|event| format!("{}:{}:{}", event.event_id, event.origin, event.action))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let services = panel
+        .service_cards
+        .iter()
+        .take(5)
+        .map(|service| {
+            format!(
+                "{}:{}:{}",
+                service.service_id, service.service_kind, service.status
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{}; pending events {}; workers {}/{}; wakeable workflows {}; recommendation {}; events {}; services {}",
+        panel.status,
+        panel.pending_event_count,
+        panel.running_service_count,
+        panel.service_count,
+        panel.wakeable_workflow_count,
+        panel.recommended_action,
+        if events.is_empty() {
+            "none".to_string()
+        } else {
+            events
+        },
+        if services.is_empty() {
+            "none".to_string()
+        } else {
+            services
+        }
     )
 }
 
@@ -8801,6 +8905,230 @@ fn build_interactive_event_panel(timeline: &GlobalEventTimelineReport) -> Intera
     }
 }
 
+fn build_event_runtime_panel(
+    store: &ForgeStore,
+    project_root: &Path,
+    workflows: &[WorkflowRegistryRow],
+) -> InteractiveEventRuntimePanel {
+    let project_root_text = project_root.display().to_string();
+    let commands = event_runtime_commands(&project_root_text);
+    let persistent_workflow_count = workflows
+        .iter()
+        .filter(|workflow| workflow.runtime.persistent)
+        .count();
+    let wakeable_workflow_count = workflows
+        .iter()
+        .filter(|workflow| {
+            matches!(
+                workflow.runtime.operator_action.as_str(),
+                "keep_event_listener_ready" | "wake_on_event"
+            )
+        })
+        .count();
+
+    let operating_context = match load_project_operating_context(project_root) {
+        Ok(context) => context,
+        Err(error) => {
+            return InteractiveEventRuntimePanel {
+                schema_version: INTERACTIVE_EVENT_RUNTIME_SCHEMA_VERSION.to_string(),
+                status: "event_runtime_unavailable".to_string(),
+                project_root: project_root_text,
+                pending_event_count: 0,
+                sampled_event_count: 0,
+                service_count: 0,
+                running_service_count: 0,
+                persistent_workflow_count,
+                wakeable_workflow_count,
+                action_required: false,
+                recommended_action: "inspect_event_runtime".to_string(),
+                recommendation_reason: format!("failed to load operating context: {error}"),
+                event_cards: Vec::new(),
+                service_cards: Vec::new(),
+                commands,
+                notes: vec![
+                    "Event runtime panel is read-only and does not route events.".to_string(),
+                ],
+            };
+        }
+    };
+
+    let inbox =
+        list_inbound_event_inbox_for_context(store, Some("pending"), 20, &operating_context);
+    let (pending_event_count, event_cards, mut notes) = match inbox {
+        Ok(report) => {
+            let cards = report
+                .events
+                .iter()
+                .take(10)
+                .map(|event| InteractiveEventRuntimeEventCard {
+                    event_id: event.id.clone(),
+                    origin: event.origin.clone(),
+                    action: event.action.clone(),
+                    status: event.status.clone(),
+                    workflow_id: event
+                        .data
+                        .get("workflow_id")
+                        .and_then(|value| value.as_str())
+                        .map(ToString::to_string),
+                    created_at: event.created_at.clone(),
+                })
+                .collect::<Vec<_>>();
+            (report.event_count, cards, Vec::new())
+        }
+        Err(error) => (
+            0,
+            Vec::new(),
+            vec![format!("pending inbox unavailable: {error}")],
+        ),
+    };
+
+    let services = list_event_services(store, project_root, Some("worker"), None, 20);
+    let (service_count, running_service_count, service_cards) = match services {
+        Ok(report) => {
+            let running = report
+                .services
+                .iter()
+                .filter(|service| service.status == "running")
+                .count();
+            let cards = report
+                .services
+                .iter()
+                .take(10)
+                .map(|service| InteractiveEventRuntimeServiceCard {
+                    service_id: service.id.clone(),
+                    service_kind: service.service_kind.clone(),
+                    status: service.status.clone(),
+                    lease_owner: service.lease_owner.clone(),
+                    lease_expires_at: service.lease_expires_at.clone(),
+                })
+                .collect::<Vec<_>>();
+            (report.service_count, running, cards)
+        }
+        Err(error) => {
+            notes.push(format!("event services unavailable: {error}"));
+            (0, 0, Vec::new())
+        }
+    };
+
+    let action_required =
+        pending_event_count > 0 || (wakeable_workflow_count > 0 && running_service_count == 0);
+    let recommended_action = if action_required && running_service_count == 0 {
+        "start_event_worker_supervisor"
+    } else if pending_event_count > 0 {
+        "observe_active_event_worker"
+    } else if wakeable_workflow_count > 0 {
+        "keep_event_worker_ready"
+    } else {
+        "no_event_runtime_action"
+    };
+    let recommendation_reason = if pending_event_count > 0 && wakeable_workflow_count > 0 {
+        "pending inbound events and wakeable persistent workflows require event worker supervision"
+    } else if pending_event_count > 0 {
+        "pending inbound events require event worker supervision"
+    } else if wakeable_workflow_count > 0 && running_service_count == 0 {
+        "persistent workflows are waiting for events without an active worker"
+    } else {
+        "no pending inbound events or wakeable workflows require action"
+    };
+    let status = if action_required {
+        "event_runtime_action_required"
+    } else if running_service_count > 0 {
+        "event_runtime_worker_running"
+    } else {
+        "event_runtime_idle"
+    };
+    notes.push(
+        "Read-only panel; run the recommended command explicitly to route events.".to_string(),
+    );
+
+    InteractiveEventRuntimePanel {
+        schema_version: INTERACTIVE_EVENT_RUNTIME_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        project_root: project_root_text,
+        pending_event_count,
+        sampled_event_count: event_cards.len(),
+        service_count,
+        running_service_count,
+        persistent_workflow_count,
+        wakeable_workflow_count,
+        action_required,
+        recommended_action: recommended_action.to_string(),
+        recommendation_reason: recommendation_reason.to_string(),
+        event_cards,
+        service_cards,
+        commands,
+        notes,
+    }
+}
+
+fn event_runtime_commands(project_root: &str) -> InteractiveEventRuntimeCommands {
+    InteractiveEventRuntimeCommands {
+        inbox: vec![
+            "forge".to_string(),
+            "events".to_string(),
+            "inbox".to_string(),
+            "--status".to_string(),
+            "pending".to_string(),
+            "--project-root".to_string(),
+            project_root.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        runtime_reconcile: vec![
+            "forge".to_string(),
+            "events".to_string(),
+            "runtime-reconcile".to_string(),
+            "--project-root".to_string(),
+            project_root.to_string(),
+            "--recover-stale-services".to_string(),
+            "--scan-schedules".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        service_supervise: vec![
+            "forge".to_string(),
+            "events".to_string(),
+            "service-supervise".to_string(),
+            "--kind".to_string(),
+            "worker".to_string(),
+            "--project-root".to_string(),
+            project_root.to_string(),
+            "--status".to_string(),
+            "pending".to_string(),
+            "--limit".to_string(),
+            "20".to_string(),
+            "--max-runs".to_string(),
+            "12".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        webhook_ingress: vec![
+            "forge".to_string(),
+            "events".to_string(),
+            "webhook-ingress".to_string(),
+            "--host".to_string(),
+            "127.0.0.1".to_string(),
+            "--port".to_string(),
+            "8787".to_string(),
+            "--path".to_string(),
+            "/webhook".to_string(),
+            "--project-root".to_string(),
+            project_root.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        services: vec![
+            "forge".to_string(),
+            "events".to_string(),
+            "services".to_string(),
+            "--project-root".to_string(),
+            project_root.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
 fn build_structured_logs_panel(
     timeline: &GlobalEventTimelineReport,
 ) -> InteractiveStructuredLogsPanel {
@@ -8998,9 +9326,12 @@ fn build_operational_cockpit_panel(
     cost: &InteractiveCostPanel,
     context_memory: &InteractiveContextMemoryPanel,
     modifier_lane: &OpsModifierLane,
+    event_runtime: &InteractiveEventRuntimePanel,
 ) -> InteractiveOperationalCockpitPanel {
-    let active_work_count =
-        active_runs + task_board.ready_handoffs + schedule.runnable_due_workflows;
+    let active_work_count = active_runs
+        + task_board.ready_handoffs
+        + schedule.runnable_due_workflows
+        + event_runtime.pending_event_count;
     let attention_level = if validation_failures > 0 || runs_needing_attention > 0 {
         "critical"
     } else if pending_approvals > 0
@@ -9009,6 +9340,7 @@ fn build_operational_cockpit_panel(
         || schedule.due_workflows > 0
         || !harness.forge_first_ready
         || modifier_lane.pending_count > 0
+        || event_runtime.action_required
     {
         "attention"
     } else {
@@ -9020,10 +9352,11 @@ fn build_operational_cockpit_panel(
         .clone()
         .unwrap_or_else(|| "none".to_string());
     let priority_summary = format!(
-        "{active_work_count} active signals, {runs_needing_attention} runs needing attention, {} ready handoffs, {} human waits, {pending_approvals} pending approvals, {} modifier proposals",
+        "{active_work_count} active signals, {runs_needing_attention} runs needing attention, {} ready handoffs, {} human waits, {pending_approvals} pending approvals, {} modifier proposals, {} pending events",
         task_board.ready_handoffs,
         task_board.pending_human_interactions,
-        modifier_lane.pending_count
+        modifier_lane.pending_count,
+        event_runtime.pending_event_count
     );
     let modifier_panel = build_operational_modifier_lane_panel(modifier_lane);
     let sections = vec![
@@ -9126,6 +9459,31 @@ fn build_operational_cockpit_panel(
             ],
         ),
         operational_cockpit_section(
+            "event_runtime",
+            "Event runtime",
+            if event_runtime.action_required {
+                "action_required"
+            } else if event_runtime.running_service_count > 0 {
+                "worker_running"
+            } else {
+                "idle"
+            },
+            event_runtime.pending_event_count + event_runtime.wakeable_workflow_count,
+            format!(
+                "{} pending events; {} wakeable workflows; {} running workers; recommendation {}",
+                event_runtime.pending_event_count,
+                event_runtime.wakeable_workflow_count,
+                event_runtime.running_service_count,
+                event_runtime.recommended_action
+            ),
+            "forge events runtime-reconcile --project-root . --recover-stale-services --scan-schedules --output json",
+            vec![
+                "forge events inbox --status pending --project-root . --output json".to_string(),
+                "forge events service-supervise --kind worker --project-root . --status pending --limit 20 --max-runs 12 --output json".to_string(),
+                "forge events services --project-root . --output json".to_string(),
+            ],
+        ),
+        operational_cockpit_section(
             "brain",
             "Brain",
             if sessions.ready_session_count > 0 {
@@ -9179,6 +9537,7 @@ fn build_operational_cockpit_panel(
         pending_human_wait_count: task_board.pending_human_interactions,
         pending_approval_count: pending_approvals,
         pending_modifier_proposal_count: modifier_lane.pending_count,
+        pending_event_count: event_runtime.pending_event_count,
         validation_failure_count: validation_failures,
         due_workflow_count: schedule.due_workflows,
         selected_brain,
@@ -9189,11 +9548,13 @@ fn build_operational_cockpit_panel(
         estimated_cost_total_usd: cost.estimated_task_cost_total_usd,
         sections,
         modifier_lane: modifier_panel,
+        event_runtime: event_runtime.clone(),
         next_actions: vec![
             "forge interactive operational-cockpit --output json".to_string(),
             "forge interactive task-board --output json".to_string(),
             "forge interactive readiness --output json".to_string(),
             "forge ops serve --project-root . --host 127.0.0.1 --port 8765".to_string(),
+            "forge events runtime-reconcile --project-root . --recover-stale-services --scan-schedules --output json".to_string(),
             "forge interactive action-registry --query operational --output json".to_string(),
             "forge interactive structured-logs --output json".to_string(),
             "forge interactive sessions --output json".to_string(),
