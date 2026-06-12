@@ -45974,6 +45974,26 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("/harness doctor")));
+    assert!(home_json["result"]["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/harness headroom-plan")));
+    assert!(home_json["result"]["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/harness headroom-stats")));
+    assert!(home_json["result"]["dashboard"]["useful_next_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge harness headroom-plan --executor codex --project-root . --output json"
+        )));
+    assert!(home_json["result"]["dashboard"]["useful_next_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge harness headroom-stats --output json"
+        )));
     assert!(home_json["result"]["dashboard"]["workflow_focus"].is_array());
     assert_eq!(
         home_json["result"]["dashboard"]["ui_composition_panel"]["schema_version"],

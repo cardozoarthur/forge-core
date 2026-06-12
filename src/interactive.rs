@@ -1679,6 +1679,9 @@ pub fn build_interactive_home_with_options(
                 "forge schedule list".to_string(),
                 "forge schedule worker-status".to_string(),
                 "forge interactive harness --output json".to_string(),
+                "forge harness headroom-plan --executor codex --project-root . --output json"
+                    .to_string(),
+                "forge harness headroom-stats --output json".to_string(),
                 "forge interactive sessions --output json".to_string(),
                 "forge interactive action-registry --output json".to_string(),
                 "forge interactive release-gates --output json".to_string(),
@@ -1699,6 +1702,8 @@ pub fn build_interactive_home_with_options(
                 "/shells".to_string(),
                 "/harness".to_string(),
                 "/harness doctor".to_string(),
+                "/harness headroom-plan".to_string(),
+                "/harness headroom-stats".to_string(),
                 "/validate".to_string(),
                 "/logs".to_string(),
                 "/workers".to_string(),
