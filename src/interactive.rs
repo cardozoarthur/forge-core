@@ -3108,6 +3108,7 @@ pub fn build_operational_tui_smoke(
     )?;
     let d = &home.dashboard;
     let readme = include_str!("../README.md");
+    let default_tui_preview = render_interactive_home(&home);
     let dashboard = OperationalTuiSmokeDashboard {
         active_runs: d.active_runs,
         workflow_count: d.task_board_panel.workflow_count,
@@ -3123,12 +3124,19 @@ pub fn build_operational_tui_smoke(
         operational_tui_smoke_check(
             "opens_useful_tui",
             "forge opens the operational TUI",
-            home.status == "interactive_home_ready",
+            home.status == "interactive_home_ready"
+                && default_tui_preview.contains("Forge operational TUI")
+                && default_tui_preview.contains("Active workflows:")
+                && default_tui_preview.contains("Events/schedules:")
+                && default_tui_preview.contains("Addons/capabilities:")
+                && default_tui_preview.contains("Costs:")
+                && default_tui_preview.contains("Handoffs/approvals:"),
             format!(
-                "{}; cockpit {}; focus panels {}",
+                "{}; cockpit {}; focus panels {}; default render {} bytes",
                 home.status,
                 d.operational_cockpit_panel.status,
-                d.navigation_panel.keybindings.len()
+                d.navigation_panel.keybindings.len(),
+                default_tui_preview.len()
             ),
             "forge",
         ),
@@ -15420,7 +15428,9 @@ fn anvil_mark() -> &'static str {
 
 pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
     if !std::io::stdin().is_terminal() {
-        println!("Forge Core workflow runtime -- use `forge --help` for available commands");
+        let store = ForgeStore::open(store_path)?;
+        let report = build_interactive_home(&store)?;
+        println!("{}", render_interactive_home(&report));
         return Ok(0);
     }
 

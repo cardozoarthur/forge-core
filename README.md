@@ -22,7 +22,7 @@ The intended architecture is hybrid:
 
 ## Forge em 5 minutos
 
-Forge é o painel operacional e o runtime persistente que transforma um objetivo em workflows auditáveis. Ao abrir `forge` em um terminal interativo, o operador deve ver o cockpit principal com workflows ativos, eventos/schedules, Addons/capabilities, custos, handoffs/approvals, readiness de brains/shells, compatibilidade de executores e comandos próximos.
+Forge é o painel operacional e o runtime persistente que transforma um objetivo em workflows auditáveis. Ao abrir `forge`, o operador deve ver o cockpit principal com workflows ativos, eventos/schedules, Addons/capabilities, custos, handoffs/approvals, readiness de brains/shells, compatibilidade de executores e comandos próximos. Em terminal interativo, a mesma entrada continua em REPL; sem TTY, ela renderiza um snapshot da TUI e encerra para funcionar em smoke tests e automações.
 
 O fluxo mental é simples:
 

@@ -48685,20 +48685,32 @@ fn interactive_workflow_sidebar_groups_workflows_for_operator_navigation() {
 }
 
 #[test]
-fn no_args_non_tty_stays_script_safe_and_does_not_open_dashboard() {
+fn no_args_non_tty_renders_operational_dashboard_and_exits_for_scripts() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
 
-    forge()
-        .arg("--store")
-        .arg(store.to_str().unwrap())
+    let output = forge()
+        .current_dir(temp.path())
+        .args(["--store", store.to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicates::str::contains(
-            "Forge Core workflow runtime -- use `forge --help`",
-        ));
+        .get_output()
+        .stdout
+        .clone();
 
-    assert!(!store.exists());
+    let stdout = String::from_utf8_lossy(&output);
+    assert!(stdout.contains("forge"));
+    assert!(stdout.contains("Forge operational TUI"));
+    assert!(stdout.contains("Active workflows:"));
+    assert!(stdout.contains("Events/schedules:"));
+    assert!(stdout.contains("Addons/capabilities:"));
+    assert!(stdout.contains("Costs:"));
+    assert!(stdout.contains("Handoffs/approvals:"));
+    assert!(stdout.contains("Architecture compass:"));
+    assert!(stdout.contains("Smoke test: forge smoke operational-tui"));
+    assert!(stdout.contains("Quick actions"));
+    assert!(stdout.contains("Useful next commands"));
+    assert!(store.exists());
 }
 
 #[test]
