@@ -40669,7 +40669,7 @@ design_system:
         .args([
             "plan",
             "--goal",
-            "Demonstrate operating context before external brain handoff",
+            "Create an operator report with auditable persona routing for operating context before external brain handoff",
             "--output",
             "json",
         ])
@@ -40762,6 +40762,63 @@ design_system:
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("delivery_acceptance_and_evidence")));
+    assert_eq!(
+        json["prompt_packet_sample"]["schema_version"],
+        "forge.interactive.operating_prompt_packet_sample.v1"
+    );
+    assert!(json["prompt_packet_sample"]["status"]
+        .as_str()
+        .unwrap()
+        .starts_with("prompt_packet_sample_ready"));
+    assert_eq!(
+        json["prompt_packet_sample"]["tenant_path"],
+        "digital-directive/forge/core"
+    );
+    assert_eq!(
+        json["prompt_packet_sample"]["persona_mode"],
+        "operator_report"
+    );
+    assert_eq!(
+        json["prompt_packet_sample"]["persona_profile_id"],
+        "persona.operator_report.v1"
+    );
+    assert!(json["prompt_packet_sample"]["validation_gates"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("personality_decision_required")));
+    assert!(
+        json["prompt_packet_sample"]["packet_sha256"]
+            .as_str()
+            .unwrap()
+            .len()
+            >= 32
+    );
+    assert_eq!(
+        json["memory_isolation_evidence"]["schema_version"],
+        "forge.interactive.operating_memory_isolation.v1"
+    );
+    assert_eq!(
+        json["memory_isolation_evidence"]["status"],
+        "tenant_memory_isolation_ready"
+    );
+    assert_eq!(
+        json["memory_isolation_evidence"]["tenant_path"],
+        "digital-directive/forge/core"
+    );
+    for key in [
+        "organization:digital-directive",
+        "brand:forge",
+        "product:core",
+        "scope:organization",
+        "scope:project",
+        "scope:processing",
+        "audience:internal",
+    ] {
+        assert!(json["memory_isolation_evidence"]["isolation_keys"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(key)));
+    }
     assert_eq!(json["identity_summary"]["active_membership_count"], 1);
     assert!(
         json["handoff_context_summary"]["ready_for_handoff"]
@@ -40796,6 +40853,8 @@ design_system:
     assert!(text.contains("Operating context: operating_context_ready"));
     assert!(text.contains("digital-directive/forge/core"));
     assert!(text.contains("Prompt packet: prompt_packet_gates_declared"));
+    assert!(text.contains("Prompt packet sample: prompt_packet_sample_ready"));
+    assert!(text.contains("Memory isolation: tenant_memory_isolation_ready"));
     assert!(text.contains("Company work: company_work_decision_required"));
     assert!(text.contains("forge task handoff"));
 
@@ -40824,6 +40883,30 @@ design_system:
         home["dashboard"]["operating_context_panel"]["tenant_path"],
         "digital-directive/forge/core"
     );
+    let tenant_track = home["dashboard"]["architecture_compass_panel"]["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["track_id"] == "tenant_identity_personality_context")
+        .unwrap();
+    assert_eq!(tenant_track["status"], "validated");
+    assert!(tenant_track["gaps"].as_array().unwrap().is_empty());
+    assert!(tenant_track["evidence_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|evidence| evidence
+            .as_str()
+            .unwrap()
+            .contains("prompt_packet_sample:prompt_packet_sample_ready")));
+    assert!(tenant_track["evidence_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|evidence| evidence
+            .as_str()
+            .unwrap()
+            .contains("memory_isolation:tenant_memory_isolation_ready")));
     assert!(home["dashboard"]["quick_actions"]
         .as_array()
         .unwrap()

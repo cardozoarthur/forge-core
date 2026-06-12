@@ -7,6 +7,7 @@ use crate::addon::{
 };
 use crate::artifact::list_workflow_artifacts;
 use crate::checkpoint::TaskCheckpoint;
+use crate::context::{build_context_package_with_checkpoint_and_project, DEFAULT_CONTEXT_BUDGET};
 use crate::cost::{build_cost_ledger, CostLedgerReport};
 use crate::event::{
     build_global_event_timeline, list_event_services, list_inbound_event_inbox_for_context,
@@ -39,10 +40,13 @@ use crate::improve::{
     rank_improvement_candidates, OrchestratorImprovementCandidate,
     OrchestratorImprovementCandidatesReport,
 };
+use crate::intent::OperatingContextSpec;
 use crate::interaction::{
     create_choice_interaction, list_human_interactions, CreateChoiceInteractionRequest,
 };
-use crate::memory::{memory_policy_report_for_project, MemoryPolicyReport};
+use crate::memory::{
+    memory_policy_report_for_project, MemoryEffectiveDefaults, MemoryPolicyReport,
+};
 use crate::milestone::{
     build_milestone_evidence_plan, build_milestone_manifest_with_store, build_milestone_status,
     collect_ready_milestone_evidence, milestone_required_attached_evidence_kinds,
@@ -2548,6 +2552,8 @@ pub struct InteractiveOperatingContextPanel {
     pub component_source: String,
     pub prompt_packet_contract: InteractiveOperatingPromptPacketContract,
     pub company_work_contract: InteractiveOperatingCompanyWorkContract,
+    pub prompt_packet_sample: InteractiveOperatingPromptPacketSample,
+    pub memory_isolation_evidence: InteractiveOperatingMemoryIsolationEvidence,
     pub identity_summary: InteractiveOperatingIdentitySummary,
     pub handoff_context_summary: InteractiveOperatingHandoffContextSummary,
     pub commands: InteractiveOperatingContextCommands,
@@ -2574,6 +2580,44 @@ pub struct InteractiveOperatingCompanyWorkContract {
     pub departments: Vec<String>,
     pub required_decisions: Vec<String>,
     pub sensitive_action_rule: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveOperatingPromptPacketSample {
+    pub schema_version: String,
+    pub status: String,
+    pub source: String,
+    pub workflow_id: Option<String>,
+    pub task_id: Option<String>,
+    pub task_title: Option<String>,
+    pub task_executor: Option<String>,
+    pub tenant_path: String,
+    pub persona_mode: Option<String>,
+    pub persona_profile_id: Option<String>,
+    pub selected_voice: Option<String>,
+    pub selected_tone: Option<String>,
+    pub validation_gates: Vec<String>,
+    pub organization_context_sha256: Option<String>,
+    pub personality_decision_sha256: Option<String>,
+    pub company_work_decision_sha256: Option<String>,
+    pub packet_sha256: Option<String>,
+    pub handoff_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveOperatingMemoryIsolationEvidence {
+    pub schema_version: String,
+    pub status: String,
+    pub tenant_path: String,
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    pub memory_scope: String,
+    pub allowed_scopes: Vec<String>,
+    pub default_audience: String,
+    pub project_governance_status: String,
+    pub isolation_keys: Vec<String>,
+    pub governed_search_command: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2784,7 +2828,7 @@ pub fn build_interactive_operating_context(
 ) -> Result<InteractiveOperatingContextPanel> {
     let identity_panel = build_interactive_identity(store, project_root)?;
     let context_memory_panel = build_interactive_context_memory(store, project_root)?;
-    build_operating_context_panel(project_root, &identity_panel, &context_memory_panel)
+    build_operating_context_panel(store, project_root, &identity_panel, &context_memory_panel)
 }
 
 pub fn build_interactive_home_with_options(
@@ -3059,6 +3103,7 @@ pub fn build_interactive_home_with_options(
     let permissions_panel = build_interactive_permissions(store)?;
     let identity_panel = build_interactive_identity(store, &repository_context_path)?;
     let operating_context_panel = build_operating_context_panel(
+        store,
         &repository_context_path,
         &identity_panel,
         &context_memory_panel,
@@ -3303,6 +3348,45 @@ struct ArchitectureCompassInputs<'a> {
 fn build_architecture_compass_panel(
     inputs: ArchitectureCompassInputs<'_>,
 ) -> InteractiveArchitectureCompassPanel {
+    let tenant_prompt_sample_ready = inputs
+        .operating_context_panel
+        .prompt_packet_sample
+        .status
+        .starts_with("prompt_packet_sample_ready");
+    let tenant_memory_isolation_ready = inputs
+        .operating_context_panel
+        .memory_isolation_evidence
+        .status
+        == "tenant_memory_isolation_ready";
+    let tenant_context_ready = inputs.operating_context_panel.status == "operating_context_ready"
+        && inputs
+            .operating_context_panel
+            .prompt_packet_contract
+            .organization_context_required
+        && inputs
+            .operating_context_panel
+            .prompt_packet_contract
+            .personality_decision_required
+        && inputs
+            .operating_context_panel
+            .prompt_packet_contract
+            .company_work_decision_required
+        && tenant_prompt_sample_ready
+        && tenant_memory_isolation_ready;
+    let mut tenant_gaps = Vec::new();
+    if !tenant_prompt_sample_ready {
+        tenant_gaps.push(
+            "Evidenciar personalidade por node com amostras de context packet reais no painel."
+                .to_string(),
+        );
+    }
+    if !tenant_memory_isolation_ready {
+        tenant_gaps.push(
+            "Adicionar mais evidência de memória organizacional isolada por empresa/marca/produto em stores com contexto explícito."
+                .to_string(),
+        );
+    }
+
     let mut tracks = vec![
         architecture_track(
             "world_class_tui",
@@ -3473,19 +3557,7 @@ fn build_architecture_compass_panel(
             "Multi-tenant, identidade, memória e personality/context routing",
             &["goal1:Fase 5", "goal1:Fase 5.5", "goal2:Fase 5.7", "goal2:Fase 5.8"],
             architecture_status(
-                inputs.operating_context_panel.status == "operating_context_ready"
-                    && inputs
-                        .operating_context_panel
-                        .prompt_packet_contract
-                        .organization_context_required
-                    && inputs
-                        .operating_context_panel
-                        .prompt_packet_contract
-                        .personality_decision_required
-                    && inputs
-                        .operating_context_panel
-                        .prompt_packet_contract
-                        .company_work_decision_required,
+                tenant_context_ready,
                 inputs.operating_context_panel.status != "operating_context_needs_attention",
             ),
             vec![
@@ -3510,13 +3582,42 @@ fn build_architecture_compass_panel(
                         .required_gates
                         .join("+")
                 ),
+                format!(
+                    "prompt_packet_sample:{} task={} persona={} packet={}",
+                    inputs.operating_context_panel.prompt_packet_sample.status,
+                    inputs
+                        .operating_context_panel
+                        .prompt_packet_sample
+                        .task_id
+                        .as_deref()
+                        .unwrap_or("none"),
+                    inputs
+                        .operating_context_panel
+                        .prompt_packet_sample
+                        .persona_mode
+                        .as_deref()
+                        .unwrap_or("brand_default"),
+                    inputs
+                        .operating_context_panel
+                        .prompt_packet_sample
+                        .packet_sha256
+                        .as_deref()
+                        .unwrap_or("missing")
+                ),
+                format!(
+                    "memory_isolation:{} keys={}",
+                    inputs
+                        .operating_context_panel
+                        .memory_isolation_evidence
+                        .status,
+                    inputs
+                        .operating_context_panel
+                        .memory_isolation_evidence
+                        .isolation_keys
+                        .join("+")
+                ),
             ],
-            vec![
-                "Evidenciar personalidade por node com amostras de context packet reais no painel."
-                    .to_string(),
-                "Adicionar mais evidência de memória organizacional isolada por empresa/marca/produto em stores com contexto explícito."
-                    .to_string(),
-            ],
+            tenant_gaps,
             "Usar forge interactive operating-context para decidir identity, memory policy, prompt-packet gates e handoff readiness antes de executar brains.",
             "Core decide escopo/isolamento; personas, brand assets e dados de domínio ficam em contexto/Addons.",
         ),
@@ -10010,6 +10111,7 @@ fn build_context_memory_panel_from_summary(
 }
 
 fn build_operating_context_panel(
+    store: &ForgeStore,
     project_root: &Path,
     identity: &InteractiveIdentityPanel,
     context_memory: &InteractiveContextMemoryPanel,
@@ -10104,6 +10206,14 @@ fn build_operating_context_panel(
         "{}/{}/{}",
         context.organization.id, context.brand.id, context.product.id
     );
+    let prompt_packet_sample =
+        operating_context_prompt_packet_sample(store, project_root, context, &tenant_path)?;
+    let memory_isolation_evidence = operating_context_memory_isolation_evidence(
+        context,
+        memory_defaults,
+        &context_memory.memory_policy.project_governance.status,
+        &tenant_path,
+    );
 
     Ok(InteractiveOperatingContextPanel {
         schema_version: INTERACTIVE_OPERATING_CONTEXT_SCHEMA_VERSION.to_string(),
@@ -10141,6 +10251,8 @@ fn build_operating_context_panel(
         component_source: context.design_system.component_source.clone(),
         prompt_packet_contract,
         company_work_contract,
+        prompt_packet_sample,
+        memory_isolation_evidence,
         identity_summary,
         handoff_context_summary,
         commands: operating_context_commands(project_root),
@@ -10177,6 +10289,157 @@ fn operating_context_personality_status(personality_scope: &str) -> String {
         "workflow_personality_ready".to_string()
     } else {
         "personality_scope_limited".to_string()
+    }
+}
+
+fn operating_context_prompt_packet_sample(
+    store: &ForgeStore,
+    project_root: &Path,
+    context: &OperatingContextSpec,
+    tenant_path: &str,
+) -> Result<InteractiveOperatingPromptPacketSample> {
+    let workflows = store.load_workflows()?;
+    let selected = workflows
+        .iter()
+        .rev()
+        .filter(|workflow| {
+            operating_context_same_tenant(&workflow.intent.operating_context, context)
+        })
+        .flat_map(|workflow| {
+            workflow
+                .tasks
+                .iter()
+                .map(move |task| (workflow, task, task.persona.is_some()))
+        })
+        .max_by_key(|(_, _, has_persona)| usize::from(*has_persona));
+
+    let Some((workflow, task, has_persona)) = selected else {
+        return Ok(InteractiveOperatingPromptPacketSample {
+            schema_version: "forge.interactive.operating_prompt_packet_sample.v1".to_string(),
+            status: "missing_workflow_task_sample".to_string(),
+            source: "store_workflows".to_string(),
+            workflow_id: None,
+            task_id: None,
+            task_title: None,
+            task_executor: None,
+            tenant_path: tenant_path.to_string(),
+            persona_mode: None,
+            persona_profile_id: None,
+            selected_voice: None,
+            selected_tone: None,
+            validation_gates: Vec::new(),
+            organization_context_sha256: None,
+            personality_decision_sha256: None,
+            company_work_decision_sha256: None,
+            packet_sha256: None,
+            handoff_status: None,
+        });
+    };
+
+    let package = build_context_package_with_checkpoint_and_project(
+        workflow,
+        &task.id,
+        DEFAULT_CONTEXT_BUDGET,
+        None,
+        Some(project_root),
+    )?;
+    let prompt_packet = package.prompt_packet;
+    let explicit_persona_suffix = if has_persona {
+        "explicit_node_persona"
+    } else {
+        "brand_default_persona"
+    };
+
+    Ok(InteractiveOperatingPromptPacketSample {
+        schema_version: "forge.interactive.operating_prompt_packet_sample.v1".to_string(),
+        status: format!("prompt_packet_sample_ready_{explicit_persona_suffix}"),
+        source: "context_engine".to_string(),
+        workflow_id: Some(workflow.id.clone()),
+        task_id: Some(task.id.clone()),
+        task_title: Some(task.title.clone()),
+        task_executor: Some(executor_kind_label(&task.executor).to_string()),
+        tenant_path: tenant_path.to_string(),
+        persona_mode: prompt_packet.persona_mode,
+        persona_profile_id: prompt_packet.persona_profile_id,
+        selected_voice: Some(prompt_packet.personality_decision.selected_voice),
+        selected_tone: Some(prompt_packet.personality_decision.selected_tone),
+        validation_gates: prompt_packet.validation_gates,
+        organization_context_sha256: Some(prompt_packet.organization_context_sha256),
+        personality_decision_sha256: Some(prompt_packet.personality_decision_sha256),
+        company_work_decision_sha256: Some(prompt_packet.company_work_decision_sha256),
+        packet_sha256: Some(prompt_packet.packet_sha256),
+        handoff_status: Some(prompt_packet.handoff_status),
+    })
+}
+
+fn operating_context_same_tenant(
+    left: &OperatingContextSpec,
+    right: &OperatingContextSpec,
+) -> bool {
+    left.organization.id == right.organization.id
+        && left.brand.id == right.brand.id
+        && left.product.id == right.product.id
+}
+
+fn operating_context_memory_isolation_evidence(
+    context: &OperatingContextSpec,
+    memory_defaults: &MemoryEffectiveDefaults,
+    project_governance_status: &str,
+    tenant_path: &str,
+) -> InteractiveOperatingMemoryIsolationEvidence {
+    let mut isolation_keys = BTreeSet::from([
+        format!("organization:{}", context.organization.id),
+        format!("brand:{}", context.brand.id),
+        format!("product:{}", context.product.id),
+        format!("audience:{}", memory_defaults.default_audience),
+    ]);
+    for scope in &memory_defaults.default_scopes {
+        isolation_keys.insert(format!("scope:{scope}"));
+    }
+    let tenant_scoped = memory_defaults
+        .default_scopes
+        .iter()
+        .any(|scope| scope == "organization")
+        && memory_defaults
+            .default_scopes
+            .iter()
+            .any(|scope| scope == "project")
+        && project_governance_status == "configured";
+    let status = if tenant_scoped {
+        "tenant_memory_isolation_ready"
+    } else if project_governance_status == "configured" {
+        "tenant_memory_isolation_partial"
+    } else {
+        "tenant_memory_isolation_missing_project_governance"
+    };
+
+    InteractiveOperatingMemoryIsolationEvidence {
+        schema_version: "forge.interactive.operating_memory_isolation.v1".to_string(),
+        status: status.to_string(),
+        tenant_path: tenant_path.to_string(),
+        organization_id: context.organization.id.clone(),
+        brand_id: context.brand.id.clone(),
+        product_id: context.product.id.clone(),
+        memory_scope: context.memory_scope.clone(),
+        allowed_scopes: memory_defaults.default_scopes.clone(),
+        default_audience: memory_defaults.default_audience.clone(),
+        project_governance_status: project_governance_status.to_string(),
+        isolation_keys: isolation_keys.into_iter().collect(),
+        governed_search_command: vec![
+            "forge".to_string(),
+            "memory".to_string(),
+            "search".to_string(),
+            "--organization".to_string(),
+            context.organization.id.clone(),
+            "--scope".to_string(),
+            "organization".to_string(),
+            "--audience".to_string(),
+            memory_defaults.default_audience.clone(),
+            "--query".to_string(),
+            "<query>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
     }
 }
 
@@ -12991,7 +13254,7 @@ pub fn render_interactive_identity(panel: &InteractiveIdentityPanel) -> String {
 
 pub fn render_interactive_operating_context(panel: &InteractiveOperatingContextPanel) -> String {
     format!(
-        "Operating context: {status}; tenant {tenant_path}, policy {tenant_policy_status}, project {project_root}\nOrganization: {organization}/{brand}/{product}; user {user}; channel {channel}; context {context_status}\nMemory: policy {memory_policy_status}, level {memory_level}, scopes {memory_scopes}, audience {memory_audience}, governance {memory_governance_status}\nPersonality: {personality_status}; scope {personality_scope}; voice {brand_voice}; tone {brand_tone}; brand values {brand_value_count}; design tokens {design_token_source}; components {component_source}\nPrompt packet: {prompt_packet_status}; gates {prompt_packet_gates}\nCompany work: {company_work_status}; departments {company_work_departments}; decisions {company_work_decisions}\nIdentity summary: identities {identity_count}, aliases {alias_count}, memberships {membership_count}, active {active_membership_count}, tenant missing {tenant_missing}\nHandoff context: ready {ready_handoffs}, blocked {blocked_tasks}, budget pressure {budget_pressure}, quality {quality_status}, missing required {required_missing}\nCommands: refresh {refresh}; identity {identity}; memory {context_memory}; context {context_packet}; handoff {task_handoff}\nNext: {next_actions}\n",
+        "Operating context: {status}; tenant {tenant_path}, policy {tenant_policy_status}, project {project_root}\nOrganization: {organization}/{brand}/{product}; user {user}; channel {channel}; context {context_status}\nMemory: policy {memory_policy_status}, level {memory_level}, scopes {memory_scopes}, audience {memory_audience}, governance {memory_governance_status}\nMemory isolation: {memory_isolation_status}; keys {memory_isolation_keys}\nPersonality: {personality_status}; scope {personality_scope}; voice {brand_voice}; tone {brand_tone}; brand values {brand_value_count}; design tokens {design_token_source}; components {component_source}\nPrompt packet: {prompt_packet_status}; gates {prompt_packet_gates}\nPrompt packet sample: {prompt_sample_status}; task {prompt_sample_task}; persona {prompt_sample_persona}; packet {prompt_sample_hash}\nCompany work: {company_work_status}; departments {company_work_departments}; decisions {company_work_decisions}\nIdentity summary: identities {identity_count}, aliases {alias_count}, memberships {membership_count}, active {active_membership_count}, tenant missing {tenant_missing}\nHandoff context: ready {ready_handoffs}, blocked {blocked_tasks}, budget pressure {budget_pressure}, quality {quality_status}, missing required {required_missing}\nCommands: refresh {refresh}; identity {identity}; memory {context_memory}; context {context_packet}; handoff {task_handoff}\nNext: {next_actions}\n",
         status = panel.status,
         tenant_path = panel.tenant_path,
         tenant_policy_status = panel.tenant_policy_status,
@@ -13007,6 +13270,8 @@ pub fn render_interactive_operating_context(panel: &InteractiveOperatingContextP
         memory_scopes = panel.memory_scopes.join(","),
         memory_audience = panel.memory_audience,
         memory_governance_status = panel.memory_governance_status,
+        memory_isolation_status = panel.memory_isolation_evidence.status,
+        memory_isolation_keys = panel.memory_isolation_evidence.isolation_keys.join(","),
         personality_status = panel.personality_status,
         personality_scope = panel.personality_scope,
         brand_voice = panel.brand_voice,
@@ -13016,6 +13281,22 @@ pub fn render_interactive_operating_context(panel: &InteractiveOperatingContextP
         component_source = panel.component_source,
         prompt_packet_status = panel.prompt_packet_contract.status,
         prompt_packet_gates = panel.prompt_packet_contract.required_gates.join(","),
+        prompt_sample_status = panel.prompt_packet_sample.status,
+        prompt_sample_task = panel
+            .prompt_packet_sample
+            .task_id
+            .as_deref()
+            .unwrap_or("none"),
+        prompt_sample_persona = panel
+            .prompt_packet_sample
+            .persona_mode
+            .as_deref()
+            .unwrap_or("brand_default"),
+        prompt_sample_hash = panel
+            .prompt_packet_sample
+            .packet_sha256
+            .as_deref()
+            .unwrap_or("missing"),
         company_work_status = panel.company_work_contract.status,
         company_work_departments = panel.company_work_contract.departments.join(","),
         company_work_decisions = panel.company_work_contract.required_decisions.join(","),
