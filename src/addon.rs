@@ -6818,9 +6818,9 @@ fn installed_view_from_record(record: StoredAddonRecord) -> Result<InstalledAddo
 }
 
 fn sync_installed_addon_capability_index(store: &ForgeStore) -> Result<()> {
-    for record in store.list_installed_addons()? {
-        let manifest = installed_manifest_from_record(&record)?;
-        let lifecycle = authorized_lifecycle_for_manifest(store, &manifest, &record.status)?;
+    let catalog = load_addon_catalog_from_store(store, &default_addon_dirs())?;
+    for manifest in catalog.addons {
+        let lifecycle = authorized_lifecycle_for_manifest(store, &manifest, &manifest.lifecycle)?;
         materialize_installed_addon_capabilities(store, &manifest, &lifecycle)?;
     }
     Ok(())

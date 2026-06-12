@@ -15602,6 +15602,8 @@ capabilities:
             store.to_str().unwrap(),
             "addons",
             "capabilities",
+            "--addon",
+            "forge.addon.fiscal",
             "--output",
             "json",
         ])

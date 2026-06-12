@@ -96,7 +96,8 @@ use crate::interactive::{
     build_interactive_action_invocation, build_interactive_action_registry,
     build_interactive_addon_capabilities_default, build_interactive_architecture_compass,
     build_interactive_artifacts, build_interactive_autocomplete, build_interactive_command_palette,
-    build_interactive_context_memory, build_interactive_guided_cockpit, build_interactive_harness,
+    build_interactive_context_memory, build_interactive_core_boundary,
+    build_interactive_guided_cockpit, build_interactive_harness,
     build_interactive_home_with_options, build_interactive_identity,
     build_interactive_improvement_loop, build_interactive_multimodal_runtime,
     build_interactive_operating_context, build_interactive_operational_cockpit,
@@ -3329,6 +3330,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.addon_capability.v1",
                 &["forge", "interactive", "addon-capabilities", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.core_boundary",
+                "Inspect Core Boundary",
+                "Return the Forge Core boundary audit proving universal Core responsibilities, Addon-owned domain capabilities, compatibility executors and goal3 acceptance gates without mutating state.",
+                object_schema(&[], &[]),
+                "forge.interactive.core_boundary.v1",
+                &["forge", "interactive", "core-boundary", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7796,6 +7806,9 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.interactive.addon_capabilities" => {
             serde_json::to_value(build_interactive_addon_capabilities_default(store))?
+        }
+        "forge.interactive.core_boundary" => {
+            serde_json::to_value(build_interactive_core_boundary(store))?
         }
         "forge.interactive.identity" => {
             let input: InteractiveIdentityInput = if input.is_null() {

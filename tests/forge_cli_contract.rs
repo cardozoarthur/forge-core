@@ -48254,6 +48254,208 @@ fn interactive_addon_capabilities_command_and_mcp_surface_are_dedicated() {
 }
 
 #[test]
+fn interactive_core_boundary_audit_proves_core_minimal_and_addon_owned_domains() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "core-boundary",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.interactive.core_boundary.v1");
+    assert_eq!(json["status"], "core_boundary_clean");
+    assert_eq!(json["core_addon_id"], "forge.core.kernel");
+    assert_eq!(json["domain_specific_core_leak_count"], 0);
+    assert!(json["core_capability_count"].as_u64().unwrap() >= 10);
+    assert!(json["domain_addon_count"].as_u64().unwrap() >= 8);
+    assert!(json["addon_owned_capability_count"].as_u64().unwrap() >= 8);
+    assert!(json["compatibility_boundary_count"].as_u64().unwrap() >= 1);
+    assert_eq!(json["acceptance_gates"].as_array().unwrap().len(), 8);
+    assert!(json["acceptance_gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|gate| gate["passed"] == true));
+    assert!(json["core_kernel_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|capability| capability["boundary_status"] == "core_universal"));
+    assert!(json["addon_boundaries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |addon| addon["addon_id"] == "forge.addon.software_development"
+                && addon["sample_capabilities"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("source_code_patch_lifecycle"))
+        ));
+    assert!(json["addon_boundaries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|addon| addon["addon_id"] == "forge.addon.multimodal"
+            && addon["sample_capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("multimodal_runtime"))));
+    assert!(json["compatibility_boundaries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|boundary| boundary["migration_state"]
+            == "compatibility_executor_visible_but_addon_owned"));
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "core-boundary",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Core boundary: core_boundary_clean"));
+    assert!(text.contains("Core kernel: workflow_runtime:core_universal"));
+    assert!(text.contains("Compatibility boundaries:"));
+    assert!(text.contains("Acceptance gates:"));
+
+    let home_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["core_boundary_panel"]["schema_version"],
+        "forge.interactive.core_boundary.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["core_boundary_panel"]["domain_specific_core_leak_count"],
+        0
+    );
+    assert!(home["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/core-boundary")));
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|region| region["widgets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|widget| widget["widget_id"] == "core_boundary_panel"
+                && widget["renderer_family"] == "boundary_audit_renderer")));
+
+    let route_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "route",
+            "--input",
+            "/core-boundary",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let route: Value = serde_json::from_slice(&route_output).unwrap();
+    assert_eq!(route["slash_command"]["name"], "/core-boundary");
+    assert_eq!(
+        route["slash_command"]["equivalent_command"],
+        serde_json::json!(["forge", "interactive", "core-boundary"])
+    );
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.core_boundary");
+    assert_eq!(tool["output_schema"], "forge.interactive.core_boundary.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.core_boundary"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.core_boundary.v1"
+    );
+    assert_eq!(mcp_json["result"]["status"], "core_boundary_clean");
+
+    let smoke_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "smoke",
+            "operational-tui",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let smoke: Value = serde_json::from_slice(&smoke_output).unwrap();
+    let check = smoke["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["check_id"] == "shows_core_boundary_audit")
+        .expect("missing core boundary smoke check");
+    assert_eq!(check["passed"], true);
+}
+
+#[test]
 fn interactive_addon_capabilities_show_addon_event_extensions_for_operational_tui() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -52319,6 +52521,12 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge interactive release-gates"),
         "the packaged Forge skill should include the release-gates CLI command"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.core_boundary")
+            && forge_core::skill::SKILL_MD.contains("forge interactive core-boundary")
+            && forge_core::skill::SKILL_MD.contains("dashboard.core_boundary_panel"),
+        "the packaged Forge skill should expose the Core boundary audit through MCP, CLI and home"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.harness"),

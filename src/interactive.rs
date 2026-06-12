@@ -1,9 +1,9 @@
 use crate::addon::{
-    addon_observability_report, default_addon_dirs, list_addon_capability_index,
-    list_addon_event_adapters, list_addon_permission_authorizations, list_addon_views,
-    load_addon_catalog_from_store, AddonCatalog, AddonEventExtensionRegistry, AddonViewAction,
-    AddonViewEntry, ADDON_EVENT_EXTENSIONS_SCHEMA_VERSION, CAP_MULTIMODAL_RUNTIME,
-    CAP_SOURCE_CODE_PATCH_LIFECYCLE,
+    addon_observability_report, builtin_addon_catalog, default_addon_dirs,
+    list_addon_capability_index, list_addon_event_adapters, list_addon_permission_authorizations,
+    list_addon_views, load_addon_catalog_from_store, AddonCatalog, AddonEventExtensionRegistry,
+    AddonManifest, AddonViewAction, AddonViewEntry, ADDON_EVENT_EXTENSIONS_SCHEMA_VERSION,
+    CAP_MULTIMODAL_RUNTIME, CAP_SOURCE_CODE_PATCH_LIFECYCLE,
 };
 use crate::artifact::list_workflow_artifacts;
 use crate::checkpoint::TaskCheckpoint;
@@ -123,6 +123,7 @@ const INTERACTIVE_OPERATIONAL_MODIFIER_LANE_SCHEMA_VERSION: &str =
 const INTERACTIVE_WORKFLOW_MUTATION_SCHEMA_VERSION: &str = "forge.interactive.workflow_mutation.v1";
 const INTERACTIVE_GUIDED_COCKPIT_SCHEMA_VERSION: &str = "forge.interactive.guided_cockpit.v1";
 const INTERACTIVE_ADDON_CAPABILITY_SCHEMA_VERSION: &str = "forge.interactive.addon_capability.v1";
+const INTERACTIVE_CORE_BOUNDARY_SCHEMA_VERSION: &str = "forge.interactive.core_boundary.v1";
 const INTERACTIVE_ARCHITECTURE_COMPASS_SCHEMA_VERSION: &str =
     "forge.interactive.architecture_compass.v1";
 const OPERATIONAL_TUI_SMOKE_SCHEMA_VERSION: &str = "forge.smoke.operational_tui.v1";
@@ -211,6 +212,7 @@ pub struct InteractiveDashboard {
     pub digital_twin_panel: OpsOperationalDigitalTwin,
     pub operational_cockpit_panel: InteractiveOperationalCockpitPanel,
     pub architecture_compass_panel: InteractiveArchitectureCompassPanel,
+    pub core_boundary_panel: InteractiveCoreBoundaryPanel,
     pub addon_capability_panel: InteractiveAddonCapabilityPanel,
     pub addon_renderer_panel: InteractiveAddonRendererPanel,
     pub attention_actions: Vec<String>,
@@ -520,6 +522,67 @@ pub struct InteractiveAddonCapabilityPanel {
     pub event_extension_registry: AddonEventExtensionRegistry,
     pub capabilities: Vec<String>,
     pub commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveCoreBoundaryPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub core_addon_id: String,
+    pub core_capability_count: usize,
+    pub addon_count: usize,
+    pub domain_addon_count: usize,
+    pub addon_owned_capability_count: usize,
+    pub domain_specific_core_leak_count: usize,
+    pub compatibility_boundary_count: usize,
+    pub core_allowed_responsibilities: Vec<String>,
+    pub core_kernel_capabilities: Vec<InteractiveCoreCapabilityBoundary>,
+    pub addon_boundaries: Vec<InteractiveAddonBoundaryCard>,
+    pub compatibility_boundaries: Vec<InteractiveCompatibilityBoundary>,
+    pub acceptance_gates: Vec<InteractiveCoreBoundaryGate>,
+    pub notes: Vec<String>,
+    pub commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveCoreCapabilityBoundary {
+    pub capability_id: String,
+    pub title: String,
+    pub domains: Vec<String>,
+    pub boundary_status: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveAddonBoundaryCard {
+    pub addon_id: String,
+    pub source: String,
+    pub lifecycle: String,
+    pub capability_count: usize,
+    pub runtime_contract_count: usize,
+    pub view_count: usize,
+    pub domains: Vec<String>,
+    pub sample_capabilities: Vec<String>,
+    pub boundary_summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveCompatibilityBoundary {
+    pub addon_id: String,
+    pub contract_id: String,
+    pub capability_id: String,
+    pub compatibility_executor: String,
+    pub target_boundary: String,
+    pub migration_state: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveCoreBoundaryGate {
+    pub gate_id: String,
+    pub title: String,
+    pub passed: bool,
+    pub evidence: String,
+    pub evidence_command: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2624,6 +2687,8 @@ pub struct OperationalTuiSmokeDashboard {
     pub schedule_workflow_count: usize,
     pub addon_count: usize,
     pub capability_count: usize,
+    pub core_boundary_status: String,
+    pub domain_specific_core_leak_count: usize,
     pub cost_estimated_usd: f64,
     pub improvement_candidate_count: usize,
     pub structured_log_count: usize,
@@ -2985,6 +3050,7 @@ pub fn build_interactive_home_with_options(
         });
     let addon_capability_panel =
         build_interactive_addon_capabilities(store, addon_catalog.as_ref());
+    let core_boundary_panel = build_interactive_core_boundary(store);
     let addon_renderer_panel = build_interactive_addon_renderer_panel(&addon_renderer_report);
     let patch_workbench_panel = build_interactive_patch_workbench(store)?;
     let permissions_panel = build_interactive_permissions(store)?;
@@ -3120,6 +3186,7 @@ pub fn build_interactive_home_with_options(
             digital_twin_panel,
             operational_cockpit_panel,
             architecture_compass_panel,
+            core_boundary_panel,
             addon_capability_panel,
             addon_renderer_panel,
             attention_actions,
@@ -3131,6 +3198,7 @@ pub fn build_interactive_home_with_options(
                 "forge request list".to_string(),
                 "forge interactive workflow-sidebar --output json".to_string(),
                 "forge interactive architecture --output json".to_string(),
+                "forge interactive core-boundary --output json".to_string(),
                 "forge interactive replacement-cli --output json".to_string(),
                 "forge interactive multimodal-runtime --project-root . --output json"
                     .to_string(),
@@ -3168,6 +3236,7 @@ pub fn build_interactive_home_with_options(
                 "/workflows".to_string(),
                 "/workflow-sidebar".to_string(),
                 "/architecture".to_string(),
+                "/core-boundary".to_string(),
                 "/replacement-cli".to_string(),
                 "/multimodal-runtime".to_string(),
                 "/runs".to_string(),
@@ -4235,6 +4304,8 @@ pub fn build_operational_tui_smoke(
         schedule_workflow_count: d.scheduled_workflows,
         addon_count: d.addon_capability_panel.addon_count,
         capability_count: d.addon_capability_panel.capability_count,
+        core_boundary_status: d.core_boundary_panel.status.clone(),
+        domain_specific_core_leak_count: d.core_boundary_panel.domain_specific_core_leak_count,
         cost_estimated_usd: d.cost_panel.estimated_task_cost_total_usd,
         improvement_candidate_count: d.improvement_loop_panel.candidate_count,
         structured_log_count: d.improvement_loop_panel.structured_log_count,
@@ -4344,6 +4415,21 @@ pub fn build_operational_tui_smoke(
                 d.addon_capability_panel.status, dashboard.addon_count, dashboard.capability_count
             ),
             "forge interactive addon-capabilities --output json",
+        ),
+        operational_tui_smoke_check(
+            "shows_core_boundary_audit",
+            "TUI shows Core boundary and Addon ownership audit",
+            d.core_boundary_panel.schema_version == INTERACTIVE_CORE_BOUNDARY_SCHEMA_VERSION
+                && dashboard.core_boundary_status == "core_boundary_clean"
+                && dashboard.domain_specific_core_leak_count == 0
+                && default_tui_preview.contains("Core boundary:"),
+            format!(
+                "{}; leaks {}; compatibility {}",
+                d.core_boundary_panel.status,
+                d.core_boundary_panel.domain_specific_core_leak_count,
+                d.core_boundary_panel.compatibility_boundary_count
+            ),
+            "forge interactive core-boundary --output json",
         ),
         operational_tui_smoke_check(
             "shows_costs",
@@ -10445,10 +10531,23 @@ pub fn build_interactive_addon_capabilities(
     let indexed_capabilities = capability_index
         .as_ref()
         .map(|index| {
-            index
-                .capabilities
+            let mut capabilities = index.capabilities.iter().collect::<Vec<_>>();
+            capabilities.sort_by(|left, right| {
+                let left_core = left.addon_id == "forge.core.kernel";
+                let right_core = right.addon_id == "forge.core.kernel";
+                right_core
+                    .cmp(&left_core)
+                    .then_with(|| {
+                        (left.capability_id == "workflow_runtime")
+                            .cmp(&(right.capability_id == "workflow_runtime"))
+                            .reverse()
+                    })
+                    .then_with(|| left.addon_id.cmp(&right.addon_id))
+                    .then_with(|| left.capability_id.cmp(&right.capability_id))
+            });
+            capabilities
                 .iter()
-                .take(8)
+                .take(12)
                 .map(|capability| {
                     format!(
                         "{}:{} [{}]",
@@ -10584,6 +10683,323 @@ pub fn build_interactive_addon_capabilities(
             "forge interactive action-registry --query addon --output json".to_string(),
         ],
     }
+}
+
+pub fn build_interactive_core_boundary(store: &ForgeStore) -> InteractiveCoreBoundaryPanel {
+    let catalog = load_addon_catalog_from_store(store, &default_addon_dirs())
+        .unwrap_or_else(|_| builtin_addon_catalog());
+    let capability_index = list_addon_capability_index(store, None, None, None).ok();
+    let core_addon = catalog
+        .addons
+        .iter()
+        .find(|addon| addon.id == "forge.core.kernel");
+    let core_capabilities = core_addon
+        .map(|addon| {
+            addon
+                .capabilities
+                .iter()
+                .map(|capability| {
+                    let domain_specific_id = domain_specific_capability_ids()
+                        .contains(capability.id.as_str());
+                    let non_core_domain = capability
+                        .domains
+                        .iter()
+                        .any(|domain| domain.as_str() != "core");
+                    let boundary_status = if domain_specific_id || non_core_domain {
+                        "domain_specific_leak"
+                    } else {
+                        "core_universal"
+                    };
+                    let reason = if domain_specific_id {
+                        "Capability id belongs to a domain Addon and should not be in Core."
+                    } else if non_core_domain {
+                        "Capability declares a non-core domain from inside the Core kernel."
+                    } else {
+                        "Capability is limited to workflow, event, context, identity or governance infrastructure."
+                    };
+                    InteractiveCoreCapabilityBoundary {
+                        capability_id: capability.id.clone(),
+                        title: capability.title.clone(),
+                        domains: capability.domains.clone(),
+                        boundary_status: boundary_status.to_string(),
+                        reason: reason.to_string(),
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let domain_specific_core_leak_count = core_capabilities
+        .iter()
+        .filter(|capability| capability.boundary_status == "domain_specific_leak")
+        .count();
+    let addon_boundaries = catalog
+        .addons
+        .iter()
+        .filter(|addon| addon.id != "forge.core.kernel")
+        .map(interactive_addon_boundary_card)
+        .collect::<Vec<_>>();
+    let domain_addon_count = addon_boundaries.len();
+    let addon_owned_capability_count = addon_boundaries
+        .iter()
+        .map(|addon| addon.capability_count)
+        .sum::<usize>();
+    let compatibility_boundaries = catalog
+        .addons
+        .iter()
+        .filter(|addon| addon.id != "forge.core.kernel")
+        .flat_map(interactive_compatibility_boundaries)
+        .collect::<Vec<_>>();
+    let compatibility_boundary_count = compatibility_boundaries.len();
+    let event_extension_count = catalog
+        .addons
+        .iter()
+        .filter(|addon| addon.id != "forge.core.kernel")
+        .map(|addon| {
+            addon.event_types.len()
+                + addon.event_channels.len()
+                + addon.event_triggers.len()
+                + addon.event_listeners.len()
+                + addon.event_adapters.len()
+        })
+        .sum::<usize>();
+    let runtime_contract_count = catalog
+        .addons
+        .iter()
+        .map(|addon| addon.runtime_contracts.len())
+        .sum::<usize>();
+    let addon_view_count = catalog
+        .addons
+        .iter()
+        .filter(|addon| addon.id != "forge.core.kernel")
+        .map(|addon| addon.views.len())
+        .sum::<usize>();
+    let permission_count = catalog
+        .addons
+        .iter()
+        .filter(|addon| addon.id != "forge.core.kernel")
+        .map(|addon| addon.permissions.len())
+        .sum::<usize>();
+    let indexed_capability_count = capability_index
+        .as_ref()
+        .map(|index| index.capability_count)
+        .unwrap_or(0);
+    let acceptance_gates = vec![
+        core_boundary_gate(
+            "core_is_minimal_and_universal",
+            "Core kernel only declares universal infrastructure capabilities",
+            core_addon.is_some() && domain_specific_core_leak_count == 0,
+            format!(
+                "{} core capabilities audited; {} domain-specific leaks",
+                core_capabilities.len(),
+                domain_specific_core_leak_count
+            ),
+            "forge interactive core-boundary --output json",
+        ),
+        core_boundary_gate(
+            "domain_capabilities_are_addon_owned",
+            "Domain capabilities live in Addons instead of Core",
+            domain_addon_count > 0 && addon_owned_capability_count > 0,
+            format!(
+                "{} non-core Addons own {} capabilities",
+                domain_addon_count, addon_owned_capability_count
+            ),
+            "forge interactive addon-capabilities --output json",
+        ),
+        core_boundary_gate(
+            "addon_manifests_are_source_of_truth",
+            "Addon manifests describe lifecycle, capabilities and contracts",
+            catalog.addon_count > 1 && catalog.capability_count > 0,
+            format!(
+                "{} Addons and {} capabilities loaded from the catalog",
+                catalog.addon_count, catalog.capability_count
+            ),
+            "forge addons catalog --output json",
+        ),
+        core_boundary_gate(
+            "capability_registry_is_queryable",
+            "Capability registry can be queried independently of the TUI",
+            indexed_capability_count > 0,
+            format!("{indexed_capability_count} capabilities indexed in the store"),
+            "forge addons capabilities --output json",
+        ),
+        core_boundary_gate(
+            "ui_composition_is_core_plus_addons",
+            "UI composition can render Core widgets and Addon-owned views",
+            addon_view_count > 0,
+            format!("{addon_view_count} Addon TUI views are available for composition"),
+            "forge interactive home --output json",
+        ),
+        core_boundary_gate(
+            "runtime_contracts_route_specific_execution",
+            "Domain execution is represented as Addon runtime contracts",
+            runtime_contract_count > 0,
+            format!(
+                "{} runtime contracts; {} compatibility boundaries still visible",
+                runtime_contract_count, compatibility_boundary_count
+            ),
+            "forge addons runtime-contracts --output json",
+        ),
+        core_boundary_gate(
+            "event_extensions_are_addon_owned",
+            "Domain events, channels and adapters are attached through Addons",
+            event_extension_count > 0,
+            format!("{event_extension_count} non-core event extension declarations"),
+            "forge events adapters --output json",
+        ),
+        core_boundary_gate(
+            "permissions_lifecycle_observability_are_visible",
+            "Security, lifecycle and observability remain inspectable",
+            permission_count > 0
+                && catalog
+                    .addons
+                    .iter()
+                    .any(|addon| addon.lifecycle == "enabled"),
+            format!("{permission_count} non-core permissions with lifecycle metadata"),
+            "forge addons observability --output json",
+        ),
+    ];
+    let status = if core_addon.is_none() {
+        "core_boundary_missing_core_kernel"
+    } else if domain_specific_core_leak_count > 0 {
+        "core_boundary_needs_refactor"
+    } else {
+        "core_boundary_clean"
+    };
+
+    InteractiveCoreBoundaryPanel {
+        schema_version: INTERACTIVE_CORE_BOUNDARY_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        core_addon_id: core_addon
+            .map(|addon| addon.id.clone())
+            .unwrap_or_else(|| "missing".to_string()),
+        core_capability_count: core_capabilities.len(),
+        addon_count: catalog.addon_count,
+        domain_addon_count,
+        addon_owned_capability_count,
+        domain_specific_core_leak_count,
+        compatibility_boundary_count,
+        core_allowed_responsibilities: core_allowed_responsibilities(),
+        core_kernel_capabilities: core_capabilities,
+        addon_boundaries,
+        compatibility_boundaries,
+        acceptance_gates,
+        notes: vec![
+            "This panel is read-only and does not migrate capabilities automatically.".to_string(),
+            "Compatibility executors are allowed only when the capability is still owned by an Addon contract.".to_string(),
+            "A clean Core boundary is evidence for goal3, not proof that the whole Forge objective is complete.".to_string(),
+        ],
+        commands: vec![
+            "forge interactive core-boundary --output json".to_string(),
+            "forge interactive addon-capabilities --output json".to_string(),
+            "forge addons catalog --output json".to_string(),
+            "forge addons capabilities --output json".to_string(),
+            "forge addons runtime-contracts --output json".to_string(),
+            "forge addons observability --output json".to_string(),
+            "forge interactive release-gates --output json".to_string(),
+        ],
+    }
+}
+
+fn interactive_addon_boundary_card(addon: &AddonManifest) -> InteractiveAddonBoundaryCard {
+    let mut domains = BTreeSet::new();
+    for capability in &addon.capabilities {
+        for domain in &capability.domains {
+            domains.insert(domain.clone());
+        }
+    }
+    let sample_capabilities = addon
+        .capabilities
+        .iter()
+        .take(5)
+        .map(|capability| capability.id.clone())
+        .collect::<Vec<_>>();
+    InteractiveAddonBoundaryCard {
+        addon_id: addon.id.clone(),
+        source: addon.source.clone(),
+        lifecycle: addon.lifecycle.clone(),
+        capability_count: addon.capabilities.len(),
+        runtime_contract_count: addon.runtime_contracts.len(),
+        view_count: addon.views.len(),
+        domains: domains.into_iter().collect(),
+        sample_capabilities,
+        boundary_summary: "addon_owned_domain_surface".to_string(),
+    }
+}
+
+fn interactive_compatibility_boundaries(
+    addon: &AddonManifest,
+) -> Vec<InteractiveCompatibilityBoundary> {
+    addon
+        .runtime_contracts
+        .iter()
+        .filter(|contract| {
+            addon.source.contains("compat")
+                || contract.runtime == "forge_core_builtin"
+                || contract.entrypoint.starts_with("forge.")
+                || contract.entrypoint.starts_with("planner:")
+        })
+        .map(|contract| InteractiveCompatibilityBoundary {
+            addon_id: addon.id.clone(),
+            contract_id: contract.id.clone(),
+            capability_id: contract.capability_id.clone(),
+            compatibility_executor: if contract.runtime.is_empty() {
+                contract.entrypoint.clone()
+            } else {
+                format!("{}:{}", contract.runtime, contract.entrypoint)
+            },
+            target_boundary: "external_addon_worker_or_governed_runtime_contract".to_string(),
+            migration_state: "compatibility_executor_visible_but_addon_owned".to_string(),
+        })
+        .collect()
+}
+
+fn core_boundary_gate(
+    gate_id: &str,
+    title: &str,
+    passed: bool,
+    evidence: String,
+    evidence_command: &str,
+) -> InteractiveCoreBoundaryGate {
+    InteractiveCoreBoundaryGate {
+        gate_id: gate_id.to_string(),
+        title: title.to_string(),
+        passed,
+        evidence,
+        evidence_command: evidence_command.to_string(),
+    }
+}
+
+fn domain_specific_capability_ids() -> BTreeSet<&'static str> {
+    [
+        "workflow_automation_research",
+        "hackathon_factory",
+        "daily_goal_research",
+        "visual_workspace",
+        "async_runtime",
+        "telegram_notification",
+        CAP_SOURCE_CODE_PATCH_LIFECYCLE,
+        CAP_MULTIMODAL_RUNTIME,
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn core_allowed_responsibilities() -> Vec<String> {
+    [
+        "workflow_runtime",
+        "dynamic_workflow_graphs",
+        "event_ingress_and_state_transitions",
+        "context_routing",
+        "memory_governance",
+        "identity_and_tenant_routing",
+        "personality_routing",
+        "human_collaboration_controls",
+        "observability_and_cost_policy",
+        "addon_registry_and_capability_resolution",
+    ]
+    .into_iter()
+    .map(ToString::to_string)
+    .collect()
 }
 
 fn empty_addon_event_extension_registry() -> AddonEventExtensionRegistry {
@@ -11456,6 +11872,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         render_architecture_benchmark_summary(&d.architecture_compass_panel);
     let architecture_execution_plan =
         render_architecture_execution_plan_summary(&d.architecture_compass_panel);
+    let core_boundary = render_core_boundary_summary(&d.core_boundary_panel);
     let addon_capabilities = render_addon_capability_summary(&d.addon_capability_panel);
     let addon_event_extensions = render_addon_event_extension_summary(&d.addon_capability_panel);
     let addon_renderer_families = if d.addon_renderer_panel.families.is_empty() {
@@ -11482,12 +11899,14 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Handoffs/approvals: ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, pending approvals {pending_approvals}, context blocked {context_blocked}\n\
          Workflow mutation/replanning: {workflow_mutation_status}; workflows {workflow_mutation_workflows}, active {workflow_mutation_active}, mutable {workflow_mutation_mutable}, proposals {workflow_mutation_pending}/{workflow_mutation_applied}, checkpoints {workflow_mutation_checkpoints}; cards {workflow_mutation_cards}\n\
          Architecture compass: {architecture_status}; tracks {architecture_track_count}, docs {architecture_doc_count}; {architecture_tracks}\n\
+         Core boundary: {core_boundary}\n\
          Architecture execution plan: {architecture_execution_plan}\n\
          Smoke test: forge smoke operational-tui --output json\n\n\
          Active runs: {active_runs}\n\
          {run_ids_line}\
          Operational cockpit: {cockpit_attention}; {cockpit_priority}; active work {cockpit_active_work}, ready handoffs {cockpit_ready_handoffs}, human waits {cockpit_human_waits}, due workflows {cockpit_due_workflows}, brain {cockpit_selected_brain}; sections {cockpit_sections}\n\
          Architecture compass: {architecture_status}; benchmarks {architecture_benchmarks}\n\
+         Core boundary: {core_boundary}\n\
          Architecture execution plan: {architecture_execution_plan}\n\
          Runs needing attention: {runs_needing_attention}\n\
          Scheduled workflows: {scheduled_workflows}\n\
@@ -11532,6 +11951,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Cost panel: {cost_status}; workflows {cost_workflows}, nodes {cost_nodes}, estimated ${cost_estimated:.4}, observed ${cost_observed:.4}\n\
          Improvement loop: {improvement_status}; workflows {improvement_total_workflows}, matched {improvement_matched_workflows}, candidates {improvement_candidates_count}, critical {improvement_critical}, high {improvement_high}, parallel {improvement_parallel}, avoidable AI {improvement_avoidable_ai}, final outcome {improvement_final_outcome}, stale/attention {improvement_stale}; top {improvement_candidates}\n\
          Context/memory panel: ready {context_ready}, blocked {context_blocked}, budget pressure {context_budget_pressure}, memory {memory_policy_status}\n\
+         Core boundary: {core_boundary}\n\
          Addons/capabilities: {addon_capability_status}; addons {addon_count}, enabled {addon_enabled}, capabilities {addon_capabilities_count}, enabled capabilities {addon_enabled_capabilities}, disabled capabilities {addon_disabled_capabilities}, permissions {addon_permissions}, runtime contracts {addon_contracts}, views {addon_views}, dispatches {addon_dispatches}, queued {addon_queued_dispatches}, event types {addon_event_types}, channels {addon_event_channels}, triggers {addon_event_triggers}, listeners {addon_event_listeners}, adapters {addon_event_adapters}; {addon_capabilities}; events {addon_event_extensions}\n\
          Addon UI renderers: {addon_renderer_status}; safe {addon_safe_renderers}/{addon_renderers}, families {addon_renderer_family_count} ({addon_renderer_families})\n\
          Repository context: {repository_context}\n\
@@ -11568,6 +11988,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         architecture_tracks = architecture_tracks,
         architecture_benchmarks = architecture_benchmarks,
         architecture_execution_plan = architecture_execution_plan,
+        core_boundary = core_boundary,
         runs_needing_attention = d.runs_needing_attention,
         scheduled_workflows = d.scheduled_workflows,
         looping_workflows = d.looping_workflows,
@@ -15268,6 +15689,15 @@ fn build_ui_composition_panel(
                     vec!["forge interactive release-gates --output json".to_string()],
                 ),
                 core_ui_widget(
+                    "core_boundary_panel",
+                    "Core boundary",
+                    "core_boundary_panel",
+                    "boundary_audit_renderer",
+                    "standard",
+                    "half",
+                    vec!["forge interactive core-boundary --output json".to_string()],
+                ),
+                core_ui_widget(
                     "cost_panel",
                     "Cost panel",
                     "cost_panel",
@@ -15612,6 +16042,118 @@ fn render_addon_capability_summary(panel: &InteractiveAddonCapabilityPanel) -> S
     } else {
         panel.capabilities.join(" | ")
     }
+}
+
+fn render_core_boundary_summary(panel: &InteractiveCoreBoundaryPanel) -> String {
+    let failed_gates = panel
+        .acceptance_gates
+        .iter()
+        .filter(|gate| !gate.passed)
+        .count();
+    let addon_samples = if panel.addon_boundaries.is_empty() {
+        "none".to_string()
+    } else {
+        panel
+            .addon_boundaries
+            .iter()
+            .take(5)
+            .map(|addon| {
+                format!(
+                    "{} caps {} domains {}",
+                    addon.addon_id,
+                    addon.capability_count,
+                    if addon.domains.is_empty() {
+                        "none".to_string()
+                    } else {
+                        addon.domains.join("+")
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    format!(
+        "{}; core caps {}, domain addons {}, addon-owned caps {}, leaks {}, compatibility {}, gates {}/{} passed; addons {}",
+        panel.status,
+        panel.core_capability_count,
+        panel.domain_addon_count,
+        panel.addon_owned_capability_count,
+        panel.domain_specific_core_leak_count,
+        panel.compatibility_boundary_count,
+        panel.acceptance_gates.len().saturating_sub(failed_gates),
+        panel.acceptance_gates.len(),
+        addon_samples
+    )
+}
+
+pub fn render_interactive_core_boundary(panel: &InteractiveCoreBoundaryPanel) -> String {
+    let core_capabilities = if panel.core_kernel_capabilities.is_empty() {
+        "none".to_string()
+    } else {
+        panel
+            .core_kernel_capabilities
+            .iter()
+            .map(|capability| {
+                format!(
+                    "{}:{} domains {}",
+                    capability.capability_id,
+                    capability.boundary_status,
+                    if capability.domains.is_empty() {
+                        "none".to_string()
+                    } else {
+                        capability.domains.join("+")
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let compatibility = if panel.compatibility_boundaries.is_empty() {
+        "none".to_string()
+    } else {
+        panel
+            .compatibility_boundaries
+            .iter()
+            .take(8)
+            .map(|boundary| {
+                format!(
+                    "{}:{} via {}",
+                    boundary.addon_id, boundary.capability_id, boundary.compatibility_executor
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let gates = if panel.acceptance_gates.is_empty() {
+        "none".to_string()
+    } else {
+        panel
+            .acceptance_gates
+            .iter()
+            .map(|gate| {
+                format!(
+                    "{}:{} ({})",
+                    gate.gate_id,
+                    if gate.passed {
+                        "passed"
+                    } else {
+                        "needs_evidence"
+                    },
+                    gate.evidence
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    format!(
+        "Core boundary: {summary}\nCore responsibilities: {responsibilities}\nCore kernel: {core_capabilities}\nCompatibility boundaries: {compatibility}\nAcceptance gates: {gates}\nCommands: {commands}\n",
+        summary = render_core_boundary_summary(panel),
+        responsibilities = panel.core_allowed_responsibilities.join(", "),
+        core_capabilities = core_capabilities,
+        compatibility = compatibility,
+        gates = gates,
+        commands = panel.commands.join(" | "),
+    )
 }
 
 fn structured_log_correlation_summary(correlation: &serde_json::Value) -> String {
@@ -17890,6 +18432,22 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/core-boundary",
+            "Core Boundary",
+            "Audit whether the Core kernel remains universal and domain capabilities stay Addon-owned.",
+            &["forge", "interactive", "core-boundary"],
+            false,
+            "low",
+        ),
+        slash(
+            "/boundary",
+            "Boundary",
+            "Alias for the Core boundary audit.",
+            &["forge", "interactive", "core-boundary"],
+            false,
+            "low",
+        ),
+        slash(
             "/readiness",
             "Readiness",
             "Show executor, brain, shell and harness readiness before operational handoff.",
@@ -18761,6 +19319,10 @@ fn repl_focus_panels() -> Vec<InteractiveReplFocusPanel> {
             title: "Architecture compass",
         },
         InteractiveReplFocusPanel {
+            panel_id: "core_boundary_panel",
+            title: "Core boundary",
+        },
+        InteractiveReplFocusPanel {
             panel_id: "artifact_panel",
             title: "Artifacts",
         },
@@ -18863,6 +19425,10 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
         "architecture_compass_panel" => {
             let panel = build_interactive_architecture_compass(store)?;
             Ok(render_interactive_architecture_compass(&panel))
+        }
+        "core_boundary_panel" => {
+            let panel = build_interactive_core_boundary(store);
+            Ok(render_interactive_core_boundary(&panel))
         }
         "task_board_panel" => {
             let panel = build_interactive_task_board(store)?;
@@ -18969,6 +19535,11 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
         "/architecture" | "/compass" => {
             let panel = build_interactive_architecture_compass(store)?;
             println!("{}", render_interactive_architecture_compass(&panel));
+            Ok(true)
+        }
+        "/core-boundary" | "/boundary" => {
+            let panel = build_interactive_core_boundary(store);
+            println!("{}", render_interactive_core_boundary(&panel));
             Ok(true)
         }
         "/task-board" => {

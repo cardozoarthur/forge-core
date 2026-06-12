@@ -109,8 +109,8 @@ use forge_core::interactive::{
     build_interactive_action_registry, build_interactive_addon_capabilities_default,
     build_interactive_architecture_compass, build_interactive_artifacts,
     build_interactive_autocomplete, build_interactive_command_palette,
-    build_interactive_context_memory, build_interactive_event_runtime,
-    build_interactive_guided_cockpit, build_interactive_harness,
+    build_interactive_context_memory, build_interactive_core_boundary,
+    build_interactive_event_runtime, build_interactive_guided_cockpit, build_interactive_harness,
     build_interactive_home_with_options, build_interactive_identity,
     build_interactive_improvement_loop, build_interactive_multimodal_runtime,
     build_interactive_operating_context, build_interactive_operational_cockpit,
@@ -124,12 +124,13 @@ use forge_core::interactive::{
     render_interactive_action_registry, render_interactive_addon_capabilities,
     render_interactive_architecture_compass, render_interactive_artifacts,
     render_interactive_autocomplete, render_interactive_command_palette,
-    render_interactive_context_memory, render_interactive_event_runtime,
-    render_interactive_guided_cockpit, render_interactive_harness, render_interactive_home,
-    render_interactive_identity, render_interactive_improvement_loop,
-    render_interactive_multimodal_runtime, render_interactive_operating_context,
-    render_interactive_operational_cockpit, render_interactive_patch_workbench,
-    render_interactive_permissions, render_interactive_readiness, render_interactive_release_gates,
+    render_interactive_context_memory, render_interactive_core_boundary,
+    render_interactive_event_runtime, render_interactive_guided_cockpit,
+    render_interactive_harness, render_interactive_home, render_interactive_identity,
+    render_interactive_improvement_loop, render_interactive_multimodal_runtime,
+    render_interactive_operating_context, render_interactive_operational_cockpit,
+    render_interactive_patch_workbench, render_interactive_permissions,
+    render_interactive_readiness, render_interactive_release_gates,
     render_interactive_replacement_cli, render_interactive_schedules, render_interactive_sessions,
     render_interactive_structured_logs, render_interactive_task_board,
     render_interactive_token_usage, render_interactive_workflow_dag,
@@ -3342,6 +3343,10 @@ enum InteractiveCommands {
         output: OutputFormat,
     },
     AddonCapabilities {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    CoreBoundary {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -8332,6 +8337,17 @@ fn run() -> Result<i32> {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => {
                         println!("{}", render_interactive_addon_capabilities(&report))
+                    }
+                }
+                Ok(0)
+            }
+            InteractiveCommands::CoreBoundary { output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_interactive_core_boundary(&store);
+                match output {
+                    OutputFormat::Json => print_response(output, &report)?,
+                    OutputFormat::Human => {
+                        println!("{}", render_interactive_core_boundary(&report))
                     }
                 }
                 Ok(0)
