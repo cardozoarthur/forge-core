@@ -538,6 +538,8 @@ pub struct InteractiveHarnessPanel {
     pub wrapper_plan: CliWrapperPlanReport,
     pub headroom_plan: HarnessHeadroomPlanReport,
     pub headroom_stats: HeadroomStatsReport,
+    pub headroom_operational_status: String,
+    pub headroom_recommended_action: String,
     pub session_lifecycle_plan: HarnessSessionLifecyclePlan,
     pub headroom_preview: TokenHeadroomReport,
     pub next_actions: Vec<String>,
@@ -1803,8 +1805,14 @@ pub fn build_interactive_harness(
         runtime_policy.token_headroom,
     );
     let mut next_actions = doctor.next_actions.clone();
+    next_actions.push(format!(
+        "headroom recommended action: {}",
+        headroom_stats.recommended_action
+    ));
     next_actions.push("forge interactive readiness --output json".to_string());
     next_actions.push("forge interactive home --output json".to_string());
+    let headroom_operational_status = headroom_stats.operational_status.clone();
+    let headroom_recommended_action = headroom_stats.recommended_action.clone();
 
     Ok(InteractiveHarnessPanel {
         schema_version: INTERACTIVE_HARNESS_SCHEMA_VERSION.to_string(),
@@ -1822,6 +1830,8 @@ pub fn build_interactive_harness(
         wrapper_plan,
         headroom_plan,
         headroom_stats,
+        headroom_operational_status,
+        headroom_recommended_action,
         session_lifecycle_plan,
         headroom_preview,
         next_actions,
@@ -6310,7 +6320,7 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         panel.next_actions.join(" | ")
     };
     format!(
-        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; headroom-plan {headroom_plan}; headroom-stats {headroom_stats} ({headroom_blob_count} blobs); session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | headroom-plan | headroom-stats | install-shims | exec\nNext actions: {next_actions}\n",
+        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; headroom-plan {headroom_plan}; headroom-stats {headroom_stats} ({headroom_blob_count} blobs); headroom action {headroom_action}; session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | headroom-plan | headroom-stats | install-shims | exec\nNext actions: {next_actions}\n",
         status = panel.status,
         executor = panel.executor,
         mode = panel.mode.effective_mode,
@@ -6320,6 +6330,7 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         headroom_plan = panel.headroom_plan.status,
         headroom_stats = panel.headroom_stats.status,
         headroom_blob_count = panel.headroom_stats.total_blobs,
+        headroom_action = panel.headroom_recommended_action,
         session_lifecycle_status = panel.session_lifecycle_plan.status,
         session_id = panel.session_lifecycle_plan.session_id,
         project_root = panel.project_root,
