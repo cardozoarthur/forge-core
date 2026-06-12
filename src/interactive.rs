@@ -41,9 +41,11 @@ use crate::interaction::{
 use crate::memory::{memory_policy_report_for_project, MemoryPolicyReport};
 use crate::milestone::{
     build_milestone_evidence_plan, build_milestone_manifest_with_store, build_milestone_status,
-    milestone_required_attached_evidence_kinds, MilestoneAttachedEvidence,
-    MilestoneEvidencePlanManifestTemplate, MilestoneEvidencePlanOptions,
-    MilestonePromotionDecision, MilestonePromotionGateTemplate, MilestoneStatusSummary,
+    collect_ready_milestone_evidence, milestone_required_attached_evidence_kinds,
+    MilestoneAttachedEvidence, MilestoneCollectReadyEvidenceOptions,
+    MilestoneCollectReadyEvidenceReport, MilestoneEvidencePlanManifestTemplate,
+    MilestoneEvidencePlanOptions, MilestonePromotionDecision, MilestonePromotionGateTemplate,
+    MilestoneStatusSummary,
 };
 use crate::multimodal::{
     build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
@@ -114,6 +116,8 @@ const INTERACTIVE_OPERATIONAL_MODIFIER_LANE_SCHEMA_VERSION: &str =
 const INTERACTIVE_ADDON_CAPABILITY_SCHEMA_VERSION: &str = "forge.interactive.addon_capability.v1";
 const OPERATIONAL_TUI_SMOKE_SCHEMA_VERSION: &str = "forge.smoke.operational_tui.v1";
 const FORGE_FIRST_HARNESS_SMOKE_SCHEMA_VERSION: &str = "forge.smoke.forge_first_harness.v1";
+const REPLACEMENT_CLI_EVIDENCE_SMOKE_SCHEMA_VERSION: &str =
+    "forge.smoke.replacement_cli_evidence.v1";
 const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
 const INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION: &str = "forge.interactive.structured_logs.v1";
 const INTERACTIVE_EVENT_RUNTIME_SCHEMA_VERSION: &str = "forge.interactive.event_runtime.v1";
@@ -1906,6 +1910,17 @@ pub struct ForgeFirstHarnessSmokeReport {
     pub commands: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplacementCliEvidenceSmokeReport {
+    pub schema_version: String,
+    pub status: String,
+    pub project_root: String,
+    pub collect_ready: MilestoneCollectReadyEvidenceReport,
+    pub release_gates: InteractiveReleaseGatesPanel,
+    pub checks: Vec<OperationalTuiSmokeCheck>,
+    pub commands: Vec<String>,
+}
+
 pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeReport> {
     build_interactive_home_with_options(store, InteractiveHomeOptions::default())
 }
@@ -2795,6 +2810,184 @@ pub fn build_forge_first_harness_smoke(
     })
 }
 
+pub fn build_replacement_cli_evidence_smoke(
+    store: &ForgeStore,
+    project_root: Option<&Path>,
+    approved_by: &str,
+    origin: &str,
+) -> Result<ReplacementCliEvidenceSmokeReport> {
+    let smoke_project_root = project_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(replacement_cli_evidence_smoke_root);
+    std::fs::create_dir_all(smoke_project_root.join(".forge"))?;
+    let approved_by = approved_by.trim();
+    let approved_by = if approved_by.is_empty() {
+        "forge_smoke"
+    } else {
+        approved_by
+    };
+    let origin = origin.trim();
+    let origin = if origin.is_empty() {
+        "forge_smoke"
+    } else {
+        origin
+    };
+
+    let collect_ready = collect_ready_milestone_evidence(
+        store,
+        MilestoneCollectReadyEvidenceOptions {
+            version: "0.5",
+            project_root: Some(&smoke_project_root),
+            connected_brain: None,
+            connected_runtime: None,
+            approved_by,
+            origin,
+        },
+    )?;
+    let release_gates = build_interactive_release_gates(store, "0.5", Some(&smoke_project_root))?;
+
+    let collected_kind = |kind: &str| {
+        collect_ready.collected_evidence.iter().any(|evidence| {
+            evidence.capability_id == "replacement_grade_cli"
+                && evidence.kind == kind
+                && evidence.status == "collected_and_attached"
+                && evidence.collection_promotion_ready
+        })
+    };
+    let skipped_kind = |capability_id: &str, kind: &str| {
+        collect_ready.skipped_evidence.iter().any(|evidence| {
+            evidence.capability_id == capability_id
+                && evidence.kind == kind
+                && evidence.status == "not_ready_to_collect"
+                && !evidence.evidence_plan.ready_to_collect_evidence
+                && evidence
+                    .evidence_plan
+                    .config_checks
+                    .iter()
+                    .any(|check| check.status == "missing")
+                && !evidence.evidence_plan.manifest_templates.is_empty()
+        })
+    };
+    let replacement_gate = release_gates
+        .gate_cards
+        .iter()
+        .find(|gate| gate.capability_id == "replacement_grade_cli");
+    let replacement_gate_partial = replacement_gate.is_some_and(|gate| {
+        gate.attached_evidence_state == "partial_required_attached_evidence"
+            && gate
+                .attached_evidence_kinds
+                .iter()
+                .any(|kind| kind == "broader_project_coding_research_workflow")
+            && gate
+                .attached_evidence_kinds
+                .iter()
+                .any(|kind| kind == "terminal_file_editing_ux")
+            && gate
+                .missing_attached_evidence_kinds
+                .iter()
+                .any(|kind| kind == "external_brain_provider_execution")
+    });
+
+    let checks = vec![
+        operational_tui_smoke_check(
+            "collects_broader_project_coding_research_workflow",
+            "Ready collection attaches broader project coding/research evidence",
+            collected_kind("broader_project_coding_research_workflow"),
+            format!(
+                "collected {}; skipped {}; failed {}",
+                collect_ready.collected_count,
+                collect_ready.skipped_count,
+                collect_ready.failed_count
+            ),
+            "forge milestone collect-ready-evidence --version 0.5 --project-root <project-root> --output json",
+        ),
+        operational_tui_smoke_check(
+            "collects_terminal_file_editing_ux",
+            "Ready collection attaches terminal file-editing UX evidence",
+            collected_kind("terminal_file_editing_ux"),
+            format!(
+                "collected kinds {}",
+                collect_ready
+                    .collected_evidence
+                    .iter()
+                    .map(|evidence| evidence.kind.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind terminal_file_editing_ux --output json",
+        ),
+        operational_tui_smoke_check(
+            "skips_external_provider_until_manifest",
+            "Provider evidence stays skipped until an approved connected-brain manifest exists",
+            skipped_kind("replacement_grade_cli", "external_brain_provider_execution"),
+            format!(
+                "skipped {} item(s); next {}",
+                collect_ready.skipped_count, collect_ready.next_action
+            ),
+            "forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root <project-root> --output json",
+        ),
+        operational_tui_smoke_check(
+            "skips_multimodal_until_runtime_manifest",
+            "Production multimodal evidence stays skipped until approved runtime manifests exist",
+            skipped_kind("experimental_multimodal_runtime", "production_runtime_benchmark"),
+            format!(
+                "skipped {} item(s); failed {}",
+                collect_ready.skipped_count, collect_ready.failed_count
+            ),
+            "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --output json",
+        ),
+        operational_tui_smoke_check(
+            "release_gate_tracks_partial_replacement_cli_evidence",
+            "Release gate shows partial replacement CLI evidence instead of overclaiming promotion",
+            replacement_gate_partial,
+            replacement_gate
+                .map(|gate| {
+                    format!(
+                        "{}; attached {}; missing {}",
+                        gate.attached_evidence_state,
+                        gate.attached_evidence_kinds.join(", "),
+                        gate.missing_attached_evidence_kinds.join(", ")
+                    )
+                })
+                .unwrap_or_else(|| "replacement_grade_cli gate missing".to_string()),
+            "forge interactive release-gates --version 0.5 --output json",
+        ),
+        operational_tui_smoke_check(
+            "does_not_auto_promote",
+            "Evidence collection does not auto-promote Forge 0.5",
+            !collect_ready.promotion_ready_after_collection && !release_gates.promotion_ready,
+            format!(
+                "collection promotion {}; release promotion {}; decision {}",
+                collect_ready.promotion_ready_after_collection,
+                release_gates.promotion_ready,
+                release_gates.promotion_decision.decision
+            ),
+            "forge milestone manifest --version 0.5 --output json",
+        ),
+    ];
+    let status = if checks.iter().all(|check| check.passed) {
+        "replacement_cli_evidence_smoke_passed"
+    } else {
+        "replacement_cli_evidence_smoke_failed"
+    };
+
+    Ok(ReplacementCliEvidenceSmokeReport {
+        schema_version: REPLACEMENT_CLI_EVIDENCE_SMOKE_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        project_root: smoke_project_root.display().to_string(),
+        collect_ready,
+        release_gates,
+        checks,
+        commands: vec![
+            "forge smoke replacement-cli-evidence --output json".to_string(),
+            "forge milestone collect-ready-evidence --version 0.5 --project-root <project-root> --approved-by <operator> --origin codex --output json".to_string(),
+            "forge interactive release-gates --version 0.5 --output json".to_string(),
+            "forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root <project-root> --output json".to_string(),
+            "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --output json".to_string(),
+        ],
+    })
+}
+
 fn forge_harness_smoke_root() -> PathBuf {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2802,6 +2995,17 @@ fn forge_harness_smoke_root() -> PathBuf {
         .unwrap_or(0);
     env::temp_dir().join(format!(
         "forge-first-harness-smoke-{}-{now}",
+        std::process::id()
+    ))
+}
+
+fn replacement_cli_evidence_smoke_root() -> PathBuf {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    env::temp_dir().join(format!(
+        "forge-replacement-cli-evidence-smoke-{}-{now}",
         std::process::id()
     ))
 }
@@ -2900,6 +3104,43 @@ pub fn render_forge_first_harness_smoke(report: &ForgeFirstHarnessSmokeReport) -
         exec_status = report.exec_receipt.status,
         mutates_external_cli = report.mutates_external_cli,
         executes_external_cli = report.executes_external_cli,
+        checks = checks,
+        commands = report.commands.join(" | "),
+    )
+}
+
+pub fn render_replacement_cli_evidence_smoke(report: &ReplacementCliEvidenceSmokeReport) -> String {
+    let checks = report
+        .checks
+        .iter()
+        .map(|check| format!("{}={} ({})", check.check_id, check.passed, check.evidence))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let collected = report
+        .collect_ready
+        .collected_evidence
+        .iter()
+        .map(|evidence| format!("{}:{}", evidence.capability_id, evidence.kind))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let skipped = report
+        .collect_ready
+        .skipped_evidence
+        .iter()
+        .map(|evidence| format!("{}:{}", evidence.capability_id, evidence.kind))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Replacement CLI evidence smoke: {status}; project {project_root}; collected {collected_count}/{required_count}; skipped {skipped_count}; failed {failed_count}; release promotion {promotion_ready}\nCollected: {collected}\nSkipped: {skipped}\nchecks: {checks}\ncommands: {commands}\n",
+        status = report.status,
+        project_root = report.project_root,
+        collected_count = report.collect_ready.collected_count,
+        required_count = report.collect_ready.required_count,
+        skipped_count = report.collect_ready.skipped_count,
+        failed_count = report.collect_ready.failed_count,
+        promotion_ready = report.release_gates.promotion_ready,
+        collected = if collected.is_empty() { "none" } else { &collected },
+        skipped = if skipped.is_empty() { "none" } else { &skipped },
         checks = checks,
         commands = report.commands.join(" | "),
     )

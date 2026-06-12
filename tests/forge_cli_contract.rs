@@ -48563,6 +48563,160 @@ fn forge_first_harness_smoke_proves_headroom_wrapper_and_shim_without_child_exec
 }
 
 #[test]
+fn replacement_cli_evidence_smoke_collects_ready_receipts_and_reports_manifest_gaps() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("replacement-cli-evidence-project");
+    fs::create_dir_all(project.join(".forge")).unwrap();
+
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "smoke",
+            "replacement-cli-evidence",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--approved-by",
+            "arthur",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.smoke.replacement_cli_evidence.v1"
+    );
+    assert_eq!(json["status"], "replacement_cli_evidence_smoke_passed");
+    assert_eq!(json["collect_ready"]["status"], "partial_collection");
+    assert_eq!(json["collect_ready"]["required_count"], 4);
+    assert_eq!(json["collect_ready"]["collected_count"], 2);
+    assert_eq!(json["collect_ready"]["skipped_count"], 2);
+    assert_eq!(json["collect_ready"]["failed_count"], 0);
+    assert_eq!(
+        json["collect_ready"]["promotion_ready_after_collection"],
+        false
+    );
+
+    let collected = json["collect_ready"]["collected_evidence"]
+        .as_array()
+        .unwrap();
+    assert!(collected.iter().any(|item| {
+        item["capability_id"] == "replacement_grade_cli"
+            && item["kind"] == "broader_project_coding_research_workflow"
+            && item["collection_promotion_ready"] == true
+    }));
+    assert!(collected.iter().any(|item| {
+        item["capability_id"] == "replacement_grade_cli"
+            && item["kind"] == "terminal_file_editing_ux"
+            && item["collection_promotion_ready"] == true
+    }));
+
+    let skipped = json["collect_ready"]["skipped_evidence"]
+        .as_array()
+        .unwrap();
+    assert!(skipped.iter().any(|item| {
+        item["capability_id"] == "replacement_grade_cli"
+            && item["kind"] == "external_brain_provider_execution"
+            && item["evidence_plan"]["ready_to_collect_evidence"] == false
+            && item["evidence_plan"]["manifest_templates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|template| template["id"] == "connected_brain_runtime_manifest")
+    }));
+    assert!(skipped.iter().any(|item| {
+        item["capability_id"] == "experimental_multimodal_runtime"
+            && item["kind"] == "production_runtime_benchmark"
+            && item["evidence_plan"]["ready_to_collect_evidence"] == false
+            && item["evidence_plan"]["manifest_templates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|template| template["id"] == "multimodal_runtime_manifest")
+    }));
+
+    let replacement_gate = json["release_gates"]["gate_cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|gate| gate["capability_id"] == "replacement_grade_cli")
+        .expect("replacement gate should be present");
+    assert_eq!(
+        replacement_gate["attached_evidence_state"],
+        "partial_required_attached_evidence"
+    );
+    assert!(replacement_gate["attached_evidence_kinds"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "broader_project_coding_research_workflow"
+        )));
+    assert!(replacement_gate["attached_evidence_kinds"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("terminal_file_editing_ux")));
+    assert!(replacement_gate["missing_attached_evidence_kinds"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("external_brain_provider_execution")));
+
+    for check_id in [
+        "collects_broader_project_coding_research_workflow",
+        "collects_terminal_file_editing_ux",
+        "skips_external_provider_until_manifest",
+        "skips_multimodal_until_runtime_manifest",
+        "release_gate_tracks_partial_replacement_cli_evidence",
+        "does_not_auto_promote",
+    ] {
+        let check = json["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["check_id"] == check_id)
+            .unwrap_or_else(|| panic!("missing replacement CLI evidence smoke check {check_id}"));
+        assert_eq!(
+            check["passed"], true,
+            "replacement CLI evidence smoke check {check_id} failed"
+        );
+    }
+
+    let text_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "smoke",
+            "replacement-cli-evidence",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--approved-by",
+            "arthur",
+            "--origin",
+            "codex",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Replacement CLI evidence smoke: replacement_cli_evidence_smoke_passed"));
+    assert!(text.contains("collected 2/4"));
+    assert!(text.contains("replacement_grade_cli:terminal_file_editing_ux"));
+    assert!(text.contains("forge smoke replacement-cli-evidence --output json"));
+}
+
+#[test]
 fn readme_explains_forge_in_five_minutes_and_names_operational_smoke() {
     let readme = fs::read_to_string("README.md").unwrap();
 
@@ -48575,6 +48729,7 @@ fn readme_explains_forge_in_five_minutes_and_names_operational_smoke() {
     assert!(readme.contains("custos"));
     assert!(readme.contains("handoffs/approvals"));
     assert!(readme.contains("forge smoke forge-first-harness"));
+    assert!(readme.contains("forge smoke replacement-cli-evidence"));
 }
 
 #[test]
@@ -50240,6 +50395,10 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge smoke forge-first-harness"),
         "the packaged Forge skill should expose the Forge-first harness smoke"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge smoke replacement-cli-evidence"),
+        "the packaged Forge skill should expose the replacement CLI evidence smoke"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.workflow_dag"),

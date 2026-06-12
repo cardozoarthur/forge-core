@@ -115,19 +115,20 @@ use forge_core::interactive::{
     build_interactive_schedules, build_interactive_sessions, build_interactive_structured_logs,
     build_interactive_task_board, build_interactive_token_usage, build_interactive_workflow_dag,
     build_interactive_workflow_sidebar, build_operational_tui_smoke,
-    render_forge_first_harness_smoke, render_interactive_action_invocation,
-    render_interactive_action_registry, render_interactive_addon_capabilities,
-    render_interactive_artifacts, render_interactive_autocomplete,
-    render_interactive_command_palette, render_interactive_context_memory,
-    render_interactive_harness, render_interactive_home, render_interactive_identity,
-    render_interactive_multimodal_runtime, render_interactive_operational_cockpit,
-    render_interactive_patch_workbench, render_interactive_permissions,
-    render_interactive_readiness, render_interactive_release_gates,
+    build_replacement_cli_evidence_smoke, render_forge_first_harness_smoke,
+    render_interactive_action_invocation, render_interactive_action_registry,
+    render_interactive_addon_capabilities, render_interactive_artifacts,
+    render_interactive_autocomplete, render_interactive_command_palette,
+    render_interactive_context_memory, render_interactive_harness, render_interactive_home,
+    render_interactive_identity, render_interactive_multimodal_runtime,
+    render_interactive_operational_cockpit, render_interactive_patch_workbench,
+    render_interactive_permissions, render_interactive_readiness, render_interactive_release_gates,
     render_interactive_replacement_cli, render_interactive_schedules, render_interactive_sessions,
     render_interactive_structured_logs, render_interactive_task_board,
     render_interactive_token_usage, render_interactive_workflow_dag,
-    render_interactive_workflow_sidebar, render_operational_tui_smoke, route_interactive_input,
-    run_interactive_repl, slash_command_catalog, InteractiveHarnessOptions, InteractiveHomeOptions,
+    render_interactive_workflow_sidebar, render_operational_tui_smoke,
+    render_replacement_cli_evidence_smoke, route_interactive_input, run_interactive_repl,
+    slash_command_catalog, InteractiveHarnessOptions, InteractiveHomeOptions,
     InteractiveSessionsOptions,
 };
 use forge_core::ir::{CreativeArtifact, TokenCollection};
@@ -3534,6 +3535,16 @@ enum SmokeCommands {
         executor: String,
         #[arg(long = "real-cmd")]
         real_cmd: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ReplacementCliEvidence {
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
+        #[arg(long, default_value = "arthur")]
+        approved_by: String,
+        #[arg(long, default_value = "codex")]
+        origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -9120,6 +9131,27 @@ fn run() -> Result<i32> {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => {
                         println!("{}", render_forge_first_harness_smoke(&report))
+                    }
+                }
+                Ok(0)
+            }
+            SmokeCommands::ReplacementCliEvidence {
+                project_root,
+                approved_by,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_replacement_cli_evidence_smoke(
+                    &store,
+                    project_root.as_deref(),
+                    &approved_by,
+                    &origin,
+                )?;
+                match output {
+                    OutputFormat::Json => print_response(output, &report)?,
+                    OutputFormat::Human => {
+                        println!("{}", render_replacement_cli_evidence_smoke(&report))
                     }
                 }
                 Ok(0)
