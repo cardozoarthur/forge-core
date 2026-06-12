@@ -4837,6 +4837,21 @@ printf 'real_provider_ok\n'
         provider_json["attached_evidence"]["kind"],
         "external_brain_provider_execution"
     );
+    let provider_artifact: Value = serde_json::from_slice(
+        &fs::read(provider_json["collection_artifact_path"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(provider_artifact["collection_promotion_ready"], true);
+    assert!(provider_artifact["promotion_gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gate| gate["id"] == "real_provider_execution_performed" && gate["passed"] == true));
+    assert!(provider_artifact["promotion_gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gate| gate["id"] == "harness_exec_event_recorded" && gate["passed"] == true));
     assert!(
         provider_json["attached_evidence"]["global_event_id"]
             .as_i64()
@@ -4888,6 +4903,26 @@ printf 'real_provider_ok\n'
         multimodal_json["attached_evidence"]["kind"],
         "production_runtime_benchmark"
     );
+    let multimodal_artifact: Value = serde_json::from_slice(
+        &fs::read(
+            multimodal_json["collection_artifact_path"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(multimodal_artifact["collection_promotion_ready"], true);
+    assert!(multimodal_artifact["promotion_gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gate| gate["id"] == "runtime_benchmark_promotion_ready" && gate["passed"] == true));
+    assert!(multimodal_artifact["promotion_gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gate| gate["id"] == "network_access_blocked" && gate["passed"] == true));
 
     let manifest_output = forge()
         .arg("--store")
@@ -4971,6 +5006,38 @@ fn milestone_collect_evidence_selects_replacement_cli_demo_evidence_kinds() {
             json["promotion_impact"],
             "collected_and_attached_not_auto_promoted"
         );
+
+        let artifact: Value = serde_json::from_slice(
+            &fs::read(json["collection_artifact_path"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(artifact["collection_promotion_ready"], true);
+        let gates = artifact["promotion_gates"].as_array().unwrap();
+        assert!(
+            gates.iter().all(|gate| gate["passed"] == true
+                && gate["id"].as_str().unwrap_or_default().contains('_')
+                && !gate["summary"].as_str().unwrap_or_default().is_empty()),
+            "every collected evidence artifact should expose explicit passed promotion gates"
+        );
+        match kind {
+            "broader_project_coding_research_workflow" => {
+                assert!(gates.iter().any(|gate| gate["id"] == "handoff_ready"));
+                assert!(gates.iter().any(|gate| gate["id"] == "exec_event_recorded"));
+                assert!(gates
+                    .iter()
+                    .any(|gate| gate["id"] == "validated_multi_file_artifacts"));
+            }
+            "terminal_file_editing_ux" => {
+                assert!(gates.iter().any(|gate| gate["id"] == "review_before_apply"));
+                assert!(gates
+                    .iter()
+                    .any(|gate| gate["id"] == "restore_approval_recorded"));
+                assert!(gates
+                    .iter()
+                    .any(|gate| gate["id"] == "restored_to_clean_state"));
+            }
+            _ => unreachable!("unexpected evidence kind in test"),
+        }
     }
 
     let manifest_output = forge()

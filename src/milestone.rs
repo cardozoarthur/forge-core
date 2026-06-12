@@ -874,6 +874,29 @@ struct CollectedMilestoneEvidence {
     collection_summary: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct MilestonePromotionGate {
+    id: String,
+    passed: bool,
+    summary: String,
+}
+
+fn milestone_promotion_gate(
+    id: impl Into<String>,
+    passed: bool,
+    summary: impl Into<String>,
+) -> MilestonePromotionGate {
+    MilestonePromotionGate {
+        id: id.into(),
+        passed,
+        summary: summary.into(),
+    }
+}
+
+fn milestone_promotion_gates_passed(gates: &[MilestonePromotionGate]) -> bool {
+    gates.iter().all(|gate| gate.passed)
+}
+
 fn default_milestone_collection_kind(capability_id: &str) -> Result<String> {
     match capability_id {
         "replacement_grade_cli" => Ok("external_brain_provider_execution".to_string()),
@@ -959,7 +982,40 @@ fn collect_replacement_grade_cli_provider_evidence(
         .and_then(|flow| flow.external_brain.as_ref())
         .context("replacement-grade CLI demo did not produce connected external brain evidence")?;
     let provider_contract = &external_brain.provider_contract;
-    let collection_promotion_ready = provider_contract.promotion_ready;
+    let promotion_gates = vec![
+        milestone_promotion_gate(
+            "provider_contract_validated",
+            provider_contract.status == "connected_external_brain_provider_contract_validated",
+            format!("provider contract status is `{}`", provider_contract.status),
+        ),
+        milestone_promotion_gate(
+            "output_schema_valid",
+            provider_contract.output_schema_valid,
+            "provider output uses the expected Forge provider-output schema",
+        ),
+        milestone_promotion_gate(
+            "real_provider_execution_performed",
+            provider_contract.real_provider_execution_performed,
+            "provider declared real provider execution in its reviewed output",
+        ),
+        milestone_promotion_gate(
+            "model_execution_performed",
+            provider_contract.provider_declared_model_execution,
+            "provider declared model execution in its reviewed output",
+        ),
+        milestone_promotion_gate(
+            "harness_exec_event_recorded",
+            external_brain.exec_event_recorded,
+            "external brain execution was recorded through Forge harness lineage",
+        ),
+        milestone_promotion_gate(
+            "external_resources_untouched",
+            !external_brain.external_resources_mutated,
+            "provider evidence did not mutate external resources",
+        ),
+    ];
+    let collection_promotion_ready =
+        provider_contract.promotion_ready && milestone_promotion_gates_passed(&promotion_gates);
     let collection_summary = if collection_promotion_ready {
         format!(
             "Connected external brain provider `{}` executed through Forge and produced promotion-ready provider evidence.",
@@ -979,7 +1035,8 @@ fn collect_replacement_grade_cli_provider_evidence(
         "collected_at": Utc::now().to_rfc3339(),
         "project_root": project_root.display().to_string(),
         "connected_brain": connected_brain.unwrap_or(&provider_contract.provider_id),
-        "collection_promotion_ready": provider_contract.promotion_ready,
+        "collection_promotion_ready": collection_promotion_ready,
+        "promotion_gates": &promotion_gates,
         "provider_contract": &provider_contract,
         "external_brain": &external_brain,
         "source_demo": &report,
@@ -1025,13 +1082,43 @@ fn collect_replacement_grade_cli_real_project_evidence(
         .real_project
         .as_ref()
         .context("real-project coding/research flow is missing its evidence payload")?;
-    let collection_promotion_ready = flow.completed_through_forge
-        && real_project.status == "real_project_workflow_demo_completed"
-        && real_project.handoff_ready
-        && real_project.exec_event_recorded
-        && real_project.validation_status == "validated"
-        && !real_project.external_resources_mutated
-        && !real_project.target_paths.is_empty();
+    let promotion_gates = vec![
+        milestone_promotion_gate(
+            "completed_through_forge",
+            flow.completed_through_forge,
+            "flow completed through Forge-owned workflow semantics",
+        ),
+        milestone_promotion_gate(
+            "real_project_demo_completed",
+            real_project.status == "real_project_workflow_demo_completed",
+            format!("real-project flow status is `{}`", real_project.status),
+        ),
+        milestone_promotion_gate(
+            "handoff_ready",
+            real_project.handoff_ready,
+            "project-root handoff packet was ready for the selected brain",
+        ),
+        milestone_promotion_gate(
+            "exec_event_recorded",
+            real_project.exec_event_recorded,
+            "Forge harness recorded workflow/task/run lineage for the project execution",
+        ),
+        milestone_promotion_gate(
+            "validated_multi_file_artifacts",
+            real_project.validation_status == "validated" && !real_project.target_paths.is_empty(),
+            format!(
+                "validation status is `{}` across {} target paths",
+                real_project.validation_status,
+                real_project.target_paths.len()
+            ),
+        ),
+        milestone_promotion_gate(
+            "external_resources_untouched",
+            !real_project.external_resources_mutated,
+            "real-project evidence stayed inside the isolated project fixture",
+        ),
+    ];
+    let collection_promotion_ready = milestone_promotion_gates_passed(&promotion_gates);
     let collection_summary = if collection_promotion_ready {
         "Replacement-grade CLI real-project coding and research workflow produced validated multi-file evidence under Forge lineage.".to_string()
     } else {
@@ -1045,6 +1132,7 @@ fn collect_replacement_grade_cli_real_project_evidence(
         "collected_at": Utc::now().to_rfc3339(),
         "requested_project_root": project_root.display().to_string(),
         "collection_promotion_ready": collection_promotion_ready,
+        "promotion_gates": &promotion_gates,
         "real_project": real_project,
         "source_flow": flow,
         "source_demo": &report,
@@ -1085,19 +1173,53 @@ fn collect_replacement_grade_cli_terminal_editing_evidence(
         .patch_lifecycle
         .as_ref()
         .context("coding-task flow is missing patch lifecycle evidence")?;
-    let collection_promotion_ready = flow.completed_through_forge
-        && patch_lifecycle.status == "patch_lifecycle_demo_ready"
-        && patch_lifecycle.restored_to_clean_state
-        && !patch_lifecycle.external_resources_mutated
-        && patch_lifecycle.artifact_refs.len() >= 6
-        && patch_lifecycle
-            .gates
-            .iter()
-            .any(|gate| gate == "review_before_apply")
-        && patch_lifecycle
-            .gates
-            .iter()
-            .any(|gate| gate == "human_restore_approval_recorded");
+    let promotion_gates = vec![
+        milestone_promotion_gate(
+            "completed_through_forge",
+            flow.completed_through_forge,
+            "terminal editing flow completed through Forge-owned workflow semantics",
+        ),
+        milestone_promotion_gate(
+            "patch_lifecycle_ready",
+            patch_lifecycle.status == "patch_lifecycle_demo_ready",
+            format!("patch lifecycle status is `{}`", patch_lifecycle.status),
+        ),
+        milestone_promotion_gate(
+            "review_before_apply",
+            patch_lifecycle
+                .gates
+                .iter()
+                .any(|gate| gate == "review_before_apply"),
+            "patch lifecycle requires review before apply",
+        ),
+        milestone_promotion_gate(
+            "restore_approval_recorded",
+            patch_lifecycle
+                .gates
+                .iter()
+                .any(|gate| gate == "human_restore_approval_recorded"),
+            "patch lifecycle records human approval before restore",
+        ),
+        milestone_promotion_gate(
+            "restored_to_clean_state",
+            patch_lifecycle.restored_to_clean_state,
+            "approved restore returned the fixture repository to a clean state",
+        ),
+        milestone_promotion_gate(
+            "artifact_lineage_complete",
+            patch_lifecycle.artifact_refs.len() >= 6,
+            format!(
+                "patch lifecycle recorded {} artifact refs",
+                patch_lifecycle.artifact_refs.len()
+            ),
+        ),
+        milestone_promotion_gate(
+            "external_resources_untouched",
+            !patch_lifecycle.external_resources_mutated,
+            "patch lifecycle stayed inside the isolated fixture repository",
+        ),
+    ];
+    let collection_promotion_ready = milestone_promotion_gates_passed(&promotion_gates);
     let collection_summary = if collection_promotion_ready {
         "Replacement-grade CLI terminal file-editing UX produced validated plan/review/diff/apply/revert/restore evidence.".to_string()
     } else {
@@ -1111,6 +1233,7 @@ fn collect_replacement_grade_cli_terminal_editing_evidence(
         "collected_at": Utc::now().to_rfc3339(),
         "requested_project_root": project_root.display().to_string(),
         "collection_promotion_ready": collection_promotion_ready,
+        "promotion_gates": &promotion_gates,
         "patch_lifecycle": patch_lifecycle,
         "source_flow": flow,
         "source_demo": &report,
@@ -1154,7 +1277,34 @@ fn collect_experimental_multimodal_runtime_evidence(
         allow_model: true,
         connected_runtime: Some(&runtime_id),
     })?;
-    let collection_promotion_ready = report.promotion_ready;
+    let promotion_gates = vec![
+        milestone_promotion_gate(
+            "runtime_benchmark_promotion_ready",
+            report.promotion_ready,
+            "connected runtime benchmark satisfied its production thresholds",
+        ),
+        milestone_promotion_gate(
+            "model_guard_approved",
+            report.guard.allowed,
+            "model execution guard was approved for the benchmark",
+        ),
+        milestone_promotion_gate(
+            "network_access_blocked",
+            !report.network_access_performed,
+            "network access remained blocked during benchmark collection",
+        ),
+        milestone_promotion_gate(
+            "device_access_blocked",
+            !report.device_access_performed
+                && !report.camera_access_performed
+                && !report.microphone_access_performed
+                && !report.screen_access_performed
+                && !report.input_access_performed,
+            "camera, microphone, screen and input access remained blocked",
+        ),
+    ];
+    let collection_promotion_ready =
+        report.promotion_ready && milestone_promotion_gates_passed(&promotion_gates);
     let collection_summary = if collection_promotion_ready {
         format!(
             "Connected multimodal runtime `{}` produced promotion-ready production benchmark evidence for `{}`.",
@@ -1175,7 +1325,8 @@ fn collect_experimental_multimodal_runtime_evidence(
         "project_root": project_root.display().to_string(),
         "connected_runtime": &runtime_id,
         "runtime_capability": &runtime_capability,
-        "collection_promotion_ready": report.promotion_ready,
+        "collection_promotion_ready": collection_promotion_ready,
+        "promotion_gates": &promotion_gates,
         "runtime_benchmark": &report,
     });
     let (collection_artifact_path, collection_artifact_sha256) =
