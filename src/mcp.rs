@@ -5942,7 +5942,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.milestone.evidence_plan",
                 "Plan Milestone Evidence Collection",
-                "Inspect project manifests and attached evidence to explain what is ready or missing before collecting real milestone receipts.",
+                "Inspect project manifests, secret-free manifest_templates, attached evidence and collection commands before collecting real milestone receipts.",
                 object_schema(&[
                     ("version", "string", "milestone version, currently 0.5"),
                     ("capability_id", "string", "milestone capability id"),

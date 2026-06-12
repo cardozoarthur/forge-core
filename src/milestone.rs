@@ -195,6 +195,7 @@ pub struct MilestoneEvidencePlanReport {
     pub attached_evidence_kinds: Vec<String>,
     pub missing_attached_evidence_kinds: Vec<String>,
     pub config_checks: Vec<MilestoneEvidencePlanConfigCheck>,
+    pub manifest_templates: Vec<MilestoneEvidencePlanManifestTemplate>,
     pub configured_evidence_sources: Vec<String>,
     pub evidence_collection_commands: Vec<String>,
     pub attach_commands: Vec<String>,
@@ -210,6 +211,19 @@ pub struct MilestoneEvidencePlanConfigCheck {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_id: Option<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneEvidencePlanManifestTemplate {
+    pub schema_version: String,
+    pub id: String,
+    pub status: String,
+    pub target_path: String,
+    pub secret_free: bool,
+    pub template_json: serde_json::Value,
+    pub preparation_commands: Vec<String>,
+    pub validation_commands: Vec<String>,
     pub summary: String,
 }
 
@@ -654,6 +668,7 @@ pub fn build_milestone_evidence_plan(
         .collect::<Vec<_>>();
 
     let mut config_checks = Vec::new();
+    let mut manifest_templates = Vec::new();
     let mut configured_evidence_sources = Vec::new();
     let mut evidence_collection_commands = Vec::new();
     let mut attach_commands = Vec::new();
@@ -664,6 +679,7 @@ pub fn build_milestone_evidence_plan(
                 &project_root,
                 options.connected_brain,
                 &mut config_checks,
+                &mut manifest_templates,
                 &mut configured_evidence_sources,
                 &mut evidence_collection_commands,
             )?;
@@ -731,6 +747,7 @@ pub fn build_milestone_evidence_plan(
         attached_evidence_kinds,
         missing_attached_evidence_kinds,
         config_checks,
+        manifest_templates,
         configured_evidence_sources,
         evidence_collection_commands,
         attach_commands,
@@ -1276,11 +1293,16 @@ fn plan_replacement_grade_cli_evidence(
     project_root: &Path,
     connected_brain: Option<&str>,
     config_checks: &mut Vec<MilestoneEvidencePlanConfigCheck>,
+    manifest_templates: &mut Vec<MilestoneEvidencePlanManifestTemplate>,
     configured_evidence_sources: &mut Vec<String>,
     evidence_collection_commands: &mut Vec<String>,
 ) -> Result<()> {
     let manifest_path = project_root.join(CONNECTED_BRAIN_RUNTIMES_RELATIVE_PATH);
     if !manifest_path.is_file() {
+        manifest_templates.push(connected_brain_manifest_template(
+            project_root,
+            connected_brain,
+        ));
         config_checks.push(MilestoneEvidencePlanConfigCheck {
             id: "connected_brain_manifest".to_string(),
             status: "missing".to_string(),
@@ -1332,6 +1354,10 @@ fn plan_replacement_grade_cli_evidence(
                 .any(|capability| capability == "replacement_grade_cli")
     });
     let Some(provider) = selected else {
+        manifest_templates.push(connected_brain_manifest_template(
+            project_root,
+            connected_brain,
+        ));
         config_checks.push(MilestoneEvidencePlanConfigCheck {
             id: "connected_brain_provider".to_string(),
             status: "missing".to_string(),
@@ -1382,6 +1408,60 @@ fn plan_replacement_grade_cli_evidence(
         provider.id
     ));
     Ok(())
+}
+
+fn connected_brain_manifest_template(
+    project_root: &Path,
+    connected_brain: Option<&str>,
+) -> MilestoneEvidencePlanManifestTemplate {
+    let provider_id = connected_brain
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("project-provider");
+    let target_path = project_root.join(CONNECTED_BRAIN_RUNTIMES_RELATIVE_PATH);
+    let template_json = serde_json::json!({
+        "providers": [{
+            "id": provider_id,
+            "brain_id": provider_id,
+            "model_id": "<approved-model-id>",
+            "provider_class": "external_cli",
+            "capabilities": ["replacement_grade_cli"],
+            "command": ["<absolute-path-to-approved-provider-command>"],
+            "approved_by": "<operator>",
+            "approval_ref": "<approval-or-change-record>",
+            "allow_model_execution": true,
+            "network_access": false,
+            "device_access": false,
+            "external_resources_mutated": false
+        }]
+    });
+    MilestoneEvidencePlanManifestTemplate {
+        schema_version: "forge.milestone.manifest_template.v1".to_string(),
+        id: "connected_brain_runtime_manifest".to_string(),
+        status: "template_ready".to_string(),
+        target_path: target_path.display().to_string(),
+        secret_free: true,
+        template_json,
+        preparation_commands: vec![
+            format!("mkdir -p {}", project_root.join(".forge").display()),
+            format!(
+                "write {} with the provided template_json after replacing placeholders; do not store secrets in this file",
+                target_path.display()
+            ),
+        ],
+        validation_commands: vec![
+            format!(
+                "forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root {} --connected-brain {} --output json",
+                project_root.display(),
+                provider_id
+            ),
+            format!(
+                "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root {} --connected-brain {} --approved-by <operator> --origin codex --output json",
+                project_root.display(),
+                provider_id
+            ),
+        ],
+        summary: "Secret-free connected brain runtime manifest template for operator-approved replacement-grade CLI evidence collection.".to_string(),
+    }
 }
 
 fn push_replacement_grade_cli_demo_collection_commands(

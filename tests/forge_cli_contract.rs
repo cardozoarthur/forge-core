@@ -4186,6 +4186,55 @@ fn milestone_evidence_plan_inspects_project_inputs_without_collecting_evidence()
             .as_str()
             .unwrap()
             .contains("forge milestone cli-demo --origin codex --project-root")));
+    let manifest_templates = missing_json["manifest_templates"].as_array().unwrap();
+    let connected_brain_template = manifest_templates
+        .iter()
+        .find(|template| template["id"] == "connected_brain_runtime_manifest")
+        .expect("missing replacement-grade connected brain manifest template");
+    assert_eq!(
+        connected_brain_template["schema_version"],
+        "forge.milestone.manifest_template.v1"
+    );
+    assert_eq!(
+        connected_brain_template["target_path"],
+        project
+            .join(".forge/connected-brain-runtimes.json")
+            .display()
+            .to_string()
+    );
+    assert_eq!(connected_brain_template["secret_free"], true);
+    assert_eq!(
+        connected_brain_template["template_json"]["providers"][0]["id"],
+        "project-provider"
+    );
+    assert_eq!(
+        connected_brain_template["template_json"]["providers"][0]["capabilities"][0],
+        "replacement_grade_cli"
+    );
+    assert_eq!(
+        connected_brain_template["template_json"]["providers"][0]["allow_model_execution"],
+        true
+    );
+    assert_eq!(
+        connected_brain_template["template_json"]["providers"][0]["network_access"],
+        false
+    );
+    assert!(connected_brain_template["preparation_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("connected-brain-runtimes.json")));
+    assert!(connected_brain_template["validation_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("forge milestone evidence-plan")));
 
     let provider_script = temp.path().join("project-provider.sh");
     fs::write(
@@ -7095,6 +7144,11 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
     assert!(
         forge_core::skill::SKILL_MD.contains("--connected-brain <provider-id>"),
         "the packaged Forge skill should teach project connected brain provider selection"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("manifest_templates")
+            && forge_core::skill::SKILL_MD.contains(".forge/connected-brain-runtimes.json"),
+        "the packaged Forge skill should teach agents to use secret-free connected brain manifest templates before evidence collection"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge interactive command-palette"),
