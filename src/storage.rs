@@ -2257,6 +2257,35 @@ impl ForgeStore {
             .map_err(Into::into)
     }
 
+    pub fn load_headroom_blobs(
+        &self,
+        source: Option<&str>,
+        content_kind: Option<&str>,
+    ) -> Result<Vec<StoredHeadroomBlobRecord>> {
+        let source = normalize_optional_filter(source);
+        let content_kind = normalize_optional_filter(content_kind);
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT source, content_kind, strategy, reversible, original_sha256,
+                   original_bytes, compressed_sha256, compressed_bytes,
+                   estimated_original_tokens, estimated_compressed_tokens,
+                   estimated_saved_tokens, budget_tokens, budget_status,
+                   routing_json, original_content, compressed_content,
+                   created_at, updated_at
+            FROM harness_headroom_blobs
+            WHERE (?1 IS NULL OR source = ?1)
+              AND (?2 IS NULL OR content_kind = ?2)
+            ORDER BY updated_at DESC, estimated_saved_tokens DESC
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![source.as_deref(), content_kind.as_deref()],
+            stored_headroom_blob_from_row,
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     fn backfill_event_observability_index(&self) -> Result<()> {
         let records = {
             let mut statement = self.connection.prepare(

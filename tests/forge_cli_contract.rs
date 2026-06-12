@@ -539,6 +539,194 @@ fn harness_cli_honors_project_forge_first_default_mode_config() {
 }
 
 #[test]
+fn harness_headroom_stats_aggregates_persisted_blobs_for_cli_mcp_and_skill() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let fixtures = [
+        (
+            "log",
+            "build-log",
+            (0..80)
+                .map(|index| format!("line {index}: error: failed build step {index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        (
+            "log",
+            "build-log",
+            (0..40)
+                .map(|index| format!("warning {index}: retryable deploy warning {index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        (
+            "json",
+            "json-fixture",
+            serde_json::json!({
+                "events": [
+                    {"kind": "tool_output", "status": "ok"},
+                    {"kind": "tool_output", "status": "ok"},
+                    {"kind": "tool_output", "status": "warning"}
+                ]
+            })
+            .to_string(),
+        ),
+    ];
+
+    for (kind, source, content) in fixtures {
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "harness",
+                "token-headroom",
+                "--content",
+                &content,
+                "--kind",
+                kind,
+                "--budget-tokens",
+                "120",
+                "--source",
+                source,
+                "--persist",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    let stats_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "headroom-stats",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stats: Value = serde_json::from_slice(&stats_output).unwrap();
+    assert_eq!(stats["schema_version"], "forge.harness.headroom_stats.v1");
+    assert_eq!(stats["status"], "headroom_stats_ready");
+    assert_eq!(stats["total_blobs"], 3);
+    assert!(stats["total_estimated_saved_tokens"].as_u64().unwrap() > 0);
+    assert!(stats["average_savings_percent"].as_f64().unwrap() >= 0.0);
+    assert!(stats["by_content_kind"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["content_kind"] == "log" && row["blob_count"] == 2));
+    assert!(stats["by_content_kind"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["content_kind"] == "json" && row["blob_count"] == 1));
+    assert!(stats["by_source"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["source"] == "build-log" && row["blob_count"] == 2));
+    assert!(stats["top_saved_blobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["retrieval_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("forge://harness/headroom/")));
+    assert!(stats["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("forge harness retrieve-headroom --ref")));
+
+    let filtered_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "headroom-stats",
+            "--source",
+            "json-fixture",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let filtered: Value = serde_json::from_slice(&filtered_output).unwrap();
+    assert_eq!(filtered["total_blobs"], 1);
+    assert_eq!(filtered["source_filter"], "json-fixture");
+    assert!(filtered["by_source"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["source"] == "json-fixture"));
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tools_json: Value = serde_json::from_slice(&tools).unwrap();
+    let tool = find_mcp_tool(&tools_json, "forge.harness.headroom_stats");
+    assert_eq!(tool["output_schema"], "forge.harness.headroom_stats.v1");
+
+    let mcp_input = serde_json::json!({"content_kind": "log", "limit": 1});
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.harness.headroom_stats",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.harness.headroom_stats.v1"
+    );
+    assert_eq!(mcp_json["result"]["content_kind_filter"], "log");
+    assert_eq!(
+        mcp_json["result"]["top_saved_blobs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge harness headroom-stats"),
+        "the packaged Forge skill should expose the headroom stats CLI command"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.harness.headroom_stats"),
+        "the packaged Forge skill should expose the headroom stats MCP tool"
+    );
+}
+
+#[test]
 fn harness_wrap_plan_can_use_explicit_project_root_default_mode_for_cli_and_mcp() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

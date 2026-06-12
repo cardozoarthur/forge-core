@@ -73,12 +73,13 @@ use forge_core::handoff::build_task_handoff_with_project;
 use forge_core::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, build_harness_adoption_plan,
     build_harness_bootstrap_report, build_harness_doctor_report, build_harness_headroom_plan,
-    build_harness_mode_report, inspect_cli_harness_shim_status, install_cli_harness_shim,
-    persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
-    resolve_harness_runtime_policy, retrieve_headroom_blob, run_cli_harness_exec,
-    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
-    HarnessAdoptionPlanOptions, HarnessBootstrapOptions, HarnessDoctorOptions,
-    HarnessHeadroomPlanOptions, HarnessModeOptions, HarnessRuntimePolicyOptions,
+    build_harness_mode_report, build_headroom_stats_report, inspect_cli_harness_shim_status,
+    install_cli_harness_shim, persist_token_headroom_report,
+    resolve_harness_forge_first_source_for_project, resolve_harness_runtime_policy,
+    retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
+    CliShimStatusOptions, CliWrapperPlanOptions, HarnessAdoptionPlanOptions,
+    HarnessBootstrapOptions, HarnessDoctorOptions, HarnessHeadroomPlanOptions, HarnessModeOptions,
+    HarnessRuntimePolicyOptions, HeadroomStatsOptions,
 };
 use forge_core::identity::{
     audit_tenant_index, ensure_operating_context_policy, ensure_workflow_policy,
@@ -674,6 +675,16 @@ enum HarnessCommands {
         retrieval_ref: String,
         #[arg(long = "include-content", default_value_t = false)]
         include_content: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    HeadroomStats {
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long = "kind", alias = "content-kind")]
+        content_kind: Option<String>,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -5949,6 +5960,24 @@ fn run() -> Result<i32> {
             } => {
                 let store = ForgeStore::open(cli.store)?;
                 let report = retrieve_headroom_blob(&store, &retrieval_ref, include_content)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            HarnessCommands::HeadroomStats {
+                source,
+                content_kind,
+                limit,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_headroom_stats_report(
+                    &store,
+                    HeadroomStatsOptions {
+                        source: source.as_deref(),
+                        content_kind: content_kind.as_deref(),
+                        limit,
+                    },
+                )?;
                 print_response(output, &report)?;
                 Ok(0)
             }

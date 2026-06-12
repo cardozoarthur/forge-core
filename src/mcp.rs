@@ -65,12 +65,13 @@ use crate::handoff::build_task_handoff_with_project;
 use crate::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, build_harness_adoption_plan,
     build_harness_bootstrap_report, build_harness_doctor_report, build_harness_headroom_plan,
-    build_harness_mode_report, inspect_cli_harness_shim_status, install_cli_harness_shim,
-    persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
-    resolve_harness_runtime_policy, retrieve_headroom_blob, run_cli_harness_exec,
-    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
-    HarnessAdoptionPlanOptions, HarnessBootstrapOptions, HarnessDoctorOptions,
-    HarnessHeadroomPlanOptions, HarnessModeOptions, HarnessRuntimePolicyOptions,
+    build_harness_mode_report, build_headroom_stats_report, inspect_cli_harness_shim_status,
+    install_cli_harness_shim, persist_token_headroom_report,
+    resolve_harness_forge_first_source_for_project, resolve_harness_runtime_policy,
+    retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
+    CliShimStatusOptions, CliWrapperPlanOptions, HarnessAdoptionPlanOptions,
+    HarnessBootstrapOptions, HarnessDoctorOptions, HarnessHeadroomPlanOptions, HarnessModeOptions,
+    HarnessRuntimePolicyOptions, HeadroomStatsOptions,
 };
 use crate::identity::{
     audit_tenant_index, ensure_workflow_policy, evaluate_tenant_policy_for_action,
@@ -521,6 +522,14 @@ struct HarnessRetrieveHeadroomInput {
     #[serde(alias = "ref")]
     retrieval_ref: String,
     include_content: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HarnessHeadroomStatsInput {
+    source: Option<String>,
+    content_kind: Option<String>,
+    kind: Option<String>,
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5602,6 +5611,19 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.harness.headroom_stats",
+                "Inspect Headroom Stats",
+                "Aggregate persisted Forge headroom blobs by source and content kind, including top reversible retrieval refs for token-savings observability.",
+                object_schema(&[
+                    ("source", "string", "optional persisted headroom source filter"),
+                    ("content_kind", "string", "optional json|log|search|code|text filter"),
+                    ("limit", "integer", "maximum top saved blobs to return"),
+                ], &[]),
+                "forge.harness.headroom_stats.v1",
+                &["forge", "harness", "headroom-stats", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
                 "forge.harness.mode",
                 "Inspect Harness Mode",
                 "Report the effective Forge-first harness mode, source, project config, exec policy status and precedence before wrapper, shim or exec use.",
@@ -8831,6 +8853,27 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 store,
                 &input.retrieval_ref,
                 input.include_content.unwrap_or(false),
+            )?)?
+        }
+        "forge.harness.headroom_stats" => {
+            let input: HarnessHeadroomStatsInput = if input.is_null() {
+                HarnessHeadroomStatsInput {
+                    source: None,
+                    content_kind: None,
+                    kind: None,
+                    limit: None,
+                }
+            } else {
+                parse_input(input)?
+            };
+            let content_kind = input.content_kind.or(input.kind);
+            serde_json::to_value(build_headroom_stats_report(
+                store,
+                HeadroomStatsOptions {
+                    source: input.source.as_deref(),
+                    content_kind: content_kind.as_deref(),
+                    limit: input.limit.unwrap_or(10),
+                },
             )?)?
         }
         "forge.harness.mode" => {

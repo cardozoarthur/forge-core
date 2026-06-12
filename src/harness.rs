@@ -4,6 +4,7 @@ use crate::storage::{ForgeStore, GlobalEventWrite, HeadroomBlobWrite, StoredHead
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use std::process::Command;
 pub const TOKEN_HEADROOM_SCHEMA_VERSION: &str = "forge.harness.token_headroom.v1";
 pub const CLI_WRAPPER_PLAN_SCHEMA_VERSION: &str = "forge.harness.cli_wrapper_plan.v1";
 pub const HEADROOM_RETRIEVAL_SCHEMA_VERSION: &str = "forge.harness.headroom_retrieval.v1";
+pub const HEADROOM_STATS_SCHEMA_VERSION: &str = "forge.harness.headroom_stats.v1";
 pub const CLI_HARNESS_EXEC_SCHEMA_VERSION: &str = "forge.harness.exec_receipt.v1";
 pub const CLI_HARNESS_EXEC_EVENT_SCHEMA_VERSION: &str = "forge.harness.exec_event.v1";
 pub const CLI_HARNESS_MODE_SCHEMA_VERSION: &str = "forge.harness.mode.v1";
@@ -586,6 +588,71 @@ pub struct HeadroomRetrievalReport {
     pub updated_at: Option<String>,
 }
 
+pub struct HeadroomStatsOptions<'a> {
+    pub source: Option<&'a str>,
+    pub content_kind: Option<&'a str>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HeadroomStatsReport {
+    pub schema_version: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_filter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_kind_filter: Option<String>,
+    pub total_blobs: usize,
+    pub total_original_bytes: i64,
+    pub total_compressed_bytes: i64,
+    pub total_estimated_original_tokens: i64,
+    pub total_estimated_compressed_tokens: i64,
+    pub total_estimated_saved_tokens: i64,
+    pub average_savings_percent: f64,
+    pub by_content_kind: Vec<HeadroomStatsContentKindBucket>,
+    pub by_source: Vec<HeadroomStatsSourceBucket>,
+    pub top_saved_blobs: Vec<HeadroomStatsSavedBlob>,
+    pub next_commands: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HeadroomStatsContentKindBucket {
+    pub content_kind: String,
+    pub blob_count: usize,
+    pub estimated_original_tokens: i64,
+    pub estimated_compressed_tokens: i64,
+    pub estimated_saved_tokens: i64,
+    pub savings_percent: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HeadroomStatsSourceBucket {
+    pub source: String,
+    pub blob_count: usize,
+    pub estimated_original_tokens: i64,
+    pub estimated_compressed_tokens: i64,
+    pub estimated_saved_tokens: i64,
+    pub savings_percent: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HeadroomStatsSavedBlob {
+    pub retrieval_ref: String,
+    pub source: String,
+    pub content_kind: String,
+    pub strategy: String,
+    pub original_sha256: String,
+    pub original_bytes: i64,
+    pub compressed_bytes: i64,
+    pub estimated_original_tokens: i64,
+    pub estimated_compressed_tokens: i64,
+    pub estimated_saved_tokens: i64,
+    pub savings_percent: f64,
+    pub budget_status: String,
+    pub updated_at: String,
+}
+
 pub fn analyze_token_headroom(
     content: &str,
     content_kind_hint: Option<&str>,
@@ -713,6 +780,113 @@ pub fn retrieve_headroom_blob(
         retrieval_ref,
         include_content,
     ))
+}
+
+pub fn build_headroom_stats_report(
+    store: &ForgeStore,
+    options: HeadroomStatsOptions<'_>,
+) -> Result<HeadroomStatsReport> {
+    let source_filter = normalize_optional_text(options.source);
+    let content_kind_filter = normalize_optional_text(options.content_kind);
+    let records =
+        store.load_headroom_blobs(source_filter.as_deref(), content_kind_filter.as_deref())?;
+
+    let mut by_content_kind = BTreeMap::<String, HeadroomStatsAccumulator>::new();
+    let mut by_source = BTreeMap::<String, HeadroomStatsAccumulator>::new();
+    let mut total = HeadroomStatsAccumulator::default();
+    for record in &records {
+        total.add(record);
+        by_content_kind
+            .entry(record.content_kind.clone())
+            .or_default()
+            .add(record);
+        by_source
+            .entry(record.source.clone())
+            .or_default()
+            .add(record);
+    }
+
+    let mut top_records = records.clone();
+    top_records.sort_by(|left, right| {
+        right
+            .estimated_saved_tokens
+            .cmp(&left.estimated_saved_tokens)
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| left.original_sha256.cmp(&right.original_sha256))
+    });
+    let top_limit = if options.limit == 0 {
+        10
+    } else {
+        options.limit.min(50)
+    };
+    let top_saved_blobs = top_records
+        .into_iter()
+        .take(top_limit)
+        .map(headroom_stats_saved_blob)
+        .collect::<Vec<_>>();
+
+    let mut next_commands = vec![
+        "forge harness token-headroom --content <payload> --kind log --budget-tokens <n> --persist --output json".to_string(),
+        "forge harness headroom-stats --output json".to_string(),
+    ];
+    if let Some(top) = top_saved_blobs.first() {
+        next_commands.push(format!(
+            "forge harness retrieve-headroom --ref {} --include-content --output json",
+            shell_quote(&top.retrieval_ref)
+        ));
+    }
+
+    Ok(HeadroomStatsReport {
+        schema_version: HEADROOM_STATS_SCHEMA_VERSION.to_string(),
+        status: if records.is_empty() {
+            "headroom_stats_empty".to_string()
+        } else {
+            "headroom_stats_ready".to_string()
+        },
+        source_filter,
+        content_kind_filter,
+        total_blobs: records.len(),
+        total_original_bytes: total.original_bytes,
+        total_compressed_bytes: total.compressed_bytes,
+        total_estimated_original_tokens: total.original_tokens,
+        total_estimated_compressed_tokens: total.compressed_tokens,
+        total_estimated_saved_tokens: total.saved_tokens,
+        average_savings_percent: headroom_savings_percent(total.original_tokens, total.saved_tokens),
+        by_content_kind: by_content_kind
+            .into_iter()
+            .map(|(content_kind, aggregate)| HeadroomStatsContentKindBucket {
+                content_kind,
+                blob_count: aggregate.blob_count,
+                estimated_original_tokens: aggregate.original_tokens,
+                estimated_compressed_tokens: aggregate.compressed_tokens,
+                estimated_saved_tokens: aggregate.saved_tokens,
+                savings_percent: headroom_savings_percent(
+                    aggregate.original_tokens,
+                    aggregate.saved_tokens,
+                ),
+            })
+            .collect(),
+        by_source: by_source
+            .into_iter()
+            .map(|(source, aggregate)| HeadroomStatsSourceBucket {
+                source,
+                blob_count: aggregate.blob_count,
+                estimated_original_tokens: aggregate.original_tokens,
+                estimated_compressed_tokens: aggregate.compressed_tokens,
+                estimated_saved_tokens: aggregate.saved_tokens,
+                savings_percent: headroom_savings_percent(
+                    aggregate.original_tokens,
+                    aggregate.saved_tokens,
+                ),
+            })
+            .collect(),
+        top_saved_blobs,
+        next_commands,
+        notes: vec![
+            "Headroom stats are read-only and aggregate only blobs already persisted in the local Forge store.".to_string(),
+            "Use filters to inspect noisy sources before routing large tool outputs or CLI stdout back to a brain.".to_string(),
+        ],
+    })
 }
 
 pub fn build_harness_mode_report(options: HarnessModeOptions<'_>) -> HarnessModeReport {
@@ -3237,6 +3411,56 @@ fn headroom_retrieval_report(
         compressed_content: include_content.then_some(record.compressed_content),
         created_at: Some(record.created_at),
         updated_at: Some(record.updated_at),
+    }
+}
+
+#[derive(Default)]
+struct HeadroomStatsAccumulator {
+    blob_count: usize,
+    original_bytes: i64,
+    compressed_bytes: i64,
+    original_tokens: i64,
+    compressed_tokens: i64,
+    saved_tokens: i64,
+}
+
+impl HeadroomStatsAccumulator {
+    fn add(&mut self, record: &StoredHeadroomBlobRecord) {
+        self.blob_count += 1;
+        self.original_bytes += record.original_bytes;
+        self.compressed_bytes += record.compressed_bytes;
+        self.original_tokens += record.estimated_original_tokens;
+        self.compressed_tokens += record.estimated_compressed_tokens;
+        self.saved_tokens += record.estimated_saved_tokens;
+    }
+}
+
+fn headroom_stats_saved_blob(record: StoredHeadroomBlobRecord) -> HeadroomStatsSavedBlob {
+    HeadroomStatsSavedBlob {
+        retrieval_ref: format!("forge://harness/headroom/{}", record.original_sha256),
+        source: record.source,
+        content_kind: record.content_kind,
+        strategy: record.strategy,
+        original_sha256: record.original_sha256,
+        original_bytes: record.original_bytes,
+        compressed_bytes: record.compressed_bytes,
+        estimated_original_tokens: record.estimated_original_tokens,
+        estimated_compressed_tokens: record.estimated_compressed_tokens,
+        estimated_saved_tokens: record.estimated_saved_tokens,
+        savings_percent: headroom_savings_percent(
+            record.estimated_original_tokens,
+            record.estimated_saved_tokens,
+        ),
+        budget_status: record.budget_status,
+        updated_at: record.updated_at,
+    }
+}
+
+fn headroom_savings_percent(original_tokens: i64, saved_tokens: i64) -> f64 {
+    if original_tokens <= 0 || saved_tokens <= 0 {
+        0.0
+    } else {
+        ((saved_tokens as f64 / original_tokens as f64) * 10000.0).round() / 100.0
     }
 }
 
