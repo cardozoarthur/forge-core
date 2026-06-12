@@ -4047,6 +4047,12 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
             && tool["async_safe"] == true
             && tool["mutates_workflow"] == true
     }));
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.milestone.collect_ready_evidence"
+            && tool["output_schema"] == "forge.milestone.collect_ready_evidence.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == true
+    }));
 
     let call = forge()
         .arg("--store")
@@ -4155,6 +4161,31 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
     assert!(!project
         .join(".forge/connected-brain-runtimes.json")
         .exists());
+
+    let collect_ready = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.milestone.collect_ready_evidence"])
+        .arg("--input")
+        .arg(format!(
+            r#"{{"version":"0.5","project_root":{},"approved_by":"arthur","origin":"codex"}}"#,
+            serde_json::to_string(project.to_str().unwrap()).unwrap()
+        ))
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let collect_ready_json: Value = serde_json::from_slice(&collect_ready).unwrap();
+    assert_eq!(collect_ready_json["status"], "ok");
+    assert_eq!(
+        collect_ready_json["result"]["schema_version"],
+        "forge.milestone.collect_ready_evidence.v1"
+    );
+    assert_eq!(collect_ready_json["result"]["status"], "partial_collection");
+    assert_eq!(collect_ready_json["result"]["collected_count"], 2);
+    assert_eq!(collect_ready_json["result"]["skipped_count"], 2);
 }
 
 #[test]
@@ -5667,6 +5698,121 @@ fn milestone_collect_evidence_selects_replacement_cli_demo_evidence_kinds() {
 }
 
 #[test]
+fn milestone_collect_ready_evidence_collects_ready_receipts_and_reports_skips() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("collect-ready-project");
+    fs::create_dir_all(&project).unwrap();
+
+    let output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "collect-ready-evidence",
+            "--version",
+            "0.5",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args([
+            "--approved-by",
+            "arthur",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.milestone.collect_ready_evidence.v1"
+    );
+    assert_eq!(json["milestone"], "0.5");
+    assert_eq!(json["status"], "partial_collection");
+    assert_eq!(json["project_root"], project.display().to_string());
+    assert_eq!(json["approved_by"], "arthur");
+    assert_eq!(json["origin"], "codex");
+    assert_eq!(json["required_count"], 4);
+    assert_eq!(json["collected_count"], 2);
+    assert_eq!(json["skipped_count"], 2);
+    assert_eq!(json["failed_count"], 0);
+    assert_eq!(json["promotion_ready_after_collection"], false);
+    assert_eq!(
+        json["promotion_decision_after_collection"]["decision"],
+        "fail"
+    );
+
+    let collected = json["collected_evidence"].as_array().unwrap();
+    assert!(collected.iter().any(|item| {
+        item["capability_id"] == "replacement_grade_cli"
+            && item["kind"] == "broader_project_coding_research_workflow"
+            && item["status"] == "collected_and_attached"
+    }));
+    assert!(collected.iter().any(|item| {
+        item["capability_id"] == "replacement_grade_cli"
+            && item["kind"] == "terminal_file_editing_ux"
+            && item["status"] == "collected_and_attached"
+    }));
+
+    let skipped = json["skipped_evidence"].as_array().unwrap();
+    assert!(skipped.iter().any(|item| {
+        item["capability_id"] == "replacement_grade_cli"
+            && item["kind"] == "external_brain_provider_execution"
+            && item["status"] == "not_ready_to_collect"
+            && item["evidence_plan"]["ready_to_collect_evidence"] == false
+    }));
+    assert!(skipped.iter().any(|item| {
+        item["capability_id"] == "experimental_multimodal_runtime"
+            && item["kind"] == "production_runtime_benchmark"
+            && item["status"] == "not_ready_to_collect"
+            && item["evidence_plan"]["ready_to_collect_evidence"] == false
+    }));
+    assert!(json["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("forge milestone evidence-plan --version 0.5")));
+
+    let manifest_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "manifest",
+            "--version",
+            "0.5",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest_output).unwrap();
+    let attached = manifest_json["attached_evidence"].as_array().unwrap();
+    assert!(attached.iter().any(|evidence| {
+        evidence["capability_id"] == "replacement_grade_cli"
+            && evidence["kind"] == "broader_project_coding_research_workflow"
+    }));
+    assert!(attached.iter().any(|evidence| {
+        evidence["capability_id"] == "replacement_grade_cli"
+            && evidence["kind"] == "terminal_file_editing_ux"
+    }));
+    assert_eq!(manifest_json["promotion_decision"]["decision"], "fail");
+}
+
+#[test]
 fn milestone_boundary_document_matches_validated_export_demo_runtime_state() {
     let docs = fs::read_to_string("docs/forge-0.5-milestone.md").unwrap();
 
@@ -5759,6 +5905,14 @@ fn milestone_boundary_document_matches_validated_export_demo_runtime_state() {
         "the visible 0.5 milestone boundary should expose the MCP autocomplete surface"
     );
     assert!(
+        docs.contains("forge milestone collect-ready-evidence"),
+        "the visible 0.5 milestone boundary should expose the ready evidence collector"
+    );
+    assert!(
+        docs.contains("forge.milestone.collect_ready_evidence"),
+        "the visible 0.5 milestone boundary should expose the MCP ready evidence collector"
+    );
+    assert!(
         docs.contains("Full terminal TUI loop and richer inline mode"),
         "the visible 0.5 milestone boundary should no longer list autocomplete as missing after autocomplete evidence exists"
     );
@@ -5781,6 +5935,14 @@ fn packaged_skill_mentions_export_demo_agent_surface() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.milestone.prepare_evidence_inputs"),
         "the packaged Forge skill should expose the MCP prepare-evidence-inputs tool to agent callers"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge milestone collect-ready-evidence"),
+        "the packaged Forge skill should teach agents how to collect all ready milestone evidence without overclaiming promotion"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.milestone.collect_ready_evidence"),
+        "the packaged Forge skill should expose the MCP collect-ready-evidence tool to agent callers"
     );
 }
 

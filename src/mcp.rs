@@ -115,8 +115,9 @@ use crate::milestone::{
     attach_milestone_evidence, build_milestone_evidence_plan, build_milestone_export_demo,
     build_milestone_manifest_with_store, build_milestone_research, build_milestone_status,
     build_replacement_cli_demo_with_options, collect_milestone_evidence,
-    prepare_milestone_evidence_inputs, MilestoneAttachEvidenceOptions, MilestoneCliDemoOptions,
-    MilestoneCollectEvidenceOptions, MilestoneEvidencePlanOptions,
+    collect_ready_milestone_evidence, prepare_milestone_evidence_inputs,
+    MilestoneAttachEvidenceOptions, MilestoneCliDemoOptions, MilestoneCollectEvidenceOptions,
+    MilestoneCollectReadyEvidenceOptions, MilestoneEvidencePlanOptions,
     MilestonePrepareEvidenceInputsOptions,
 };
 use crate::multimodal::{
@@ -1808,6 +1809,16 @@ struct MilestoneCollectEvidenceInput {
     capability: Option<String>,
     capability_id: Option<String>,
     kind: Option<String>,
+    project_root: Option<String>,
+    connected_brain: Option<String>,
+    connected_runtime: Option<String>,
+    approved_by: String,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MilestoneCollectReadyEvidenceInput {
+    version: Option<String>,
     project_root: Option<String>,
     connected_brain: Option<String>,
     connected_runtime: Option<String>,
@@ -6243,6 +6254,32 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
+                "forge.milestone.collect_ready_evidence",
+                "Collect Ready Milestone Evidence",
+                "Attempt every required Forge 0.5 milestone evidence kind, attach receipts whose inputs are ready and report skipped or failed kinds without auto-promoting.",
+                object_schema(&[
+                    ("version", "string", "milestone version, currently 0.5"),
+                    ("project_root", "string", "project root containing .forge manifests"),
+                    ("connected_brain", "string", "optional connected brain provider id"),
+                    ("connected_runtime", "string", "optional connected multimodal runtime id"),
+                    ("approved_by", "string", "operator approving ready evidence collection and attachment"),
+                    ("origin", "string", "codex|opencode|gemini|forge_cli|skill|mcp"),
+                ], &["approved_by"]),
+                "forge.milestone.collect_ready_evidence.v1",
+                &[
+                    "forge",
+                    "milestone",
+                    "collect-ready-evidence",
+                    "--version",
+                    "0.5",
+                    "--approved-by",
+                    "<operator>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, true),
+            ),
+            tool(
                 "forge.milestone.research",
                 "Inspect Forge Milestone Research",
                 "Inspect the source-grounded Forge 0.5 creative-runtime research baseline, validation gates and workflow templates.",
@@ -9624,6 +9661,23 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     version: &version,
                     capability_id: &capability_id,
                     kind: input.kind.as_deref(),
+                    project_root: project_root.as_deref(),
+                    connected_brain: input.connected_brain.as_deref(),
+                    connected_runtime: input.connected_runtime.as_deref(),
+                    approved_by: &input.approved_by,
+                    origin: &origin,
+                },
+            )?)?
+        }
+        "forge.milestone.collect_ready_evidence" => {
+            let input: MilestoneCollectReadyEvidenceInput = parse_input(input)?;
+            let version = input.version.unwrap_or_else(|| "0.5".to_string());
+            let project_root = input.project_root.map(PathBuf::from);
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(collect_ready_milestone_evidence(
+                store,
+                MilestoneCollectReadyEvidenceOptions {
+                    version: &version,
                     project_root: project_root.as_deref(),
                     connected_brain: input.connected_brain.as_deref(),
                     connected_runtime: input.connected_runtime.as_deref(),

@@ -299,6 +299,16 @@ pub struct MilestoneCollectEvidenceOptions<'a> {
     pub origin: &'a str,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct MilestoneCollectReadyEvidenceOptions<'a> {
+    pub version: &'a str,
+    pub project_root: Option<&'a Path>,
+    pub connected_brain: Option<&'a str>,
+    pub connected_runtime: Option<&'a str>,
+    pub approved_by: &'a str,
+    pub origin: &'a str,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MilestoneCollectEvidenceReport {
     pub schema_version: String,
@@ -316,6 +326,59 @@ pub struct MilestoneCollectEvidenceReport {
     pub attached_evidence: MilestoneAttachedEvidence,
     pub promotion_impact: String,
     pub next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneCollectReadyEvidenceReport {
+    pub schema_version: String,
+    pub milestone: String,
+    pub status: String,
+    pub project_root: String,
+    pub approved_by: String,
+    pub origin: String,
+    pub required_count: usize,
+    pub collected_count: usize,
+    pub skipped_count: usize,
+    pub failed_count: usize,
+    pub promotion_ready_after_collection: bool,
+    pub promotion_decision_after_collection: MilestonePromotionDecision,
+    pub collected_evidence: Vec<MilestoneCollectReadyEvidenceCollected>,
+    pub skipped_evidence: Vec<MilestoneCollectReadyEvidenceSkipped>,
+    pub failed_evidence: Vec<MilestoneCollectReadyEvidenceFailed>,
+    pub next_commands: Vec<String>,
+    pub next_action: String,
+    pub promotion_impact: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneCollectReadyEvidenceCollected {
+    pub capability_id: String,
+    pub kind: String,
+    pub status: String,
+    pub configured_evidence_source: String,
+    pub collection_promotion_ready: bool,
+    pub collection_artifact_path: String,
+    pub collection_artifact_sha256: String,
+    pub attached_evidence_id: String,
+    pub attached_artifact_path: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneCollectReadyEvidenceSkipped {
+    pub capability_id: String,
+    pub kind: String,
+    pub status: String,
+    pub reason: String,
+    pub evidence_plan: MilestoneEvidencePlanReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneCollectReadyEvidenceFailed {
+    pub capability_id: String,
+    pub kind: String,
+    pub status: String,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1078,6 +1141,156 @@ pub fn collect_milestone_evidence(
         next_action:
             "Inspect `forge milestone manifest --version 0.5 --output json`; promotion remains gated by all required evidence."
                 .to_string(),
+    })
+}
+
+pub fn collect_ready_milestone_evidence(
+    store: &ForgeStore,
+    options: MilestoneCollectReadyEvidenceOptions<'_>,
+) -> Result<MilestoneCollectReadyEvidenceReport> {
+    let version = normalize_required(options.version, "version")?;
+    if version != SUPPORTED_MILESTONE {
+        bail!("unsupported milestone {version}; currently supported: {SUPPORTED_MILESTONE}");
+    }
+    let approved_by = normalize_required(options.approved_by, "approved-by")?;
+    let origin = normalize_required(options.origin, "origin")?;
+    let project_root = options
+        .project_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let targets = forge_05_capabilities()
+        .into_iter()
+        .flat_map(|capability| {
+            milestone_required_attached_evidence_kinds(&capability.id)
+                .into_iter()
+                .map(move |kind| (capability.id.clone(), kind))
+        })
+        .collect::<Vec<_>>();
+    let required_count = targets.len();
+    let mut collected_evidence = Vec::new();
+    let mut skipped_evidence = Vec::new();
+    let mut failed_evidence = Vec::new();
+
+    for (capability_id, kind) in targets {
+        if milestone_collection_kind_requires_project_plan(&capability_id, &kind) {
+            let plan = build_milestone_evidence_plan(
+                store,
+                MilestoneEvidencePlanOptions {
+                    version: &version,
+                    capability_id: &capability_id,
+                    project_root: Some(&project_root),
+                    connected_brain: options.connected_brain,
+                    connected_runtime: options.connected_runtime,
+                },
+            )?;
+            if !plan.ready_to_collect_evidence {
+                skipped_evidence.push(MilestoneCollectReadyEvidenceSkipped {
+                    capability_id,
+                    kind,
+                    status: "not_ready_to_collect".to_string(),
+                    reason: plan.next_action.clone(),
+                    evidence_plan: plan,
+                });
+                continue;
+            }
+        }
+
+        match collect_milestone_evidence(
+            store,
+            MilestoneCollectEvidenceOptions {
+                version: &version,
+                capability_id: &capability_id,
+                kind: Some(&kind),
+                project_root: Some(&project_root),
+                connected_brain: options.connected_brain,
+                connected_runtime: options.connected_runtime,
+                approved_by: &approved_by,
+                origin: &origin,
+            },
+        ) {
+            Ok(report) => collected_evidence.push(MilestoneCollectReadyEvidenceCollected {
+                capability_id: report.capability_id,
+                kind: report.kind,
+                status: report.status,
+                configured_evidence_source: report.configured_evidence_source,
+                collection_promotion_ready: report.collection_promotion_ready,
+                collection_artifact_path: report.collection_artifact_path,
+                collection_artifact_sha256: report.collection_artifact_sha256,
+                attached_evidence_id: report.attached_evidence.evidence_id,
+                attached_artifact_path: report.attached_evidence.artifact_path,
+                summary: report.collection_summary,
+            }),
+            Err(error) => failed_evidence.push(MilestoneCollectReadyEvidenceFailed {
+                capability_id,
+                kind,
+                status: "collection_failed".to_string(),
+                error: error.to_string(),
+            }),
+        }
+    }
+
+    let manifest = build_milestone_manifest_with_store(&version, Some(store))?;
+    let promotion_decision_after_collection = manifest.promotion_decision.clone();
+    let collected_count = collected_evidence.len();
+    let skipped_count = skipped_evidence.len();
+    let failed_count = failed_evidence.len();
+    let status = if failed_count > 0 {
+        "collection_with_failures"
+    } else if skipped_count > 0 && collected_count > 0 {
+        "partial_collection"
+    } else if skipped_count > 0 {
+        "no_ready_evidence"
+    } else {
+        "all_ready_evidence_collected"
+    };
+    let mut next_commands = skipped_evidence
+        .iter()
+        .map(|item| {
+            format!(
+                "forge milestone evidence-plan --version {} --capability {} --project-root {} --output json",
+                version,
+                item.capability_id,
+                project_root.display()
+            )
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    next_commands.push("forge milestone manifest --version 0.5 --output json".to_string());
+    let next_action = if promotion_decision_after_collection.promotable {
+        "Inspect the manifest and run an explicit human-controlled release promotion; this command only collected evidence."
+            .to_string()
+    } else if failed_count > 0 {
+        "Inspect failed evidence collectors, fix their errors, then rerun collect-ready-evidence."
+            .to_string()
+    } else if skipped_count > 0 {
+        "Prepare the missing project evidence inputs, then rerun collect-ready-evidence."
+            .to_string()
+    } else {
+        "Inspect the manifest; promotion remains governed by the release decision surface."
+            .to_string()
+    };
+
+    Ok(MilestoneCollectReadyEvidenceReport {
+        schema_version: "forge.milestone.collect_ready_evidence.v1".to_string(),
+        milestone: version,
+        status: status.to_string(),
+        project_root: project_root.display().to_string(),
+        approved_by,
+        origin,
+        required_count,
+        collected_count,
+        skipped_count,
+        failed_count,
+        promotion_ready_after_collection: promotion_decision_after_collection.promotable,
+        promotion_decision_after_collection,
+        collected_evidence,
+        skipped_evidence,
+        failed_evidence,
+        next_commands,
+        next_action,
+        promotion_impact: "collects_ready_required_evidence_not_auto_promoted".to_string(),
     })
 }
 
