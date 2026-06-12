@@ -48,12 +48,13 @@ use crate::credential_vault::{
 use crate::event::{
     build_event_improvement_policy_for_context, build_event_observability_history_for_context,
     build_event_observability_index_for_context, build_event_service_plan,
-    build_global_event_timeline_for_context, build_workflow_event_stream, emit_event_egress,
-    ingest_inbound_event_with_context, list_event_services, list_inbound_event_inbox_for_context,
-    recover_stale_event_services, route_inbound_event, run_event_runtime_daemon,
-    run_event_runtime_reconcile, run_event_service_supervisor, run_event_webhook_ingress_service,
-    run_event_worker_service, run_inbound_event_worker_loop, scan_inbound_event_inbox,
-    EventEgressEmitInput, InboundEventIngestInput, InboundEventWorkerLoopOptions,
+    build_global_event_timeline_for_context, build_workflow_event_stream,
+    dispatch_inbound_event_activations, emit_event_egress, ingest_inbound_event_with_context,
+    list_event_services, list_inbound_event_inbox_for_context, recover_stale_event_services,
+    route_inbound_event, run_event_runtime_daemon, run_event_runtime_reconcile,
+    run_event_service_supervisor, run_event_webhook_ingress_service, run_event_worker_service,
+    run_inbound_event_worker_loop, scan_inbound_event_inbox, EventEgressEmitInput,
+    InboundEventIngestInput, InboundEventWorkerLoopOptions,
 };
 use crate::executor::{
     build_brain_session_history_report, build_brain_sessions_report_with_options,
@@ -1384,6 +1385,13 @@ struct EventEmitInput {
 struct InboundEventRouteInput {
     event_id: String,
     project_root: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InboundEventActivationDispatchInput {
+    event_id: String,
+    project_root: Option<String>,
+    dry_run: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2721,6 +2729,30 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "forge",
                     "events",
                     "route",
+                    "--event",
+                    "<event-id>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(false, true),
+            ),
+            tool(
+                "forge.events.dispatch_activations",
+                "Dispatch Inbound Event Activations",
+                "Route an inbound event if needed, then enqueue dispatch-ready Addon Event Extension workflow activations into Forge's runtime contract dispatch ledger without executing handlers inline.",
+                object_schema(
+                    &[
+                        ("event_id", "string", "inbound event id"),
+                        ("project_root", "string", "optional project root for context/addons"),
+                        ("dry_run", "boolean", "plan dispatches without persisting ledger rows"),
+                    ],
+                    &["event_id"],
+                ),
+                "forge.event_activation_dispatch.v1",
+                &[
+                    "forge",
+                    "events",
+                    "dispatch-activations",
                     "--event",
                     "<event-id>",
                     "--output",
@@ -7001,6 +7033,19 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));
             serde_json::to_value(route_inbound_event(store, &input.event_id, &project_root)?)?
+        }
+        "forge.events.dispatch_activations" => {
+            let input: InboundEventActivationDispatchInput = parse_input(input)?;
+            let project_root = input
+                .project_root
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            serde_json::to_value(dispatch_inbound_event_activations(
+                store,
+                &input.event_id,
+                &project_root,
+                input.dry_run.unwrap_or(false),
+            )?)?
         }
         "forge.cost.ledger" => {
             let input: CostLedgerInput = parse_input(input)?;

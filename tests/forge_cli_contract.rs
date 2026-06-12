@@ -24897,6 +24897,320 @@ event_adapters:
 }
 
 #[test]
+fn inbound_event_dispatch_activations_enqueues_addon_runtime_contracts() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("event-activation-dispatch-project");
+    let addon_dir = project_root.join(".forge/addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        project_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: digital-directive
+  label: Digital Directive
+brand:
+  scope: brand
+  id: forge
+  label: Forge
+product:
+  scope: product
+  id: core
+  label: Forge Core
+user:
+  scope: user
+  id: operator
+  label: Operator
+channel:
+  scope: channel
+  id: demo_inbox
+  label: Demo Inbox
+tenant_policy_mode: audit
+"#,
+    )
+    .unwrap();
+    fs::write(
+        addon_dir.join("event-activation-dispatch-demo.yaml"),
+        r#"
+id: forge.addon.event_activation_dispatch_demo
+name: Event Activation Dispatch Demo Addon
+version: 0.1.0
+description: Demonstrates dispatching Addon Event Extension activations.
+lifecycle: enabled
+permissions:
+  - id: demo.event.consume
+    description: Consume demo event extension routes.
+    risk: medium
+    actions:
+      - start_workflow
+capabilities:
+  - id: demo_event_dispatch_operations
+    title: Demo event dispatch operations
+    description: Dispatch workflow planning from generic event extension matches.
+    event_triggers:
+      - demo.dispatch.received
+workflows:
+  - id: demo_event_dispatch_workflow
+    kind: dynamic_workflow_strategy
+    description: Plan work from dispatched event extension matches.
+runtime_contracts:
+  - id: demo_event_dispatch_planner
+    title: Demo event dispatch planner
+    contract_type: planning_strategy
+    capability_id: demo_event_dispatch_operations
+    workflow_extension_id: demo_event_dispatch_workflow
+    runtime: external_worker
+    entrypoint: demo.event.dispatch.plan
+    inputs:
+      - forge.event_workflow_activation
+    outputs:
+      - forge.workflow_plan
+    permissions:
+      - demo.event.consume
+event_types:
+  - id: demo.dispatch
+    title: Demo dispatch message
+    transport: demo
+event_channels:
+  - id: demo.dispatch.inbox
+    title: Demo dispatch inbox
+    transport: demo
+    direction: ingress
+    origins:
+      - demo
+    event_types:
+      - demo.dispatch
+    actions:
+      - start_workflow
+    schema: demo.dispatch
+    auth: forge_policy
+    permissions:
+      - demo.event.consume
+event_triggers:
+  - id: demo.dispatch.received
+    title: Demo dispatch received
+    event_type: demo.dispatch
+    channel: demo.dispatch.inbox
+    adapter_id: demo.dispatch.start
+    workflow_extension_id: demo_event_dispatch_workflow
+    capability_id: demo_event_dispatch_operations
+    actions:
+      - start_workflow
+    permissions:
+      - demo.event.consume
+event_listeners:
+  - id: demo.dispatch.listener
+    title: Demo dispatch listener
+    event_type: demo.dispatch
+    channel: demo.dispatch.inbox
+    adapter_id: demo.dispatch.start
+    workflow_extension_id: demo_event_dispatch_workflow
+    capability_id: demo_event_dispatch_operations
+    handler: forge.event_inbox.route
+    actions:
+      - start_workflow
+    permissions:
+      - demo.event.consume
+event_adapters:
+  - id: demo.dispatch.start
+    title: Demo dispatch start adapter
+    transport: demo
+    direction: ingress
+    origins:
+      - demo
+    actions:
+      - start_workflow
+    event_types:
+      - demo.dispatch
+    schema: demo.dispatch
+    auth: forge_policy
+    permissions:
+      - demo.event.consume
+"#,
+    )
+    .unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let ingest_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "ingest",
+            "--origin",
+            "demo",
+            "--action",
+            "start_workflow",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--input",
+            r#"{"goal":"Dispatch workflow activations from matched Event Extensions","transport":"demo","event_type":"demo.dispatch","auth_verified":true}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ingest: Value = serde_json::from_slice(&ingest_output).unwrap();
+    let event_id = ingest["event"]["id"].as_str().unwrap();
+
+    let dispatch_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "dispatch-activations",
+            "--event",
+            event_id,
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let dispatch: Value = serde_json::from_slice(&dispatch_output).unwrap();
+    assert_eq!(
+        dispatch["schema_version"],
+        "forge.event_activation_dispatch.v1"
+    );
+    assert_eq!(dispatch["status"], "event_activation_dispatch_queued");
+    assert_eq!(dispatch["event_id"], event_id);
+    assert_eq!(dispatch["dry_run"], false);
+    assert_eq!(dispatch["route"]["status"], "event_routed");
+    assert_eq!(dispatch["activation_count"], 2);
+    assert_eq!(dispatch["dispatch_attempt_count"], 2);
+    assert_eq!(dispatch["queued_count"], 2);
+    assert_eq!(dispatch["blocked_count"], 0);
+    assert_eq!(
+        dispatch["dispatch_reports"][0]["dispatches"][0]["input"]["schema_version"],
+        "forge.event_workflow_activation.v1"
+    );
+    assert_eq!(
+        dispatch["dispatch_reports"][0]["dispatches"][0]["input"]["event_id"],
+        event_id
+    );
+    assert_eq!(
+        dispatch["dispatch_reports"][0]["dispatches"][0]["input"]["workflow_extension_id"],
+        "demo_event_dispatch_workflow"
+    );
+
+    let ledger_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "dispatches",
+            "--addon",
+            "forge.addon.event_activation_dispatch_demo",
+            "--status",
+            "queued",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ledger: Value = serde_json::from_slice(&ledger_output).unwrap();
+    assert_eq!(ledger["dispatch_count"], 2);
+    assert_eq!(ledger["queued_count"], 2);
+
+    let second_ingest_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "ingest",
+            "--origin",
+            "demo",
+            "--action",
+            "start_workflow",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--input",
+            r#"{"goal":"Dry-run dispatch workflow activations from matched Event Extensions","transport":"demo","event_type":"demo.dispatch","auth_verified":true}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second_ingest: Value = serde_json::from_slice(&second_ingest_output).unwrap();
+    let second_event_id = second_ingest["event"]["id"].as_str().unwrap();
+    let mcp_input = serde_json::json!({
+        "event_id": second_event_id,
+        "project_root": project_root.to_str().unwrap(),
+        "dry_run": true
+    });
+    let mcp_output = forge()
+        .args(["--store", store.to_str().unwrap(), "mcp", "call"])
+        .arg("forge.events.dispatch_activations")
+        .arg("--input")
+        .arg(mcp_input.to_string())
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.event_activation_dispatch.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["status"],
+        "event_activation_dispatch_dry_run"
+    );
+    assert_eq!(mcp_json["result"]["dry_run_count"], 2);
+    assert_eq!(mcp_json["result"]["queued_count"], 0);
+
+    let final_ledger_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "dispatches",
+            "--addon",
+            "forge.addon.event_activation_dispatch_demo",
+            "--status",
+            "queued",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let final_ledger: Value = serde_json::from_slice(&final_ledger_output).unwrap();
+    assert_eq!(final_ledger["dispatch_count"], 2);
+}
+
+#[test]
 fn addon_event_adapters_project_declared_event_triggers_listeners_and_channels() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

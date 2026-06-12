@@ -52,10 +52,11 @@ use forge_core::credential_vault::{
 use forge_core::event::{
     build_event_improvement_policy_for_context, build_event_observability_history_for_context,
     build_event_observability_index_for_context, build_event_service_plan,
-    build_global_event_timeline_for_context, build_workflow_event_stream, emit_event_egress,
-    ingest_inbound_event_with_context, list_event_services, list_inbound_event_inbox_for_context,
-    recover_stale_event_services, route_inbound_event, run_event_runtime_daemon,
-    run_event_runtime_reconcile, run_event_service_supervisor, run_event_webhook_ingress_server,
+    build_global_event_timeline_for_context, build_workflow_event_stream,
+    dispatch_inbound_event_activations, emit_event_egress, ingest_inbound_event_with_context,
+    list_event_services, list_inbound_event_inbox_for_context, recover_stale_event_services,
+    route_inbound_event, run_event_runtime_daemon, run_event_runtime_reconcile,
+    run_event_service_supervisor, run_event_webhook_ingress_server,
     run_event_webhook_ingress_service, run_event_worker_service, run_inbound_event_worker_loop,
     scan_inbound_event_inbox, EventEgressEmitInput, InboundEventIngestInput,
     InboundEventWorkerLoopOptions,
@@ -1980,6 +1981,16 @@ enum EventCommands {
         event_id: String,
         #[arg(long = "project-root", default_value = ".")]
         project_root: PathBuf,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    DispatchActivations {
+        #[arg(long = "event")]
+        event_id: String,
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
+        #[arg(long = "dry-run")]
+        dry_run: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -4764,6 +4775,21 @@ fn run() -> Result<i32> {
                 let report = route_inbound_event(&store, &event_id, &project_root)?;
                 print_response(output, &report)?;
                 Ok(0)
+            }
+            EventCommands::DispatchActivations {
+                event_id,
+                project_root,
+                dry_run,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report =
+                    dispatch_inbound_event_activations(&store, &event_id, &project_root, dry_run)?;
+                let should_fail = report.blocked_count > 0
+                    || report.skipped_count > 0
+                    || (report.dispatch_attempt_count == 0 && report.activation_count > 0);
+                print_response(output, &report)?;
+                Ok(if should_fail { 1 } else { 0 })
             }
             EventCommands::Emit {
                 addon,

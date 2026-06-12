@@ -1,9 +1,9 @@
 use crate::addon::{
-    evaluate_addon_runtime_contract_policy, list_addon_event_adapters,
-    load_addon_catalog_from_store, AddonCatalog, AddonEventAdapterView, AddonEventChannelView,
-    AddonEventExtensionRegistry, AddonEventListenerView, AddonEventTriggerView,
-    AddonPermissionGate, AddonRuntimeContractPolicyEntry, EventAdapterCredentialVaultRef,
-    EventAdapterDeclaration,
+    enqueue_addon_runtime_contract_dispatch, evaluate_addon_runtime_contract_policy,
+    list_addon_event_adapters, load_addon_catalog_from_store, AddonCatalog, AddonEventAdapterView,
+    AddonEventChannelView, AddonEventExtensionRegistry, AddonEventListenerView,
+    AddonEventTriggerView, AddonPermissionGate, AddonRuntimeContractDispatchReport,
+    AddonRuntimeContractPolicyEntry, EventAdapterCredentialVaultRef, EventAdapterDeclaration,
 };
 use crate::artifact::hex_sha256;
 use crate::checkpoint::{record_task_checkpoint, TaskCheckpointRequest};
@@ -80,6 +80,7 @@ pub const EVENT_ADDON_ADAPTER_PLAN_SCHEMA_VERSION: &str = "forge.event_addon_ada
 pub const EVENT_EXTENSION_MATCHES_SCHEMA_VERSION: &str = "forge.event_extension_matches.v1";
 pub const EVENT_WORKFLOW_ACTIVATION_PLAN_SCHEMA_VERSION: &str =
     "forge.event_workflow_activation_plan.v1";
+pub const EVENT_ACTIVATION_DISPATCH_SCHEMA_VERSION: &str = "forge.event_activation_dispatch.v1";
 pub const EVENT_EGRESS_EMIT_SCHEMA_VERSION: &str = "forge.event_egress_emit.v1";
 pub const EVENT_EGRESS_REQUEST_SCHEMA_VERSION: &str = "forge.event_egress_request.v1";
 pub const EVENT_EGRESS_DELIVERY_EVIDENCE_SCHEMA_VERSION: &str =
@@ -970,6 +971,23 @@ pub struct InboundEventRouteReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_result: Option<Value>,
     pub event: InboundEventView,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InboundEventActivationDispatchReport {
+    pub schema_version: String,
+    pub status: String,
+    pub event_id: String,
+    pub dry_run: bool,
+    pub activation_count: usize,
+    pub dispatch_attempt_count: usize,
+    pub queued_count: usize,
+    pub dry_run_count: usize,
+    pub blocked_count: usize,
+    pub skipped_count: usize,
+    pub route: InboundEventRouteReport,
+    pub dispatch_reports: Vec<AddonRuntimeContractDispatchReport>,
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5525,6 +5543,186 @@ pub fn route_inbound_event(
         ),
         other => bail!("unsupported inbound event action for routing: {other}"),
     }
+}
+
+pub fn dispatch_inbound_event_activations(
+    store: &ForgeStore,
+    event_id: &str,
+    project_root: &Path,
+    dry_run: bool,
+) -> Result<InboundEventActivationDispatchReport> {
+    let route = route_inbound_event(store, event_id, project_root)?;
+    let project_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let addon_dirs = vec![project_root.join(".forge/addons")];
+    let addon_catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
+    let activation_plan = &route
+        .addon_event_adapter_plan
+        .event_workflow_activation_plan;
+    let mut dispatch_reports = Vec::new();
+    let mut skipped_count = 0;
+
+    for activation in &activation_plan.activations {
+        if !activation.dispatch_allowed {
+            skipped_count += 1;
+            continue;
+        }
+        let mut dispatched_for_activation = false;
+        for contract in activation
+            .runtime_contracts
+            .iter()
+            .filter(|contract| contract.dispatch_allowed)
+        {
+            let input = event_activation_dispatch_input(&route, activation, contract);
+            let source = format!(
+                "event_inbox:{}:{}:{}",
+                route.event_id, activation.source_kind, activation.source_id
+            );
+            dispatch_reports.push(enqueue_addon_runtime_contract_dispatch(
+                store,
+                &addon_catalog,
+                Some(&activation.addon_id),
+                &contract.contract_id,
+                input,
+                &source,
+                dry_run,
+            )?);
+            dispatched_for_activation = true;
+        }
+        if !dispatched_for_activation {
+            skipped_count += 1;
+        }
+    }
+
+    let dispatch_attempt_count = dispatch_reports.len();
+    let queued_count = dispatch_reports
+        .iter()
+        .map(|report| report.queued_count)
+        .sum::<usize>();
+    let dry_run_count = dispatch_reports
+        .iter()
+        .flat_map(|report| report.dispatches.iter())
+        .filter(|dispatch| dispatch.status == "dry_run")
+        .count();
+    let blocked_count = dispatch_reports
+        .iter()
+        .map(|report| report.blocked_count)
+        .sum::<usize>();
+    let status = event_activation_dispatch_status(
+        activation_plan.activation_count,
+        dispatch_attempt_count,
+        queued_count,
+        dry_run_count,
+        blocked_count,
+        skipped_count,
+    );
+    let notes = event_activation_dispatch_notes(status, dry_run, skipped_count);
+
+    Ok(InboundEventActivationDispatchReport {
+        schema_version: EVENT_ACTIVATION_DISPATCH_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        event_id: route.event_id.clone(),
+        dry_run,
+        activation_count: activation_plan.activation_count,
+        dispatch_attempt_count,
+        queued_count,
+        dry_run_count,
+        blocked_count,
+        skipped_count,
+        route,
+        dispatch_reports,
+        notes,
+    })
+}
+
+fn event_activation_dispatch_input(
+    route: &InboundEventRouteReport,
+    activation: &InboundEventWorkflowActivation,
+    contract: &AddonRuntimeContractPolicyEntry,
+) -> Value {
+    json!({
+        "schema_version": "forge.event_workflow_activation.v1",
+        "event_id": route.event_id,
+        "origin": route.origin,
+        "action": route.action,
+        "normalized_action": route.adapter_policy.normalized_action,
+        "route_decision": route.route_decision,
+        "workflow_id": route.workflow_id,
+        "workflow_goal": route.workflow_goal,
+        "source_kind": activation.source_kind,
+        "source_id": activation.source_id,
+        "addon_id": activation.addon_id,
+        "capability_id": activation.capability_id,
+        "workflow_extension_id": activation.workflow_extension_id,
+        "event_type": activation.event_type,
+        "channel": activation.channel,
+        "adapter_id": activation.adapter_id,
+        "contract_id": contract.contract_id,
+        "contract_type": contract.contract_type,
+        "runtime": contract.runtime,
+        "entrypoint": contract.entrypoint,
+    })
+}
+
+fn event_activation_dispatch_status(
+    activation_count: usize,
+    dispatch_attempt_count: usize,
+    queued_count: usize,
+    dry_run_count: usize,
+    blocked_count: usize,
+    skipped_count: usize,
+) -> &'static str {
+    if activation_count == 0 {
+        "event_activation_dispatch_unmatched"
+    } else if dispatch_attempt_count == 0 {
+        "event_activation_dispatch_blocked"
+    } else if blocked_count > 0 || skipped_count > 0 {
+        "event_activation_dispatch_partially_queued"
+    } else if dry_run_count > 0 && queued_count == 0 {
+        "event_activation_dispatch_dry_run"
+    } else {
+        "event_activation_dispatch_queued"
+    }
+}
+
+fn event_activation_dispatch_notes(
+    status: &str,
+    dry_run: bool,
+    skipped_count: usize,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    match status {
+        "event_activation_dispatch_unmatched" => {
+            notes.push("No event workflow activations were available for dispatch.".to_string());
+        }
+        "event_activation_dispatch_blocked" => {
+            notes.push(
+                "Event workflow activations were present but none were dispatch-ready.".to_string(),
+            );
+        }
+        "event_activation_dispatch_partially_queued" => {
+            notes.push(format!(
+                "{skipped_count} event workflow activation(s) were skipped because they were not dispatch-ready."
+            ));
+        }
+        "event_activation_dispatch_dry_run" => {
+            notes.push(
+                "Event workflow activation dispatches were planned as dry-run ledger entries only."
+                    .to_string(),
+            );
+        }
+        _ => {
+            notes.push(
+                "Event workflow activations were queued in the Addon runtime dispatch ledger."
+                    .to_string(),
+            );
+        }
+    }
+    if dry_run {
+        notes.push("Dry-run mode did not persist dispatches to the runtime ledger.".to_string());
+    }
+    notes
 }
 
 pub fn emit_event_egress(
