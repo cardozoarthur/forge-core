@@ -24392,6 +24392,246 @@ tenant_policy_mode: audit
 }
 
 #[test]
+fn inbound_events_project_addon_event_adapter_plan_for_routes_and_workers() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("event-addon-project");
+    let addon_dir = project_root.join(".forge/addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        project_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: digital-directive
+  label: Digital Directive
+brand:
+  scope: brand
+  id: forge
+  label: Forge
+product:
+  scope: product
+  id: core
+  label: Forge Core
+user:
+  scope: user
+  id: operator
+  label: Operator
+channel:
+  scope: channel
+  id: demo_inbox
+  label: Demo Inbox
+tenant_policy_mode: audit
+"#,
+    )
+    .unwrap();
+    fs::write(
+        addon_dir.join("inbound-demo.yaml"),
+        r#"
+id: forge.addon.inbound_demo
+name: Inbound Demo Addon
+version: 0.1.0
+description: Demonstrates event adapters as Addon-provided workflow triggers.
+lifecycle: enabled
+permissions:
+  - id: demo.event_ingest
+    description: Allow the demo inbox to initiate workflows.
+    risk: medium
+    actions:
+      - start_workflow
+event_types:
+  - id: demo.message
+    title: Demo message
+    transport: demo
+event_adapters:
+  - id: demo.start
+    title: Demo start adapter
+    transport: demo
+    direction: ingress
+    origins:
+      - demo
+    actions:
+      - start_workflow
+    event_types:
+      - demo.message
+    schema: demo.message
+    auth: forge_policy
+    permissions:
+      - demo.event_ingest
+  - id: demo.modify
+    title: Demo modify adapter
+    transport: demo
+    direction: ingress
+    origins:
+      - demo
+    actions:
+      - modify_workflow
+    event_types:
+      - demo.message
+    schema: demo.message
+    auth: forge_policy
+"#,
+    )
+    .unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let ingest_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "ingest",
+            "--origin",
+            "demo",
+            "--action",
+            "start_workflow",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--input",
+            r#"{"goal":"Run an Addon-routed event workflow","transport":"demo","event_type":"demo.message","auth_verified":true}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ingest: Value = serde_json::from_slice(&ingest_output).unwrap();
+    let event_id = ingest["event"]["id"].as_str().unwrap();
+
+    let route_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "route",
+            "--event",
+            event_id,
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let route: Value = serde_json::from_slice(&route_output).unwrap();
+    assert_eq!(route["status"], "event_routed");
+    assert_eq!(
+        route["addon_event_adapter_plan"]["schema_version"],
+        "forge.event_addon_adapter_plan.v1"
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["status"],
+        "addon_event_adapter_plan_ready"
+    );
+    assert_eq!(route["addon_event_adapter_plan"]["enforced"], true);
+    assert_eq!(
+        route["addon_event_adapter_plan"]["source_candidate_count"],
+        2
+    );
+    assert_eq!(route["addon_event_adapter_plan"]["matched_count"], 1);
+    assert_eq!(route["addon_event_adapter_plan"]["blocked_count"], 1);
+    assert_eq!(
+        route["addon_event_adapter_plan"]["adapters"][0]["adapter_id"],
+        "demo.start"
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["adapters"][0]["status"],
+        "matched"
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["adapters"][0]["permission_gate"]["status"],
+        "allowed"
+    );
+    assert_eq!(
+        route["addon_event_adapter_plan"]["adapters"][1]["status"],
+        "action_not_allowed"
+    );
+    assert!(route["addon_event_adapter_plan"]["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("route".to_string()))));
+
+    let second_ingest_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "ingest",
+            "--origin",
+            "demo",
+            "--action",
+            "start_workflow",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--input",
+            r#"{"goal":"Run another Addon-routed event workflow","transport":"demo","event_type":"demo.message","auth_verified":true}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second_ingest: Value = serde_json::from_slice(&second_ingest_output).unwrap();
+    let second_event_id = second_ingest["event"]["id"].as_str().unwrap();
+
+    let scan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "scan",
+            "--status",
+            "pending",
+            "--limit",
+            "1",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let scan: Value = serde_json::from_slice(&scan_output).unwrap();
+    assert_eq!(scan["status"], "event_worker_scanned");
+    assert_eq!(scan["events"][0]["event_id"], second_event_id);
+    assert_eq!(
+        scan["events"][0]["addon_event_adapter_plan"]["schema_version"],
+        "forge.event_addon_adapter_plan.v1"
+    );
+    assert_eq!(
+        scan["events"][0]["addon_event_adapter_plan"]["matched_count"],
+        1
+    );
+}
+
+#[test]
 fn request_status_reflects_current_workflow_mutations_for_async_callers() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

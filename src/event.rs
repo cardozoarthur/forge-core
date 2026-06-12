@@ -1,6 +1,6 @@
 use crate::addon::{
     list_addon_event_adapters, load_addon_catalog_from_store, AddonCatalog, AddonEventAdapterView,
-    EventAdapterCredentialVaultRef, EventAdapterDeclaration,
+    AddonPermissionGate, EventAdapterCredentialVaultRef, EventAdapterDeclaration,
 };
 use crate::artifact::hex_sha256;
 use crate::checkpoint::{record_task_checkpoint, TaskCheckpointRequest};
@@ -73,6 +73,7 @@ pub const EVENT_WEBHOOK_INGRESS_SCHEMA_VERSION: &str = "forge.event_webhook_ingr
 pub const EVENT_WEBHOOK_INGRESS_RESPONSE_SCHEMA_VERSION: &str =
     "forge.event_webhook_ingress.response.v1";
 pub const EVENT_ADAPTER_POLICY_SCHEMA_VERSION: &str = "forge.event_adapter_policy.v1";
+pub const EVENT_ADDON_ADAPTER_PLAN_SCHEMA_VERSION: &str = "forge.event_addon_adapter_plan.v1";
 pub const EVENT_EGRESS_EMIT_SCHEMA_VERSION: &str = "forge.event_egress_emit.v1";
 pub const EVENT_EGRESS_REQUEST_SCHEMA_VERSION: &str = "forge.event_egress_request.v1";
 pub const EVENT_EGRESS_DELIVERY_EVIDENCE_SCHEMA_VERSION: &str =
@@ -560,6 +561,8 @@ pub struct InboundEventWorkerEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_decision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub addon_event_adapter_plan: Option<InboundEventAddonAdapterPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -952,6 +955,7 @@ pub struct InboundEventRouteReport {
     pub action: String,
     pub origin: String,
     pub adapter_policy: InboundEventAdapterPolicyReport,
+    pub addon_event_adapter_plan: InboundEventAddonAdapterPlan,
     pub route_decision: String,
     pub workflow_id: Option<String>,
     pub workflow_goal: Option<String>,
@@ -981,6 +985,59 @@ pub struct InboundEventAdapterPolicyReport {
     pub issues: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_adapter: Option<AddonEventAdapterView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InboundEventAddonAdapterPlan {
+    pub schema_version: String,
+    pub status: String,
+    pub enforced: bool,
+    pub origin: String,
+    pub action: String,
+    pub normalized_action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_verified: Option<bool>,
+    pub source_candidate_count: usize,
+    pub matched_count: usize,
+    pub allowed_count: usize,
+    pub blocked_count: usize,
+    pub adapters: Vec<InboundEventAddonAdapterPlanEntry>,
+    pub next_commands: Vec<Vec<String>>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InboundEventAddonAdapterPlanEntry {
+    pub addon_id: String,
+    pub addon_name: String,
+    pub addon_version: String,
+    pub addon_lifecycle: String,
+    pub adapter_id: String,
+    pub adapter_title: String,
+    pub transport: String,
+    pub direction: String,
+    pub status: String,
+    pub allowed: bool,
+    pub source_matched: bool,
+    pub action_matched: bool,
+    pub schema_matched: bool,
+    pub auth_required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_verified: Option<bool>,
+    pub mutates_workflow: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_decision: Option<String>,
+    pub origins: Vec<String>,
+    pub actions: Vec<String>,
+    pub event_types: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub permission_gate: AddonPermissionGate,
+    pub issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2790,6 +2847,7 @@ pub fn scan_inbound_event_inbox(
                 identity_context: route.event.identity_context.clone(),
                 workflow_id: route.workflow_id,
                 route_decision: Some(route.route_decision),
+                addon_event_adapter_plan: Some(route.addon_event_adapter_plan),
                 error: None,
             }),
             Err(error) => {
@@ -2816,6 +2874,7 @@ pub fn scan_inbound_event_inbox(
                     identity_context,
                     workflow_id: None,
                     route_decision: None,
+                    addon_event_adapter_plan: None,
                     error: Some(error_message),
                 });
             }
@@ -5336,6 +5395,8 @@ pub fn route_inbound_event(
     let addon_dirs = vec![project_root.join(".forge/addons")];
     let addon_catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
     let adapter_policy = evaluate_inbound_event_adapter_policy(&addon_catalog, &event);
+    let addon_event_adapter_plan =
+        build_inbound_addon_event_adapter_plan(&addon_catalog, &event, &adapter_policy);
     if !adapter_policy.allowed {
         bail!(
             "inbound event blocked by adapter policy: {}",
@@ -5350,6 +5411,7 @@ pub fn route_inbound_event(
             action: event.action.clone(),
             origin: event.origin.clone(),
             adapter_policy,
+            addon_event_adapter_plan,
             route_decision: "event was already routed".to_string(),
             workflow_id: event
                 .data
@@ -5368,16 +5430,41 @@ pub fn route_inbound_event(
     }
 
     match normalized_action(&event.action).as_str() {
-        "start_workflow" => {
-            route_start_workflow(store, event, &project_root, &addon_catalog, adapter_policy)
+        "start_workflow" => route_start_workflow(
+            store,
+            event,
+            &project_root,
+            &addon_catalog,
+            adapter_policy,
+            addon_event_adapter_plan,
+        ),
+        "continue_workflow" => {
+            route_continue_workflow(store, event, adapter_policy, addon_event_adapter_plan)
         }
-        "continue_workflow" => route_continue_workflow(store, event, adapter_policy),
-        "modify_workflow" => route_modify_workflow(store, event, adapter_policy),
-        "pause_workflow" => route_status_workflow(store, event, "pause_workflow", adapter_policy),
-        "resume_workflow" => route_status_workflow(store, event, "resume_workflow", adapter_policy),
-        "complete_workflow" => {
-            route_status_workflow(store, event, "complete_workflow", adapter_policy)
+        "modify_workflow" => {
+            route_modify_workflow(store, event, adapter_policy, addon_event_adapter_plan)
         }
+        "pause_workflow" => route_status_workflow(
+            store,
+            event,
+            "pause_workflow",
+            adapter_policy,
+            addon_event_adapter_plan,
+        ),
+        "resume_workflow" => route_status_workflow(
+            store,
+            event,
+            "resume_workflow",
+            adapter_policy,
+            addon_event_adapter_plan,
+        ),
+        "complete_workflow" => route_status_workflow(
+            store,
+            event,
+            "complete_workflow",
+            adapter_policy,
+            addon_event_adapter_plan,
+        ),
         other => bail!("unsupported inbound event action for routing: {other}"),
     }
 }
@@ -7123,6 +7210,235 @@ fn evaluate_inbound_event_adapter_policy(
     }
 }
 
+fn build_inbound_addon_event_adapter_plan(
+    catalog: &AddonCatalog,
+    event: &InboundEventRecord,
+    adapter_policy: &InboundEventAdapterPolicyReport,
+) -> InboundEventAddonAdapterPlan {
+    let adapter_report = list_addon_event_adapters(catalog, None, None, Some("ingress"));
+    let mut adapters = adapter_report
+        .adapters
+        .into_iter()
+        .filter(|adapter| {
+            adapter_source_matches(adapter, &event.origin, adapter_policy.transport.as_deref())
+        })
+        .map(|adapter| inbound_event_addon_adapter_plan_entry(event, adapter_policy, adapter))
+        .collect::<Vec<_>>();
+    adapters.sort_by(|left, right| {
+        addon_event_adapter_plan_status_rank(&left.status)
+            .cmp(&addon_event_adapter_plan_status_rank(&right.status))
+            .then_with(|| left.adapter_id.cmp(&right.adapter_id))
+            .then_with(|| left.addon_id.cmp(&right.addon_id))
+    });
+
+    let matched_count = adapters
+        .iter()
+        .filter(|entry| entry.status == "matched")
+        .count();
+    let allowed_count = adapters.iter().filter(|entry| entry.allowed).count();
+    let blocked_count = adapters.len().saturating_sub(allowed_count);
+    let status = if !adapter_policy.enforced {
+        "addon_event_adapter_plan_unenforced"
+    } else if matched_count > 0 {
+        "addon_event_adapter_plan_ready"
+    } else {
+        "addon_event_adapter_plan_blocked"
+    };
+
+    InboundEventAddonAdapterPlan {
+        schema_version: EVENT_ADDON_ADAPTER_PLAN_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        enforced: adapter_policy.enforced,
+        origin: event.origin.clone(),
+        action: event.action.clone(),
+        normalized_action: adapter_policy.normalized_action.clone(),
+        transport: adapter_policy.transport.clone(),
+        schema: adapter_policy.schema.clone(),
+        auth_verified: adapter_policy.auth_verified,
+        source_candidate_count: adapters.len(),
+        matched_count,
+        allowed_count,
+        blocked_count,
+        next_commands: inbound_event_addon_adapter_next_commands(event, &adapters),
+        notes: inbound_event_addon_adapter_plan_notes(adapter_policy, matched_count, &adapters),
+        adapters,
+    }
+}
+
+fn inbound_event_addon_adapter_plan_entry(
+    event: &InboundEventRecord,
+    adapter_policy: &InboundEventAdapterPolicyReport,
+    adapter: AddonEventAdapterView,
+) -> InboundEventAddonAdapterPlanEntry {
+    let action_matched =
+        adapter_action_matches(&adapter, &event.action, &adapter_policy.normalized_action);
+    let schema_matched = adapter_schema_matches(&adapter, adapter_policy.schema.as_deref());
+    let permission_gate = adapter.permission_gate.clone();
+    let auth_required = auth_requires_verification(&adapter.adapter.auth);
+    let auth_verified = adapter_policy.auth_verified;
+    let mut issues = Vec::new();
+    let mut status = "matched".to_string();
+    let mut allowed = true;
+
+    if !action_matched {
+        status = "action_not_allowed".to_string();
+        allowed = false;
+        issues.push("adapter origin matched, but action is not declared".to_string());
+    } else if !schema_matched {
+        status = "schema_mismatch".to_string();
+        allowed = false;
+        issues.push(
+            "event schema does not match the declared adapter schema or event types".to_string(),
+        );
+    } else if !permission_gate.allowed {
+        status = permission_gate.status.clone();
+        allowed = false;
+        issues.push(format!(
+            "permission gate denied adapter: {}",
+            permission_gate.status
+        ));
+    } else if auth_required {
+        match auth_verified {
+            Some(true) => {}
+            Some(false) => {
+                status = "auth_not_verified".to_string();
+                allowed = false;
+                issues.push("adapter auth was explicitly reported as not verified".to_string());
+            }
+            None => {
+                status = "auth_unverified".to_string();
+                issues.push(format!(
+                    "adapter declares auth `{}` but event did not include auth_verified evidence",
+                    adapter.adapter.auth
+                ));
+            }
+        }
+    }
+
+    InboundEventAddonAdapterPlanEntry {
+        addon_id: adapter.addon_id,
+        addon_name: adapter.addon_name,
+        addon_version: adapter.addon_version,
+        addon_lifecycle: adapter.addon_lifecycle,
+        adapter_id: adapter.adapter.id.clone(),
+        adapter_title: adapter.adapter.title.clone(),
+        transport: adapter.adapter.transport.clone(),
+        direction: adapter.adapter.direction.clone(),
+        status,
+        allowed,
+        source_matched: true,
+        action_matched,
+        schema_matched,
+        auth_required,
+        auth_verified,
+        mutates_workflow: event_route_action_mutates_workflow(&adapter_policy.normalized_action),
+        route_decision: allowed.then(|| adapter_policy.normalized_action.clone()),
+        origins: adapter.adapter.origins.clone(),
+        actions: adapter.adapter.actions.clone(),
+        event_types: adapter.adapter.event_types.clone(),
+        schema: normalize_text(Some(&adapter.adapter.schema)),
+        permission_gate,
+        issues,
+    }
+}
+
+fn inbound_event_addon_adapter_next_commands(
+    event: &InboundEventRecord,
+    adapters: &[InboundEventAddonAdapterPlanEntry],
+) -> Vec<Vec<String>> {
+    let mut commands = vec![
+        vec![
+            "forge".to_string(),
+            "events".to_string(),
+            "route".to_string(),
+            "--event".to_string(),
+            event.id.clone(),
+            "--project-root".to_string(),
+            "<project-root>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        vec![
+            "forge".to_string(),
+            "events".to_string(),
+            "adapters".to_string(),
+            "--direction".to_string(),
+            "ingress".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    ];
+
+    for adapter in adapters {
+        for permission in &adapter.permission_gate.human_approval_required {
+            commands.push(vec![
+                "forge".to_string(),
+                "addons".to_string(),
+                "authorize-permission".to_string(),
+                "--addon".to_string(),
+                adapter.addon_id.clone(),
+                "--permission".to_string(),
+                permission.clone(),
+                "--risk".to_string(),
+                "review".to_string(),
+                "--approved-by".to_string(),
+                "<operator>".to_string(),
+                "--source".to_string(),
+                "event-adapter-plan".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]);
+        }
+    }
+    commands
+}
+
+fn inbound_event_addon_adapter_plan_notes(
+    adapter_policy: &InboundEventAdapterPolicyReport,
+    matched_count: usize,
+    adapters: &[InboundEventAddonAdapterPlanEntry],
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    if !adapter_policy.enforced {
+        notes.push("No Addon ingress adapter claimed this origin; Forge kept legacy inbox routing available.".to_string());
+    } else if matched_count > 0 {
+        notes.push(
+            "Addon ingress adapter candidates are ready for Forge event routing.".to_string(),
+        );
+    } else if adapters.is_empty() {
+        notes.push("No Addon ingress adapter matched the event origin and transport.".to_string());
+    } else {
+        notes.push("Addon ingress adapter candidates matched the origin but are blocked by action, schema, auth or permission gates.".to_string());
+    }
+    if !adapter_policy.issues.is_empty() {
+        notes.extend(adapter_policy.issues.clone());
+    }
+    notes
+}
+
+fn addon_event_adapter_plan_status_rank(status: &str) -> usize {
+    match status {
+        "matched" => 0,
+        "auth_unverified" => 1,
+        "auth_not_verified" => 2,
+        "action_not_allowed" => 3,
+        "schema_mismatch" => 4,
+        _ => 5,
+    }
+}
+
+fn event_route_action_mutates_workflow(action: &str) -> bool {
+    matches!(
+        action,
+        "start_workflow"
+            | "continue_workflow"
+            | "modify_workflow"
+            | "pause_workflow"
+            | "resume_workflow"
+            | "complete_workflow"
+    )
+}
+
 fn blocked_adapter_policy(
     event: &InboundEventRecord,
     input: BlockedAdapterPolicyInput<'_>,
@@ -7222,6 +7538,7 @@ fn route_start_workflow(
     project_root: &Path,
     addon_catalog: &AddonCatalog,
     adapter_policy: InboundEventAdapterPolicyReport,
+    addon_event_adapter_plan: InboundEventAddonAdapterPlan,
 ) -> Result<InboundEventRouteReport> {
     let goal = extract_goal(&event.data)
         .with_context(|| format!("inbound event {} does not include a goal", event.id))?;
@@ -7252,6 +7569,7 @@ fn route_start_workflow(
         action: routed_event.action.clone(),
         origin: routed_event.origin.clone(),
         adapter_policy,
+        addon_event_adapter_plan,
         route_decision: "start_workflow".to_string(),
         workflow_id: Some(workflow.id.clone()),
         workflow_goal: Some(workflow.goal.clone()),
@@ -7265,6 +7583,7 @@ fn route_modify_workflow(
     store: &ForgeStore,
     event: InboundEventRecord,
     adapter_policy: InboundEventAdapterPolicyReport,
+    addon_event_adapter_plan: InboundEventAddonAdapterPlan,
 ) -> Result<InboundEventRouteReport> {
     let workflow_id = extract_workflow_id(&event.data)
         .with_context(|| format!("inbound event {} does not include a workflow_id", event.id))?;
@@ -7291,6 +7610,7 @@ fn route_modify_workflow(
         action: routed_event.action.clone(),
         origin: routed_event.origin.clone(),
         adapter_policy,
+        addon_event_adapter_plan,
         route_decision,
         workflow_id: Some(workflow.id.clone()),
         workflow_goal: Some(workflow.goal.clone()),
@@ -7304,6 +7624,7 @@ fn route_continue_workflow(
     store: &ForgeStore,
     event: InboundEventRecord,
     adapter_policy: InboundEventAdapterPolicyReport,
+    addon_event_adapter_plan: InboundEventAddonAdapterPlan,
 ) -> Result<InboundEventRouteReport> {
     let continue_action = continue_action_for_data(&event.data)?;
     let origin = format!("event_inbox:{}", event.origin);
@@ -7345,6 +7666,7 @@ fn route_continue_workflow(
         action: routed_event.action.clone(),
         origin: routed_event.origin.clone(),
         adapter_policy,
+        addon_event_adapter_plan,
         route_decision,
         workflow_id: Some(workflow.id.clone()),
         workflow_goal: Some(workflow.goal.clone()),
@@ -7359,6 +7681,7 @@ fn route_status_workflow(
     event: InboundEventRecord,
     route_decision: &str,
     adapter_policy: InboundEventAdapterPolicyReport,
+    addon_event_adapter_plan: InboundEventAddonAdapterPlan,
 ) -> Result<InboundEventRouteReport> {
     let workflow_id = extract_workflow_id(&event.data)
         .with_context(|| format!("inbound event {} does not include a workflow_id", event.id))?;
@@ -7388,6 +7711,7 @@ fn route_status_workflow(
         action: routed_event.action.clone(),
         origin: routed_event.origin.clone(),
         adapter_policy,
+        addon_event_adapter_plan,
         route_decision,
         workflow_id: Some(workflow.id.clone()),
         workflow_goal: Some(workflow.goal.clone()),
