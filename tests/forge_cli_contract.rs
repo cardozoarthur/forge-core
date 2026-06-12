@@ -42076,6 +42076,239 @@ tenant_policy_mode: enforce
 }
 
 #[test]
+fn interactive_identity_command_and_mcp_surface_unify_context_aliases_and_tenant_audit() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("tenant-project");
+    fs::create_dir_all(project_root.join(".forge")).unwrap();
+    fs::write(
+        project_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: digital-directive
+  label: Digital Directive
+brand:
+  scope: brand
+  id: forge
+  label: Forge
+product:
+  scope: product
+  id: core
+  label: Forge Core
+user:
+  scope: user
+  id: operator-1
+  label: Operator One
+channel:
+  scope: channel
+  id: local_cli
+  label: Local CLI
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "link",
+            "--left-scope",
+            "telegram",
+            "--left-id",
+            "chat-42",
+            "--right-scope",
+            "user",
+            "--right-id",
+            "operator-1",
+            "--source",
+            "test",
+            "--reason",
+            "operator channel alias",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "link",
+            "--left-scope",
+            "user",
+            "--left-id",
+            "operator-1",
+            "--right-scope",
+            "web",
+            "--right-id",
+            "console-1",
+            "--source",
+            "test",
+            "--reason",
+            "operator web alias",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "identity",
+            "--project-root",
+        ])
+        .arg(project_root.to_str().unwrap())
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.interactive.identity.v1");
+    assert_eq!(json["status"], "interactive_identity_ready");
+    assert_eq!(
+        json["current_context"]["organization_id"],
+        "digital-directive"
+    );
+    assert_eq!(json["current_context"]["brand_id"], "forge");
+    assert_eq!(json["current_context"]["product_id"], "core");
+    assert_eq!(json["current_context"]["user_id"], "operator-1");
+    assert_eq!(json["current_context"]["channel_id"], "local_cli");
+    assert_eq!(json["current_context"]["tenant_policy_mode"], "enforce");
+    assert!(json["identity_count"].as_u64().unwrap() >= 5);
+    assert_eq!(json["membership_count"], 1);
+    assert_eq!(json["active_membership_count"], 1);
+    assert_eq!(json["link_count"], 2);
+    assert_eq!(json["channel_alias_count"], 2);
+    assert_eq!(json["tenant_audit"]["status"], "tenant_index_complete");
+    assert_eq!(json["tenant_audit"]["missing_count"], 0);
+    assert!(json["identities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|identity| { identity["scope"] == "user" && identity["id"] == "operator-1" }));
+    assert!(json["channel_aliases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|alias| {
+            alias["alias_path"] == "telegram:chat-42 -> user:operator-1"
+                && alias["commands"]["resolve"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("resolve"))
+        }));
+    assert!(json["channel_aliases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|alias| {
+            alias["alias_path"] == "web:console-1 -> user:operator-1"
+                && alias["commands"]["resolve"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("web"))
+        }));
+    assert!(json["memberships"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|membership| {
+            membership["subject_id"] == "operator-1"
+                && membership["tenant_path"] == "digital-directive/forge/core"
+        }));
+    assert!(json["commands"]["sync"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("sync")));
+    assert!(json["commands"]["link"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("link")));
+    assert!(json["commands"]["tenant_audit"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("tenant-audit")));
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "identity",
+            "--project-root",
+        ])
+        .arg(project_root.to_str().unwrap())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Identity center"));
+    assert!(text.contains("operator-1"));
+    assert!(text.contains("telegram:chat-42"));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.identity");
+    assert_eq!(tool["output_schema"], "forge.interactive.identity.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.identity"])
+        .arg("--input")
+        .arg(format!(
+            r#"{{"project_root":"{}"}}"#,
+            project_root.display()
+        ))
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.identity.v1"
+    );
+    assert_eq!(mcp_json["result"]["channel_alias_count"], 2);
+}
+
+#[test]
 fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -43022,6 +43255,11 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
 
     for (name, output_schema, mutates_workflow) in [
         ("forge.interactive.home", "forge.interactive.home.v1", false),
+        (
+            "forge.interactive.identity",
+            "forge.interactive.identity.v1",
+            false,
+        ),
         ("forge.brain_router", "forge.brain_router.v1", false),
         (
             "forge.interactive.slash_commands",
@@ -43132,6 +43370,15 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
             .is_string(),
         "interactive home should expose context and memory policy state for agent dashboards"
     );
+    assert_eq!(
+        home_json["result"]["dashboard"]["identity_panel"]["schema_version"],
+        "forge.interactive.identity.v1"
+    );
+    assert!(
+        home_json["result"]["dashboard"]["identity_panel"]["current_context"]["organization_id"]
+            .is_string(),
+        "interactive home should expose operating identity context for TUI/web dashboards"
+    );
 
     let brain_router = forge()
         .arg("--store")
@@ -43237,6 +43484,14 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.structured_logs"),
         "the packaged Forge skill should expose the dedicated structured logs surface through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.identity"),
+        "the packaged Forge skill should expose the dedicated interactive identity surface through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge interactive identity"),
+        "the packaged Forge skill should include the identity center CLI command"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge interactive structured-logs"),

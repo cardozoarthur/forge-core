@@ -20,7 +20,10 @@ use crate::harness::{
     HarnessModeReport, HarnessRuntimePolicyOptions, HarnessSessionLifecyclePlan,
     TokenHeadroomReport,
 };
-use crate::identity::list_identity_memberships;
+use crate::identity::{
+    audit_tenant_index, inspect_project_operating_context, list_identity_links,
+    list_identity_memberships, list_identity_registry,
+};
 use crate::interaction::list_human_interactions;
 use crate::memory::memory_policy_report;
 use crate::milestone::{
@@ -71,6 +74,7 @@ const INTERACTIVE_PATCH_EDIT_INTAKE_SCHEMA_VERSION: &str = "forge.interactive.pa
 const INTERACTIVE_PATCH_FILE_ACTION_HINT_SCHEMA_VERSION: &str =
     "forge.interactive.patch_file_action_hint.v1";
 const INTERACTIVE_PERMISSIONS_SCHEMA_VERSION: &str = "forge.interactive.permissions.v1";
+const INTERACTIVE_IDENTITY_SCHEMA_VERSION: &str = "forge.interactive.identity.v1";
 const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
 const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
 const INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION: &str = "forge.interactive.structured_logs.v1";
@@ -125,6 +129,7 @@ pub struct InteractiveDashboard {
     pub ui_composition_panel: InteractiveUiCompositionPanel,
     pub patch_workbench_panel: InteractivePatchWorkbenchPanel,
     pub permissions_panel: InteractivePermissionsPanel,
+    pub identity_panel: InteractiveIdentityPanel,
     pub dag_panel: InteractiveWorkflowDagPanel,
     pub task_board_panel: InteractiveTaskBoardPanel,
     pub schedule_panel: InteractiveSchedulePanel,
@@ -922,6 +927,100 @@ pub struct InteractivePermissionsCommands {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct InteractiveIdentityPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub project_root: String,
+    pub context_status: String,
+    pub identity_count: usize,
+    pub link_count: usize,
+    pub channel_alias_count: usize,
+    pub membership_count: usize,
+    pub active_membership_count: usize,
+    pub tenant_audit_missing_count: usize,
+    pub current_context: InteractiveIdentityCurrentContext,
+    pub identities: Vec<crate::identity::IdentityRegistryView>,
+    pub channel_aliases: Vec<InteractiveIdentityChannelAlias>,
+    pub memberships: Vec<InteractiveIdentityMembership>,
+    pub tenant_audit: crate::identity::TenantAuditReport,
+    pub commands: InteractiveIdentityCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveIdentityCurrentContext {
+    pub organization_id: String,
+    pub organization_label: String,
+    pub brand_id: String,
+    pub brand_label: String,
+    pub product_id: String,
+    pub product_label: String,
+    pub user_id: String,
+    pub user_label: String,
+    pub channel_id: String,
+    pub channel_label: String,
+    pub memory_scope: String,
+    pub personality_scope: String,
+    pub tenant_policy_mode: String,
+    pub source: String,
+    pub warning_count: usize,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveIdentityChannelAlias {
+    pub alias_path: String,
+    pub left_scope: String,
+    pub left_id: String,
+    pub right_scope: String,
+    pub right_id: String,
+    pub link_type: String,
+    pub status: String,
+    pub source: String,
+    pub commands: InteractiveIdentityAliasCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveIdentityAliasCommands {
+    pub resolve: Vec<String>,
+    pub unlink: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveIdentityMembership {
+    pub subject_scope: String,
+    pub subject_id: String,
+    pub tenant_path: String,
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    pub role: String,
+    pub status: String,
+    pub permission_count: usize,
+    pub expired: bool,
+    pub not_yet_valid: bool,
+    pub commands: InteractiveIdentityMembershipCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveIdentityMembershipCommands {
+    pub list: Vec<String>,
+    pub update: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveIdentityCommands {
+    pub refresh: Vec<String>,
+    pub context: Vec<String>,
+    pub sync: Vec<String>,
+    pub registry: Vec<String>,
+    pub link: Vec<String>,
+    pub links: Vec<String>,
+    pub resolve: Vec<String>,
+    pub memberships: Vec<String>,
+    pub tenant_audit: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct InteractiveWorkflowDagPanel {
     pub schema_version: String,
     pub status: String,
@@ -1476,6 +1575,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
     let addon_renderer_panel = build_interactive_addon_renderer_panel(&addon_renderer_report);
     let patch_workbench_panel = build_interactive_patch_workbench(store)?;
     let permissions_panel = build_interactive_permissions(store)?;
+    let identity_panel = build_interactive_identity(store, &repository_context_path)?;
     let ui_composition_panel = build_ui_composition_panel(&addon_renderer_report);
 
     Ok(InteractiveHomeReport {
@@ -1518,6 +1618,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
             ui_composition_panel,
             patch_workbench_panel,
             permissions_panel,
+            identity_panel,
             dag_panel,
             task_board_panel,
             schedule_panel,
@@ -1540,6 +1641,7 @@ pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeRepor
                 "forge interactive release-gates --output json".to_string(),
                 "forge interactive patch-workbench --output json".to_string(),
                 "forge interactive permissions --output json".to_string(),
+                "forge interactive identity --output json".to_string(),
             ],
             quick_actions: vec![
                 "/status".to_string(),
@@ -2365,6 +2467,19 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             &["permissions", "approval", "tenant", "addon", "membership"],
         ),
         command_palette_entry(
+            "identity.open",
+            "identity",
+            "Open identity center",
+            "Inspect operating context, identity registry, channel aliases, memberships and tenant audit.",
+            "identity_panel",
+            None,
+            &["interactive", "identity", "--output", "json"],
+            false,
+            false,
+            "low",
+            &["identity", "alias", "tenant", "context", "channel"],
+        ),
+        command_palette_entry(
             "workflow.task_board",
             "workflow",
             "Open task board",
@@ -2760,6 +2875,7 @@ fn command_palette_groups(
         "navigation",
         "workflow",
         "patch",
+        "identity",
         "permissions",
         "sessions",
         "harness",
@@ -2795,6 +2911,7 @@ fn command_palette_group_title(group_id: &str) -> &'static str {
         "navigation" => "Navigation",
         "workflow" => "Workflows",
         "patch" => "Patch Workbench",
+        "identity" => "Identity",
         "permissions" => "Permissions",
         "sessions" => "Sessions",
         "harness" => "Harness",
@@ -3317,6 +3434,102 @@ pub fn build_interactive_permissions(store: &ForgeStore) -> Result<InteractivePe
         addon_permissions,
         approval_items,
         commands: permissions_commands(),
+    })
+}
+
+pub fn build_interactive_identity(
+    store: &ForgeStore,
+    project_root: &Path,
+) -> Result<InteractiveIdentityPanel> {
+    let context = inspect_project_operating_context(project_root)?;
+    let registry_report = list_identity_registry(store, None, None)?;
+    let links_report = list_identity_links(store, None, None, Some("active"))?;
+    let link_count = links_report.link_count;
+    let memberships_report = list_identity_memberships(store, None, None, None, None, None, None)?;
+    let tenant_audit = audit_tenant_index(store)?;
+
+    let channel_aliases = links_report
+        .links
+        .into_iter()
+        .filter(is_channel_alias_link)
+        .map(|link| {
+            let (alias_scope, alias_id, subject_scope, subject_id) = channel_alias_parts(&link);
+            InteractiveIdentityChannelAlias {
+                alias_path: format!("{alias_scope}:{alias_id} -> {subject_scope}:{subject_id}"),
+                commands: identity_alias_commands(&link, &alias_scope, &alias_id),
+                left_scope: link.left_scope,
+                left_id: link.left_id,
+                right_scope: link.right_scope,
+                right_id: link.right_id,
+                link_type: link.link_type,
+                status: link.status,
+                source: link.source,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let memberships = memberships_report
+        .memberships
+        .into_iter()
+        .map(|membership| InteractiveIdentityMembership {
+            tenant_path: format!(
+                "{}/{}/{}",
+                membership.organization_id, membership.brand_id, membership.product_id
+            ),
+            commands: identity_membership_commands(&membership),
+            permission_count: membership.permissions.len(),
+            subject_scope: membership.subject_scope,
+            subject_id: membership.subject_id,
+            organization_id: membership.organization_id,
+            brand_id: membership.brand_id,
+            product_id: membership.product_id,
+            role: membership.role,
+            status: membership.status,
+            expired: membership.expired,
+            not_yet_valid: membership.not_yet_valid,
+        })
+        .collect::<Vec<_>>();
+    let active_membership_count = memberships
+        .iter()
+        .filter(|membership| {
+            membership.status == "active" && !membership.expired && !membership.not_yet_valid
+        })
+        .count();
+
+    Ok(InteractiveIdentityPanel {
+        schema_version: INTERACTIVE_IDENTITY_SCHEMA_VERSION.to_string(),
+        status: "interactive_identity_ready".to_string(),
+        project_root: context.project_root.clone(),
+        context_status: context.status.clone(),
+        identity_count: registry_report.identity_count,
+        link_count,
+        channel_alias_count: channel_aliases.len(),
+        membership_count: memberships.len(),
+        active_membership_count,
+        tenant_audit_missing_count: tenant_audit.missing_count,
+        current_context: InteractiveIdentityCurrentContext {
+            organization_id: context.context.organization.id.clone(),
+            organization_label: context.context.organization.label.clone(),
+            brand_id: context.context.brand.id.clone(),
+            brand_label: context.context.brand.label.clone(),
+            product_id: context.context.product.id.clone(),
+            product_label: context.context.product.label.clone(),
+            user_id: context.context.user.id.clone(),
+            user_label: context.context.user.label.clone(),
+            channel_id: context.context.channel.id.clone(),
+            channel_label: context.context.channel.label.clone(),
+            memory_scope: context.context.memory_scope.clone(),
+            personality_scope: context.context.personality_scope.clone(),
+            tenant_policy_mode: context.context.tenant_policy_mode.clone(),
+            source: context.source.clone(),
+            warning_count: context.warnings.len(),
+            warnings: context.warnings,
+        },
+        identities: registry_report.identities,
+        channel_aliases,
+        memberships,
+        tenant_audit,
+        commands: identity_commands(Path::new(&context.project_root)),
     })
 }
 
@@ -4467,6 +4680,203 @@ fn permissions_commands() -> InteractivePermissionsCommands {
     }
 }
 
+fn identity_commands(project_root: &Path) -> InteractiveIdentityCommands {
+    let project_root = project_root.display().to_string();
+    InteractiveIdentityCommands {
+        refresh: vec![
+            "interactive".to_string(),
+            "identity".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        context: vec![
+            "identity".to_string(),
+            "context".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        sync: vec![
+            "identity".to_string(),
+            "sync".to_string(),
+            "--project-root".to_string(),
+            project_root,
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        registry: vec![
+            "identity".to_string(),
+            "registry".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        link: vec![
+            "identity".to_string(),
+            "link".to_string(),
+            "--left-scope".to_string(),
+            "<channel-scope>".to_string(),
+            "--left-id".to_string(),
+            "<channel-id>".to_string(),
+            "--right-scope".to_string(),
+            "user".to_string(),
+            "--right-id".to_string(),
+            "<user-id>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        links: vec![
+            "identity".to_string(),
+            "links".to_string(),
+            "--status".to_string(),
+            "active".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        resolve: vec![
+            "identity".to_string(),
+            "resolve".to_string(),
+            "--scope".to_string(),
+            "<scope>".to_string(),
+            "--id".to_string(),
+            "<id>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        memberships: vec![
+            "identity".to_string(),
+            "memberships".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        tenant_audit: vec![
+            "identity".to_string(),
+            "tenant-audit".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
+fn identity_alias_commands(
+    link: &crate::identity::IdentityLinkView,
+    alias_scope: &str,
+    alias_id: &str,
+) -> InteractiveIdentityAliasCommands {
+    InteractiveIdentityAliasCommands {
+        resolve: vec![
+            "identity".to_string(),
+            "resolve".to_string(),
+            "--scope".to_string(),
+            alias_scope.to_string(),
+            "--id".to_string(),
+            alias_id.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        unlink: vec![
+            "identity".to_string(),
+            "unlink".to_string(),
+            "--left-scope".to_string(),
+            link.left_scope.clone(),
+            "--left-id".to_string(),
+            link.left_id.clone(),
+            "--right-scope".to_string(),
+            link.right_scope.clone(),
+            "--right-id".to_string(),
+            link.right_id.clone(),
+            "--source".to_string(),
+            "forge_cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
+fn channel_alias_parts(
+    link: &crate::identity::IdentityLinkView,
+) -> (String, String, String, String) {
+    match (
+        is_channel_identity_scope(&link.left_scope),
+        is_channel_identity_scope(&link.right_scope),
+    ) {
+        (true, false) => (
+            link.left_scope.clone(),
+            link.left_id.clone(),
+            link.right_scope.clone(),
+            link.right_id.clone(),
+        ),
+        (false, true) => (
+            link.right_scope.clone(),
+            link.right_id.clone(),
+            link.left_scope.clone(),
+            link.left_id.clone(),
+        ),
+        _ => (
+            link.left_scope.clone(),
+            link.left_id.clone(),
+            link.right_scope.clone(),
+            link.right_id.clone(),
+        ),
+    }
+}
+
+fn identity_membership_commands(
+    membership: &crate::identity::IdentityMembershipView,
+) -> InteractiveIdentityMembershipCommands {
+    InteractiveIdentityMembershipCommands {
+        list: vec![
+            "identity".to_string(),
+            "memberships".to_string(),
+            "--subject-scope".to_string(),
+            membership.subject_scope.clone(),
+            "--subject".to_string(),
+            membership.subject_id.clone(),
+            "--organization".to_string(),
+            membership.organization_id.clone(),
+            "--brand".to_string(),
+            membership.brand_id.clone(),
+            "--product".to_string(),
+            membership.product_id.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        update: vec![
+            "identity".to_string(),
+            "membership-update".to_string(),
+            "--subject-scope".to_string(),
+            membership.subject_scope.clone(),
+            "--subject".to_string(),
+            membership.subject_id.clone(),
+            "--organization".to_string(),
+            membership.organization_id.clone(),
+            "--brand".to_string(),
+            membership.brand_id.clone(),
+            "--product".to_string(),
+            membership.product_id.clone(),
+            "--grant".to_string(),
+            "<permission>".to_string(),
+            "--source".to_string(),
+            "forge_cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
+fn is_channel_alias_link(link: &crate::identity::IdentityLinkView) -> bool {
+    is_channel_identity_scope(&link.left_scope) || is_channel_identity_scope(&link.right_scope)
+}
+
+fn is_channel_identity_scope(scope: &str) -> bool {
+    !matches!(
+        scope,
+        "organization" | "brand" | "product" | "user" | "workspace" | "project"
+    )
+}
+
 fn permission_membership_commands(
     membership: &crate::identity::IdentityMembershipView,
 ) -> InteractivePermissionMembershipCommands {
@@ -5211,6 +5621,16 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     let patch_workbench_files = render_patch_workbench_file_summary(&d.patch_workbench_panel);
     let permission_memberships = render_permission_membership_summary(&d.permissions_panel);
     let permission_approvals = render_permission_approval_summary(&d.permissions_panel);
+    let identity_aliases = render_identity_alias_summary(&d.identity_panel);
+    let identity_memberships = render_identity_membership_summary(&d.identity_panel);
+    let identity_context = format!(
+        "{}/{}/{} user {} channel {}",
+        d.identity_panel.current_context.organization_id,
+        d.identity_panel.current_context.brand_id,
+        d.identity_panel.current_context.product_id,
+        d.identity_panel.current_context.user_id,
+        d.identity_panel.current_context.channel_id
+    );
     let task_board_lanes = render_task_board_lane_summary(&d.task_board_panel);
     let dag_workflows = render_workflow_dag_summary(&d.dag_panel);
     let digital_twin_workflows = if d.digital_twin_panel.workflows.is_empty() {
@@ -5278,6 +5698,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          UI composition: {ui_composition_status}; layout {ui_composition_layout}, regions {ui_composition_regions_count}, widgets {ui_composition_widgets} ({ui_composition_core_widgets} core, {ui_composition_addon_widgets} addon); {ui_composition_regions}\n\
          Patch workbench: {patch_workbench_status}; clean {patch_workbench_clean}, files {patch_workbench_files_count}, staged {patch_workbench_staged}, unstaged {patch_workbench_unstaged}, untracked {patch_workbench_untracked}, diff {patch_workbench_diff_present}, check {patch_workbench_diff_check}; {patch_workbench_files}\n\
          Permission center: {permissions_status}; memberships {permissions_memberships}, active {permissions_active}, addon permissions {permissions_addons}, approved {permissions_approved_addons}, pending approvals {permissions_pending}, timed out {permissions_timed_out}; memberships {permission_memberships}; approvals {permission_approvals}\n\
+         Identity center: {identity_status}; context {identity_context}, identities {identity_count}, aliases {identity_alias_count}, memberships {identity_membership_count}, tenant audit missing {identity_tenant_missing}; aliases {identity_aliases}; memberships {identity_memberships}\n\
          Operational digital twin: {digital_twin_status}; workflows {digital_twin_workflows_count}, happening {digital_twin_happening}, done {digital_twin_done}, remaining {digital_twin_remaining}, validated {digital_twin_validated}, rejected {digital_twin_rejected}, approvals {digital_twin_approvals}; {digital_twin_workflows}\n\
          DAG panel: {dag_status}; workflows {dag_workflows_count}, nodes {dag_nodes}, edges {dag_edges}, running {dag_running}, blocked {dag_blocked}, waits {dag_waits}, human waits {dag_human_waits}; {dag_workflows}\n\
          Task board: {task_board_status}; workflows {task_board_workflows}, tasks {task_board_tasks}, ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, checkpoints {task_board_checkpoints}, artifacts {task_board_artifacts}; lanes {task_board_lanes}\n\
@@ -5379,6 +5800,14 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         permissions_timed_out = d.permissions_panel.timed_out_human_approval_count,
         permission_memberships = permission_memberships,
         permission_approvals = permission_approvals,
+        identity_status = d.identity_panel.status,
+        identity_context = identity_context,
+        identity_count = d.identity_panel.identity_count,
+        identity_alias_count = d.identity_panel.channel_alias_count,
+        identity_membership_count = d.identity_panel.membership_count,
+        identity_tenant_missing = d.identity_panel.tenant_audit_missing_count,
+        identity_aliases = identity_aliases,
+        identity_memberships = identity_memberships,
         digital_twin_status = d.digital_twin_panel.schema_version,
         digital_twin_workflows_count = d.digital_twin_panel.workflow_count,
         digital_twin_happening = d.digital_twin_panel.global_counts.happening_now_count,
@@ -5623,6 +6052,81 @@ pub fn render_interactive_permissions(panel: &InteractivePermissionsPanel) -> St
         addon_permissions = render_addon_permission_summary(panel),
         approvals = render_permission_approval_summary(panel),
     )
+}
+
+pub fn render_interactive_identity(panel: &InteractiveIdentityPanel) -> String {
+    format!(
+        "Identity center: {status}; context {organization}/{brand}/{product}, user {user}, channel {channel}, policy {policy}\nRegistry: identities {identity_count}, active links {link_count}, channel aliases {channel_alias_count}, memberships {membership_count}, active memberships {active_membership_count}, tenant audit missing {tenant_audit_missing_count}\nIdentities: {identities}\nChannel aliases: {aliases}\nMemberships: {memberships}\n",
+        status = panel.status,
+        organization = panel.current_context.organization_id,
+        brand = panel.current_context.brand_id,
+        product = panel.current_context.product_id,
+        user = panel.current_context.user_id,
+        channel = panel.current_context.channel_id,
+        policy = panel.current_context.tenant_policy_mode,
+        identity_count = panel.identity_count,
+        link_count = panel.link_count,
+        channel_alias_count = panel.channel_alias_count,
+        membership_count = panel.membership_count,
+        active_membership_count = panel.active_membership_count,
+        tenant_audit_missing_count = panel.tenant_audit_missing_count,
+        identities = render_identity_record_summary(panel),
+        aliases = render_identity_alias_summary(panel),
+        memberships = render_identity_membership_summary(panel),
+    )
+}
+
+fn render_identity_record_summary(panel: &InteractiveIdentityPanel) -> String {
+    if panel.identities.is_empty() {
+        return "none".to_string();
+    }
+    panel
+        .identities
+        .iter()
+        .take(8)
+        .map(|identity| format!("{}:{} ({})", identity.scope, identity.id, identity.label))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn render_identity_alias_summary(panel: &InteractiveIdentityPanel) -> String {
+    if panel.channel_aliases.is_empty() {
+        return "none".to_string();
+    }
+    panel
+        .channel_aliases
+        .iter()
+        .take(8)
+        .map(|alias| {
+            format!(
+                "{} [{} {}]",
+                alias.alias_path, alias.link_type, alias.status
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn render_identity_membership_summary(panel: &InteractiveIdentityPanel) -> String {
+    if panel.memberships.is_empty() {
+        return "none".to_string();
+    }
+    panel
+        .memberships
+        .iter()
+        .take(8)
+        .map(|membership| {
+            format!(
+                "{}:{} -> {} ({}, {} permissions)",
+                membership.subject_scope,
+                membership.subject_id,
+                membership.tenant_path,
+                membership.role,
+                membership.permission_count
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 pub fn render_interactive_readiness(panel: &InteractiveReadinessPanel) -> String {
@@ -6351,6 +6855,15 @@ fn build_ui_composition_panel(
                     "standard",
                     "half",
                     vec!["forge interactive permissions --output json".to_string()],
+                ),
+                core_ui_widget(
+                    "identity_panel",
+                    "Identity center",
+                    "identity_panel",
+                    "identity_center_renderer",
+                    "standard",
+                    "half",
+                    vec!["forge interactive identity --output json".to_string()],
                 ),
             ],
         ),

@@ -92,9 +92,9 @@ use crate::interaction::{
 use crate::interactive::{
     build_interactive_action_invocation, build_interactive_action_registry,
     build_interactive_autocomplete, build_interactive_command_palette, build_interactive_harness,
-    build_interactive_home, build_interactive_patch_workbench, build_interactive_permissions,
-    build_interactive_readiness, build_interactive_release_gates, build_interactive_sessions,
-    build_interactive_structured_logs, build_interactive_task_board,
+    build_interactive_home, build_interactive_identity, build_interactive_patch_workbench,
+    build_interactive_permissions, build_interactive_readiness, build_interactive_release_gates,
+    build_interactive_sessions, build_interactive_structured_logs, build_interactive_task_board,
     build_interactive_workflow_dag, route_interactive_input, slash_command_catalog,
     InteractiveHarnessOptions, InteractiveSessionsOptions,
 };
@@ -612,6 +612,11 @@ struct InteractiveActionInvocationInput {
 #[derive(Debug, Deserialize, Default)]
 struct InteractiveAutocompleteInput {
     input: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InteractiveIdentityInput {
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3128,6 +3133,17 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.permissions.v1",
                 &["forge", "interactive", "permissions", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.identity",
+                "Inspect Interactive Identity",
+                "Return the Forge interactive identity center with operating context, registry records, channel aliases, memberships and tenant audit without mutating state.",
+                object_schema(&[
+                    ("project_root", "string", "optional project root used to load .forge/operating-context"),
+                ], &[]),
+                "forge.interactive.identity.v1",
+                &["forge", "interactive", "identity", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7300,6 +7316,18 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.interactive.permissions" => {
             serde_json::to_value(build_interactive_permissions(store)?)?
+        }
+        "forge.interactive.identity" => {
+            let input: InteractiveIdentityInput = if input.is_null() {
+                InteractiveIdentityInput::default()
+            } else {
+                parse_input(input)?
+            };
+            let project_root = input
+                .project_root
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            serde_json::to_value(build_interactive_identity(store, &project_root)?)?
         }
         "forge.interactive.task_board" => {
             serde_json::to_value(build_interactive_task_board(store)?)?
