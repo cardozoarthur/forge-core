@@ -41963,6 +41963,11 @@ fn interactive_structured_logs_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("Structured logs"));
     assert!(text.contains("task_checkpoint_recorded"));
     assert!(text.contains(workflow_id));
+    assert!(text.contains("category workflow"));
+    assert!(text.contains("source"));
+    assert!(text.contains(&format!("correlation task={checkpoint_task_id}")));
+    assert!(text.contains("observability"));
+    assert!(text.contains("payload"));
 
     let manifest = forge()
         .args(["mcp", "tools", "--output", "json"])

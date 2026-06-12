@@ -7336,12 +7336,60 @@ fn render_structured_log_summary(panel: &InteractiveStructuredLogsPanel) -> Stri
         .take(5)
         .map(|entry| {
             format!(
-                "#{} {} {} {} {}",
-                entry.store_sequence, entry.severity, entry.workflow_id, entry.kind, entry.origin
+                "#{} {} {} {} {} category {} source {} correlation {} observability {} payload {}",
+                entry.store_sequence,
+                entry.severity,
+                entry.workflow_id,
+                entry.kind,
+                entry.origin,
+                entry.category,
+                entry.source,
+                structured_log_correlation_summary(&entry.correlation),
+                structured_log_json_summary(&entry.observability),
+                entry.payload_preview
             )
         })
         .collect::<Vec<_>>()
         .join(" | ")
+}
+
+fn structured_log_correlation_summary(correlation: &serde_json::Value) -> String {
+    let Some(map) = correlation.as_object() else {
+        return structured_log_json_summary(correlation);
+    };
+    let fields = [
+        "task_id",
+        "run_id",
+        "artifact_id",
+        "interaction_id",
+        "node_ref",
+        "addon_id",
+        "workflow_id",
+    ];
+    let parts = fields
+        .iter()
+        .filter_map(|field| {
+            map.get(*field)
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| {
+                    let label = field.strip_suffix("_id").unwrap_or(field);
+                    format!("{label}={value}")
+                })
+        })
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        structured_log_json_summary(correlation)
+    } else {
+        parts.join(",")
+    }
+}
+
+fn structured_log_json_summary(value: &serde_json::Value) -> String {
+    serde_json::to_string(value)
+        .map(|json| truncate_display(&json, 180))
+        .unwrap_or_else(|_| "unavailable".to_string())
 }
 
 fn render_ui_composition_region_summary(panel: &InteractiveUiCompositionPanel) -> String {
