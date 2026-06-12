@@ -24,8 +24,8 @@ use crate::identity::list_identity_memberships;
 use crate::interaction::list_human_interactions;
 use crate::memory::memory_policy_report;
 use crate::milestone::{
-    build_milestone_manifest, build_milestone_status, MilestonePromotionDecision,
-    MilestoneStatusSummary,
+    build_milestone_manifest_with_store, build_milestone_status, MilestoneAttachedEvidence,
+    MilestonePromotionDecision, MilestoneStatusSummary,
 };
 use crate::ops::{
     build_addon_view_renderer_report, build_operational_digital_twin, load_modifier_lane,
@@ -259,6 +259,8 @@ pub struct InteractiveReleaseGatesPanel {
     pub summary: MilestoneStatusSummary,
     pub gate_count: usize,
     pub blocked_gate_count: usize,
+    pub attached_evidence_count: usize,
+    pub attached_evidence: Vec<MilestoneAttachedEvidence>,
     pub gate_cards: Vec<InteractiveReleaseGateCard>,
     pub commands: InteractiveReleaseGateCommands,
     pub next_actions: Vec<String>,
@@ -272,6 +274,8 @@ pub struct InteractiveReleaseGateCard {
     pub promotion_ready: bool,
     pub required_evidence: String,
     pub evidence: String,
+    pub attached_evidence_count: usize,
+    pub attached_evidence: Vec<MilestoneAttachedEvidence>,
     pub gap_before_promotion: String,
     pub next_commands: Vec<String>,
 }
@@ -1811,11 +1815,11 @@ pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveRead
 }
 
 pub fn build_interactive_release_gates(
-    _store: &ForgeStore,
+    store: &ForgeStore,
     version: &str,
 ) -> Result<InteractiveReleaseGatesPanel> {
     let status = build_milestone_status(version)?;
-    let manifest = build_milestone_manifest(version)?;
+    let manifest = build_milestone_manifest_with_store(version, Some(store))?;
     let required_evidence_by_capability = manifest
         .requirements
         .iter()
@@ -1826,11 +1830,24 @@ pub fn build_interactive_release_gates(
             )
         })
         .collect::<BTreeMap<_, _>>();
+    let mut attached_evidence_by_capability: BTreeMap<String, Vec<MilestoneAttachedEvidence>> =
+        BTreeMap::new();
+    for evidence in &manifest.attached_evidence {
+        attached_evidence_by_capability
+            .entry(evidence.capability_id.clone())
+            .or_default()
+            .push(evidence.clone());
+    }
     let gate_cards = status
         .capabilities
         .iter()
         .map(|capability| {
             let promotion_ready = matches!(capability.status.as_str(), "implemented" | "validated");
+            let attached_evidence = attached_evidence_by_capability
+                .get(&capability.id)
+                .cloned()
+                .unwrap_or_default();
+            let attached_evidence_count = attached_evidence.len();
             InteractiveReleaseGateCard {
                 capability_id: capability.id.clone(),
                 title: capability.title.clone(),
@@ -1841,6 +1858,8 @@ pub fn build_interactive_release_gates(
                     .cloned()
                     .unwrap_or_else(|| "milestone evidence required".to_string()),
                 evidence: capability.evidence.clone(),
+                attached_evidence_count,
+                attached_evidence,
                 gap_before_promotion: capability.gap_before_promotion.clone(),
                 next_commands: release_gate_next_commands(&capability.id),
             }
@@ -1870,6 +1889,8 @@ pub fn build_interactive_release_gates(
         summary: status.summary,
         gate_count: gate_cards.len(),
         blocked_gate_count,
+        attached_evidence_count: manifest.attached_evidence.len(),
+        attached_evidence: manifest.attached_evidence,
         gate_cards,
         commands,
         next_actions,
@@ -4931,6 +4952,7 @@ fn release_gate_next_commands(capability_id: &str) -> Vec<String> {
     match capability_id {
         "replacement_grade_cli" => vec![
             "forge milestone cli-demo --origin codex --output json".to_string(),
+            "forge milestone attach-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --summary \"Operator-approved provider receipt.\" --artifact <path> --approved-by <operator> --output json".to_string(),
             "forge interactive harness --output json".to_string(),
             "forge interactive patch-workbench --output json".to_string(),
         ],
@@ -4939,6 +4961,7 @@ fn release_gate_next_commands(capability_id: &str) -> Vec<String> {
             "forge multimodal readiness --capability image_understanding --output json".to_string(),
             "forge multimodal benchmark-template --capability image_understanding --output json"
                 .to_string(),
+            "forge milestone attach-evidence --version 0.5 --capability experimental_multimodal_runtime --kind production_runtime_benchmark --summary \"Operator-approved runtime receipt.\" --artifact <path> --approved-by <operator> --output json".to_string(),
         ],
         _ => vec![
             "forge milestone status --version 0.5 --output json".to_string(),
@@ -5594,12 +5617,13 @@ pub fn render_interactive_release_gates(panel: &InteractiveReleaseGatesPanel) ->
         panel.next_actions.join(" | ")
     };
     format!(
-        "Release gates: {status}; milestone {milestone}; promotion {decision}; blocked {blocked_gate_count}/{gate_count}; blocked by {blocked_by}\nGates: {gate_summary}\nNext actions: {next_actions}\n",
+        "Release gates: {status}; milestone {milestone}; promotion {decision}; blocked {blocked_gate_count}/{gate_count}; attached evidence {attached_evidence_count}; blocked by {blocked_by}\nGates: {gate_summary}\nNext actions: {next_actions}\n",
         status = panel.status,
         milestone = panel.milestone,
         decision = panel.promotion_decision.decision,
         blocked_gate_count = panel.blocked_gate_count,
         gate_count = panel.gate_count,
+        attached_evidence_count = panel.attached_evidence_count,
         blocked_by = blocked_by,
         gate_summary = gate_summary,
         next_actions = next_actions,

@@ -40949,6 +40949,41 @@ tenant_policy_mode: enforce
 fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    let receipt = temp.path().join("release-gate-runtime-receipt.json");
+    fs::write(
+        &receipt,
+        r#"{"runtime":"release-gate-smoke","model_execution":true,"passed":true}"#,
+    )
+    .unwrap();
+    let receipt_sha = hex_sha256(&fs::read(&receipt).unwrap());
+
+    forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "attach-evidence",
+            "--version",
+            "0.5",
+            "--capability",
+            "experimental_multimodal_runtime",
+            "--kind",
+            "production_runtime_benchmark",
+            "--summary",
+            "Release-gate runtime receipt.",
+            "--artifact",
+        ])
+        .arg(receipt.to_str().unwrap())
+        .args([
+            "--approved-by",
+            "arthur",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
 
     let output = forge()
         .args([
@@ -40972,6 +41007,7 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
     assert_eq!(json["milestone"], "0.5");
     assert_eq!(json["promotion_decision"]["decision"], "fail");
     assert_eq!(json["promotion_ready"], false);
+    assert_eq!(json["attached_evidence_count"], 1);
     assert!(json["blocked_by"]
         .as_array()
         .unwrap()
@@ -40990,6 +41026,16 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
     assert!(json["gate_cards"].as_array().unwrap().iter().any(|gate| {
         gate["capability_id"] == "experimental_multimodal_runtime"
             && gate["status"] == "groundwork"
+            && gate["attached_evidence_count"] == 1
+            && gate["attached_evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|evidence| {
+                    evidence["kind"] == "production_runtime_benchmark"
+                        && evidence["artifact_sha256"] == receipt_sha
+                        && evidence["promotion_impact"] == "evidence_attached_not_auto_promoted"
+                })
             && gate["next_commands"]
                 .as_array()
                 .unwrap()
@@ -41024,6 +41070,7 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("Release gates"));
     assert!(text.contains("replacement_grade_cli"));
     assert!(text.contains("experimental_multimodal_runtime"));
+    assert!(text.contains("attached evidence 1"));
 
     let home_output = forge()
         .args([
@@ -41043,6 +41090,10 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
     assert_eq!(
         home["dashboard"]["release_gates_panel"]["schema_version"],
         "forge.interactive.release_gates.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["release_gates_panel"]["attached_evidence_count"],
+        1
     );
     assert!(home["dashboard"]["ui_composition_panel"]["regions"]
         .as_array()
@@ -41091,6 +41142,7 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
         "forge.interactive.release_gates.v1"
     );
     assert_eq!(mcp_json["result"]["promotion_ready"], false);
+    assert_eq!(mcp_json["result"]["attached_evidence_count"], 1);
     assert!(mcp_json["result"]["blocked_by"]
         .as_array()
         .unwrap()
