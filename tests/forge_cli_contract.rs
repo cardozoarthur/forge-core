@@ -49541,6 +49541,222 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
 }
 
 #[test]
+fn interactive_multimodal_runtime_panel_surfaces_addon_guard_and_evidence_path() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("multimodal-project");
+    fs::create_dir_all(project.join(".forge")).unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "multimodal-runtime",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let panel: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        panel["schema_version"],
+        "forge.interactive.multimodal_runtime.v1"
+    );
+    assert_eq!(panel["capability_id"], "experimental_multimodal_runtime");
+    assert_eq!(panel["addon_id"], "forge.addon.multimodal");
+    assert_eq!(panel["addon_view_id"], "multimodal.benchmark_center");
+    assert_eq!(panel["feature_flag_enabled"], false);
+    assert_eq!(panel["promotion_ready"], false);
+    assert_eq!(panel["installs_performed"], false);
+    assert_eq!(panel["model_execution_performed"], false);
+    assert_eq!(panel["device_access_performed"], false);
+    assert!(panel["readiness_percent"].as_u64().unwrap() >= 70);
+    assert!(panel["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|blocker| blocker
+            .as_str()
+            .unwrap()
+            .contains("production multimodal runtime benchmark evidence")));
+    assert!(panel["commands"]["runtime_benchmark"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("runtime-benchmark")));
+    assert!(panel["commands"]["evidence_plan"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("experimental_multimodal_runtime")));
+
+    let surfaces = panel["surfaces"].as_array().unwrap();
+    for surface_id in [
+        "addon_ownership",
+        "feature_flag_guard",
+        "capability_inventory",
+        "benchmark_templates",
+        "guarded_runtime_path",
+        "demo_plans",
+        "production_evidence",
+    ] {
+        assert!(
+            surfaces
+                .iter()
+                .any(|surface| surface["surface_id"] == surface_id),
+            "missing multimodal surface {surface_id}"
+        );
+    }
+
+    let addon_ownership = surfaces
+        .iter()
+        .find(|surface| surface["surface_id"] == "addon_ownership")
+        .unwrap();
+    assert_eq!(addon_ownership["ready"], true);
+    assert!(addon_ownership["evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("multimodal_behavior_declared_by_addon")));
+    assert!(addon_ownership["source_panels"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("addon_capability_panel")));
+
+    let guard = surfaces
+        .iter()
+        .find(|surface| surface["surface_id"] == "feature_flag_guard")
+        .unwrap();
+    assert_eq!(guard["ready"], true);
+    assert!(guard["evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "disabled_by_default_or_project_approved"
+        )));
+
+    let production = surfaces
+        .iter()
+        .find(|surface| surface["surface_id"] == "production_evidence")
+        .unwrap();
+    assert_eq!(production["ready"], false);
+    assert!(production["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|blocker| blocker
+            .as_str()
+            .unwrap()
+            .contains(".forge/multimodal-runtimes.json")));
+
+    let home_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["multimodal_runtime_panel"]["schema_version"],
+        "forge.interactive.multimodal_runtime.v1"
+    );
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|region| region["widgets"].as_array().unwrap().iter())
+        .any(|widget| widget["widget_id"] == "multimodal_runtime_panel"));
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "multimodal-runtime",
+            "--project-root",
+            project.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Multimodal runtime:"));
+    assert!(text.contains("addon_ownership[ready]"));
+    assert!(text.contains("production_evidence[blocked]"));
+    assert!(text.contains("forge multimodal runtime-benchmark"));
+
+    let tools = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value = serde_json::from_slice(&tools).unwrap();
+    let tool = find_mcp_tool(&manifest, "forge.interactive.multimodal_runtime");
+    assert_eq!(
+        tool["output_schema"],
+        "forge.interactive.multimodal_runtime.v1"
+    );
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.multimodal_runtime"])
+        .arg("--input")
+        .arg(
+            serde_json::json!({
+                "project_root": project.to_str().unwrap()
+            })
+            .to_string(),
+        )
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp["status"], "ok");
+    assert_eq!(
+        mcp["result"]["schema_version"],
+        "forge.interactive.multimodal_runtime.v1"
+    );
+
+    let slash = forge()
+        .args(["interactive", "slash-commands", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let slash_json: Value = serde_json::from_slice(&slash).unwrap();
+    assert!(slash_json["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command["name"] == "/multimodal-runtime"
+            && command["mutates_workflow"] == false));
+}
+
+#[test]
 fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -49899,6 +50115,12 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
             && forge_core::skill::SKILL_MD.contains("forge interactive replacement-cli")
             && forge_core::skill::SKILL_MD.contains("dashboard.replacement_cli_panel"),
         "the packaged Forge skill should expose the dedicated replacement CLI readiness surface through MCP, CLI and home"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.multimodal_runtime")
+            && forge_core::skill::SKILL_MD.contains("forge interactive multimodal-runtime")
+            && forge_core::skill::SKILL_MD.contains("dashboard.multimodal_runtime_panel"),
+        "the packaged Forge skill should expose the Addon-owned multimodal runtime surface through MCP, CLI and home"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.workflow_dag"),

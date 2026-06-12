@@ -2,7 +2,8 @@ use crate::addon::{
     addon_observability_report, default_addon_dirs, list_addon_capability_index,
     list_addon_event_adapters, list_addon_permission_authorizations, list_addon_views,
     load_addon_catalog_from_store, AddonCatalog, AddonEventExtensionRegistry, AddonViewAction,
-    AddonViewEntry, ADDON_EVENT_EXTENSIONS_SCHEMA_VERSION, CAP_SOURCE_CODE_PATCH_LIFECYCLE,
+    AddonViewEntry, ADDON_EVENT_EXTENSIONS_SCHEMA_VERSION, CAP_MULTIMODAL_RUNTIME,
+    CAP_SOURCE_CODE_PATCH_LIFECYCLE,
 };
 use crate::artifact::list_workflow_artifacts;
 use crate::checkpoint::TaskCheckpoint;
@@ -42,6 +43,11 @@ use crate::milestone::{
     MilestoneEvidencePlanManifestTemplate, MilestoneEvidencePlanOptions,
     MilestonePromotionDecision, MilestonePromotionGateTemplate, MilestoneStatusSummary,
 };
+use crate::multimodal::{
+    build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
+    build_multimodal_readiness, build_multimodal_status_with_feature_flag,
+    evaluate_multimodal_guard, resolve_multimodal_feature_flag, MultimodalReadinessOptions,
+};
 use crate::ops::{
     build_addon_view_renderer_report, build_operational_digital_twin, load_modifier_lane,
     OpsAddonViewRendererReport, OpsModifierLane, OpsModifierProposal, OpsOperationalDigitalTwin,
@@ -69,6 +75,8 @@ use std::process::Command;
 const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
 const INTERACTIVE_WORKFLOW_SIDEBAR_SCHEMA_VERSION: &str = "forge.interactive.workflow_sidebar.v1";
 const INTERACTIVE_REPLACEMENT_CLI_SCHEMA_VERSION: &str = "forge.interactive.replacement_cli.v1";
+const INTERACTIVE_MULTIMODAL_RUNTIME_SCHEMA_VERSION: &str =
+    "forge.interactive.multimodal_runtime.v1";
 const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_board.v1";
 const INTERACTIVE_ARTIFACTS_SCHEMA_VERSION: &str = "forge.interactive.artifacts.v1";
 const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
@@ -160,6 +168,7 @@ pub struct InteractiveDashboard {
     pub workflow_focus: Vec<InteractiveWorkflowCard>,
     pub workflow_sidebar_panel: InteractiveWorkflowSidebarPanel,
     pub replacement_cli_panel: InteractiveReplacementCliPanel,
+    pub multimodal_runtime_panel: InteractiveMultimodalRuntimePanel,
     pub navigation_panel: InteractiveNavigationPanel,
     pub ui_composition_panel: InteractiveUiCompositionPanel,
     pub patch_workbench_panel: InteractivePatchWorkbenchPanel,
@@ -516,6 +525,65 @@ pub struct InteractiveReplacementCliCommands {
     pub sessions: Vec<String>,
     pub release_gates: Vec<String>,
     pub cli_demo: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveMultimodalRuntimePanel {
+    pub schema_version: String,
+    pub status: String,
+    pub project_root: String,
+    pub capability_id: String,
+    pub addon_id: String,
+    pub addon_view_id: String,
+    pub feature_flag_enabled: bool,
+    pub feature_flag_source: String,
+    pub feature_flag_status: String,
+    pub promotion_ready: bool,
+    pub installs_performed: bool,
+    pub model_execution_performed: bool,
+    pub device_access_performed: bool,
+    pub network_access_performed: bool,
+    pub capability_count: usize,
+    pub available_count: usize,
+    pub missing_count: usize,
+    pub guard_status: String,
+    pub guard_allowed: bool,
+    pub surface_count: usize,
+    pub ready_surface_count: usize,
+    pub blocked_surface_count: usize,
+    pub readiness_percent: u64,
+    pub surfaces: Vec<InteractiveMultimodalRuntimeSurface>,
+    pub blockers: Vec<String>,
+    pub next_actions: Vec<String>,
+    pub commands: InteractiveMultimodalRuntimeCommands,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveMultimodalRuntimeSurface {
+    pub surface_id: String,
+    pub title: String,
+    pub status: String,
+    pub ready: bool,
+    pub source_panels: Vec<String>,
+    pub evidence: Vec<String>,
+    pub blockers: Vec<String>,
+    pub commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveMultimodalRuntimeCommands {
+    pub refresh: Vec<String>,
+    pub status: Vec<String>,
+    pub readiness: Vec<String>,
+    pub install_plan: Vec<String>,
+    pub benchmark_template: Vec<String>,
+    pub runtime_benchmark: Vec<String>,
+    pub demo_plan: Vec<String>,
+    pub guard: Vec<String>,
+    pub evidence_plan: Vec<String>,
+    pub collect_evidence: Vec<String>,
+    pub addon_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2100,6 +2168,8 @@ pub fn build_interactive_home_with_options(
     let permissions_panel = build_interactive_permissions(store)?;
     let identity_panel = build_interactive_identity(store, &repository_context_path)?;
     let replacement_cli_panel = build_interactive_replacement_cli(store)?;
+    let multimodal_runtime_panel =
+        build_interactive_multimodal_runtime(store, &repository_context_path, false)?;
     let operational_cockpit_panel = build_operational_cockpit_panel(
         active_runs,
         runs_needing_attention,
@@ -2159,6 +2229,7 @@ pub fn build_interactive_home_with_options(
             workflow_focus,
             workflow_sidebar_panel,
             replacement_cli_panel,
+            multimodal_runtime_panel,
             navigation_panel: build_navigation_panel(),
             ui_composition_panel,
             patch_workbench_panel,
@@ -2184,6 +2255,8 @@ pub fn build_interactive_home_with_options(
                 "forge request list".to_string(),
                 "forge interactive workflow-sidebar --output json".to_string(),
                 "forge interactive replacement-cli --output json".to_string(),
+                "forge interactive multimodal-runtime --project-root . --output json"
+                    .to_string(),
                 "forge schedule list".to_string(),
                 "forge interactive schedules --output json".to_string(),
                 "forge schedule worker-status".to_string(),
@@ -2213,6 +2286,7 @@ pub fn build_interactive_home_with_options(
                 "/workflows".to_string(),
                 "/workflow-sidebar".to_string(),
                 "/replacement-cli".to_string(),
+                "/multimodal-runtime".to_string(),
                 "/runs".to_string(),
                 "/artifacts".to_string(),
                 "/task-board".to_string(),
@@ -6506,6 +6580,519 @@ fn replacement_cli_commands() -> InteractiveReplacementCliCommands {
     }
 }
 
+pub fn build_interactive_multimodal_runtime(
+    store: &ForgeStore,
+    project_root: &Path,
+    enable_experimental: bool,
+) -> Result<InteractiveMultimodalRuntimePanel> {
+    let addon_id = "forge.addon.multimodal";
+    let addon_view_id = "multimodal.benchmark_center";
+    let capability_id = "experimental_multimodal_runtime";
+    let runtime_contract_id = "multimodal_runtime_benchmark.executor";
+    let permission_id = "multimodal.runtime_benchmark";
+    let project_root_display = project_root.display().to_string();
+
+    let catalog = load_addon_catalog_from_store(store, &default_addon_dirs()).ok();
+    let addon = catalog
+        .as_ref()
+        .and_then(|catalog| catalog.addons.iter().find(|addon| addon.id == addon_id));
+    let has_addon = addon.is_some();
+    let has_capability = addon
+        .map(|addon| {
+            addon
+                .capabilities
+                .iter()
+                .any(|capability| capability.id == CAP_MULTIMODAL_RUNTIME)
+        })
+        .unwrap_or(false);
+    let has_permission = addon
+        .map(|addon| {
+            addon
+                .permissions
+                .iter()
+                .any(|permission| permission.id == permission_id)
+        })
+        .unwrap_or(false);
+    let has_view = addon
+        .map(|addon| addon.views.iter().any(|view| view.id == addon_view_id))
+        .unwrap_or(false);
+    let has_runtime_contract = addon
+        .map(|addon| {
+            addon
+                .runtime_contracts
+                .iter()
+                .any(|contract| contract.id == runtime_contract_id)
+        })
+        .unwrap_or(false);
+    let view_action_count = addon
+        .and_then(|addon| addon.views.iter().find(|view| view.id == addon_view_id))
+        .map(|view| view.actions.len())
+        .unwrap_or(0);
+
+    let feature_flag = resolve_multimodal_feature_flag(enable_experimental, Some(project_root));
+    let status_report = build_multimodal_status_with_feature_flag(feature_flag.clone());
+    let readiness = build_multimodal_readiness(MultimodalReadinessOptions {
+        capability_id: "image_understanding",
+        enable_experimental: feature_flag.enabled,
+        explicit_allow: false,
+        project_root: Some(project_root),
+    })?;
+    let install_plan = build_multimodal_install_plan("image_understanding", feature_flag.enabled)?;
+    let benchmark_template =
+        build_multimodal_benchmark_template("image_understanding", feature_flag.enabled)?;
+    let demo_plan = build_multimodal_demo_plan("local_image_recognition", feature_flag.enabled)?;
+    let guard = evaluate_multimodal_guard(
+        "image_understanding",
+        "runtime_benchmark",
+        feature_flag.enabled,
+        false,
+    )?;
+    let release_gates = build_interactive_release_gates(store, "0.5", Some(project_root))?;
+    let multimodal_gate = release_gates
+        .gate_cards
+        .iter()
+        .find(|gate| gate.capability_id == capability_id);
+    let promotion_ready = multimodal_gate
+        .map(|gate| gate.promotion_ready)
+        .unwrap_or(false);
+    let mut blockers = multimodal_gate
+        .map(|gate| gate.missing_attached_evidence_kinds.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|kind| format!("missing attached evidence kind: {kind}"))
+        .collect::<Vec<_>>();
+    blockers.push(
+        "production multimodal runtime benchmark evidence must be attached before promotion"
+            .to_string(),
+    );
+    blockers.push(format!(
+        "provide approved connected runtime metadata in {}/.forge/multimodal-runtimes.json",
+        project_root_display
+    ));
+
+    let addon_ready =
+        has_addon && has_capability && has_permission && has_view && has_runtime_contract;
+    let feature_guard_ready =
+        !feature_flag.enabled || feature_flag.approved_by.is_some() || enable_experimental;
+    let inventory_ready = status_report.capability_count >= 10
+        && status_report.installs_performed == false
+        && status_report.available_count <= status_report.capability_count;
+    let template_ready = install_plan.status == "plan_only"
+        && matches!(
+            benchmark_template.status.as_str(),
+            "benchmark_template_ready" | "plan_only"
+        )
+        && readiness.schema_version == "forge.multimodal.readiness.v1";
+    let guarded_runtime_ready = has_runtime_contract
+        && guard.status == "denied"
+        && guard.requires_human_approval
+        && !guard.allowed;
+    let demo_plan_ready = demo_plan.schema_version == "forge.multimodal.demo_plan.v1"
+        && !demo_plan.stages.is_empty()
+        && demo_plan.requires_human_approval_before_execution;
+    let addon_view_ready = has_view && view_action_count >= 2;
+
+    let mut surfaces = vec![
+        multimodal_runtime_surface(
+            "addon_ownership",
+            "Addon ownership boundary",
+            if addon_ready { "ready" } else { "missing" },
+            addon_ready,
+            &["addon_capability_panel", "ui_composition_panel"],
+            &[
+                "multimodal_behavior_declared_by_addon",
+                "capability_multimodal_runtime_registered",
+                "runtime_contract_multimodal_runtime_benchmark_declared",
+            ],
+            &multimodal_missing_addon_blockers(
+                has_addon,
+                has_capability,
+                has_permission,
+                has_view,
+                has_runtime_contract,
+            ),
+            &[
+                "forge interactive addon-capabilities --output json",
+                "forge addons views --addon forge.addon.multimodal --output json",
+            ],
+        ),
+        multimodal_runtime_surface(
+            "feature_flag_guard",
+            "Feature flag and guard",
+            &feature_flag.source,
+            feature_guard_ready,
+            &["multimodal_status", "multimodal_guard"],
+            &[
+                "disabled_by_default_or_project_approved",
+                "human_opt_in_required",
+                "guard_denies_without_explicit_allow",
+            ],
+            &[],
+            &[
+                "forge multimodal status --project-root <project-root> --output json",
+                "forge multimodal guard --capability image_understanding --action runtime_benchmark --project-root <project-root> --output json",
+            ],
+        ),
+        multimodal_runtime_surface(
+            "capability_inventory",
+            "Capability inventory",
+            &status_report.status,
+            inventory_ready,
+            &["multimodal_status"],
+            &[
+                "image_audio_video_3d_capabilities_indexed",
+                "provider_and_local_runtime_candidates_visible",
+                "model_storage_policy_visible",
+            ],
+            &[],
+            &["forge multimodal status --project-root <project-root> --output json"],
+        ),
+        multimodal_runtime_surface(
+            "benchmark_templates",
+            "Readiness, install plan and benchmark templates",
+            &benchmark_template.status,
+            template_ready,
+            &[
+                "multimodal_readiness",
+                "multimodal_install_plan",
+                "multimodal_benchmark_template",
+            ],
+            &[
+                "plan_only_install_manifest_available",
+                "benchmark_template_available",
+                "readiness_probe_declares_no_model_execution",
+            ],
+            &[],
+            &[
+                "forge multimodal install-plan --capability image_understanding --project-root <project-root> --output json",
+                "forge multimodal readiness --capability image_understanding --project-root <project-root> --output json",
+                "forge multimodal benchmark-template --capability image_understanding --project-root <project-root> --output json",
+            ],
+        ),
+        multimodal_runtime_surface(
+            "guarded_runtime_path",
+            "Guarded runtime execution path",
+            &guard.status,
+            guarded_runtime_ready,
+            &["multimodal_runtime_benchmark", "addon_runtime_contract"],
+            &[
+                "runtime_benchmark_requires_opt_in_and_allow_model",
+                "addon_runtime_contract_can_dispatch_guarded_benchmark",
+                "guard_records_denied_state_without_execution",
+            ],
+            &[],
+            &[
+                "forge multimodal runtime-benchmark --capability image_understanding --fixture static_image_labels --project-root <project-root> --approved-by <operator> --confirm-runtime-execution --allow-model --output json",
+                "forge addons dispatch-contract --addon forge.addon.multimodal --runtime-contract multimodal_runtime_benchmark.executor --output json",
+            ],
+        ),
+        multimodal_runtime_surface(
+            "demo_plans",
+            "Safe multimodal demo plans",
+            &demo_plan.status,
+            demo_plan_ready,
+            &["multimodal_demo_plan", "multimodal_demo_receipt"],
+            &[
+                "local_image_audio_and_blender_demo_plans_available",
+                "demo_receipts_require_local_fixture_confirmation",
+                "device_access_remains_blocked_without_guard",
+            ],
+            &[],
+            &[
+                "forge multimodal demo-plan --demo local_image_recognition --project-root <project-root> --output json",
+                "forge multimodal demo-receipt --demo local_image_recognition --fixture static_image_labels --project-root <project-root> --approved-by <operator> --confirm-local-fixture --allow-model --output json",
+            ],
+        ),
+        multimodal_runtime_surface(
+            "addon_view_actions",
+            "Addon benchmark center actions",
+            if addon_view_ready { "ready" } else { "missing" },
+            addon_view_ready,
+            &["multimodal_benchmark_center", "command_palette_panel"],
+            &[
+                "addon_view_actions_projected_to_command_palette",
+                "permission_and_risk_metadata_preserved",
+                "specialized_multimodal_ui_owned_by_addon",
+            ],
+            &[],
+            &[
+                "forge addons views --addon forge.addon.multimodal --surface ops_console --output json",
+                "forge interactive command-palette --query multimodal --output json",
+            ],
+        ),
+        multimodal_runtime_surface(
+            "production_evidence",
+            "Production runtime evidence",
+            multimodal_gate
+                .map(|gate| gate.status.as_str())
+                .unwrap_or("missing"),
+            promotion_ready,
+            &["release_gates_panel", "milestone_evidence_plan"],
+            &[
+                "production_runtime_benchmark_required",
+                "connected_runtime_manifest_template_available",
+                "promotion_requires_attached_operator_evidence",
+            ],
+            &[
+                "missing .forge/multimodal-runtimes.json connected runtime evidence",
+                "production multimodal runtime benchmark evidence is not attached",
+            ],
+            &[
+                "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --output json",
+                "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --approved-by <operator> --output json",
+            ],
+        ),
+    ];
+
+    for surface in &mut surfaces {
+        if !surface.ready && surface.blockers.is_empty() {
+            surface.blockers.push(
+                "surface evidence is not strong enough for multimodal runtime readiness"
+                    .to_string(),
+            );
+        }
+    }
+
+    let ready_surface_count = surfaces.iter().filter(|surface| surface.ready).count();
+    let surface_count = surfaces.len();
+    let blocked_surface_count = surface_count.saturating_sub(ready_surface_count);
+    let readiness_percent = if surface_count == 0 {
+        0
+    } else {
+        ((ready_surface_count * 100) / surface_count) as u64
+    };
+    let status = if promotion_ready {
+        "multimodal_runtime_promotion_ready"
+    } else if ready_surface_count + 1 >= surface_count {
+        "multimodal_runtime_guarded_ready_with_production_gaps"
+    } else {
+        "multimodal_runtime_needs_attention"
+    };
+
+    Ok(InteractiveMultimodalRuntimePanel {
+        schema_version: INTERACTIVE_MULTIMODAL_RUNTIME_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        project_root: project_root_display,
+        capability_id: capability_id.to_string(),
+        addon_id: addon_id.to_string(),
+        addon_view_id: addon_view_id.to_string(),
+        feature_flag_enabled: feature_flag.enabled,
+        feature_flag_source: feature_flag.source.clone(),
+        feature_flag_status: feature_flag.project_config_status.clone(),
+        promotion_ready,
+        installs_performed: status_report.installs_performed
+            || install_plan.installs_performed
+            || readiness.installs_performed
+            || benchmark_template.installs_performed
+            || demo_plan.installs_performed,
+        model_execution_performed: readiness.model_execution_performed,
+        device_access_performed: readiness.device_access_performed
+            || benchmark_template.device_access_performed
+            || demo_plan.device_access_performed,
+        network_access_performed: false,
+        capability_count: status_report.capability_count,
+        available_count: status_report.available_count,
+        missing_count: status_report.missing_count,
+        guard_status: guard.status,
+        guard_allowed: guard.allowed,
+        surface_count,
+        ready_surface_count,
+        blocked_surface_count,
+        readiness_percent,
+        surfaces,
+        blockers,
+        next_actions: vec![
+            "Create or inspect project .forge/multimodal.json before enabling runtime work."
+                .to_string(),
+            "Prepare .forge/multimodal-runtimes.json with approved connected runtime metadata."
+                .to_string(),
+            "Collect production_runtime_benchmark evidence only after opt-in, guard approval and operator approval.".to_string(),
+        ],
+        commands: multimodal_runtime_commands(project_root),
+        notes: vec![
+            "This panel is read-only; it does not install models, execute models, access devices, access the network or mutate workflows.".to_string(),
+            "Specialized multimodal behavior remains Addon-owned; Core only projects Addon contracts and guarded compatibility commands.".to_string(),
+        ],
+    })
+}
+
+fn multimodal_missing_addon_blockers(
+    has_addon: bool,
+    has_capability: bool,
+    has_permission: bool,
+    has_view: bool,
+    has_runtime_contract: bool,
+) -> Vec<&'static str> {
+    let mut blockers = Vec::new();
+    if !has_addon {
+        blockers.push("missing forge.addon.multimodal");
+    }
+    if !has_capability {
+        blockers.push("missing multimodal_runtime capability");
+    }
+    if !has_permission {
+        blockers.push("missing multimodal.runtime_benchmark permission");
+    }
+    if !has_view {
+        blockers.push("missing multimodal.benchmark_center view");
+    }
+    if !has_runtime_contract {
+        blockers.push("missing multimodal_runtime_benchmark.executor contract");
+    }
+    blockers
+}
+
+fn multimodal_runtime_surface(
+    surface_id: &str,
+    title: &str,
+    status: &str,
+    ready: bool,
+    source_panels: &[&str],
+    evidence: &[&str],
+    blockers: &[&str],
+    commands: &[&str],
+) -> InteractiveMultimodalRuntimeSurface {
+    InteractiveMultimodalRuntimeSurface {
+        surface_id: surface_id.to_string(),
+        title: title.to_string(),
+        status: status.to_string(),
+        ready,
+        source_panels: source_panels
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        evidence: evidence.iter().map(|value| (*value).to_string()).collect(),
+        blockers: blockers.iter().map(|value| (*value).to_string()).collect(),
+        commands: commands.iter().map(|value| (*value).to_string()).collect(),
+    }
+}
+
+fn multimodal_runtime_commands(project_root: &Path) -> InteractiveMultimodalRuntimeCommands {
+    let project_root = project_root.display().to_string();
+    InteractiveMultimodalRuntimeCommands {
+        refresh: vec![
+            "interactive".to_string(),
+            "multimodal-runtime".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        status: vec![
+            "multimodal".to_string(),
+            "status".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        readiness: vec![
+            "multimodal".to_string(),
+            "readiness".to_string(),
+            "--capability".to_string(),
+            "image_understanding".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        install_plan: vec![
+            "multimodal".to_string(),
+            "install-plan".to_string(),
+            "--capability".to_string(),
+            "image_understanding".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        benchmark_template: vec![
+            "multimodal".to_string(),
+            "benchmark-template".to_string(),
+            "--capability".to_string(),
+            "image_understanding".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        runtime_benchmark: vec![
+            "multimodal".to_string(),
+            "runtime-benchmark".to_string(),
+            "--capability".to_string(),
+            "image_understanding".to_string(),
+            "--fixture".to_string(),
+            "static_image_labels".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--approved-by".to_string(),
+            "<operator>".to_string(),
+            "--confirm-runtime-execution".to_string(),
+            "--allow-model".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        demo_plan: vec![
+            "multimodal".to_string(),
+            "demo-plan".to_string(),
+            "--demo".to_string(),
+            "local_image_recognition".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        guard: vec![
+            "multimodal".to_string(),
+            "guard".to_string(),
+            "--capability".to_string(),
+            "image_understanding".to_string(),
+            "--action".to_string(),
+            "runtime_benchmark".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        evidence_plan: vec![
+            "milestone".to_string(),
+            "evidence-plan".to_string(),
+            "--version".to_string(),
+            "0.5".to_string(),
+            "--capability".to_string(),
+            "experimental_multimodal_runtime".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--connected-runtime".to_string(),
+            "<runtime-id>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        collect_evidence: vec![
+            "milestone".to_string(),
+            "collect-evidence".to_string(),
+            "--version".to_string(),
+            "0.5".to_string(),
+            "--capability".to_string(),
+            "experimental_multimodal_runtime".to_string(),
+            "--project-root".to_string(),
+            project_root,
+            "--connected-runtime".to_string(),
+            "<runtime-id>".to_string(),
+            "--approved-by".to_string(),
+            "<operator>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        addon_capabilities: vec![
+            "interactive".to_string(),
+            "addon-capabilities".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
 pub fn build_interactive_token_usage(store: &ForgeStore) -> Result<InteractiveTokenUsagePanel> {
     build_token_usage_panel(store)
 }
@@ -7796,6 +8383,8 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     };
     let workflow_sidebar = render_workflow_sidebar_summary(&d.workflow_sidebar_panel);
     let replacement_cli_surfaces = render_replacement_cli_surface_summary(&d.replacement_cli_panel);
+    let multimodal_runtime_surfaces =
+        render_multimodal_runtime_surface_summary(&d.multimodal_runtime_panel);
     let navigation_keys = render_navigation_keybindings(&d.navigation_panel);
     let command_palette_entries = render_command_palette_entry_summary(&d.command_palette_panel);
     let autocomplete_suggestions = render_autocomplete_suggestion_summary(&d.autocomplete_panel);
@@ -7892,6 +8481,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Scheduler worker status: {scheduler_worker_status}\n\
          Workflow sidebar: {workflow_sidebar}\n\
          Replacement CLI: {replacement_cli_status}; readiness {replacement_cli_readiness}% ({replacement_cli_ready}/{replacement_cli_surfaces_count}); promotion_ready {replacement_cli_promotion_ready}; surfaces {replacement_cli_surfaces}\n\
+         Multimodal runtime: {multimodal_runtime_status}; readiness {multimodal_runtime_readiness}% ({multimodal_runtime_ready}/{multimodal_runtime_surfaces_count}); addon {multimodal_runtime_addon}; view {multimodal_runtime_view}; feature {multimodal_runtime_feature_enabled} from {multimodal_runtime_feature_source}; promotion_ready {multimodal_runtime_promotion_ready}; surfaces {multimodal_runtime_surfaces}\n\
          Workflow focus: {workflow_focus}\n\
          Navigation panel: {navigation_status}; default {navigation_default_mode}, theme {navigation_theme}, modes {navigation_modes}, keys {navigation_keys}\n\
          Command palette: {command_palette_status}; query {command_palette_query}, groups {command_palette_groups}, entries {command_palette_entry_count}; {command_palette_entries}\n\
@@ -7982,6 +8572,16 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         replacement_cli_surfaces_count = d.replacement_cli_panel.surface_count,
         replacement_cli_promotion_ready = d.replacement_cli_panel.promotion_ready,
         replacement_cli_surfaces = replacement_cli_surfaces,
+        multimodal_runtime_status = d.multimodal_runtime_panel.status,
+        multimodal_runtime_readiness = d.multimodal_runtime_panel.readiness_percent,
+        multimodal_runtime_ready = d.multimodal_runtime_panel.ready_surface_count,
+        multimodal_runtime_surfaces_count = d.multimodal_runtime_panel.surface_count,
+        multimodal_runtime_addon = d.multimodal_runtime_panel.addon_id,
+        multimodal_runtime_view = d.multimodal_runtime_panel.addon_view_id,
+        multimodal_runtime_feature_enabled = d.multimodal_runtime_panel.feature_flag_enabled,
+        multimodal_runtime_feature_source = d.multimodal_runtime_panel.feature_flag_source,
+        multimodal_runtime_promotion_ready = d.multimodal_runtime_panel.promotion_ready,
+        multimodal_runtime_surfaces = multimodal_runtime_surfaces,
         workflow_focus = workflow_focus,
         navigation_status = d.navigation_panel.status,
         navigation_default_mode = d.navigation_panel.default_display_mode,
@@ -8295,7 +8895,57 @@ pub fn render_interactive_replacement_cli(panel: &InteractiveReplacementCliPanel
     )
 }
 
+pub fn render_interactive_multimodal_runtime(panel: &InteractiveMultimodalRuntimePanel) -> String {
+    format!(
+        "Multimodal runtime: {status}; capability {capability_id}; addon {addon_id}; view {addon_view_id}; readiness {readiness_percent}% ({ready_surface_count}/{surface_count}); promotion_ready {promotion_ready}; feature {feature_enabled} from {feature_source}/{feature_status}\nSurfaces: {surfaces}\nBlockers: {blockers}\nCommands: {commands}\nNotes: {notes}\n",
+        status = panel.status,
+        capability_id = panel.capability_id,
+        addon_id = panel.addon_id,
+        addon_view_id = panel.addon_view_id,
+        readiness_percent = panel.readiness_percent,
+        ready_surface_count = panel.ready_surface_count,
+        surface_count = panel.surface_count,
+        promotion_ready = panel.promotion_ready,
+        feature_enabled = panel.feature_flag_enabled,
+        feature_source = panel.feature_flag_source,
+        feature_status = panel.feature_flag_status,
+        surfaces = render_multimodal_runtime_surface_summary(panel),
+        blockers = if panel.blockers.is_empty() {
+            "none".to_string()
+        } else {
+            panel.blockers.join("; ")
+        },
+        commands = [
+            format!("forge {}", panel.commands.refresh.join(" ")),
+            format!("forge {}", panel.commands.status.join(" ")),
+            format!("forge {}", panel.commands.runtime_benchmark.join(" ")),
+            format!("forge {}", panel.commands.evidence_plan.join(" ")),
+        ]
+        .join(" | "),
+        notes = if panel.notes.is_empty() {
+            "none".to_string()
+        } else {
+            panel.notes.join("; ")
+        },
+    )
+}
+
 fn render_replacement_cli_surface_summary(panel: &InteractiveReplacementCliPanel) -> String {
+    if panel.surfaces.is_empty() {
+        return "none".to_string();
+    }
+    panel
+        .surfaces
+        .iter()
+        .map(|surface| {
+            let readiness = if surface.ready { "ready" } else { "blocked" };
+            format!("{}[{}]:{}", surface.surface_id, readiness, surface.status)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_multimodal_runtime_surface_summary(panel: &InteractiveMultimodalRuntimePanel) -> String {
     if panel.surfaces.is_empty() {
         return "none".to_string();
     }
@@ -10406,6 +11056,18 @@ fn build_ui_composition_panel(
                     "detailed",
                     "full",
                     vec!["forge interactive replacement-cli --output json".to_string()],
+                ),
+                core_ui_widget(
+                    "multimodal_runtime_panel",
+                    "Multimodal runtime readiness",
+                    "multimodal_runtime_panel",
+                    "addon_runtime_readiness_renderer",
+                    "detailed",
+                    "full",
+                    vec![
+                        "forge interactive multimodal-runtime --project-root . --output json"
+                            .to_string(),
+                    ],
                 ),
                 core_ui_widget(
                     "sessions_panel",
@@ -12555,6 +13217,20 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/multimodal-runtime",
+            "Multimodal Runtime",
+            "Show Addon-owned multimodal runtime readiness, guards, templates and production evidence blockers.",
+            &[
+                "forge",
+                "interactive",
+                "multimodal-runtime",
+                "--project-root",
+                ".",
+            ],
+            false,
+            "low",
+        ),
+        slash(
             "/artifacts",
             "Artifacts",
             "Show workflow artifacts and evidence from the interactive panel.",
@@ -13579,6 +14255,11 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
             let panel = build_interactive_replacement_cli(store)?;
             Ok(render_interactive_replacement_cli(&panel))
         }
+        "multimodal_runtime_panel" => {
+            let project_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let panel = build_interactive_multimodal_runtime(store, &project_root, false)?;
+            Ok(render_interactive_multimodal_runtime(&panel))
+        }
         "patch_workbench_panel" => {
             let panel = build_interactive_patch_workbench(store)?;
             Ok(render_interactive_patch_workbench(&panel))
@@ -13607,6 +14288,12 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
         "/replacement-cli" => {
             let panel = build_interactive_replacement_cli(store)?;
             println!("{}", render_interactive_replacement_cli(&panel));
+            Ok(true)
+        }
+        "/multimodal-runtime" => {
+            let project_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let panel = build_interactive_multimodal_runtime(store, &project_root, false)?;
+            println!("{}", render_interactive_multimodal_runtime(&panel));
             Ok(true)
         }
         "/artifacts" => {

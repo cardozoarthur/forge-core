@@ -97,13 +97,13 @@ use crate::interactive::{
     build_interactive_autocomplete, build_interactive_command_palette,
     build_interactive_context_memory, build_interactive_harness,
     build_interactive_home_with_options, build_interactive_identity,
-    build_interactive_operational_cockpit, build_interactive_patch_workbench,
-    build_interactive_permissions, build_interactive_readiness, build_interactive_release_gates,
-    build_interactive_replacement_cli, build_interactive_schedules, build_interactive_sessions,
-    build_interactive_structured_logs, build_interactive_task_board, build_interactive_token_usage,
-    build_interactive_workflow_dag, build_interactive_workflow_sidebar, route_interactive_input,
-    slash_command_catalog, InteractiveHarnessOptions, InteractiveHomeOptions,
-    InteractiveSessionsOptions,
+    build_interactive_multimodal_runtime, build_interactive_operational_cockpit,
+    build_interactive_patch_workbench, build_interactive_permissions, build_interactive_readiness,
+    build_interactive_release_gates, build_interactive_replacement_cli,
+    build_interactive_schedules, build_interactive_sessions, build_interactive_structured_logs,
+    build_interactive_task_board, build_interactive_token_usage, build_interactive_workflow_dag,
+    build_interactive_workflow_sidebar, route_interactive_input, slash_command_catalog,
+    InteractiveHarnessOptions, InteractiveHomeOptions, InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -635,6 +635,12 @@ struct InteractiveAutocompleteInput {
 #[derive(Debug, Deserialize, Default)]
 struct InteractiveIdentityInput {
     project_root: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InteractiveMultimodalRuntimeInput {
+    project_root: Option<String>,
+    enable_experimental: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3301,6 +3307,26 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.replacement_cli.v1",
                 &["forge", "interactive", "replacement-cli", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.multimodal_runtime",
+                "Inspect Multimodal Runtime Readiness",
+                "Return the Addon-owned multimodal runtime readiness panel with feature-flag state, guard result, benchmark templates, demo plans and production evidence blockers without installing models, executing models, accessing devices or mutating workflows.",
+                object_schema(&[
+                    ("project_root", "string", "optional project root used to inspect .forge/multimodal.json and .forge/multimodal-runtimes.json"),
+                    ("enable_experimental", "boolean", "optional explicit experimental feature flag for inspection only"),
+                ], &[]),
+                "forge.interactive.multimodal_runtime.v1",
+                &[
+                    "forge",
+                    "interactive",
+                    "multimodal-runtime",
+                    "--project-root",
+                    ".",
+                    "--output",
+                    "json",
+                ],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7679,6 +7705,22 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.interactive.replacement_cli" => {
             serde_json::to_value(build_interactive_replacement_cli(store)?)?
+        }
+        "forge.interactive.multimodal_runtime" => {
+            let input: InteractiveMultimodalRuntimeInput = if input.is_null() {
+                InteractiveMultimodalRuntimeInput::default()
+            } else {
+                parse_input(input)?
+            };
+            let project_root = input
+                .project_root
+                .map(PathBuf::from)
+                .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            serde_json::to_value(build_interactive_multimodal_runtime(
+                store,
+                &project_root,
+                input.enable_experimental.unwrap_or(false),
+            )?)?
         }
         "forge.interactive.workflow_sidebar" => {
             serde_json::to_value(build_interactive_workflow_sidebar(store)?)?
