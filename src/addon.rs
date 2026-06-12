@@ -84,6 +84,16 @@ pub struct AddonExecutorDispatchInput<'a> {
     pub dry_run: bool,
 }
 
+pub struct AddonHandoffDispatchInput<'a> {
+    pub addon_id: Option<&'a str>,
+    pub contract_id: &'a str,
+    pub handoff_ref: &'a str,
+    pub input: serde_json::Value,
+    pub context: serde_json::Value,
+    pub source: &'a str,
+    pub dry_run: bool,
+}
+
 pub struct AddonPlanningStrategyInput<'a> {
     pub dispatch: AddonPlannerDispatchInput<'a>,
     pub worker_id: &'a str,
@@ -98,6 +108,12 @@ pub struct AddonValidatorExecutionInput<'a> {
 
 pub struct AddonExecutorExecutionInput<'a> {
     pub dispatch: AddonExecutorDispatchInput<'a>,
+    pub worker_id: &'a str,
+    pub lease_seconds: u64,
+}
+
+pub struct AddonHandoffExecutionInput<'a> {
+    pub dispatch: AddonHandoffDispatchInput<'a>,
     pub worker_id: &'a str,
     pub lease_seconds: u64,
 }
@@ -137,6 +153,18 @@ struct AddonExecutorReportInput<'a> {
     dispatch_report: AddonRuntimeContractDispatchReport,
     executor_result: Option<serde_json::Value>,
     validation: AddonExecutorResultValidation,
+}
+
+struct AddonHandoffReportInput<'a> {
+    status: &'a str,
+    handoff_ref: &'a str,
+    contract_id: &'a str,
+    worker_id: &'a str,
+    source: &'a str,
+    dry_run: bool,
+    dispatch_report: AddonRuntimeContractDispatchReport,
+    handoff_result: Option<serde_json::Value>,
+    validation: AddonHandoffResultValidation,
 }
 
 pub struct AddonRuntimeContractCompletionInput<'a> {
@@ -227,6 +255,12 @@ pub const ADDON_EXECUTOR_EXECUTION_SCHEMA_VERSION: &str = "forge.addon_executor_
 pub const ADDON_EXECUTOR_RESULT_SCHEMA_VERSION: &str = "forge.addon_executor_result.v1";
 pub const ADDON_EXECUTOR_RESULT_VALIDATION_SCHEMA_VERSION: &str =
     "forge.addon_executor_result_validation.v1";
+pub const ADDON_HANDOFF_DISPATCH_INPUT_SCHEMA_VERSION: &str =
+    "forge.addon_handoff_dispatch_input.v1";
+pub const ADDON_HANDOFF_EXECUTION_SCHEMA_VERSION: &str = "forge.addon_handoff_execution.v1";
+pub const ADDON_HANDOFF_RESULT_SCHEMA_VERSION: &str = "forge.addon_handoff_result.v1";
+pub const ADDON_HANDOFF_RESULT_VALIDATION_SCHEMA_VERSION: &str =
+    "forge.addon_handoff_result_validation.v1";
 pub const ADDON_RUNTIME_WORKERS_SCHEMA_VERSION: &str = "forge.addon_runtime_workers.v1";
 pub const ADDON_VIEWS_SCHEMA_VERSION: &str = "forge.addon_views.v1";
 pub const ADDON_PACKAGE_SCHEMA_VERSION: &str = "forge.addon_package.v1";
@@ -626,6 +660,21 @@ pub struct AddonExecutorExecutionReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct AddonHandoffExecutionReport {
+    pub schema_version: String,
+    pub status: String,
+    pub handoff_ref: String,
+    pub contract_id: String,
+    pub worker_id: String,
+    pub source: String,
+    pub dry_run: bool,
+    pub dispatch_report: AddonRuntimeContractDispatchReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff_result: Option<serde_json::Value>,
+    pub validation: AddonHandoffResultValidation,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct AddonPlanningStrategyResultValidation {
     pub schema_version: String,
     pub status: String,
@@ -656,6 +705,23 @@ pub struct AddonExecutorResultValidation {
     pub result_status: String,
     pub completed: bool,
     pub output_count: usize,
+    pub artifact_count: usize,
+    pub event_count: usize,
+    pub reported_issue_count: usize,
+    pub reported_issues: Vec<String>,
+    pub schema_issue_count: usize,
+    pub schema_issues: Vec<String>,
+    pub result_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddonHandoffResultValidation {
+    pub schema_version: String,
+    pub status: String,
+    pub result_status: String,
+    pub delivered: bool,
+    pub target_present: bool,
+    pub receipt_present: bool,
     pub artifact_count: usize,
     pub event_count: usize,
     pub reported_issue_count: usize,
@@ -2457,6 +2523,67 @@ pub fn enqueue_addon_executor_dispatch(
     )
 }
 
+pub fn enqueue_addon_handoff_dispatch(
+    store: &ForgeStore,
+    catalog: &AddonCatalog,
+    input: AddonHandoffDispatchInput<'_>,
+) -> Result<AddonRuntimeContractDispatchReport> {
+    let policy = evaluate_addon_runtime_contract_policy(
+        catalog,
+        input.addon_id,
+        Some(input.contract_id),
+        None,
+        None,
+        None,
+    );
+    if policy.contracts.is_empty() {
+        bail!("handoff runtime contract not found: {}", input.contract_id);
+    }
+    if policy.contracts.len() > 1 {
+        bail!(
+            "handoff runtime contract id is ambiguous across Addons: {}",
+            input.contract_id
+        );
+    }
+    let policy_entry = policy.contracts.into_iter().next().unwrap();
+    if policy_entry.contract_type != "handoff" {
+        bail!(
+            "runtime contract {} is not a handoff: {}",
+            input.contract_id,
+            policy_entry.contract_type
+        );
+    }
+
+    let dispatch_payload = serde_json::json!({
+        "schema_version": ADDON_HANDOFF_DISPATCH_INPUT_SCHEMA_VERSION,
+        "handoff_ref": input.handoff_ref,
+        "input": input.input,
+        "handoff": {
+            "addon_id": policy_entry.addon_id,
+            "contract_id": policy_entry.contract_id,
+            "contract_type": policy_entry.contract_type,
+            "capability_id": policy_entry.capability_id,
+            "workflow_extension_id": policy_entry.contract.workflow_extension_id,
+            "runtime": policy_entry.runtime,
+            "entrypoint": policy_entry.entrypoint,
+        },
+        "context": {
+            "provided_context": input.context,
+            "handoff_policy": "Addon handoffs run outside Core through the dispatch ledger and return auditable generic receipts",
+        },
+        "requested_at": Utc::now().to_rfc3339(),
+    });
+    enqueue_addon_runtime_contract_dispatch(
+        store,
+        catalog,
+        input.addon_id,
+        input.contract_id,
+        dispatch_payload,
+        input.source,
+        input.dry_run,
+    )
+}
+
 pub fn execute_addon_planning_strategy(
     store: &ForgeStore,
     catalog: &AddonCatalog,
@@ -2753,6 +2880,99 @@ pub fn execute_addon_executor(
     }))
 }
 
+pub fn execute_addon_handoff(
+    store: &ForgeStore,
+    catalog: &AddonCatalog,
+    input: AddonHandoffExecutionInput<'_>,
+) -> Result<AddonHandoffExecutionReport> {
+    let enqueue_report = enqueue_addon_handoff_dispatch(
+        store,
+        catalog,
+        AddonHandoffDispatchInput {
+            addon_id: input.dispatch.addon_id,
+            contract_id: input.dispatch.contract_id,
+            handoff_ref: input.dispatch.handoff_ref,
+            input: input.dispatch.input.clone(),
+            context: input.dispatch.context.clone(),
+            source: input.dispatch.source,
+            dry_run: input.dispatch.dry_run,
+        },
+    )?;
+
+    if input.dispatch.dry_run || enqueue_report.blocked_count > 0 {
+        let validation = addon_handoff_result_validation_not_executed(
+            if input.dispatch.dry_run {
+                "dry_run"
+            } else {
+                "dispatch_blocked"
+            },
+            if input.dispatch.dry_run {
+                "dry-run does not execute the handoff worker"
+            } else {
+                "handoff dispatch is blocked by runtime contract policy"
+            },
+        );
+        return Ok(addon_handoff_execution_report(AddonHandoffReportInput {
+            status: if input.dispatch.dry_run {
+                "addon_handoff_execution_dry_run"
+            } else {
+                "addon_handoff_dispatch_blocked"
+            },
+            handoff_ref: input.dispatch.handoff_ref,
+            contract_id: input.dispatch.contract_id,
+            worker_id: input.worker_id,
+            source: input.dispatch.source,
+            dry_run: input.dispatch.dry_run,
+            dispatch_report: enqueue_report,
+            handoff_result: None,
+            validation,
+        }));
+    }
+
+    let dispatch_id = enqueue_report
+        .dispatches
+        .first()
+        .map(|dispatch| dispatch.id.clone())
+        .with_context(|| "handoff dispatch report did not include dispatch entry")?;
+    let execution_report = execute_addon_runtime_contract_dispatch(
+        store,
+        catalog,
+        &dispatch_id,
+        input.worker_id,
+        input.lease_seconds,
+        false,
+    )?;
+    let handoff_result = addon_handoff_result_from_dispatch(&execution_report);
+    let validation = validate_addon_handoff_result(handoff_result.as_ref())?;
+    let status = if execution_report.completed_count == 0 {
+        "addon_handoff_execution_failed"
+    } else if validation.status != "valid" {
+        "addon_handoff_result_invalid"
+    } else if validation.result_status == "delivered" {
+        "addon_handoff_delivered"
+    } else if validation.result_status == "accepted" {
+        "addon_handoff_accepted"
+    } else if validation.result_status == "failed" {
+        "addon_handoff_failed"
+    } else if validation.result_status == "needs_followup" {
+        "addon_handoff_needs_followup"
+    } else {
+        "addon_handoff_review_required"
+    };
+
+    Ok(addon_handoff_execution_report(AddonHandoffReportInput {
+        status,
+        handoff_ref: input.dispatch.handoff_ref,
+        contract_id: input.dispatch.contract_id,
+        worker_id: input.worker_id,
+        source: input.dispatch.source,
+        dry_run: false,
+        dispatch_report: execution_report,
+        handoff_result,
+        validation,
+    }))
+}
+
 fn addon_planner_task_shape_from_atomic_task(task: &AtomicTask) -> AddonPlanningStrategyTaskShape {
     AddonPlanningStrategyTaskShape {
         id: task.id.clone(),
@@ -2855,6 +3075,16 @@ fn addon_executor_result_from_dispatch(
         .cloned()
 }
 
+fn addon_handoff_result_from_dispatch(
+    report: &AddonRuntimeContractDispatchReport,
+) -> Option<serde_json::Value> {
+    report
+        .dispatches
+        .first()
+        .and_then(|dispatch| dispatch.data.pointer("/runtime_processing/outcome/result"))
+        .cloned()
+}
+
 fn addon_validator_result_validation_not_executed(
     status: &str,
     issue: &str,
@@ -2883,6 +3113,27 @@ fn addon_executor_result_validation_not_executed(
         result_status: "unknown".to_string(),
         completed: false,
         output_count: 0,
+        artifact_count: 0,
+        event_count: 0,
+        reported_issue_count: 0,
+        reported_issues: Vec::new(),
+        schema_issue_count: 1,
+        schema_issues: vec![issue.to_string()],
+        result_sha256: None,
+    }
+}
+
+fn addon_handoff_result_validation_not_executed(
+    status: &str,
+    issue: &str,
+) -> AddonHandoffResultValidation {
+    AddonHandoffResultValidation {
+        schema_version: ADDON_HANDOFF_RESULT_VALIDATION_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        result_status: "unknown".to_string(),
+        delivered: false,
+        target_present: false,
+        receipt_present: false,
         artifact_count: 0,
         event_count: 0,
         reported_issue_count: 0,
@@ -3098,6 +3349,136 @@ fn validate_addon_executor_result(
         result_status: result_status.clone(),
         completed: result_status == "completed",
         output_count,
+        artifact_count,
+        event_count,
+        reported_issue_count: reported_issues.len(),
+        reported_issues,
+        schema_issue_count: schema_issues.len(),
+        schema_issues,
+        result_sha256: Some(hex_sha256(&serde_json::to_vec(result)?)),
+    })
+}
+
+fn validate_addon_handoff_result(
+    result: Option<&serde_json::Value>,
+) -> Result<AddonHandoffResultValidation> {
+    let Some(result) = result else {
+        return Ok(addon_handoff_result_validation_not_executed(
+            "missing_result",
+            "handoff dispatch did not return a result payload",
+        ));
+    };
+
+    let mut schema_issues = Vec::new();
+    let schema_version = result
+        .get("schema_version")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if !schema_version.is_empty() && schema_version != ADDON_HANDOFF_RESULT_SCHEMA_VERSION {
+        schema_issues.push(format!(
+            "handoff result schema_version should be {}",
+            ADDON_HANDOFF_RESULT_SCHEMA_VERSION
+        ));
+    }
+
+    let raw_status = result
+        .get("status")
+        .and_then(|value| value.as_str())
+        .or_else(|| result.get("outcome").and_then(|value| value.as_str()))
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let result_status = match raw_status.as_str() {
+        "deliver" | "delivered" | "sent" | "posted" => "delivered",
+        "accept" | "accepted" | "ok" | "queued" => "accepted",
+        "fail" | "failed" | "error" => "failed",
+        "needs_followup" | "follow_up" | "pending" => "needs_followup",
+        "review" | "review_required" | "needs_review" => "review_required",
+        "skip" | "skipped" => "skipped",
+        "" => {
+            schema_issues.push("handoff result must include status or outcome".to_string());
+            "unknown"
+        }
+        other => {
+            schema_issues.push(format!("unsupported handoff result status: {other}"));
+            "unknown"
+        }
+    }
+    .to_string();
+
+    let target_present = match result.get("target") {
+        Some(value) if value.is_object() => {
+            value.as_object().is_some_and(|target| !target.is_empty())
+        }
+        Some(value) if value.is_string() => value
+            .as_str()
+            .is_some_and(|target| !target.trim().is_empty()),
+        Some(value) if value.is_null() => false,
+        Some(_) => {
+            schema_issues.push(
+                "handoff result target must be an object or non-empty string when present"
+                    .to_string(),
+            );
+            false
+        }
+        None => false,
+    };
+    let receipt_present = result.get("receipt").is_some_and(|value| !value.is_null());
+    if matches!(result_status.as_str(), "delivered" | "accepted") && !target_present {
+        schema_issues.push("delivered or accepted handoff result must include target".to_string());
+    }
+    if matches!(result_status.as_str(), "delivered" | "accepted") && !receipt_present {
+        schema_issues.push("delivered or accepted handoff result must include receipt".to_string());
+    }
+
+    let artifact_count = result
+        .get("artifacts")
+        .and_then(|value| value.as_array())
+        .map(Vec::len)
+        .unwrap_or(0);
+    if result.get("artifacts").is_some() && !result["artifacts"].is_array() {
+        schema_issues.push("handoff result artifacts must be an array when present".to_string());
+    }
+
+    let event_count = result
+        .get("events")
+        .and_then(|value| value.as_array())
+        .map(Vec::len)
+        .unwrap_or(0);
+    if result.get("events").is_some() && !result["events"].is_array() {
+        schema_issues.push("handoff result events must be an array when present".to_string());
+    }
+
+    let reported_issues = result
+        .get("issues")
+        .or_else(|| result.get("errors"))
+        .and_then(|value| value.as_array())
+        .map(|issues| {
+            issues
+                .iter()
+                .map(addon_validator_issue_summary)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if result.get("issues").is_some() && !result["issues"].is_array() {
+        schema_issues.push("handoff result issues must be an array when present".to_string());
+    }
+    if result.get("errors").is_some() && !result["errors"].is_array() {
+        schema_issues.push("handoff result errors must be an array when present".to_string());
+    }
+
+    let status = if schema_issues.is_empty() {
+        "valid"
+    } else {
+        "invalid"
+    };
+    Ok(AddonHandoffResultValidation {
+        schema_version: ADDON_HANDOFF_RESULT_VALIDATION_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        result_status: result_status.clone(),
+        delivered: result_status == "delivered",
+        target_present,
+        receipt_present,
         artifact_count,
         event_count,
         reported_issue_count: reported_issues.len(),
@@ -3397,6 +3778,23 @@ fn addon_executor_execution_report(
         dry_run: input.dry_run,
         dispatch_report: input.dispatch_report,
         executor_result: input.executor_result,
+        validation: input.validation,
+    }
+}
+
+fn addon_handoff_execution_report(
+    input: AddonHandoffReportInput<'_>,
+) -> AddonHandoffExecutionReport {
+    AddonHandoffExecutionReport {
+        schema_version: ADDON_HANDOFF_EXECUTION_SCHEMA_VERSION.to_string(),
+        status: input.status.to_string(),
+        handoff_ref: input.handoff_ref.to_string(),
+        contract_id: input.contract_id.to_string(),
+        worker_id: input.worker_id.to_string(),
+        source: input.source.to_string(),
+        dry_run: input.dry_run,
+        dispatch_report: input.dispatch_report,
+        handoff_result: input.handoff_result,
         validation: input.validation,
     }
 }

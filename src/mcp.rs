@@ -3,7 +3,7 @@ use crate::addon::{
     complete_addon_runtime_contract_dispatch, create_addon_migration_workflow,
     create_addon_package_lock, default_addon_dirs, disable_addon, downgrade_addon, enable_addon,
     enqueue_addon_planner_dispatch, enqueue_addon_runtime_contract_dispatch,
-    evaluate_addon_runtime_contract_policy, execute_addon_executor,
+    evaluate_addon_runtime_contract_policy, execute_addon_executor, execute_addon_handoff,
     execute_addon_planning_strategy, execute_addon_runtime_contract_dispatch,
     execute_addon_validator, fetch_addon_package, install_addon, install_addon_package,
     list_addon_capability_index, list_addon_event_adapters, list_addon_marketplace,
@@ -17,6 +17,8 @@ use crate::addon::{
     uninstall_addon, upgrade_addon, validate_addon_catalog,
     AddonExecutorDispatchInput as AddonExecutorDispatchRequest,
     AddonExecutorExecutionInput as AddonExecutorExecutionRequest,
+    AddonHandoffDispatchInput as AddonHandoffDispatchRequest,
+    AddonHandoffExecutionInput as AddonHandoffExecutionRequest,
     AddonPackageInput as AddonPackageRequest,
     AddonPlannerDispatchInput as AddonPlannerDispatchRequest,
     AddonPlanningStrategyInput as AddonPlanningStrategyRequest,
@@ -465,6 +467,24 @@ struct AddonExecutorExecutionInput {
     worker_id: Option<String>,
     task: Option<String>,
     task_ref: Option<String>,
+    input: Option<serde_json::Value>,
+    context: Option<serde_json::Value>,
+    lease_seconds: Option<u64>,
+    source: Option<String>,
+    dry_run: Option<bool>,
+    addon_dirs: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddonHandoffExecutionInput {
+    addon: Option<String>,
+    addon_id: Option<String>,
+    contract: Option<String>,
+    contract_id: Option<String>,
+    worker: Option<String>,
+    worker_id: Option<String>,
+    handoff: Option<String>,
+    handoff_ref: Option<String>,
     input: Option<serde_json::Value>,
     context: Option<serde_json::Value>,
     lease_seconds: Option<u64>,
@@ -3715,6 +3735,45 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "<worker-id>",
                     "--task",
                     "<task-ref>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(false, true),
+            ),
+            tool(
+                "forge.addons.execute_handoff",
+                "Execute Addon Handoff With Result Audit",
+                "Dispatch a handoff runtime contract to a registered worker, validate the returned target, receipt, artifacts and events, and record the normal dispatch/claim/completion audit.",
+                object_schema(
+                    &[
+                        ("addon_id", "string", "optional Addon id filter"),
+                        ("contract_id", "string", "handoff runtime contract id"),
+                        ("worker_id", "string", "registered runtime worker id"),
+                        ("handoff_ref", "string", "handoff or external delivery reference"),
+                        ("input", "object", "handoff input payload"),
+                        ("context", "object", "optional handoff context payload"),
+                        ("lease_seconds", "integer", "external worker claim lease"),
+                        ("source", "string", "dispatch source"),
+                        ("dry_run", "boolean", "evaluate without executing worker"),
+                        (
+                            "addon_dirs",
+                            "array",
+                            "optional addon manifest directories; defaults to .forge/addons",
+                        ),
+                    ],
+                    &["contract_id", "worker_id", "handoff_ref"],
+                ),
+                "forge.addon_handoff_execution.v1",
+                &[
+                    "forge",
+                    "addons",
+                    "execute-handoff",
+                    "--contract",
+                    "<contract-id>",
+                    "--worker",
+                    "<worker-id>",
+                    "--handoff",
+                    "<handoff-ref>",
                     "--output",
                     "json",
                 ],
@@ -7534,6 +7593,38 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                         addon_id: addon_id.as_deref(),
                         contract_id: &contract_id,
                         task_ref: &task_ref,
+                        input: input.input.unwrap_or_else(|| serde_json::json!({})),
+                        context: input.context.unwrap_or_else(|| serde_json::json!({})),
+                        source: input.source.as_deref().unwrap_or("mcp"),
+                        dry_run: input.dry_run.unwrap_or(false),
+                    },
+                    worker_id: &worker_id,
+                    lease_seconds: input.lease_seconds.unwrap_or(300),
+                },
+            )?)?
+        }
+        "forge.addons.execute_handoff" => {
+            let input: AddonHandoffExecutionInput = parse_input(input)?;
+            let addon_dirs = addon_dirs_from_input(input.addon_dirs);
+            let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
+            let addon_id = input.addon_id.or(input.addon);
+            let contract_id = input.contract_id.or(input.contract).ok_or_else(|| {
+                anyhow::anyhow!("forge.addons.execute_handoff requires contract_id")
+            })?;
+            let worker_id = input.worker_id.or(input.worker).ok_or_else(|| {
+                anyhow::anyhow!("forge.addons.execute_handoff requires worker_id")
+            })?;
+            let handoff_ref = input.handoff_ref.or(input.handoff).ok_or_else(|| {
+                anyhow::anyhow!("forge.addons.execute_handoff requires handoff_ref")
+            })?;
+            serde_json::to_value(execute_addon_handoff(
+                store,
+                &catalog,
+                AddonHandoffExecutionRequest {
+                    dispatch: AddonHandoffDispatchRequest {
+                        addon_id: addon_id.as_deref(),
+                        contract_id: &contract_id,
+                        handoff_ref: &handoff_ref,
                         input: input.input.unwrap_or_else(|| serde_json::json!({})),
                         context: input.context.unwrap_or_else(|| serde_json::json!({})),
                         source: input.source.as_deref().unwrap_or("mcp"),
