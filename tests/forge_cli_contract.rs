@@ -43894,7 +43894,7 @@ fn interactive_home_exposes_task_board_handoffs_checkpoints_and_artifacts() {
     assert!(ui_composition["commands"]["refresh"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::json!("home")));
+        .contains(&serde_json::json!("ui-composition")));
     let structured_logs = &home["dashboard"]["structured_logs_panel"];
     assert_eq!(
         structured_logs["schema_version"],
@@ -49097,6 +49097,164 @@ fn interactive_addon_capabilities_command_and_mcp_surface_are_dedicated() {
 }
 
 #[test]
+fn interactive_ui_composition_command_and_mcp_surface_are_dedicated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("ui-composition-project");
+    fs::create_dir_all(project_root.join(".forge")).unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "ui-composition",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.interactive.ui_composition.v1"
+    );
+    assert_eq!(json["status"], "ui_composition_ready");
+    assert!(json["region_count"].as_u64().unwrap() >= 4);
+    assert!(json["widget_count"].as_u64().unwrap() >= 8);
+    assert!(json["core_widget_count"].as_u64().unwrap() >= 8);
+    assert!(json["addon_widget_count"].as_u64().unwrap() >= 1);
+    assert!(json["commands"]["refresh"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("ui-composition")));
+    assert!(json["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|region| region["region_id"] == "addons"
+            && region["widgets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|widget| widget["source"] == "addon"
+                    && widget["renderer_family"]
+                        .as_str()
+                        .unwrap()
+                        .contains("renderer"))));
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "ui-composition",
+            "--project-root",
+            project_root.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("UI composition"));
+    assert!(text.contains("Addon renderer families"));
+    assert!(text.contains("interactive ui-composition --output json"));
+
+    let home_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert!(home["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/ui-composition")));
+    assert_eq!(
+        home["dashboard"]["ui_composition_panel"]["commands"]["refresh"],
+        json["commands"]["refresh"]
+    );
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.ui_composition");
+    assert_eq!(tool["output_schema"], "forge.interactive.ui_composition.v1");
+    assert!(tool["description"]
+        .as_str()
+        .unwrap()
+        .contains("UI composition"));
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_input = serde_json::json!({
+        "project_root": project_root
+    });
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.ui_composition"])
+        .arg("--input")
+        .arg(mcp_input.to_string())
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.ui_composition.v1"
+    );
+    assert!(mcp_json["result"]["regions"].is_array());
+
+    let route_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "route",
+            "--input",
+            "/ui-composition",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let route: Value = serde_json::from_slice(&route_output).unwrap();
+    assert_eq!(route["routing_decision"], "slash_command");
+    assert_eq!(route["slash_command"]["name"], "/ui-composition");
+    assert_eq!(route["slash_command"]["recognized"], true);
+}
+
+#[test]
 fn interactive_core_boundary_audit_proves_core_minimal_and_addon_owned_domains() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -51817,6 +51975,7 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         "/inspect",
         "/runs",
         "/workflows",
+        "/ui-composition",
         "/artifacts",
         "/task-board",
         "/costs",

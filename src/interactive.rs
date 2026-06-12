@@ -2814,6 +2814,15 @@ pub fn build_interactive_operational_cockpit(
     Ok(report.dashboard.operational_cockpit_panel)
 }
 
+pub fn build_interactive_ui_composition(
+    store: &ForgeStore,
+    project_root: Option<PathBuf>,
+) -> Result<InteractiveUiCompositionPanel> {
+    let report =
+        build_interactive_home_with_options(store, InteractiveHomeOptions { project_root })?;
+    Ok(report.dashboard.ui_composition_panel)
+}
+
 pub fn build_interactive_event_runtime(
     store: &ForgeStore,
     project_root: &Path,
@@ -3294,6 +3303,7 @@ pub fn build_interactive_home_with_options(
                 "/guided-cockpit".to_string(),
                 "/guide".to_string(),
                 "/cockpit".to_string(),
+                "/ui-composition".to_string(),
                 "/status".to_string(),
                 "/workflows".to_string(),
                 "/workflow-sidebar".to_string(),
@@ -6361,6 +6371,19 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             false,
             "low",
             &["guide", "guided", "cockpit", "tui", "workflow"],
+        ),
+        command_palette_entry(
+            "navigation.ui_composition",
+            "navigation",
+            "Open UI composition",
+            "Inspect dynamic Core and Addon widget composition for TUI, web and agent dashboards.",
+            "ui_composition_panel",
+            None,
+            &["interactive", "ui-composition", "--output", "json"],
+            false,
+            false,
+            "low",
+            &["ui", "composition", "widgets", "addons", "renderer", "dashboard"],
         ),
         command_palette_entry(
             "navigation.slash_commands",
@@ -12944,6 +12967,36 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     )
 }
 
+pub fn render_interactive_ui_composition(panel: &InteractiveUiCompositionPanel) -> String {
+    let renderer_families = if panel.addon_renderer_families.is_empty() {
+        "none".to_string()
+    } else {
+        panel.addon_renderer_families.join(", ")
+    };
+    let commands = [
+        ("refresh", &panel.commands.refresh),
+        ("inspect_addons", &panel.commands.inspect_addons),
+        ("open_task_board", &panel.commands.open_task_board),
+    ]
+    .into_iter()
+    .map(|(name, command)| format!("{name} {}", command.join(" ")))
+    .collect::<Vec<_>>()
+    .join(" | ");
+
+    format!(
+        "UI composition: {status}; layout {layout}; regions {regions}; widgets {widgets} ({core} core, {addons} addon)\nRegions: {region_summary}\nAddon renderer families: {renderer_families}\nCommands: {commands}\n",
+        status = panel.status,
+        layout = panel.layout_kind,
+        regions = panel.region_count,
+        widgets = panel.widget_count,
+        core = panel.core_widget_count,
+        addons = panel.addon_widget_count,
+        region_summary = render_ui_composition_region_summary(panel),
+        renderer_families = renderer_families,
+        commands = commands,
+    )
+}
+
 pub fn render_interactive_guided_cockpit(panel: &InteractiveGuidedCockpitPanel) -> String {
     format!(
         "Guided cockpit: {status}; visual {visual}; steps {completed}/{total}; current {current}; blocked {blocked}; confirmations {confirmations}\nPanes: {panes}\nSteps: {steps}\nSafe actions: {policy}\nNext: {next}\nNotes: {notes}\n",
@@ -16510,7 +16563,7 @@ fn build_ui_composition_panel(
         commands: InteractiveUiCompositionCommands {
             refresh: vec![
                 "interactive".to_string(),
-                "home".to_string(),
+                "ui-composition".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -19037,6 +19090,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/ui-composition",
+            "UI Composition",
+            "Show dynamic Core and Addon widget composition for TUI, web and agent dashboards.",
+            &["forge", "interactive", "ui-composition"],
+            false,
+            "low",
+        ),
+        slash(
             "/status",
             "Status",
             "Show workflow or runtime status.",
@@ -20453,6 +20514,10 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
             let panel = build_interactive_addon_capabilities_default(store);
             Ok(render_interactive_addon_capabilities(&panel))
         }
+        "ui_composition_panel" => {
+            let panel = build_interactive_ui_composition(store, None)?;
+            Ok(render_interactive_ui_composition(&panel))
+        }
         "sessions_panel" => {
             let panel = build_interactive_sessions(store, InteractiveSessionsOptions::default())?;
             Ok(render_interactive_sessions(&panel))
@@ -20584,6 +20649,11 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
         "/addons" => {
             let panel = build_interactive_addon_capabilities_default(store);
             println!("{}", render_interactive_addon_capabilities(&panel));
+            Ok(true)
+        }
+        "/ui-composition" | "/ui" => {
+            let panel = build_interactive_ui_composition(store, None)?;
+            println!("{}", render_interactive_ui_composition(&panel));
             Ok(true)
         }
         "/sessions" => {

@@ -104,10 +104,10 @@ use crate::interactive::{
     build_interactive_patch_workbench, build_interactive_permissions, build_interactive_readiness,
     build_interactive_release_gates, build_interactive_replacement_cli,
     build_interactive_schedules, build_interactive_sessions, build_interactive_structured_logs,
-    build_interactive_task_board, build_interactive_token_usage, build_interactive_workflow_dag,
-    build_interactive_workflow_mutation, build_interactive_workflow_sidebar,
-    route_interactive_input, slash_command_catalog, InteractiveHarnessOptions,
-    InteractiveHomeOptions, InteractiveSessionsOptions,
+    build_interactive_task_board, build_interactive_token_usage, build_interactive_ui_composition,
+    build_interactive_workflow_dag, build_interactive_workflow_mutation,
+    build_interactive_workflow_sidebar, route_interactive_input, slash_command_catalog,
+    InteractiveHarnessOptions, InteractiveHomeOptions, InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -3166,6 +3166,25 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "forge",
                     "interactive",
                     "guided-cockpit",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.ui_composition",
+                "Inspect UI Composition",
+                "Return the dedicated Forge UI composition contract with ordered regions, Core widgets, Addon widgets, renderer families and commands for TUI, web and agent dashboards without loading the full home dashboard.",
+                object_schema(&[
+                    ("project_root", "string", "optional project root for project-scoped dashboard panels"),
+                ], &[]),
+                "forge.interactive.ui_composition.v1",
+                &[
+                    "forge",
+                    "interactive",
+                    "ui-composition",
+                    "--project-root",
+                    "<project-root>",
                     "--output",
                     "json",
                 ],
@@ -7738,6 +7757,15 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.interactive.guided_cockpit" => {
             serde_json::to_value(build_interactive_guided_cockpit(store)?)?
+        }
+        "forge.interactive.ui_composition" => {
+            let input: InteractiveHomeInput = if input.is_null() {
+                InteractiveHomeInput { project_root: None }
+            } else {
+                parse_input(input)?
+            };
+            let project_root = input.project_root.map(PathBuf::from);
+            serde_json::to_value(build_interactive_ui_composition(store, project_root)?)?
         }
         "forge.interactive.readiness" => serde_json::to_value(build_interactive_readiness(store)?)?,
         "forge.interactive.operational_cockpit" => {
