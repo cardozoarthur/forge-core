@@ -21,6 +21,8 @@ pub const CLI_HARNESS_DOCTOR_SCHEMA_VERSION: &str = "forge.harness.doctor.v1";
 pub const CLI_HARNESS_HEADROOM_PLAN_SCHEMA_VERSION: &str = "forge.harness.headroom_plan.v1";
 pub const CLI_HARNESS_ADOPTION_PLAN_SCHEMA_VERSION: &str = "forge.harness.adoption_plan.v1";
 pub const CLI_HARNESS_BOOTSTRAP_SCHEMA_VERSION: &str = "forge.harness.bootstrap.v1";
+pub const CLI_HARNESS_ORCHESTRATION_CONTRACT_SCHEMA_VERSION: &str =
+    "forge.harness.orchestration_contract.v1";
 pub const CLI_HARNESS_BOOTSTRAP_CONFIG_WRITE_SCHEMA_VERSION: &str =
     "forge.harness.bootstrap_config_write.v1";
 pub const CLI_HARNESS_SESSION_LIFECYCLE_PLAN_SCHEMA_VERSION: &str =
@@ -74,9 +76,36 @@ pub struct CliWrapperPlanReport {
     pub require_token_headroom_for_forge_first: bool,
     pub env: Vec<CliWrapperEnvVar>,
     pub launch_command: Vec<String>,
+    pub orchestration_contract: HarnessOrchestrationContract,
     pub session_lifecycle_plan: HarnessSessionLifecyclePlan,
     pub harness_checks: Vec<String>,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessOrchestrationContract {
+    pub schema_version: String,
+    pub status: String,
+    pub control_plane: String,
+    pub executor: String,
+    pub forge_first: bool,
+    pub workflow_id: Option<String>,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub required_env: Vec<CliWrapperEnvVar>,
+    pub routing_stages: Vec<HarnessOrchestrationStage>,
+    pub gates: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessOrchestrationStage {
+    pub id: String,
+    pub owner: String,
+    pub source: String,
+    pub target: String,
+    pub required: bool,
+    pub rationale: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -184,6 +213,7 @@ pub struct HarnessHeadroomPlanReport {
     pub token_headroom_source: String,
     pub require_token_headroom_for_forge_first: bool,
     pub wrapper_env: Vec<CliWrapperEnvVar>,
+    pub orchestration_contract: HarnessOrchestrationContract,
     pub wrapper_plan: CliWrapperPlanReport,
     pub session_lifecycle_plan: HarnessSessionLifecyclePlan,
     pub compression_pipeline: Vec<String>,
@@ -1182,6 +1212,7 @@ pub fn build_harness_headroom_plan(
         token_headroom_source: token_headroom_source.to_string(),
         require_token_headroom_for_forge_first,
         wrapper_env,
+        orchestration_contract: wrapper_plan.orchestration_contract.clone(),
         session_lifecycle_plan: wrapper_plan.session_lifecycle_plan.clone(),
         wrapper_plan,
         compression_pipeline: vec![
@@ -1931,6 +1962,8 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
             "keeps Claude tool loading deferred when a wrapper changes its environment",
         ));
     }
+    let orchestration_env = harness_orchestration_env(token_headroom);
+    env.extend(orchestration_env.clone());
 
     let mut launch_command = vec![
         "forge".to_string(),
@@ -1977,6 +2010,16 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
             "project policy requires token headroom for Forge-first CLI execution".to_string(),
         );
     }
+    let session_lifecycle_plan =
+        build_harness_session_lifecycle_plan(&executor, workflow_id, task_id, run_id);
+    let orchestration_contract = build_harness_orchestration_contract(
+        &executor,
+        forge_first,
+        workflow_id,
+        task_id,
+        run_id,
+        orchestration_env,
+    );
 
     CliWrapperPlanReport {
         schema_version: CLI_WRAPPER_PLAN_SCHEMA_VERSION.to_string(),
@@ -1996,18 +2039,170 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         require_token_headroom_for_forge_first,
         env,
         launch_command,
-        session_lifecycle_plan: build_harness_session_lifecycle_plan(
-            &executor,
-            workflow_id,
-            task_id,
-            run_id,
-        ),
+        orchestration_contract,
+        session_lifecycle_plan,
         harness_checks,
         notes: vec![
             "Headroom-inspired ideas absorbed: local-first compression, reversible retrieval refs, CLI wrapper env shaping, tool-search preservation and shim-based harness tests".to_string(),
             "This plan is non-destructive; actual exec remains a separate guarded harness action".to_string(),
             "Session lifecycle commands are plan-only and must be recorded through Forge before relying on external brain shell state.".to_string(),
         ],
+    }
+}
+
+fn harness_orchestration_env(token_headroom: bool) -> Vec<CliWrapperEnvVar> {
+    vec![
+        env_var(
+            "FORGE_PROMPT_PACKET_REQUIRED",
+            "true",
+            "requires Forge-owned prompt packets with organization, personality and company-work decisions before brain execution",
+        ),
+        env_var(
+            "FORGE_CONTEXT_ROUTING",
+            "forge_controlled",
+            "routes task context through Forge context policy instead of the child CLI's implicit project scan",
+        ),
+        env_var(
+            "FORGE_MEMORY_ROUTING",
+            "forge_controlled",
+            "routes memory lookup through Forge memory governance and visibility policy",
+        ),
+        env_var(
+            "FORGE_SKILL_ROUTING",
+            "forge_controlled",
+            "routes skill selection through Forge-owned workflow and node capability context",
+        ),
+        env_var(
+            "FORGE_MCP_ROUTING",
+            "forge_controlled",
+            "routes MCP/tool availability through Forge capability, permission and workflow state",
+        ),
+        env_var(
+            "FORGE_CREDENTIAL_VAULT_BOUNDARY",
+            "reference_only",
+            "keeps credential-vault values outside prompts and passes only governed references to child CLIs",
+        ),
+        env_var(
+            "FORGE_TOKEN_HEADROOM_REQUIRED",
+            if token_headroom { "true" } else { "false" },
+            "declares whether large context, logs and tool output must use Forge token-headroom routing",
+        ),
+        env_var(
+            "FORGE_SESSION_LIFECYCLE",
+            "audited",
+            "requires shell launch/opened/attached/closed state to be recorded through Forge session lifecycle",
+        ),
+        env_var(
+            "FORGE_EVENT_RECEIPTS",
+            "required",
+            "requires workflow/task/run lineage and receipt events for guarded child process execution",
+        ),
+    ]
+}
+
+fn build_harness_orchestration_contract(
+    executor: &str,
+    forge_first: bool,
+    workflow_id: Option<&str>,
+    task_id: Option<&str>,
+    run_id: Option<&str>,
+    required_env: Vec<CliWrapperEnvVar>,
+) -> HarnessOrchestrationContract {
+    HarnessOrchestrationContract {
+        schema_version: CLI_HARNESS_ORCHESTRATION_CONTRACT_SCHEMA_VERSION.to_string(),
+        status: "orchestration_contract_ready".to_string(),
+        control_plane: "forge_core".to_string(),
+        executor: executor.to_string(),
+        forge_first,
+        workflow_id: normalize_optional_text(workflow_id),
+        task_id: normalize_optional_text(task_id),
+        run_id: normalize_optional_text(run_id),
+        required_env,
+        routing_stages: vec![
+            orchestration_stage(
+                "prompt_packet",
+                "goal/workflow/node context",
+                "child brain prompt",
+                "Forge supplies organization, brand, product, personality and company-work decisions before the CLI sees task context.",
+            ),
+            orchestration_stage(
+                "context_router",
+                "Forge context engine",
+                "bounded task packet",
+                "Context is selected by workflow/task policy rather than by unrestricted project scanning.",
+            ),
+            orchestration_stage(
+                "memory_router",
+                "Forge memory governance",
+                "scoped memory snippets",
+                "Memory access stays tenant-bound, audience-gated and retrieval-based.",
+            ),
+            orchestration_stage(
+                "skill_router",
+                "Forge capability registry",
+                "executor skill surface",
+                "Skills are selected from workflow and node capability needs, not from global CLI defaults.",
+            ),
+            orchestration_stage(
+                "mcp_router",
+                "Forge tool registry",
+                "allowed tool surface",
+                "MCP/tool access remains permissioned, auditable and replaceable per node brain.",
+            ),
+            orchestration_stage(
+                "credential_vault_boundary",
+                "Forge credential references",
+                "child process environment",
+                "Secrets cross the boundary only through approved vault references or injected env, never through prompt text.",
+            ),
+            orchestration_stage(
+                "token_headroom",
+                "Forge harness headroom",
+                "logs, context and stdout/stderr",
+                "Large payloads are compressed locally with reversible retrieval refs before returning to a brain.",
+            ),
+            orchestration_stage(
+                "session_lifecycle",
+                "Forge session registry",
+                "brain shell lifecycle",
+                "Shell launch/opened/attached/closed transitions stay auditable even when a human drives the CLI.",
+            ),
+            orchestration_stage(
+                "event_receipt",
+                "Forge event timeline",
+                "workflow observability",
+                "Guarded CLI work emits receipts tied to workflow, task and run lineage.",
+            ),
+        ],
+        gates: vec![
+            "prompt_packet_required".to_string(),
+            "context_budget_enforced".to_string(),
+            "memory_policy_respected".to_string(),
+            "credential_values_not_prompted".to_string(),
+            "token_headroom_applied_when_required".to_string(),
+            "session_lifecycle_recordable".to_string(),
+            "event_receipts_recordable".to_string(),
+        ],
+        notes: vec![
+            "This contract makes external CLIs execution brains; Forge remains the workflow, routing, memory, permission and observability control plane.".to_string(),
+            "The contract is read-only planning data and does not launch or intercept a child process by itself.".to_string(),
+        ],
+    }
+}
+
+fn orchestration_stage(
+    id: &str,
+    source: &str,
+    target: &str,
+    rationale: &str,
+) -> HarnessOrchestrationStage {
+    HarnessOrchestrationStage {
+        id: id.to_string(),
+        owner: "forge".to_string(),
+        source: source.to_string(),
+        target: target.to_string(),
+        required: true,
+        rationale: rationale.to_string(),
     }
 }
 

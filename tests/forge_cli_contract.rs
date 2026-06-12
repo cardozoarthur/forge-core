@@ -231,6 +231,17 @@ fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environme
         mcp_json["result"]["schema_version"],
         "forge.harness.cli_wrapper_plan.v1"
     );
+    assert_eq!(
+        mcp_json["result"]["orchestration_contract"]["schema_version"],
+        "forge.harness.orchestration_contract.v1"
+    );
+    assert!(
+        mcp_json["result"]["orchestration_contract"]["routing_stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "mcp_router" && item["owner"] == "forge")
+    );
     assert_eq!(mcp_json["result"]["executor"], "claude");
     assert_eq!(mcp_json["result"]["forge_first"], true);
     assert!(mcp_json["result"]["launch_command"]
@@ -294,6 +305,10 @@ fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environme
     assert_eq!(
         exec_json["wrapper_plan"]["schema_version"],
         "forge.harness.cli_wrapper_plan.v1"
+    );
+    assert_eq!(
+        exec_json["wrapper_plan"]["orchestration_contract"]["control_plane"],
+        "forge_core"
     );
     let exec_env = exec_json["wrapper_plan"]["env"].as_array().unwrap();
     assert!(exec_env
@@ -1412,6 +1427,54 @@ fn harness_headroom_plan_exposes_wrapper_policy_for_cli_mcp_and_skill() {
     assert_eq!(
         json["wrapper_plan"]["schema_version"],
         "forge.harness.cli_wrapper_plan.v1"
+    );
+    assert_eq!(
+        json["wrapper_plan"]["orchestration_contract"]["schema_version"],
+        "forge.harness.orchestration_contract.v1"
+    );
+    assert_eq!(
+        json["wrapper_plan"]["orchestration_contract"]["control_plane"],
+        "forge_core"
+    );
+    let orchestration_stages = json["wrapper_plan"]["orchestration_contract"]["routing_stages"]
+        .as_array()
+        .unwrap();
+    for stage in [
+        "prompt_packet",
+        "context_router",
+        "memory_router",
+        "skill_router",
+        "mcp_router",
+        "credential_vault_boundary",
+        "token_headroom",
+        "session_lifecycle",
+        "event_receipt",
+    ] {
+        assert!(
+            orchestration_stages
+                .iter()
+                .any(|item| item["id"] == stage && item["owner"] == "forge"),
+            "wrapper orchestration contract should expose Forge-owned {stage} routing"
+        );
+    }
+    assert!(
+        json["wrapper_plan"]["orchestration_contract"]["required_env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == "FORGE_PROMPT_PACKET_REQUIRED" && item["value"] == "true")
+    );
+    assert!(
+        json["wrapper_plan"]["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == "FORGE_CONTEXT_ROUTING"
+                && item["value"] == "forge_controlled")
+    );
+    assert_eq!(
+        json["orchestration_contract"]["schema_version"],
+        "forge.harness.orchestration_contract.v1"
     );
     assert_eq!(
         json["session_lifecycle_plan"]["schema_version"],
