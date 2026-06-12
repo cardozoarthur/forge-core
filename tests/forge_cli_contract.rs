@@ -8110,6 +8110,166 @@ fn workflow_decision_records_revisioned_product_state() {
 }
 
 #[test]
+fn addons_resolve_projects_capability_discovery_plan_for_missing_dependencies() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let addon_dir = temp.path().join(".forge/addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        addon_dir.join("demo-operations.yaml"),
+        r#"
+id: forge.addon.demo_operations
+name: Demo Operations Addon
+version: 0.1.0
+description: Domain-neutral demo operations capability with an external dependency.
+lifecycle: enabled
+capabilities:
+  - id: demo_partner_operations
+    title: Demo partner operations
+    description: Prepare an operational partner demo workflow.
+    keywords:
+      - agenda demo
+      - partner operations
+    requires_capabilities:
+      - calendar_scheduling
+    workflow_extensions:
+      - demo_partner_operations
+workflows:
+  - id: demo_partner_operations
+    kind: dynamic_workflow_strategy
+    description: Extend planning with partner demo operations when the capability is available.
+"#,
+    )
+    .unwrap();
+    fs::write(
+        addon_dir.join("calendar.yaml"),
+        r#"
+id: forge.addon.calendar
+name: Calendar Addon
+version: 0.1.0
+description: Provides calendar scheduling as an installable capability.
+lifecycle: disabled
+capabilities:
+  - id: calendar_scheduling
+    title: Calendar scheduling
+    description: Schedule appointments and calendar slots.
+    keywords:
+      - calendar
+      - scheduling
+"#,
+    )
+    .unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "resolve",
+            "--goal",
+            "Preparar uma agenda demo para parceiro",
+            "--addon-dir",
+            addon_dir.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.capability_resolution.v1");
+    assert_eq!(json["status"], "missing_capabilities");
+    assert!(json["required_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability["id"] == "demo_partner_operations"));
+    assert!(json["missing_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability["id"] == "calendar_scheduling"
+            && capability["required_by"] == "demo_partner_operations"));
+    assert!(json["capability_suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |suggestion| suggestion["capability_id"] == "calendar_scheduling"
+                && suggestion["action"] == "enable_addon"
+                && suggestion["addon_id"] == "forge.addon.calendar"
+        ));
+    assert_eq!(
+        json["capability_discovery_plan"]["schema_version"],
+        "forge.capability_discovery_plan.v1"
+    );
+    assert_eq!(
+        json["capability_discovery_plan"]["status"],
+        "capability_discovery_blocked"
+    );
+    assert_eq!(json["capability_discovery_plan"]["can_plan"], false);
+    assert_eq!(
+        json["capability_discovery_plan"]["missing_capability_count"],
+        1
+    );
+    let discovery_step = json["capability_discovery_plan"]["ordered_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["capability_id"] == "calendar_scheduling")
+        .expect("missing calendar capability should have a discovery step");
+    assert_eq!(discovery_step["action"], "enable_addon");
+    assert_eq!(discovery_step["addon_id"], "forge.addon.calendar");
+    assert_eq!(discovery_step["mutates_state"], true);
+    assert_eq!(discovery_step["requires_human_approval"], true);
+    assert!(discovery_step["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("enable"))));
+    assert!(json["capability_discovery_plan"]["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("enable"))));
+
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.addons.resolve",
+            "--input",
+            &serde_json::json!({
+                "goal": "Preparar uma agenda demo para parceiro",
+                "addon_dirs": [addon_dir.to_str().unwrap()]
+            })
+            .to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["capability_discovery_plan"]["schema_version"],
+        "forge.capability_discovery_plan.v1"
+    );
+}
+
+#[test]
 fn mcp_exposes_patch_plan_and_skill_guidance_for_agent_file_editing() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

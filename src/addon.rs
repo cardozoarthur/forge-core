@@ -34,6 +34,7 @@ use uuid::Uuid;
 
 pub const ADDON_CATALOG_SCHEMA_VERSION: &str = "forge.addon_catalog.v1";
 pub const CAPABILITY_RESOLUTION_SCHEMA_VERSION: &str = "forge.capability_resolution.v1";
+pub const CAPABILITY_DISCOVERY_PLAN_SCHEMA_VERSION: &str = "forge.capability_discovery_plan.v1";
 pub const ADDON_VALIDATION_SCHEMA_VERSION: &str = "forge.addon_validation.v1";
 pub const INSTALLED_ADDONS_SCHEMA_VERSION: &str = "forge.installed_addons.v1";
 pub const ADDON_LIFECYCLE_SCHEMA_VERSION: &str = "forge.addon_lifecycle.v1";
@@ -1316,6 +1317,72 @@ pub struct CapabilitySuggestion {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityDiscoveryPlan {
+    #[serde(default = "capability_discovery_plan_schema_version")]
+    pub schema_version: String,
+    pub status: String,
+    pub can_plan: bool,
+    pub missing_capability_count: usize,
+    pub suggestion_count: usize,
+    #[serde(default)]
+    pub ordered_steps: Vec<CapabilityDiscoveryStep>,
+    #[serde(default)]
+    pub next_commands: Vec<Vec<String>>,
+    #[serde(default)]
+    pub mcp_tools: Vec<String>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+impl Default for CapabilityDiscoveryPlan {
+    fn default() -> Self {
+        Self {
+            schema_version: capability_discovery_plan_schema_version(),
+            status: "capability_discovery_uncomputed".to_string(),
+            can_plan: false,
+            missing_capability_count: 0,
+            suggestion_count: 0,
+            ordered_steps: Vec::new(),
+            next_commands: Vec::new(),
+            mcp_tools: Vec::new(),
+            notes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityDiscoveryStep {
+    pub id: String,
+    pub order: usize,
+    pub capability_id: String,
+    pub required_by: String,
+    pub action: String,
+    pub status: String,
+    pub addon_id: String,
+    pub addon_name: String,
+    pub addon_version: String,
+    pub addon_lifecycle: String,
+    pub reason: String,
+    #[serde(default)]
+    pub commands: Vec<Vec<String>>,
+    #[serde(default)]
+    pub mcp_tools: Vec<String>,
+    #[serde(default)]
+    pub permission_ids: Vec<String>,
+    pub mutates_state: bool,
+    pub requires_human_approval: bool,
+    pub executes_child: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityResolutionReport {
     #[serde(default = "capability_resolution_schema_version")]
     pub schema_version: String,
@@ -1328,6 +1395,8 @@ pub struct CapabilityResolutionReport {
     pub missing_capabilities: Vec<MissingCapability>,
     #[serde(default)]
     pub capability_suggestions: Vec<CapabilitySuggestion>,
+    #[serde(default)]
+    pub capability_discovery_plan: CapabilityDiscoveryPlan,
     #[serde(default)]
     pub active_addons: Vec<String>,
     #[serde(default)]
@@ -1828,6 +1897,7 @@ impl Default for CapabilityResolutionReport {
             required_capabilities: Vec::new(),
             missing_capabilities: Vec::new(),
             capability_suggestions: Vec::new(),
+            capability_discovery_plan: CapabilityDiscoveryPlan::default(),
             active_addons: Vec::new(),
             available_capabilities: Vec::new(),
             workflow_extensions: Vec::new(),
@@ -5739,6 +5809,8 @@ pub fn resolve_goal_capabilities(goal: &str, catalog: &AddonCatalog) -> Capabili
         }
     }
     let capability_suggestions = build_capability_suggestions(catalog, &missing);
+    let capability_discovery_plan =
+        build_capability_discovery_plan(&missing, &capability_suggestions);
 
     let active_addons = required
         .iter()
@@ -5762,6 +5834,7 @@ pub fn resolve_goal_capabilities(goal: &str, catalog: &AddonCatalog) -> Capabili
         required_capabilities: required,
         missing_capabilities: missing,
         capability_suggestions,
+        capability_discovery_plan,
         active_addons,
         available_capabilities: available_capabilities.into_iter().collect(),
         workflow_extensions,
@@ -8818,6 +8891,159 @@ fn build_capability_suggestions(
     suggestions
 }
 
+fn build_capability_discovery_plan(
+    missing: &[MissingCapability],
+    suggestions: &[CapabilitySuggestion],
+) -> CapabilityDiscoveryPlan {
+    let mut ordered_steps = suggestions
+        .iter()
+        .enumerate()
+        .map(|(index, suggestion)| capability_discovery_step_from_suggestion(index + 1, suggestion))
+        .collect::<Vec<_>>();
+    if ordered_steps.is_empty() && !missing.is_empty() {
+        ordered_steps = missing
+            .iter()
+            .enumerate()
+            .map(|(index, missing_capability)| {
+                missing_capability_discovery_step(index + 1, missing_capability)
+            })
+            .collect();
+    }
+
+    let mut next_commands = Vec::new();
+    let mut mcp_tools = Vec::new();
+    for step in &ordered_steps {
+        if let Some(command) = step.commands.first() {
+            next_commands.push(command.clone());
+        }
+        extend_unique(&mut mcp_tools, step.mcp_tools.clone());
+    }
+
+    let status = if missing.is_empty() {
+        "capability_discovery_ready"
+    } else if suggestions.is_empty() {
+        "capability_discovery_missing_without_provider"
+    } else {
+        "capability_discovery_blocked"
+    };
+
+    CapabilityDiscoveryPlan {
+        schema_version: capability_discovery_plan_schema_version(),
+        status: status.to_string(),
+        can_plan: missing.is_empty(),
+        missing_capability_count: missing.len(),
+        suggestion_count: suggestions.len(),
+        ordered_steps,
+        next_commands,
+        mcp_tools,
+        notes: vec![
+            "Discovery plan is read-only: it does not install, enable, authorize or execute Addons."
+                .to_string(),
+            "Planning remains capability-first; domain behavior stays in Addons and the Core only orders safe resolution actions."
+                .to_string(),
+        ],
+    }
+}
+
+fn capability_discovery_step_from_suggestion(
+    order: usize,
+    suggestion: &CapabilitySuggestion,
+) -> CapabilityDiscoveryStep {
+    CapabilityDiscoveryStep {
+        id: format!("resolve_{}_{}", order, suggestion.capability_id),
+        order,
+        capability_id: suggestion.capability_id.clone(),
+        required_by: suggestion.required_by.clone(),
+        action: suggestion.action.clone(),
+        status: suggestion.status.clone(),
+        addon_id: suggestion.addon_id.clone(),
+        addon_name: suggestion.addon_name.clone(),
+        addon_version: suggestion.addon_version.clone(),
+        addon_lifecycle: suggestion.addon_lifecycle.clone(),
+        reason: suggestion.reason.clone(),
+        commands: suggestion.commands.clone(),
+        mcp_tools: suggestion.mcp_tools.clone(),
+        permission_ids: suggestion.permission_ids.clone(),
+        mutates_state: capability_discovery_action_mutates_state(&suggestion.action),
+        requires_human_approval: capability_discovery_action_requires_approval(suggestion),
+        executes_child: false,
+        package_id: suggestion.package_id.clone(),
+        package_source: suggestion.package_source.clone(),
+        repository: suggestion.repository.clone(),
+        channel: suggestion.channel.clone(),
+    }
+}
+
+fn missing_capability_discovery_step(
+    order: usize,
+    missing: &MissingCapability,
+) -> CapabilityDiscoveryStep {
+    CapabilityDiscoveryStep {
+        id: format!("inspect_missing_{}_{}", order, missing.id),
+        order,
+        capability_id: missing.id.clone(),
+        required_by: missing.required_by.clone(),
+        action: "inspect_registry".to_string(),
+        status: "missing_without_provider".to_string(),
+        addon_id: String::new(),
+        addon_name: String::new(),
+        addon_version: String::new(),
+        addon_lifecycle: "missing".to_string(),
+        reason: format!(
+            "capability `{}` is missing and no installed, inactive or marketplace Addon currently declares it: {}",
+            missing.id, missing.reason
+        ),
+        commands: vec![
+            vec![
+                "forge".to_string(),
+                "addons".to_string(),
+                "catalog".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            vec![
+                "forge".to_string(),
+                "addons".to_string(),
+                "marketplace".to_string(),
+                "--status".to_string(),
+                "installable".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        ],
+        mcp_tools: vec![
+            "forge.addons.catalog".to_string(),
+            "forge.addons.marketplace".to_string(),
+        ],
+        permission_ids: Vec::new(),
+        mutates_state: false,
+        requires_human_approval: false,
+        executes_child: false,
+        package_id: None,
+        package_source: None,
+        repository: None,
+        channel: None,
+    }
+}
+
+fn capability_discovery_action_mutates_state(action: &str) -> bool {
+    matches!(
+        action,
+        "authorize_permission"
+            | "enable_addon"
+            | "install_or_enable_addon"
+            | "install_package"
+            | "fetch_package"
+    )
+}
+
+fn capability_discovery_action_requires_approval(suggestion: &CapabilitySuggestion) -> bool {
+    matches!(
+        suggestion.action.as_str(),
+        "authorize_permission" | "enable_addon" | "install_or_enable_addon" | "install_package"
+    ) || !suggestion.permission_ids.is_empty()
+}
+
 fn append_marketplace_capability_suggestions(
     store: &ForgeStore,
     report: &mut CapabilityResolutionReport,
@@ -8879,6 +9105,10 @@ fn append_marketplace_capability_suggestions(
             .then_with(|| left.addon_id.cmp(&right.addon_id))
             .then_with(|| left.package_id.cmp(&right.package_id))
     });
+    report.capability_discovery_plan = build_capability_discovery_plan(
+        &report.missing_capabilities,
+        &report.capability_suggestions,
+    );
     Ok(())
 }
 
@@ -11373,6 +11603,10 @@ fn addon_manifest_schema_version() -> String {
 
 fn capability_resolution_schema_version() -> String {
     CAPABILITY_RESOLUTION_SCHEMA_VERSION.to_string()
+}
+
+fn capability_discovery_plan_schema_version() -> String {
+    CAPABILITY_DISCOVERY_PLAN_SCHEMA_VERSION.to_string()
 }
 
 fn addon_validation_schema_version() -> String {
