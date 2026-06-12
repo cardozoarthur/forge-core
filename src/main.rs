@@ -124,8 +124,9 @@ use forge_core::memory::{
 use forge_core::milestone::{
     attach_milestone_evidence, build_milestone_evidence_plan, build_milestone_export_demo,
     build_milestone_manifest_with_store, build_milestone_research, build_milestone_status,
-    build_replacement_cli_demo_with_options, MilestoneAttachEvidenceOptions,
-    MilestoneCliDemoOptions, MilestoneEvidencePlanOptions,
+    build_replacement_cli_demo_with_options, collect_milestone_evidence,
+    MilestoneAttachEvidenceOptions, MilestoneCliDemoOptions, MilestoneCollectEvidenceOptions,
+    MilestoneEvidencePlanOptions,
 };
 use forge_core::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
@@ -3355,6 +3356,25 @@ enum MilestoneCommands {
         connected_brain: Option<String>,
         #[arg(long = "connected-runtime")]
         connected_runtime: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    #[command(name = "collect-evidence")]
+    CollectEvidence {
+        #[arg(long, default_value = "0.5")]
+        version: String,
+        #[arg(long = "capability", alias = "capability-id")]
+        capability_id: String,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
+        #[arg(long = "connected-brain")]
+        connected_brain: Option<String>,
+        #[arg(long = "connected-runtime")]
+        connected_runtime: Option<String>,
+        #[arg(long = "approved-by")]
+        approved_by: String,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -8040,6 +8060,32 @@ fn run() -> Result<i32> {
                         project_root: project_root.as_deref(),
                         connected_brain: connected_brain.as_deref(),
                         connected_runtime: connected_runtime.as_deref(),
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            MilestoneCommands::CollectEvidence {
+                version,
+                capability_id,
+                project_root,
+                connected_brain,
+                connected_runtime,
+                approved_by,
+                origin,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = collect_milestone_evidence(
+                    &store,
+                    MilestoneCollectEvidenceOptions {
+                        version: &version,
+                        capability_id: &capability_id,
+                        project_root: project_root.as_deref(),
+                        connected_brain: connected_brain.as_deref(),
+                        connected_runtime: connected_runtime.as_deref(),
+                        approved_by: &approved_by,
+                        origin: &origin,
                     },
                 )?;
                 print_response(output, &report)?;

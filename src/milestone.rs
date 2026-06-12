@@ -17,6 +17,10 @@ use crate::ir::{
     ir_schema_version, CreativeArtifact, DesignToken, DocumentSection, DocumentSpec, ScreenSpec,
     SemanticAlias, TokenCollection, TokenType,
 };
+use crate::multimodal::{
+    build_multimodal_runtime_benchmark, resolve_multimodal_feature_flag,
+    MultimodalRuntimeBenchmarkOptions,
+};
 use crate::patch::{
     build_patch_apply, build_patch_diff, build_patch_plan, build_patch_restore, build_patch_revert,
     build_patch_review, PatchApplyArtifactRef, PatchDiffOptions, PatchPlanArtifactRef,
@@ -207,6 +211,35 @@ pub struct MilestoneEvidencePlanConfigCheck {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_id: Option<String>,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MilestoneCollectEvidenceOptions<'a> {
+    pub version: &'a str,
+    pub capability_id: &'a str,
+    pub project_root: Option<&'a Path>,
+    pub connected_brain: Option<&'a str>,
+    pub connected_runtime: Option<&'a str>,
+    pub approved_by: &'a str,
+    pub origin: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestoneCollectEvidenceReport {
+    pub schema_version: String,
+    pub milestone: String,
+    pub capability_id: String,
+    pub kind: String,
+    pub status: String,
+    pub project_root: String,
+    pub configured_evidence_source: String,
+    pub collection_promotion_ready: bool,
+    pub collection_artifact_path: String,
+    pub collection_artifact_sha256: String,
+    pub collection_summary: String,
+    pub attached_evidence: MilestoneAttachedEvidence,
+    pub promotion_impact: String,
+    pub next_action: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -683,6 +716,319 @@ pub fn build_milestone_evidence_plan(
     })
 }
 
+pub fn collect_milestone_evidence(
+    store: &ForgeStore,
+    options: MilestoneCollectEvidenceOptions<'_>,
+) -> Result<MilestoneCollectEvidenceReport> {
+    let version = normalize_required(options.version, "version")?;
+    let capability_id = normalize_required(options.capability_id, "capability")?;
+    let approved_by = normalize_required(options.approved_by, "approved-by")?;
+    let origin = normalize_required(options.origin, "origin")?;
+    let project_root = options
+        .project_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let plan = build_milestone_evidence_plan(
+        store,
+        MilestoneEvidencePlanOptions {
+            version: &version,
+            capability_id: &capability_id,
+            project_root: Some(&project_root),
+            connected_brain: options.connected_brain,
+            connected_runtime: options.connected_runtime,
+        },
+    )?;
+    if !plan.ready_to_collect_evidence {
+        bail!(
+            "milestone evidence inputs for `{capability_id}` are not ready: {}; {}",
+            plan.status,
+            plan.next_action
+        );
+    }
+
+    let collected = match capability_id.as_str() {
+        "replacement_grade_cli" => collect_replacement_grade_cli_evidence(
+            store,
+            &version,
+            &project_root,
+            options.connected_brain,
+            &origin,
+        )?,
+        "experimental_multimodal_runtime" => collect_experimental_multimodal_runtime_evidence(
+            store,
+            &version,
+            &project_root,
+            options.connected_runtime,
+            &approved_by,
+        )?,
+        _ => bail!(
+            "capability `{capability_id}` does not have an automatic milestone evidence collector"
+        ),
+    };
+
+    if !collected.collection_promotion_ready {
+        bail!(
+            "collector for `{capability_id}` produced non-promotion-ready evidence: {}",
+            collected.collection_summary
+        );
+    }
+
+    let attached_evidence = attach_milestone_evidence(
+        store,
+        MilestoneAttachEvidenceOptions {
+            version: &version,
+            capability_id: &capability_id,
+            kind: &collected.kind,
+            summary: &collected.collection_summary,
+            artifact_path: &collected.collection_artifact_path,
+            approved_by: &approved_by,
+            origin: &origin,
+        },
+    )?;
+
+    Ok(MilestoneCollectEvidenceReport {
+        schema_version: "forge.milestone.collect_evidence.v1".to_string(),
+        milestone: version,
+        capability_id,
+        kind: collected.kind,
+        status: "collected_and_attached".to_string(),
+        project_root: project_root.display().to_string(),
+        configured_evidence_source: collected.configured_evidence_source,
+        collection_promotion_ready: collected.collection_promotion_ready,
+        collection_artifact_path: collected.collection_artifact_path.display().to_string(),
+        collection_artifact_sha256: collected.collection_artifact_sha256,
+        collection_summary: collected.collection_summary,
+        attached_evidence,
+        promotion_impact: "collected_and_attached_not_auto_promoted".to_string(),
+        next_action:
+            "Inspect `forge milestone manifest --version 0.5 --output json`; promotion remains gated by all required evidence."
+                .to_string(),
+    })
+}
+
+struct CollectedMilestoneEvidence {
+    kind: String,
+    configured_evidence_source: String,
+    collection_promotion_ready: bool,
+    collection_artifact_path: PathBuf,
+    collection_artifact_sha256: String,
+    collection_summary: String,
+}
+
+fn collect_replacement_grade_cli_evidence(
+    store: &ForgeStore,
+    version: &str,
+    project_root: &Path,
+    connected_brain: Option<&str>,
+    origin: &str,
+) -> Result<CollectedMilestoneEvidence> {
+    let report = build_replacement_cli_demo_with_options(
+        store,
+        origin,
+        MilestoneCliDemoOptions {
+            project_root: Some(project_root),
+            connected_brain,
+        },
+    )?;
+    let external_brain = report
+        .flows
+        .iter()
+        .find(|flow| flow.kind == "connected_external_brain")
+        .and_then(|flow| flow.external_brain.as_ref())
+        .context("replacement-grade CLI demo did not produce connected external brain evidence")?;
+    let provider_contract = &external_brain.provider_contract;
+    let collection_promotion_ready = provider_contract.promotion_ready;
+    let collection_summary = if collection_promotion_ready {
+        format!(
+            "Connected external brain provider `{}` executed through Forge and produced promotion-ready provider evidence.",
+            provider_contract.provider_id
+        )
+    } else {
+        format!(
+            "Connected external brain provider `{}` executed through Forge but did not satisfy the promotion-ready provider contract.",
+            provider_contract.provider_id
+        )
+    };
+    let payload = serde_json::json!({
+        "schema_version": "forge.milestone.collection.external_brain_provider_execution.v1",
+        "milestone": version,
+        "capability_id": "replacement_grade_cli",
+        "kind": "external_brain_provider_execution",
+        "collected_at": Utc::now().to_rfc3339(),
+        "project_root": project_root.display().to_string(),
+        "connected_brain": connected_brain.unwrap_or(&provider_contract.provider_id),
+        "collection_promotion_ready": provider_contract.promotion_ready,
+        "provider_contract": &provider_contract,
+        "external_brain": &external_brain,
+        "source_demo": &report,
+    });
+    let (collection_artifact_path, collection_artifact_sha256) =
+        write_milestone_collection_artifact(
+            store,
+            version,
+            "replacement_grade_cli",
+            "external_brain_provider_execution",
+            &payload,
+        )?;
+
+    Ok(CollectedMilestoneEvidence {
+        kind: "external_brain_provider_execution".to_string(),
+        configured_evidence_source: format!(
+            "connected_brain_provider:{}",
+            provider_contract.provider_id
+        ),
+        collection_promotion_ready,
+        collection_artifact_path,
+        collection_artifact_sha256,
+        collection_summary,
+    })
+}
+
+fn collect_experimental_multimodal_runtime_evidence(
+    store: &ForgeStore,
+    version: &str,
+    project_root: &Path,
+    connected_runtime: Option<&str>,
+    approved_by: &str,
+) -> Result<CollectedMilestoneEvidence> {
+    let (runtime_id, runtime_capability) =
+        selected_multimodal_runtime_capability(project_root, connected_runtime)?;
+    let feature_flag = resolve_multimodal_feature_flag(false, Some(project_root));
+    let report = build_multimodal_runtime_benchmark(MultimodalRuntimeBenchmarkOptions {
+        capability_id: &runtime_capability,
+        fixture_id: "static_image_labels",
+        enable_experimental: feature_flag.enabled,
+        project_root: Some(project_root),
+        approved_by: Some(approved_by),
+        confirm_runtime_execution: true,
+        allow_model: true,
+        connected_runtime: Some(&runtime_id),
+    })?;
+    let collection_promotion_ready = report.promotion_ready;
+    let collection_summary = if collection_promotion_ready {
+        format!(
+            "Connected multimodal runtime `{}` produced promotion-ready production benchmark evidence for `{}`.",
+            runtime_id, runtime_capability
+        )
+    } else {
+        format!(
+            "Connected multimodal runtime `{}` ran but did not satisfy production benchmark promotion gates for `{}`.",
+            runtime_id, runtime_capability
+        )
+    };
+    let payload = serde_json::json!({
+        "schema_version": "forge.milestone.collection.production_runtime_benchmark.v1",
+        "milestone": version,
+        "capability_id": "experimental_multimodal_runtime",
+        "kind": "production_runtime_benchmark",
+        "collected_at": Utc::now().to_rfc3339(),
+        "project_root": project_root.display().to_string(),
+        "connected_runtime": &runtime_id,
+        "runtime_capability": &runtime_capability,
+        "collection_promotion_ready": report.promotion_ready,
+        "runtime_benchmark": &report,
+    });
+    let (collection_artifact_path, collection_artifact_sha256) =
+        write_milestone_collection_artifact(
+            store,
+            version,
+            "experimental_multimodal_runtime",
+            "production_runtime_benchmark",
+            &payload,
+        )?;
+
+    Ok(CollectedMilestoneEvidence {
+        kind: "production_runtime_benchmark".to_string(),
+        configured_evidence_source: format!("connected_multimodal_runtime:{runtime_id}"),
+        collection_promotion_ready,
+        collection_artifact_path,
+        collection_artifact_sha256,
+        collection_summary,
+    })
+}
+
+fn selected_multimodal_runtime_capability(
+    project_root: &Path,
+    connected_runtime: Option<&str>,
+) -> Result<(String, String)> {
+    let manifest_path = project_root.join(".forge/multimodal-runtimes.json");
+    let manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path)?)
+        .with_context(|| {
+            format!(
+                "invalid multimodal runtime manifest {}",
+                manifest_path.display()
+            )
+        })?;
+    let runtimes = manifest
+        .get("runtimes")
+        .and_then(serde_json::Value::as_array)
+        .context("multimodal runtime manifest must contain a runtimes array")?;
+    let selected = runtimes.iter().find(|runtime| {
+        let id = runtime
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        connected_runtime
+            .map(|requested| requested == id)
+            .unwrap_or_else(|| runtime.get("production").is_some())
+    });
+    let runtime = selected.context("no selected connected multimodal runtime was found")?;
+    let runtime_id = runtime
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .context("selected connected multimodal runtime is missing id")?
+        .to_string();
+    let runtime_capability = runtime
+        .get("capabilities")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|capabilities| {
+            capabilities
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .next()
+        })
+        .unwrap_or("image_understanding")
+        .to_string();
+    Ok((runtime_id, runtime_capability))
+}
+
+fn write_milestone_collection_artifact<T: Serialize>(
+    store: &ForgeStore,
+    version: &str,
+    capability_id: &str,
+    kind: &str,
+    payload: &T,
+) -> Result<(PathBuf, String)> {
+    let dir = store
+        .base_dir()
+        .join("tmp")
+        .join("milestone")
+        .join(sanitize_milestone_component(version));
+    fs::create_dir_all(&dir).with_context(|| {
+        format!(
+            "failed to create milestone collection artifact directory {}",
+            dir.display()
+        )
+    })?;
+    let file_name = format!(
+        "{}-{}-collection-{}.json",
+        sanitize_milestone_component(capability_id),
+        sanitize_milestone_component(kind),
+        Utc::now().timestamp_millis()
+    );
+    let path = dir.join(file_name);
+    let bytes = serde_json::to_vec_pretty(payload)?;
+    let sha256 = hex_sha256(&bytes);
+    fs::write(&path, bytes).with_context(|| {
+        format!(
+            "failed to write milestone collection artifact {}",
+            path.display()
+        )
+    })?;
+    Ok((path, sha256))
+}
+
 pub fn milestone_required_attached_evidence_kinds(capability_id: &str) -> Vec<String> {
     match capability_id {
         "replacement_grade_cli" => vec![
@@ -714,6 +1060,10 @@ fn plan_replacement_grade_cli_evidence(
                 CONNECTED_BRAIN_RUNTIMES_RELATIVE_PATH
             ),
         });
+        evidence_collection_commands.push(format!(
+            "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --project-root {} --connected-brain <provider-id> --approved-by <operator> --origin codex --output json",
+            project_root.display()
+        ));
         evidence_collection_commands.push(format!(
             "forge milestone cli-demo --origin codex --project-root {} --connected-brain <provider-id> --output json",
             project_root.display()
@@ -783,6 +1133,11 @@ fn plan_replacement_grade_cli_evidence(
     });
     configured_evidence_sources.push(format!("connected_brain_provider:{}", provider.id));
     evidence_collection_commands.push(format!(
+        "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --project-root {} --connected-brain {} --approved-by <operator> --origin codex --output json",
+        project_root.display(),
+        provider.id
+    ));
+    evidence_collection_commands.push(format!(
         "forge milestone cli-demo --origin codex --project-root {} --connected-brain {} --output json",
         project_root.display(),
         provider.id
@@ -841,6 +1196,10 @@ fn plan_experimental_multimodal_evidence(
             summary: "Create .forge/multimodal-runtimes.json with a production connected runtime."
                 .to_string(),
         });
+        evidence_collection_commands.push(format!(
+            "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root {} --connected-runtime <runtime-id> --approved-by <operator> --output json",
+            project_root.display()
+        ));
         evidence_collection_commands.push(format!(
             "forge multimodal runtime-benchmark --capability image_understanding --fixture static_image_labels --project-root {} --connected-runtime <runtime-id> --approved-by <operator> --confirm-runtime-execution --allow-model --output json",
             project_root.display()
@@ -964,6 +1323,11 @@ fn plan_experimental_multimodal_evidence(
         },
     });
     configured_evidence_sources.push(format!("connected_multimodal_runtime:{runtime_id}"));
+    evidence_collection_commands.push(format!(
+        "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root {} --connected-runtime {} --approved-by <operator> --output json",
+        project_root.display(),
+        runtime_id
+    ));
     evidence_collection_commands.push(format!(
         "forge multimodal runtime-benchmark --capability {} --fixture static_image_labels --project-root {} --connected-runtime {} --approved-by <operator> --confirm-runtime-execution --allow-model --output json",
         capability,
@@ -2431,6 +2795,20 @@ printf 'connected_external_brain_stub_ok\n'
         && model_execution_allowed
         && real_provider_execution_allowed
         && receipt.stdout_sha256.is_some();
+    let provider_approval_recorded = approved_by
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        && approval_ref
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+    let provider_model_declared = !model_id.trim().is_empty() && model_id != "not_declared";
+    let provider_promotion_ready = provider_selection.is_some()
+        && provider_contract_valid
+        && provider_approval_recorded
+        && provider_model_declared
+        && allow_model_execution
+        && provider_declared_model_execution
+        && real_provider_execution_performed;
     let mut provider_validation_evidence = vec![
         "provider_process_ran_under_forge_harness".to_string(),
         "provider_command_hash_recorded".to_string(),
@@ -2472,7 +2850,7 @@ printf 'connected_external_brain_stub_ok\n'
         output_latency_ms,
         provider_declared_model_execution,
         real_provider_execution_performed,
-        promotion_ready: false,
+        promotion_ready: provider_promotion_ready,
         validation_evidence: provider_validation_evidence,
     };
     let validation_status =

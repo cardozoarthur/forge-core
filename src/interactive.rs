@@ -4983,6 +4983,7 @@ fn release_gate_next_commands(capability_id: &str) -> Vec<String> {
     match capability_id {
         "replacement_grade_cli" => vec![
             "forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root <project-root> --connected-brain <provider-id> --output json".to_string(),
+            "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --project-root <project-root> --connected-brain <provider-id> --approved-by <operator> --origin codex --output json".to_string(),
             "forge milestone cli-demo --origin codex --output json".to_string(),
             "forge milestone attach-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --summary \"Operator-approved provider receipt.\" --artifact <path> --approved-by <operator> --output json".to_string(),
             "forge interactive harness --output json".to_string(),
@@ -4990,6 +4991,7 @@ fn release_gate_next_commands(capability_id: &str) -> Vec<String> {
         ],
         "experimental_multimodal_runtime" => vec![
             "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --output json".to_string(),
+            "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --approved-by <operator> --output json".to_string(),
             "forge multimodal status --output json".to_string(),
             "forge multimodal readiness --capability image_understanding --output json".to_string(),
             "forge multimodal benchmark-template --capability image_understanding --output json"

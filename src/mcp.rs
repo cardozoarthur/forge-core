@@ -100,8 +100,9 @@ use crate::memory::{
 use crate::milestone::{
     attach_milestone_evidence, build_milestone_evidence_plan, build_milestone_export_demo,
     build_milestone_manifest_with_store, build_milestone_research, build_milestone_status,
-    build_replacement_cli_demo_with_options, MilestoneAttachEvidenceOptions,
-    MilestoneCliDemoOptions, MilestoneEvidencePlanOptions,
+    build_replacement_cli_demo_with_options, collect_milestone_evidence,
+    MilestoneAttachEvidenceOptions, MilestoneCliDemoOptions, MilestoneCollectEvidenceOptions,
+    MilestoneEvidencePlanOptions,
 };
 use crate::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
@@ -1662,6 +1663,18 @@ struct MilestoneEvidencePlanInput {
     project_root: Option<String>,
     connected_brain: Option<String>,
     connected_runtime: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MilestoneCollectEvidenceInput {
+    version: Option<String>,
+    capability: Option<String>,
+    capability_id: Option<String>,
+    project_root: Option<String>,
+    connected_brain: Option<String>,
+    connected_runtime: Option<String>,
+    approved_by: String,
+    origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5730,6 +5743,35 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.milestone.collect_evidence",
+                "Collect and Attach Milestone Evidence",
+                "Run a ready, approval-gated milestone evidence source, persist the generated receipt artifact and attach it to the milestone without auto-promoting.",
+                object_schema(&[
+                    ("version", "string", "milestone version, currently 0.5"),
+                    ("capability_id", "string", "milestone capability id"),
+                    ("project_root", "string", "project root containing .forge manifests"),
+                    ("connected_brain", "string", "optional connected brain provider id"),
+                    ("connected_runtime", "string", "optional connected multimodal runtime id"),
+                    ("approved_by", "string", "operator approving evidence collection and attachment"),
+                    ("origin", "string", "codex|opencode|gemini|forge_cli|skill|mcp"),
+                ], &["capability_id", "approved_by"]),
+                "forge.milestone.collect_evidence.v1",
+                &[
+                    "forge",
+                    "milestone",
+                    "collect-evidence",
+                    "--version",
+                    "0.5",
+                    "--capability",
+                    "<capability-id>",
+                    "--approved-by",
+                    "<operator>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, true),
+            ),
+            tool(
                 "forge.milestone.research",
                 "Inspect Forge Milestone Research",
                 "Inspect the source-grounded Forge 0.5 creative-runtime research baseline, validation gates and workflow templates.",
@@ -8842,6 +8884,28 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     project_root: project_root.as_deref(),
                     connected_brain: input.connected_brain.as_deref(),
                     connected_runtime: input.connected_runtime.as_deref(),
+                },
+            )?)?
+        }
+        "forge.milestone.collect_evidence" => {
+            let input: MilestoneCollectEvidenceInput = parse_input(input)?;
+            let version = input.version.unwrap_or_else(|| "0.5".to_string());
+            let capability_id = input
+                .capability_id
+                .or(input.capability)
+                .context("capability_id is required")?;
+            let project_root = input.project_root.map(PathBuf::from);
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(collect_milestone_evidence(
+                store,
+                MilestoneCollectEvidenceOptions {
+                    version: &version,
+                    capability_id: &capability_id,
+                    project_root: project_root.as_deref(),
+                    connected_brain: input.connected_brain.as_deref(),
+                    connected_runtime: input.connected_runtime.as_deref(),
+                    approved_by: &input.approved_by,
+                    origin: &origin,
                 },
             )?)?
         }

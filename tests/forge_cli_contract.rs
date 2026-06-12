@@ -3484,6 +3484,12 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
             && tool["async_safe"] == true
             && tool["mutates_workflow"] == false
     }));
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.milestone.collect_evidence"
+            && tool["output_schema"] == "forge.milestone.collect_evidence.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == true
+    }));
 
     let call = forge()
         .arg("--store")
@@ -4014,6 +4020,227 @@ fn milestone_evidence_plan_inspects_project_inputs_without_collecting_evidence()
             .as_str()
             .unwrap()
             .contains("--kind production_runtime_benchmark")));
+}
+
+#[test]
+fn milestone_collect_evidence_runs_ready_sources_and_attaches_receipts() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("collect-project");
+    let forge_dir = project.join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+
+    let provider_script = temp.path().join("real-provider.sh");
+    fs::write(
+        &provider_script,
+        r#"#!/bin/sh
+set -eu
+mkdir -p brain-output
+cat > brain-output/plan.json <<EOF
+{"schema_version":"forge.connected_external_brain.provider_plan.v1","workflow_id":"$FORGE_WORKFLOW_ID","task_id":"$FORGE_TASK_ID","run_id":"$FORGE_RUN_ID","brain_id":"real-provider","model_execution_performed":true}
+EOF
+cat > brain-output/provider-output.json <<EOF
+{"schema_version":"forge.connected_external_brain.provider_output.v1","provider_id":"real-provider","quality_score":0.98,"latency_ms":10,"model_execution_performed":true,"real_provider_execution_performed":true}
+EOF
+cat > brain-output/research.md <<EOF
+# Real provider evidence
+
+- Workflow: $FORGE_WORKFLOW_ID
+- Provider: real-provider
+EOF
+cat > brain-output/code.rs <<'RS'
+pub fn real_provider_marker() -> &'static str {
+    "real-provider"
+}
+RS
+printf 'real_provider_ok\n'
+"#,
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&provider_script).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&provider_script, perms).unwrap();
+
+    fs::write(
+        forge_dir.join("connected-brain-runtimes.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "providers": [{
+                "id": "real-provider",
+                "brain_id": "real-provider",
+                "model_id": "real-provider-model-v1",
+                "provider_class": "external_cli",
+                "capabilities": ["replacement_grade_cli"],
+                "command": [provider_script.display().to_string()],
+                "approved_by": "arthur",
+                "approval_ref": "provider-approval-collect-001",
+                "allow_model_execution": true,
+                "network_access": false,
+                "device_access": false,
+                "external_resources_mutated": false
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        forge_dir.join("multimodal.json"),
+        r#"{"experimental_enabled":true,"approved_by":"arthur","reason":"collect production runtime evidence","scope":"project"}"#,
+    )
+    .unwrap();
+    fs::write(
+        forge_dir.join("multimodal-runtimes.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "runtimes": [{
+                "id": "production-vision-runtime",
+                "model_id": "vision-prod-model-v3",
+                "capabilities": ["image_understanding"],
+                "probe_command": [
+                    "/bin/sh",
+                    "-c",
+                    "printf '{\"labels\":[\"document\",\"production-runtime\"],\"quality_score\":0.97,\"latency_ms\":12}'"
+                ],
+                "network_access": false,
+                "device_access": false,
+                "production": {
+                    "approved_by": "arthur",
+                    "approval_ref": "runtime-approval-collect-001",
+                    "runtime_version": "vision-runtime 3.2.1",
+                    "model_manifest_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "model_license": "internal-production-approved",
+                    "evidence_artifacts": ["benchmarks/vision-prod-collect.json"],
+                    "min_quality_score": 0.95,
+                    "max_latency_ms": 20
+                }
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let provider_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "collect-evidence",
+            "--version",
+            "0.5",
+            "--capability",
+            "replacement_grade_cli",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args([
+            "--connected-brain",
+            "real-provider",
+            "--approved-by",
+            "arthur",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let provider_json: Value = serde_json::from_slice(&provider_output).unwrap();
+    assert_eq!(
+        provider_json["schema_version"],
+        "forge.milestone.collect_evidence.v1"
+    );
+    assert_eq!(provider_json["capability_id"], "replacement_grade_cli");
+    assert_eq!(provider_json["kind"], "external_brain_provider_execution");
+    assert_eq!(provider_json["status"], "collected_and_attached");
+    assert_eq!(provider_json["collection_promotion_ready"], true);
+    assert_eq!(
+        provider_json["attached_evidence"]["schema_version"],
+        "forge.milestone.attached_evidence.v1"
+    );
+    assert_eq!(
+        provider_json["attached_evidence"]["kind"],
+        "external_brain_provider_execution"
+    );
+    assert!(
+        provider_json["attached_evidence"]["global_event_id"]
+            .as_i64()
+            .unwrap()
+            > 0
+    );
+
+    let multimodal_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "collect-evidence",
+            "--version",
+            "0.5",
+            "--capability",
+            "experimental_multimodal_runtime",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args([
+            "--connected-runtime",
+            "production-vision-runtime",
+            "--approved-by",
+            "arthur",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let multimodal_json: Value = serde_json::from_slice(&multimodal_output).unwrap();
+    assert_eq!(
+        multimodal_json["schema_version"],
+        "forge.milestone.collect_evidence.v1"
+    );
+    assert_eq!(
+        multimodal_json["capability_id"],
+        "experimental_multimodal_runtime"
+    );
+    assert_eq!(multimodal_json["kind"], "production_runtime_benchmark");
+    assert_eq!(multimodal_json["status"], "collected_and_attached");
+    assert_eq!(multimodal_json["collection_promotion_ready"], true);
+    assert_eq!(
+        multimodal_json["attached_evidence"]["kind"],
+        "production_runtime_benchmark"
+    );
+
+    let manifest_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "manifest",
+            "--version",
+            "0.5",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest_output).unwrap();
+    let attached = manifest_json["attached_evidence"].as_array().unwrap();
+    assert!(attached.iter().any(|evidence| {
+        evidence["capability_id"] == "replacement_grade_cli"
+            && evidence["kind"] == "external_brain_provider_execution"
+    }));
+    assert!(attached.iter().any(|evidence| {
+        evidence["capability_id"] == "experimental_multimodal_runtime"
+            && evidence["kind"] == "production_runtime_benchmark"
+    }));
+    assert_eq!(manifest_json["promotion_decision"]["decision"], "fail");
 }
 
 #[test]
@@ -41278,6 +41505,10 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
                 .as_str()
                 .unwrap()
                 .contains("forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli"))
+            && gate["next_commands"].as_array().unwrap().iter().any(|command| command
+                .as_str()
+                .unwrap()
+                .contains("forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli"))
     }));
     assert!(json["gate_cards"].as_array().unwrap().iter().any(|gate| {
         gate["capability_id"] == "experimental_multimodal_runtime"
@@ -41311,6 +41542,10 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
                 .as_str()
                 .unwrap()
                 .contains("forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime"))
+            && gate["next_commands"].as_array().unwrap().iter().any(|command| command
+                .as_str()
+                .unwrap()
+                .contains("forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime"))
     }));
     assert!(json["commands"]["refresh"]
         .as_array()
