@@ -49271,6 +49271,251 @@ fn interactive_improvement_loop_command_home_slash_and_mcp_surface_are_dedicated
 }
 
 #[test]
+fn interactive_workflow_mutation_planner_is_home_cli_slash_action_and_mcp_surface() {
+    use forge_core::ops::{create_modifier_proposal, OpsModifierProposalInput};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Operate a live workflow that needs strategic replanning",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap().to_string();
+
+    let store = ForgeStore::open(&store_path).unwrap();
+    create_modifier_proposal(
+        &store,
+        OpsModifierProposalInput {
+            workflow_id: &workflow_id,
+            target_kind: "workflow_goal",
+            task_id: None,
+            title: "Replanejar objetivo ativo",
+            summary: "Adicionar proposta pendente para a TUI de mutação.",
+            rationale: "A operação assistida precisa revisar goal sem parar o workflow.",
+            proposed_goal: Some("Operate a live workflow with replanning evidence"),
+            proposed_title: None,
+            proposed_expected_output: None,
+            author: "codex",
+        },
+    )
+    .unwrap();
+    drop(store);
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "interactive",
+            "workflow-mutation",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let panel: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        panel["schema_version"],
+        "forge.interactive.workflow_mutation.v1"
+    );
+    assert_eq!(panel["status"], "workflow_mutation_actionable");
+    assert_eq!(panel["workflow_count"], 1);
+    assert_eq!(panel["pending_modifier_proposal_count"], 1);
+    assert!(panel["workflow_cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|card| {
+            card["workflow_id"] == workflow_id
+                && card["mutable_targets"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("workflow_goal"))
+                && card["commands"]["update_goal"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!(workflow_id))
+        }));
+    assert!(panel["proposal_cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|proposal| {
+            proposal["workflow_id"] == workflow_id
+                && proposal["target_kind"] == "workflow_goal"
+                && proposal["status"] == "pending"
+        }));
+    assert!(panel["commands"]["refresh"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("workflow-mutation")));
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "interactive",
+            "workflow-mutation",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Workflow mutation: workflow_mutation_actionable"));
+    assert!(text.contains("update-goal"));
+    assert!(text.contains("update-node-brain"));
+
+    let home_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["workflow_mutation_panel"]["schema_version"],
+        "forge.interactive.workflow_mutation.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["workflow_mutation_panel"]["pending_modifier_proposal_count"],
+        1
+    );
+    assert!(home["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/workflow-mutation")));
+    assert!(home["dashboard"]["useful_next_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge interactive workflow-mutation --output json"
+        )));
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|region| region["widgets"].as_array().unwrap().iter())
+        .any(|widget| widget["widget_id"] == "workflow_mutation_panel"
+            && widget["renderer_family"] == "workflow_mutation_renderer"));
+
+    let slash_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "interactive",
+            "slash-commands",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let slash_json: Value = serde_json::from_slice(&slash_output).unwrap();
+    let slash = find_slash_command(&slash_json, "/workflow-mutation");
+    assert_eq!(slash["risk_level"], "low");
+    assert_eq!(slash["mutates_workflow"], false);
+    assert!(slash["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("workflow-mutation")));
+
+    let action_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "interactive",
+            "action-registry",
+            "--query",
+            "workflow mutation",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let action_json: Value = serde_json::from_slice(&action_output).unwrap();
+    assert!(action_json["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["action_id"] == "workflow.mutation"
+            && action["source_panel"] == "workflow_mutation_panel"));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.workflow_mutation");
+    assert_eq!(
+        tool["output_schema"],
+        "forge.interactive.workflow_mutation.v1"
+    );
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.interactive.workflow_mutation",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp_json["status"], "ok");
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.workflow_mutation.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["workflow_cards"][0]["workflow_id"],
+        serde_json::json!(workflow_id)
+    );
+}
+
+#[test]
 fn interactive_workflow_sidebar_groups_workflows_for_operator_navigation() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -49571,6 +49816,7 @@ fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
         "shows_addons_and_capabilities",
         "shows_costs",
         "shows_improvement_loop",
+        "shows_workflow_mutation_replanning",
         "shows_handoffs_and_approvals",
         "shows_operating_context",
         "runs_end_to_end_demo_flow",
@@ -49610,6 +49856,12 @@ fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
         .unwrap()
         .contains(&serde_json::json!(
             "forge interactive improvement-loop --output json"
+        )));
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge interactive workflow-mutation --output json"
         )));
     assert!(json["commands"]
         .as_array()

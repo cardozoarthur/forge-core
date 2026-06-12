@@ -103,8 +103,9 @@ use crate::interactive::{
     build_interactive_release_gates, build_interactive_replacement_cli,
     build_interactive_schedules, build_interactive_sessions, build_interactive_structured_logs,
     build_interactive_task_board, build_interactive_token_usage, build_interactive_workflow_dag,
-    build_interactive_workflow_sidebar, route_interactive_input, slash_command_catalog,
-    InteractiveHarnessOptions, InteractiveHomeOptions, InteractiveSessionsOptions,
+    build_interactive_workflow_mutation, build_interactive_workflow_sidebar,
+    route_interactive_input, slash_command_catalog, InteractiveHarnessOptions,
+    InteractiveHomeOptions, InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -3342,6 +3343,21 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.task_board.v1",
                 &["forge", "interactive", "task-board", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.workflow_mutation",
+                "Inspect Interactive Workflow Mutation Planner",
+                "Return the Forge workflow mutation and replanning surface with DAG, task-board, modifier lane, handoffs, costs, proposals and safe mutation commands without applying mutations.",
+                object_schema(&[], &[]),
+                "forge.interactive.workflow_mutation.v1",
+                &[
+                    "forge",
+                    "interactive",
+                    "workflow-mutation",
+                    "--output",
+                    "json",
+                ],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7764,6 +7780,9 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.interactive.task_board" => {
             serde_json::to_value(build_interactive_task_board(store)?)?
+        }
+        "forge.interactive.workflow_mutation" => {
+            serde_json::to_value(build_interactive_workflow_mutation(store)?)?
         }
         "forge.interactive.replacement_cli" => {
             serde_json::to_value(build_interactive_replacement_cli(store)?)?

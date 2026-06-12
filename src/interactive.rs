@@ -57,8 +57,9 @@ use crate::multimodal::{
     evaluate_multimodal_guard, resolve_multimodal_feature_flag, MultimodalReadinessOptions,
 };
 use crate::ops::{
-    build_addon_view_renderer_report, build_operational_digital_twin, load_modifier_lane,
-    OpsAddonViewRendererReport, OpsModifierLane, OpsModifierProposal, OpsOperationalDigitalTwin,
+    build_addon_view_renderer_report, build_operational_digital_twin, create_modifier_proposal,
+    load_modifier_lane, OpsAddonViewRendererReport, OpsModifierLane, OpsModifierProposal,
+    OpsModifierProposalInput, OpsOperationalDigitalTwin,
 };
 use crate::registry::{
     list_workflows_with_filters, RegistryContextActionRef, RegistryContextActionSummary,
@@ -119,6 +120,7 @@ const INTERACTIVE_OPERATIONAL_COCKPIT_SCHEMA_VERSION: &str =
     "forge.interactive.operational_cockpit.v1";
 const INTERACTIVE_OPERATIONAL_MODIFIER_LANE_SCHEMA_VERSION: &str =
     "forge.interactive.operational_modifier_lane.v1";
+const INTERACTIVE_WORKFLOW_MUTATION_SCHEMA_VERSION: &str = "forge.interactive.workflow_mutation.v1";
 const INTERACTIVE_ADDON_CAPABILITY_SCHEMA_VERSION: &str = "forge.interactive.addon_capability.v1";
 const INTERACTIVE_ARCHITECTURE_COMPASS_SCHEMA_VERSION: &str =
     "forge.interactive.architecture_compass.v1";
@@ -194,6 +196,7 @@ pub struct InteractiveDashboard {
     pub identity_panel: InteractiveIdentityPanel,
     pub dag_panel: InteractiveWorkflowDagPanel,
     pub task_board_panel: InteractiveTaskBoardPanel,
+    pub workflow_mutation_panel: InteractiveWorkflowMutationPanel,
     pub artifact_panel: InteractiveArtifactPanel,
     pub schedule_panel: InteractiveSchedulePanel,
     pub event_panel: InteractiveEventPanel,
@@ -1723,6 +1726,81 @@ pub struct InteractiveTaskBoardTaskCard {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowMutationPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub operation_mode: String,
+    pub workflow_count: usize,
+    pub active_workflow_count: usize,
+    pub mutable_workflow_count: usize,
+    pub task_count: usize,
+    pub ready_handoff_count: usize,
+    pub human_wait_count: usize,
+    pub checkpoint_resume_candidate_count: usize,
+    pub artifact_count: usize,
+    pub pending_modifier_proposal_count: usize,
+    pub applied_modifier_proposal_count: usize,
+    pub event_count: usize,
+    pub estimated_cost_total_usd: f64,
+    pub workflow_cards: Vec<InteractiveWorkflowMutationCard>,
+    pub proposal_cards: Vec<InteractiveOperationalModifierProposalCard>,
+    pub commands: InteractiveWorkflowMutationCommands,
+    pub next_actions: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowMutationCard {
+    pub workflow_id: String,
+    pub lifecycle_state: String,
+    pub goal: String,
+    pub active: bool,
+    pub task_count: usize,
+    pub ready_handoffs: usize,
+    pub human_waits: usize,
+    pub checkpoint_resume_candidates: usize,
+    pub artifact_count: usize,
+    pub dag_node_count: usize,
+    pub dag_edge_count: usize,
+    pub mutable_targets: Vec<String>,
+    pub recommended_action: String,
+    pub commands: InteractiveWorkflowMutationWorkflowCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowMutationWorkflowCommands {
+    pub inspect: Vec<String>,
+    pub task_board: Vec<String>,
+    pub workflow_dag: Vec<String>,
+    pub validate: Vec<String>,
+    pub update_goal: Vec<String>,
+    pub update_node_brain: Vec<String>,
+    pub attach_artifact: Vec<String>,
+    pub context: Vec<String>,
+    pub handoff: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowMutationCommands {
+    pub refresh: Vec<String>,
+    pub task_board: Vec<String>,
+    pub workflow_dag: Vec<String>,
+    pub operational_cockpit: Vec<String>,
+    pub action_registry: Vec<String>,
+    pub ops_console: Vec<String>,
+    pub propose_goal_route: String,
+    pub propose_task_route: String,
+    pub apply_proposal_route: String,
+    pub update_goal: Vec<String>,
+    pub update_node_brain: Vec<String>,
+    pub attach_artifact: Vec<String>,
+    pub validate: Vec<String>,
+    pub context: Vec<String>,
+    pub handoff: Vec<String>,
+    pub structured_logs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct InteractiveArtifactPanel {
     pub schema_version: String,
     pub status: String,
@@ -2502,6 +2580,8 @@ pub struct OperationalTuiSmokeDashboard {
     pub cost_estimated_usd: f64,
     pub improvement_candidate_count: usize,
     pub structured_log_count: usize,
+    pub workflow_mutation_workflow_count: usize,
+    pub pending_mutation_proposal_count: usize,
     pub ready_handoff_count: usize,
     pub pending_approval_count: usize,
 }
@@ -2884,6 +2964,14 @@ pub fn build_interactive_home_with_options(
         &modifier_lane,
         &event_runtime_panel,
     );
+    let workflow_mutation_panel = build_workflow_mutation_panel(
+        &workflows.workflows,
+        &task_board_panel,
+        &dag_panel,
+        &operational_cockpit_panel.modifier_lane,
+        &event_panel,
+        &cost_panel,
+    );
     let ui_composition_panel = build_ui_composition_panel(&addon_renderer_report);
     let architecture_compass_panel = build_architecture_compass_panel(ArchitectureCompassInputs {
         workflows: &workflows,
@@ -2897,6 +2985,7 @@ pub fn build_interactive_home_with_options(
         ui_composition_panel: &ui_composition_panel,
         task_board_panel: &task_board_panel,
         dag_panel: &dag_panel,
+        workflow_mutation_panel: &workflow_mutation_panel,
         artifact_panel: &artifact_panel,
         operational_cockpit_panel: &operational_cockpit_panel,
         harness_panel: &harness_panel,
@@ -2955,6 +3044,7 @@ pub fn build_interactive_home_with_options(
             operating_context_panel,
             dag_panel,
             task_board_panel,
+            workflow_mutation_panel,
             artifact_panel,
             schedule_panel,
             event_panel,
@@ -2993,6 +3083,7 @@ pub fn build_interactive_home_with_options(
                 "forge interactive sessions --output json".to_string(),
                 "forge interactive action-registry --output json".to_string(),
                 "forge interactive artifacts --output json".to_string(),
+                "forge interactive workflow-mutation --output json".to_string(),
                 "forge interactive improvement-loop --output json".to_string(),
                 "forge improve candidates --output json".to_string(),
                 "forge interactive addon-capabilities --output json".to_string(),
@@ -3014,6 +3105,7 @@ pub fn build_interactive_home_with_options(
                 "/runs".to_string(),
                 "/artifacts".to_string(),
                 "/task-board".to_string(),
+                "/workflow-mutation".to_string(),
                 "/readiness".to_string(),
                 "/schedules".to_string(),
                 "/addons".to_string(),
@@ -3057,6 +3149,7 @@ struct ArchitectureCompassInputs<'a> {
     ui_composition_panel: &'a InteractiveUiCompositionPanel,
     task_board_panel: &'a InteractiveTaskBoardPanel,
     dag_panel: &'a InteractiveWorkflowDagPanel,
+    workflow_mutation_panel: &'a InteractiveWorkflowMutationPanel,
     artifact_panel: &'a InteractiveArtifactPanel,
     operational_cockpit_panel: &'a InteractiveOperationalCockpitPanel,
     harness_panel: &'a InteractiveHarnessPanel,
@@ -3078,6 +3171,7 @@ fn build_architecture_compass_panel(
             architecture_status(
                 inputs.operational_cockpit_panel.status == "operational_cockpit_ready"
                     && inputs.task_board_panel.workflow_count > 0
+                    && inputs.workflow_mutation_panel.workflow_count > 0
                     && inputs.ui_composition_panel.core_widget_count > 0,
                 inputs.ui_composition_panel.widget_count > 0,
             ),
@@ -3090,6 +3184,13 @@ fn build_architecture_compass_panel(
                 format!(
                     "task_board:workflows={} ready_handoffs={}",
                     inputs.task_board_panel.workflow_count, inputs.task_board_panel.ready_handoffs
+                ),
+                format!(
+                    "workflow_mutation:{} workflows={} mutable={} proposals={}",
+                    inputs.workflow_mutation_panel.status,
+                    inputs.workflow_mutation_panel.workflow_count,
+                    inputs.workflow_mutation_panel.mutable_workflow_count,
+                    inputs.workflow_mutation_panel.pending_modifier_proposal_count
                 ),
                 format!(
                     "ui_composition:widgets={} addon_widgets={}",
@@ -3110,10 +3211,16 @@ fn build_architecture_compass_panel(
             "Dynamic workflow engine",
             &["goal1:Fase 3", "goal1:Fase 7"],
             architecture_status(
-                inputs.dag_panel.node_count > 0
-                    && inputs.task_board_panel.checkpoint_resume_candidates > 0
+                inputs.workflow_mutation_panel.workflow_count > 0
+                    && inputs.workflow_mutation_panel.mutable_workflow_count > 0
+                    && inputs.dag_panel.node_count > 0
+                    && (inputs.task_board_panel.checkpoint_resume_candidates > 0
+                        || inputs.workflow_mutation_panel.pending_modifier_proposal_count
+                            + inputs.workflow_mutation_panel.applied_modifier_proposal_count
+                            > 0)
                     && inputs.workflows.summary.total > 0,
-                inputs.workflows.summary.total > 0,
+                inputs.workflow_mutation_panel.status != "workflow_mutation_idle"
+                    || inputs.workflows.summary.total > 0,
             ),
             vec![
                 format!(
@@ -3132,6 +3239,13 @@ fn build_architecture_compass_panel(
                     "task_board:checkpoints={} human_waits={}",
                     inputs.task_board_panel.checkpoint_resume_candidates,
                     inputs.task_board_panel.pending_human_interactions
+                ),
+                format!(
+                    "workflow_mutation:{} mutable={} handoffs={} proposals={}",
+                    inputs.workflow_mutation_panel.status,
+                    inputs.workflow_mutation_panel.mutable_workflow_count,
+                    inputs.workflow_mutation_panel.ready_handoff_count,
+                    inputs.workflow_mutation_panel.pending_modifier_proposal_count
                 ),
             ],
             vec![
@@ -3313,13 +3427,14 @@ fn build_architecture_compass_panel(
             "Human + AI visual copilot",
             &["goal1:Fase 7", "goal2:Fase 7.8", "goal3:UI Composition"],
             architecture_status(
-                inputs.digital_twin_panel.workflow_count > 0
-                    && inputs.artifact_panel.artifact_count > 0
+                inputs.workflow_mutation_panel.workflow_count > 0
+                    && inputs.digital_twin_panel.workflow_count > 0
                     && inputs.operational_cockpit_panel.modifier_lane.pending_count
                         + inputs.operational_cockpit_panel.modifier_lane.applied_count
                         > 0,
                 inputs.digital_twin_panel.workflow_count > 0
-                    || inputs.artifact_panel.artifact_count > 0,
+                    || inputs.artifact_panel.artifact_count > 0
+                    || inputs.workflow_mutation_panel.status != "workflow_mutation_idle",
             ),
             vec![
                 format!(
@@ -3339,6 +3454,12 @@ fn build_architecture_compass_panel(
                     "modifier_lane:pending={} applied={}",
                     inputs.operational_cockpit_panel.modifier_lane.pending_count,
                     inputs.operational_cockpit_panel.modifier_lane.applied_count
+                ),
+                format!(
+                    "workflow_mutation:{} cards={} next_actions={}",
+                    inputs.workflow_mutation_panel.status,
+                    inputs.workflow_mutation_panel.workflow_cards.len(),
+                    inputs.workflow_mutation_panel.next_actions.len()
                 ),
             ],
             vec![
@@ -3545,6 +3666,7 @@ fn architecture_execution_plan(
                 "Replanejamento preserva revisions, checkpoints e auditoria.",
             ],
             &[
+                "forge interactive workflow-mutation --output json",
                 "forge interactive workflow-dag --output json",
                 "forge interactive schedules --output json",
                 "forge interactive structured-logs --output json",
@@ -3672,6 +3794,7 @@ fn architecture_execution_plan(
             ],
             &[
                 "forge interactive operational-cockpit --output json",
+                "forge interactive workflow-mutation --output json",
                 "forge interactive task-board --output json",
                 "forge interactive artifacts --output json",
             ],
@@ -3985,6 +4108,24 @@ pub fn build_operational_tui_smoke(
                 origin,
             },
         )?;
+        create_modifier_proposal(
+            store,
+            OpsModifierProposalInput {
+                workflow_id: &request.workflow_id,
+                target_kind: "workflow_goal",
+                task_id: None,
+                title: "Refine operational TUI smoke goal",
+                summary: "Create a pending workflow mutation proposal for the replanning panel.",
+                rationale:
+                    "The smoke must prove human+AI assisted runtime mutation is visible in the TUI.",
+                proposed_goal: Some(
+                    "Demonstrate Forge operational TUI with visible workflow mutation evidence",
+                ),
+                proposed_title: None,
+                proposed_expected_output: None,
+                author: origin,
+            },
+        )?;
     }
 
     let event_data = serde_json::json!({
@@ -4029,6 +4170,8 @@ pub fn build_operational_tui_smoke(
         cost_estimated_usd: d.cost_panel.estimated_task_cost_total_usd,
         improvement_candidate_count: d.improvement_loop_panel.candidate_count,
         structured_log_count: d.improvement_loop_panel.structured_log_count,
+        workflow_mutation_workflow_count: d.workflow_mutation_panel.workflow_count,
+        pending_mutation_proposal_count: d.workflow_mutation_panel.pending_modifier_proposal_count,
         ready_handoff_count: d.task_board_panel.ready_handoffs,
         pending_approval_count: d.pending_approvals,
     };
@@ -4138,6 +4281,26 @@ pub fn build_operational_tui_smoke(
             "forge interactive improvement-loop --output json",
         ),
         operational_tui_smoke_check(
+            "shows_workflow_mutation_replanning",
+            "TUI shows workflow mutation and replanning surface",
+            d.workflow_mutation_panel.schema_version
+                == INTERACTIVE_WORKFLOW_MUTATION_SCHEMA_VERSION
+                && dashboard.workflow_mutation_workflow_count > 0
+                && dashboard.pending_mutation_proposal_count > 0
+                && d.workflow_mutation_panel
+                    .workflow_cards
+                    .iter()
+                    .any(|card| !card.mutable_targets.is_empty()),
+            format!(
+                "{}; {} workflows; {} pending proposals; {} mutable workflows",
+                d.workflow_mutation_panel.status,
+                dashboard.workflow_mutation_workflow_count,
+                dashboard.pending_mutation_proposal_count,
+                d.workflow_mutation_panel.mutable_workflow_count
+            ),
+            "forge interactive workflow-mutation --output json",
+        ),
+        operational_tui_smoke_check(
             "shows_handoffs_and_approvals",
             "TUI shows handoffs and approvals",
             dashboard.ready_handoff_count > 0 || dashboard.pending_approval_count > 0,
@@ -4225,6 +4388,7 @@ pub fn build_operational_tui_smoke(
             "forge interactive event-runtime --output json".to_string(),
             "forge interactive structured-logs --output json".to_string(),
             "forge interactive improvement-loop --output json".to_string(),
+            "forge interactive workflow-mutation --output json".to_string(),
             "forge interactive addon-capabilities --output json".to_string(),
             "forge interactive operating-context --output json".to_string(),
             "forge cost ledger --output json".to_string(),
@@ -4738,7 +4902,7 @@ pub fn render_operational_tui_smoke(report: &OperationalTuiSmokeReport) -> Strin
         .collect::<Vec<_>>()
         .join(" | ");
     format!(
-        "Operational TUI smoke: {status}; workflow {workflow_id}; run {run_id}; scheduled {scheduled_workflow_id}; event {event_id}\nDashboard: active runs {active_runs}, workflows {workflow_count}, events {event_count}, schedules {schedule_workflow_count}, addons {addon_count}, capabilities {capability_count}, cost ${cost_estimated_usd:.4}, handoffs {ready_handoff_count}, approvals {pending_approval_count}\nchecks: {checks}\ncommands: {commands}\n",
+        "Operational TUI smoke: {status}; workflow {workflow_id}; run {run_id}; scheduled {scheduled_workflow_id}; event {event_id}\nDashboard: active runs {active_runs}, workflows {workflow_count}, events {event_count}, schedules {schedule_workflow_count}, addons {addon_count}, capabilities {capability_count}, cost ${cost_estimated_usd:.4}, mutation workflows {workflow_mutation_workflow_count}, mutation proposals {pending_mutation_proposal_count}, handoffs {ready_handoff_count}, approvals {pending_approval_count}\nchecks: {checks}\ncommands: {commands}\n",
         status = report.status,
         workflow_id = report.workflow_id,
         run_id = report.run_id,
@@ -4751,6 +4915,8 @@ pub fn render_operational_tui_smoke(report: &OperationalTuiSmokeReport) -> Strin
         addon_count = report.dashboard.addon_count,
         capability_count = report.dashboard.capability_count,
         cost_estimated_usd = report.dashboard.cost_estimated_usd,
+        workflow_mutation_workflow_count = report.dashboard.workflow_mutation_workflow_count,
+        pending_mutation_proposal_count = report.dashboard.pending_mutation_proposal_count,
         ready_handoff_count = report.dashboard.ready_handoff_count,
         pending_approval_count = report.dashboard.pending_approval_count,
         checks = checks,
@@ -6092,6 +6258,29 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             false,
             "low",
             &["workflow", "dag", "graph", "dependency", "wait"],
+        ),
+        command_palette_entry(
+            "workflow.mutation",
+            "workflow",
+            "Open workflow mutation planner",
+            "Inspect DAG, task-board, modifier lane, handoffs, costs and safe commands before replanning or mutating workflows.",
+            "workflow_mutation_panel",
+            None,
+            &["interactive", "workflow-mutation", "--output", "json"],
+            false,
+            false,
+            "low",
+            &[
+                "workflow",
+                "mutation",
+                "replan",
+                "replanning",
+                "modifier",
+                "goal",
+                "node",
+                "brain",
+                "artifact",
+            ],
         ),
         command_palette_entry(
             "observability.structured_logs",
@@ -8618,6 +8807,13 @@ pub fn build_interactive_task_board(store: &ForgeStore) -> Result<InteractiveTas
     build_task_board_panel(store, &workflows.workflows)
 }
 
+pub fn build_interactive_workflow_mutation(
+    store: &ForgeStore,
+) -> Result<InteractiveWorkflowMutationPanel> {
+    let home = build_interactive_home(store)?;
+    Ok(home.dashboard.workflow_mutation_panel)
+}
+
 pub fn build_interactive_workflow_sidebar(
     store: &ForgeStore,
 ) -> Result<InteractiveWorkflowSidebarPanel> {
@@ -11097,6 +11293,9 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         .required_gates
         .join("+");
     let task_board_lanes = render_task_board_lane_summary(&d.task_board_panel);
+    let workflow_mutation_cards = render_workflow_mutation_card_summary(&d.workflow_mutation_panel);
+    let workflow_mutation_proposals =
+        render_workflow_mutation_proposal_summary(&d.workflow_mutation_panel);
     let artifact_workflows = render_artifact_workflow_summary(&d.artifact_panel);
     let artifact_entries = render_artifact_entry_summary(&d.artifact_panel);
     let dag_workflows = render_workflow_dag_summary(&d.dag_panel);
@@ -11156,6 +11355,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Costs: estimated ${cost_estimated:.4}, observed ${cost_observed:.4}, nodes {cost_nodes}, AI {cost_ai_nodes}, deterministic {cost_deterministic_nodes}, avoided-model {cost_avoided_nodes}\n\
          Improvement loop: {improvement_status}; candidates {improvement_candidates_count}, critical {improvement_critical}, high {improvement_high}, parallel {improvement_parallel}, avoidable AI {improvement_avoidable_ai}, final outcome {improvement_final_outcome}, stale/attention {improvement_stale}, validation failures {improvement_validation_failures}, context {improvement_context}; top {improvement_candidates}\n\
          Handoffs/approvals: ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, pending approvals {pending_approvals}, context blocked {context_blocked}\n\
+         Workflow mutation/replanning: {workflow_mutation_status}; workflows {workflow_mutation_workflows}, active {workflow_mutation_active}, mutable {workflow_mutation_mutable}, proposals {workflow_mutation_pending}/{workflow_mutation_applied}, checkpoints {workflow_mutation_checkpoints}; cards {workflow_mutation_cards}\n\
          Architecture compass: {architecture_status}; tracks {architecture_track_count}, docs {architecture_doc_count}; {architecture_tracks}\n\
          Architecture execution plan: {architecture_execution_plan}\n\
          Smoke test: forge smoke operational-tui --output json\n\n\
@@ -11198,6 +11398,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Operational digital twin: {digital_twin_status}; workflows {digital_twin_workflows_count}, happening {digital_twin_happening}, done {digital_twin_done}, remaining {digital_twin_remaining}, validated {digital_twin_validated}, rejected {digital_twin_rejected}, approvals {digital_twin_approvals}; {digital_twin_workflows}\n\
          DAG panel: {dag_status}; workflows {dag_workflows_count}, nodes {dag_nodes}, edges {dag_edges}, running {dag_running}, blocked {dag_blocked}, waits {dag_waits}, human waits {dag_human_waits}; {dag_workflows}\n\
          Task board: {task_board_status}; workflows {task_board_workflows}, tasks {task_board_tasks}, ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, checkpoints {task_board_checkpoints}, artifacts {task_board_artifacts}; lanes {task_board_lanes}\n\
+         Workflow mutation/replanning: {workflow_mutation_status}; mode {workflow_mutation_mode}, workflows {workflow_mutation_workflows}, tasks {workflow_mutation_tasks}, ready handoffs {workflow_mutation_ready_handoffs}, human waits {workflow_mutation_human_waits}, proposals {workflow_mutation_pending}/{workflow_mutation_applied}, events {workflow_mutation_events}, cost ${workflow_mutation_cost:.4}; cards {workflow_mutation_cards}; proposals {workflow_mutation_proposals}; next {workflow_mutation_next}\n\
          Artifact panel: {artifact_status}; workflows {artifact_workflows_count}, artifacts {artifact_count}, bytes {artifact_bytes}; workflows {artifact_workflows}; entries {artifact_entries}\n\
          Schedule panel: {schedule_status}; due {schedule_due}, runnable {schedule_runnable}, cron {schedule_cron}, wait_until {schedule_wait_until}, next {schedule_next}\n\
          Event timeline: {event_status}; visible {event_visible}/{event_total}; latest {latest_events}\n\
@@ -11384,6 +11585,32 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         task_board_checkpoints = d.task_board_panel.checkpoint_resume_candidates,
         task_board_artifacts = d.task_board_panel.artifact_count,
         task_board_lanes = task_board_lanes,
+        workflow_mutation_status = d.workflow_mutation_panel.status,
+        workflow_mutation_mode = d.workflow_mutation_panel.operation_mode,
+        workflow_mutation_workflows = d.workflow_mutation_panel.workflow_count,
+        workflow_mutation_active = d.workflow_mutation_panel.active_workflow_count,
+        workflow_mutation_mutable = d.workflow_mutation_panel.mutable_workflow_count,
+        workflow_mutation_tasks = d.workflow_mutation_panel.task_count,
+        workflow_mutation_ready_handoffs = d.workflow_mutation_panel.ready_handoff_count,
+        workflow_mutation_human_waits = d.workflow_mutation_panel.human_wait_count,
+        workflow_mutation_checkpoints = d
+            .workflow_mutation_panel
+            .checkpoint_resume_candidate_count,
+        workflow_mutation_pending = d
+            .workflow_mutation_panel
+            .pending_modifier_proposal_count,
+        workflow_mutation_applied = d
+            .workflow_mutation_panel
+            .applied_modifier_proposal_count,
+        workflow_mutation_events = d.workflow_mutation_panel.event_count,
+        workflow_mutation_cost = d.workflow_mutation_panel.estimated_cost_total_usd,
+        workflow_mutation_cards = workflow_mutation_cards,
+        workflow_mutation_proposals = workflow_mutation_proposals,
+        workflow_mutation_next = if d.workflow_mutation_panel.next_actions.is_empty() {
+            "none".to_string()
+        } else {
+            d.workflow_mutation_panel.next_actions.join(" | ")
+        },
         artifact_status = d.artifact_panel.status,
         artifact_workflows_count = d.artifact_panel.workflow_count,
         artifact_count = d.artifact_panel.artifact_count,
@@ -11679,6 +11906,47 @@ pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> Strin
         artifacts = panel.artifact_count,
         lanes = render_task_board_lane_summary(panel),
         cards = render_task_board_card_summary(panel),
+    )
+}
+
+pub fn render_interactive_workflow_mutation(panel: &InteractiveWorkflowMutationPanel) -> String {
+    format!(
+        "Workflow mutation: {status}; mode {mode}; workflows {workflow_count}, active {active}, mutable {mutable}, tasks {tasks}, ready handoffs {ready_handoffs}, human waits {human_waits}, checkpoints {checkpoints}, artifacts {artifacts}, proposals {pending}/{applied}, events {events}, cost ${cost:.4}\nWorkflows: {workflows}\nProposals: {proposals}\nCommands: refresh {refresh}; task-board {task_board}; dag {dag}; cockpit {cockpit}; ops {ops}; update-goal {update_goal}; update-node-brain {update_node_brain}; attach {attach}; logs {logs}\nNext: {next_actions}\nNotes: {notes}\n",
+        status = panel.status,
+        mode = panel.operation_mode,
+        workflow_count = panel.workflow_count,
+        active = panel.active_workflow_count,
+        mutable = panel.mutable_workflow_count,
+        tasks = panel.task_count,
+        ready_handoffs = panel.ready_handoff_count,
+        human_waits = panel.human_wait_count,
+        checkpoints = panel.checkpoint_resume_candidate_count,
+        artifacts = panel.artifact_count,
+        pending = panel.pending_modifier_proposal_count,
+        applied = panel.applied_modifier_proposal_count,
+        events = panel.event_count,
+        cost = panel.estimated_cost_total_usd,
+        workflows = render_workflow_mutation_card_summary(panel),
+        proposals = render_workflow_mutation_proposal_summary(panel),
+        refresh = panel.commands.refresh.join(" "),
+        task_board = panel.commands.task_board.join(" "),
+        dag = panel.commands.workflow_dag.join(" "),
+        cockpit = panel.commands.operational_cockpit.join(" "),
+        ops = panel.commands.ops_console.join(" "),
+        update_goal = panel.commands.update_goal.join(" "),
+        update_node_brain = panel.commands.update_node_brain.join(" "),
+        attach = panel.commands.attach_artifact.join(" "),
+        logs = panel.commands.structured_logs.join(" "),
+        next_actions = if panel.next_actions.is_empty() {
+            "none".to_string()
+        } else {
+            panel.next_actions.join(" | ")
+        },
+        notes = if panel.notes.is_empty() {
+            "none".to_string()
+        } else {
+            panel.notes.join(" | ")
+        },
     )
 }
 
@@ -14329,6 +14597,15 @@ fn build_ui_composition_panel(
                     vec!["forge interactive task-board --output json".to_string()],
                 ),
                 core_ui_widget(
+                    "workflow_mutation_panel",
+                    "Workflow mutation planner",
+                    "workflow_mutation_panel",
+                    "workflow_mutation_renderer",
+                    "detailed",
+                    "full",
+                    vec!["forge interactive workflow-mutation --output json".to_string()],
+                ),
+                core_ui_widget(
                     "patch_workbench_panel",
                     "Patch workbench",
                     "patch_workbench_panel",
@@ -14979,6 +15256,58 @@ fn render_task_board_card_summary(panel: &InteractiveTaskBoardPanel) -> String {
     } else {
         cards.join(" | ")
     }
+}
+
+fn render_workflow_mutation_card_summary(panel: &InteractiveWorkflowMutationPanel) -> String {
+    if panel.workflow_cards.is_empty() {
+        return "none".to_string();
+    }
+
+    panel
+        .workflow_cards
+        .iter()
+        .take(12)
+        .map(|card| {
+            format!(
+                "{} [{}] action {} targets {} dag {}/{} handoffs {} waits {} checkpoints {} commands goal {} brain {}",
+                card.workflow_id,
+                card.lifecycle_state,
+                card.recommended_action,
+                if card.mutable_targets.is_empty() {
+                    "none".to_string()
+                } else {
+                    card.mutable_targets.join("+")
+                },
+                card.dag_node_count,
+                card.dag_edge_count,
+                card.ready_handoffs,
+                card.human_waits,
+                card.checkpoint_resume_candidates,
+                card.commands.update_goal.join(" "),
+                card.commands.update_node_brain.join(" ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn render_workflow_mutation_proposal_summary(panel: &InteractiveWorkflowMutationPanel) -> String {
+    if panel.proposal_cards.is_empty() {
+        return "none".to_string();
+    }
+
+    panel
+        .proposal_cards
+        .iter()
+        .take(12)
+        .map(|proposal| {
+            format!(
+                "{}:{}:{}:{}",
+                proposal.workflow_id, proposal.proposal_id, proposal.target_kind, proposal.status
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 fn prioritized_task_board_card_commands(card: &InteractiveTaskBoardTaskCard) -> String {
@@ -15909,6 +16238,397 @@ fn build_task_board_panel(
     })
 }
 
+fn build_workflow_mutation_panel(
+    rows: &[WorkflowRegistryRow],
+    task_board: &InteractiveTaskBoardPanel,
+    dag: &InteractiveWorkflowDagPanel,
+    modifier_lane: &InteractiveOperationalModifierLanePanel,
+    event_panel: &InteractiveEventPanel,
+    cost_panel: &InteractiveCostPanel,
+) -> InteractiveWorkflowMutationPanel {
+    let workflow_cards = rows
+        .iter()
+        .take(12)
+        .map(|row| workflow_mutation_card(row, task_board, dag, modifier_lane))
+        .collect::<Vec<_>>();
+    let active_workflow_count = workflow_cards.iter().filter(|card| card.active).count();
+    let mutable_workflow_count = workflow_cards
+        .iter()
+        .filter(|card| !card.mutable_targets.is_empty())
+        .count();
+    let task_count = task_board.task_count;
+    let ready_handoff_count = task_board.ready_handoffs;
+    let human_wait_count = task_board.pending_human_interactions;
+    let checkpoint_resume_candidate_count = task_board.checkpoint_resume_candidates;
+    let artifact_count = task_board.artifact_count;
+    let status = if modifier_lane.pending_count > 0
+        || ready_handoff_count > 0
+        || human_wait_count > 0
+        || checkpoint_resume_candidate_count > 0
+    {
+        "workflow_mutation_actionable"
+    } else if !workflow_cards.is_empty() {
+        "workflow_mutation_ready"
+    } else {
+        "workflow_mutation_idle"
+    };
+    let proposal_cards = modifier_lane
+        .proposal_cards
+        .iter()
+        .take(12)
+        .cloned()
+        .collect();
+    let mut next_actions = vec![
+        "forge interactive workflow-mutation --output json".to_string(),
+        "forge interactive task-board --output json".to_string(),
+        "forge interactive workflow-dag --output json".to_string(),
+        "forge interactive operational-cockpit --output json".to_string(),
+        "forge ops serve --project-root . --host 127.0.0.1 --port 8765".to_string(),
+        "forge interactive action-registry --query workflow --output json".to_string(),
+    ];
+    if modifier_lane.pending_count > 0 {
+        next_actions.insert(
+            0,
+            "review pending modifier proposals, then apply through the ops console/API if approved"
+                .to_string(),
+        );
+    } else if workflow_cards.is_empty() {
+        next_actions.push(
+            "start a workflow with forge request start --goal \"...\" --origin forge_cli"
+                .to_string(),
+        );
+    } else {
+        next_actions.push(
+            "choose a workflow card, inspect its task, then mutate through workflow update-goal, update-node-brain or attach-artifact".to_string(),
+        );
+    }
+
+    InteractiveWorkflowMutationPanel {
+        schema_version: INTERACTIVE_WORKFLOW_MUTATION_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        operation_mode: "read_only_replanning_surface_governed_by_workflow_mutations".to_string(),
+        workflow_count: rows.len(),
+        active_workflow_count,
+        mutable_workflow_count,
+        task_count,
+        ready_handoff_count,
+        human_wait_count,
+        checkpoint_resume_candidate_count,
+        artifact_count,
+        pending_modifier_proposal_count: modifier_lane.pending_count,
+        applied_modifier_proposal_count: modifier_lane.applied_count,
+        event_count: event_panel.total_event_count,
+        estimated_cost_total_usd: cost_panel.estimated_task_cost_total_usd,
+        workflow_cards,
+        proposal_cards,
+        commands: InteractiveWorkflowMutationCommands {
+            refresh: vec![
+                "interactive".to_string(),
+                "workflow-mutation".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            task_board: vec![
+                "interactive".to_string(),
+                "task-board".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            workflow_dag: vec![
+                "interactive".to_string(),
+                "workflow-dag".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            operational_cockpit: vec![
+                "interactive".to_string(),
+                "operational-cockpit".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            action_registry: vec![
+                "interactive".to_string(),
+                "action-registry".to_string(),
+                "--query".to_string(),
+                "workflow".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            ops_console: vec![
+                "ops".to_string(),
+                "serve".to_string(),
+                "--project-root".to_string(),
+                ".".to_string(),
+                "--host".to_string(),
+                "127.0.0.1".to_string(),
+                "--port".to_string(),
+                "8765".to_string(),
+            ],
+            propose_goal_route: "POST /api/modifier/propose-goal".to_string(),
+            propose_task_route: "POST /api/modifier/propose-task".to_string(),
+            apply_proposal_route: "POST /api/modifier/apply".to_string(),
+            update_goal: vec![
+                "workflow".to_string(),
+                "update-goal".to_string(),
+                "--workflow".to_string(),
+                "<workflow-id>".to_string(),
+                "--goal".to_string(),
+                "<new-goal>".to_string(),
+                "--origin".to_string(),
+                "forge_cli".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            update_node_brain: vec![
+                "workflow".to_string(),
+                "update-node-brain".to_string(),
+                "--workflow".to_string(),
+                "<workflow-id>".to_string(),
+                "--task".to_string(),
+                "<task-id>".to_string(),
+                "--default-brain".to_string(),
+                "<brain>".to_string(),
+                "--origin".to_string(),
+                "forge_cli".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            attach_artifact: vec![
+                "workflow".to_string(),
+                "attach-artifact".to_string(),
+                "--workflow".to_string(),
+                "<workflow-id>".to_string(),
+                "--path".to_string(),
+                "<artifact-path>".to_string(),
+                "--kind".to_string(),
+                "<kind>".to_string(),
+                "--origin".to_string(),
+                "forge_cli".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            validate: vec![
+                "validate".to_string(),
+                "--workflow".to_string(),
+                "<workflow-id>".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            context: vec![
+                "context".to_string(),
+                "--workflow".to_string(),
+                "<workflow-id>".to_string(),
+                "--task".to_string(),
+                "<task-id>".to_string(),
+                "--strict".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            handoff: vec![
+                "task".to_string(),
+                "handoff".to_string(),
+                "--workflow".to_string(),
+                "<workflow-id>".to_string(),
+                "--task".to_string(),
+                "<task-id>".to_string(),
+                "--executor".to_string(),
+                "<executor>".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            structured_logs: vec![
+                "interactive".to_string(),
+                "structured-logs".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        },
+        next_actions,
+        notes: vec![
+            "The panel is read-only; every mutation must still go through Forge workflow/ops APIs so revisions, origin and validation remain auditable.".to_string(),
+            "Use it to keep DAG, task board, modifier lane, handoffs, costs and logs in one replanning routine while a workflow keeps running.".to_string(),
+        ],
+    }
+}
+
+fn workflow_mutation_card(
+    row: &WorkflowRegistryRow,
+    task_board: &InteractiveTaskBoardPanel,
+    dag: &InteractiveWorkflowDagPanel,
+    modifier_lane: &InteractiveOperationalModifierLanePanel,
+) -> InteractiveWorkflowMutationCard {
+    let lane = task_board
+        .lanes
+        .iter()
+        .find(|lane| lane.workflow_id == row.workflow_id);
+    let dag_workflow = dag
+        .workflows
+        .iter()
+        .find(|workflow| workflow.workflow_id == row.workflow_id);
+    let ready_handoffs = lane
+        .map(|lane| lane.ready_handoffs)
+        .unwrap_or(row.context_actions.ready_for_handoff);
+    let human_waits = lane
+        .map(|lane| lane.pending_human_interactions)
+        .unwrap_or(row.human_interaction_summary.pending_required);
+    let checkpoint_resume_candidates = lane
+        .map(|lane| lane.checkpoint_resume_candidates)
+        .unwrap_or(0);
+    let task_count = lane
+        .map(|lane| lane.total_tasks)
+        .unwrap_or(row.task_summary.total);
+    let dag_node_count = dag_workflow
+        .map(|workflow| workflow.node_count)
+        .unwrap_or(task_count);
+    let dag_edge_count = dag_workflow
+        .map(|workflow| workflow.edge_count)
+        .unwrap_or(0);
+    let has_pending_proposal = modifier_lane
+        .proposal_cards
+        .iter()
+        .any(|proposal| proposal.workflow_id == row.workflow_id && proposal.status == "pending");
+    let mut mutable_targets = vec![
+        "workflow_goal".to_string(),
+        "task_node_brain".to_string(),
+        "artifact_attachment".to_string(),
+    ];
+    if task_count > 0 {
+        mutable_targets.push("task_node".to_string());
+    }
+    if ready_handoffs > 0 {
+        mutable_targets.push("executor_handoff".to_string());
+    }
+    if human_waits > 0 {
+        mutable_targets.push("human_wait_resolution".to_string());
+    }
+    if checkpoint_resume_candidates > 0 {
+        mutable_targets.push("checkpoint_resume".to_string());
+    }
+    let recommended_action = if has_pending_proposal {
+        "review_modifier_proposals"
+    } else if human_waits > 0 {
+        "resolve_human_waits_before_mutation"
+    } else if ready_handoffs > 0 {
+        "prepare_handoff_or_update_node_brain"
+    } else if checkpoint_resume_candidates > 0 {
+        "resume_or_replan_from_checkpoint"
+    } else if workflow_sidebar_row_is_active(row) {
+        "monitor_or_update_goal"
+    } else {
+        "inspect_before_replanning"
+    };
+    let context_task = row
+        .context_action_refs
+        .first()
+        .map(|action| action.task_id.clone())
+        .unwrap_or_else(|| "<task-id>".to_string());
+    let handoff_executor = row
+        .context_action_refs
+        .first()
+        .map(|action| action.executor.clone())
+        .unwrap_or_else(|| "<executor>".to_string());
+
+    InteractiveWorkflowMutationCard {
+        workflow_id: row.workflow_id.clone(),
+        lifecycle_state: row.lifecycle_state.clone(),
+        goal: truncate_display(&row.current_goal, 120),
+        active: workflow_sidebar_row_is_active(row),
+        task_count,
+        ready_handoffs,
+        human_waits,
+        checkpoint_resume_candidates,
+        artifact_count: row.artifact_count,
+        dag_node_count,
+        dag_edge_count,
+        mutable_targets,
+        recommended_action: recommended_action.to_string(),
+        commands: InteractiveWorkflowMutationWorkflowCommands {
+            inspect: vec!["inspect".to_string(), row.workflow_id.clone()],
+            task_board: vec![
+                "interactive".to_string(),
+                "task-board".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            workflow_dag: vec![
+                "interactive".to_string(),
+                "workflow-dag".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            validate: vec![
+                "validate".to_string(),
+                "--workflow".to_string(),
+                row.workflow_id.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            update_goal: vec![
+                "workflow".to_string(),
+                "update-goal".to_string(),
+                "--workflow".to_string(),
+                row.workflow_id.clone(),
+                "--goal".to_string(),
+                "<new-goal>".to_string(),
+                "--origin".to_string(),
+                "forge_cli".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            update_node_brain: vec![
+                "workflow".to_string(),
+                "update-node-brain".to_string(),
+                "--workflow".to_string(),
+                row.workflow_id.clone(),
+                "--task".to_string(),
+                context_task.clone(),
+                "--default-brain".to_string(),
+                "<brain>".to_string(),
+                "--origin".to_string(),
+                "forge_cli".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            attach_artifact: vec![
+                "workflow".to_string(),
+                "attach-artifact".to_string(),
+                "--workflow".to_string(),
+                row.workflow_id.clone(),
+                "--path".to_string(),
+                "<artifact-path>".to_string(),
+                "--kind".to_string(),
+                "<kind>".to_string(),
+                "--origin".to_string(),
+                "forge_cli".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            context: vec![
+                "context".to_string(),
+                "--workflow".to_string(),
+                row.workflow_id.clone(),
+                "--task".to_string(),
+                context_task.clone(),
+                "--strict".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            handoff: vec![
+                "task".to_string(),
+                "handoff".to_string(),
+                "--workflow".to_string(),
+                row.workflow_id.clone(),
+                "--task".to_string(),
+                context_task,
+                "--executor".to_string(),
+                handoff_executor,
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        },
+    }
+}
+
 fn task_board_next_actions(
     row: &WorkflowRegistryRow,
     checkpoints: &[TaskCheckpoint],
@@ -16535,6 +17255,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "Task Board",
             "Show operational workflow lanes with handoffs, checkpoints, human waits and artifacts.",
             &["forge", "interactive", "task-board"],
+            false,
+            "low",
+        ),
+        slash(
+            "/workflow-mutation",
+            "Workflow Mutation",
+            "Show the replanning surface that combines DAG, task-board, modifier lane, handoffs, costs and safe mutation commands.",
+            &["forge", "interactive", "workflow-mutation"],
             false,
             "low",
         ),
@@ -17414,6 +18142,10 @@ fn repl_focus_panels() -> Vec<InteractiveReplFocusPanel> {
             title: "Task board",
         },
         InteractiveReplFocusPanel {
+            panel_id: "workflow_mutation_panel",
+            title: "Workflow mutation",
+        },
+        InteractiveReplFocusPanel {
             panel_id: "architecture_compass_panel",
             title: "Architecture compass",
         },
@@ -17521,6 +18253,10 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
             let panel = build_interactive_task_board(store)?;
             Ok(render_interactive_task_board(&panel))
         }
+        "workflow_mutation_panel" => {
+            let panel = build_interactive_workflow_mutation(store)?;
+            Ok(render_interactive_workflow_mutation(&panel))
+        }
         "artifact_panel" => {
             let panel = build_interactive_artifacts(store)?;
             Ok(render_interactive_artifacts(&panel))
@@ -17618,6 +18354,11 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
         "/task-board" => {
             let panel = build_interactive_task_board(store)?;
             println!("{}", render_interactive_task_board(&panel));
+            Ok(true)
+        }
+        "/workflow-mutation" | "/replan" | "/replanning" => {
+            let panel = build_interactive_workflow_mutation(store)?;
+            println!("{}", render_interactive_workflow_mutation(&panel));
             Ok(true)
         }
         "/workflows" | "/workflow-sidebar" | "/sidebar" => {

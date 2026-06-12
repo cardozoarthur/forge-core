@@ -116,23 +116,24 @@ use forge_core::interactive::{
     build_interactive_release_gates, build_interactive_replacement_cli,
     build_interactive_schedules, build_interactive_sessions, build_interactive_structured_logs,
     build_interactive_task_board, build_interactive_token_usage, build_interactive_workflow_dag,
-    build_interactive_workflow_sidebar, build_operational_tui_smoke,
-    build_replacement_cli_evidence_smoke, render_forge_first_harness_smoke,
-    render_interactive_action_invocation, render_interactive_action_registry,
-    render_interactive_addon_capabilities, render_interactive_architecture_compass,
-    render_interactive_artifacts, render_interactive_autocomplete,
-    render_interactive_command_palette, render_interactive_context_memory,
-    render_interactive_event_runtime, render_interactive_harness, render_interactive_home,
-    render_interactive_identity, render_interactive_improvement_loop,
-    render_interactive_multimodal_runtime, render_interactive_operating_context,
-    render_interactive_operational_cockpit, render_interactive_patch_workbench,
-    render_interactive_permissions, render_interactive_readiness, render_interactive_release_gates,
+    build_interactive_workflow_mutation, build_interactive_workflow_sidebar,
+    build_operational_tui_smoke, build_replacement_cli_evidence_smoke,
+    render_forge_first_harness_smoke, render_interactive_action_invocation,
+    render_interactive_action_registry, render_interactive_addon_capabilities,
+    render_interactive_architecture_compass, render_interactive_artifacts,
+    render_interactive_autocomplete, render_interactive_command_palette,
+    render_interactive_context_memory, render_interactive_event_runtime,
+    render_interactive_harness, render_interactive_home, render_interactive_identity,
+    render_interactive_improvement_loop, render_interactive_multimodal_runtime,
+    render_interactive_operating_context, render_interactive_operational_cockpit,
+    render_interactive_patch_workbench, render_interactive_permissions,
+    render_interactive_readiness, render_interactive_release_gates,
     render_interactive_replacement_cli, render_interactive_schedules, render_interactive_sessions,
     render_interactive_structured_logs, render_interactive_task_board,
     render_interactive_token_usage, render_interactive_workflow_dag,
-    render_interactive_workflow_sidebar, render_operational_tui_smoke,
-    render_replacement_cli_evidence_smoke, route_interactive_input, run_interactive_repl,
-    slash_command_catalog, InteractiveHarnessOptions, InteractiveHomeOptions,
+    render_interactive_workflow_mutation, render_interactive_workflow_sidebar,
+    render_operational_tui_smoke, render_replacement_cli_evidence_smoke, route_interactive_input,
+    run_interactive_repl, slash_command_catalog, InteractiveHarnessOptions, InteractiveHomeOptions,
     InteractiveSessionsOptions,
 };
 use forge_core::ir::{CreativeArtifact, TokenCollection};
@@ -3415,6 +3416,10 @@ enum InteractiveCommands {
         output: OutputFormat,
     },
     TaskBoard {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    WorkflowMutation {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -8452,6 +8457,17 @@ fn run() -> Result<i32> {
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => println!("{}", render_interactive_task_board(&report)),
+                }
+                Ok(0)
+            }
+            InteractiveCommands::WorkflowMutation { output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_interactive_workflow_mutation(&store)?;
+                match output {
+                    OutputFormat::Json => print_response(output, &report)?,
+                    OutputFormat::Human => {
+                        println!("{}", render_interactive_workflow_mutation(&report))
+                    }
                 }
                 Ok(0)
             }
