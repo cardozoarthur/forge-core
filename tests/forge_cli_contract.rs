@@ -43888,6 +43888,23 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
         "forge.harness.session_lifecycle_plan.v1"
     );
     assert_eq!(
+        json["adoption_plan"]["schema_version"],
+        "forge.harness.adoption_plan.v1"
+    );
+    assert_eq!(
+        json["adoption_plan"]["commands"]["bootstrap_project_harness"]
+            .as_array()
+            .unwrap(),
+        json["adoption_plan"]["commands"]["write_project_harness_config"]
+            .as_array()
+            .unwrap()
+    );
+    assert!(json["adoption_plan"]["adoption_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|step| step["id"] == "bootstrap_project_harness"));
+    assert_eq!(
         json["headroom_stats"]["schema_version"],
         "forge.harness.headroom_stats.v1"
     );
@@ -43942,6 +43959,14 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("headroom-stats")));
+    assert!(json["commands"]["adoption_plan"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("adoption-plan")));
+    assert!(json["commands"]["bootstrap_project_harness"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("bootstrap")));
     assert!(json["commands"]["exec"]
         .as_array()
         .unwrap()
@@ -43970,6 +43995,8 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("Harness center"));
     assert!(text.contains("codex"));
     assert!(text.contains("wrap-plan"));
+    assert!(text.contains("adoption-plan"));
+    assert!(text.contains("bootstrap"));
     assert!(text.contains("headroom-plan"));
     assert!(text.contains("headroom-stats"));
     assert!(text.contains(json["headroom_recommended_action"].as_str().unwrap()));
@@ -44015,6 +44042,10 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert_eq!(
         home["dashboard"]["harness_panel"]["headroom_plan"]["schema_version"],
         "forge.harness.headroom_plan.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["harness_panel"]["adoption_plan"]["schema_version"],
+        "forge.harness.adoption_plan.v1"
     );
     assert_eq!(
         home["dashboard"]["harness_panel"]["headroom_stats"]["schema_version"],
@@ -44086,6 +44117,10 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert_eq!(
         mcp_json["result"]["headroom_plan"]["schema_version"],
         "forge.harness.headroom_plan.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["adoption_plan"]["schema_version"],
+        "forge.harness.adoption_plan.v1"
     );
     assert_eq!(
         mcp_json["result"]["headroom_stats"]["schema_version"],
@@ -46820,6 +46855,11 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge interactive harness"),
         "the packaged Forge skill should include the harness center CLI command"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("adoption_plan")
+            && forge_core::skill::SKILL_MD.contains("bootstrap_project_harness"),
+        "the packaged Forge skill should teach agents that the interactive harness panel exposes adoption and bootstrap controls"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.sessions"),

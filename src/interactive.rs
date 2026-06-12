@@ -12,13 +12,14 @@ use crate::executor::{
 };
 use crate::graph::{AtomicTask, ExecutorKind, TaskStatus};
 use crate::harness::{
-    analyze_token_headroom, build_harness_doctor_report, build_harness_headroom_plan,
-    build_harness_mode_report, build_headroom_stats_report, inspect_cli_harness_shim_status,
-    resolve_harness_forge_first_source_for_project, resolve_harness_runtime_policy,
-    CliShimStatusOptions, CliShimStatusReport, CliWrapperPlanReport, HarnessDoctorOptions,
-    HarnessDoctorReport, HarnessHeadroomPlanOptions, HarnessHeadroomPlanReport, HarnessModeOptions,
-    HarnessModeReport, HarnessRuntimePolicyOptions, HarnessSessionLifecyclePlan,
-    HeadroomStatsOptions, HeadroomStatsReport, TokenHeadroomReport,
+    analyze_token_headroom, build_harness_adoption_plan, build_harness_doctor_report,
+    build_harness_headroom_plan, build_harness_mode_report, build_headroom_stats_report,
+    inspect_cli_harness_shim_status, resolve_harness_forge_first_source_for_project,
+    resolve_harness_runtime_policy, CliShimStatusOptions, CliShimStatusReport,
+    CliWrapperPlanReport, HarnessAdoptionPlanOptions, HarnessAdoptionPlanReport,
+    HarnessDoctorOptions, HarnessDoctorReport, HarnessHeadroomPlanOptions,
+    HarnessHeadroomPlanReport, HarnessModeOptions, HarnessModeReport, HarnessRuntimePolicyOptions,
+    HarnessSessionLifecyclePlan, HeadroomStatsOptions, HeadroomStatsReport, TokenHeadroomReport,
 };
 use crate::identity::{
     audit_tenant_index, inspect_project_operating_context, list_identity_links,
@@ -547,6 +548,7 @@ pub struct InteractiveHarnessPanel {
     pub shim_status: CliShimStatusReport,
     pub wrapper_plan: CliWrapperPlanReport,
     pub headroom_plan: HarnessHeadroomPlanReport,
+    pub adoption_plan: HarnessAdoptionPlanReport,
     pub headroom_stats: HeadroomStatsReport,
     pub headroom_operational_status: String,
     pub headroom_recommended_action: String,
@@ -566,6 +568,8 @@ pub struct InteractiveHarnessCommands {
     pub wrap_plan: Vec<String>,
     pub headroom_plan: Vec<String>,
     pub headroom_stats: Vec<String>,
+    pub adoption_plan: Vec<String>,
+    pub bootstrap_project_harness: Vec<String>,
     pub install_shims: Vec<String>,
     pub exec: Vec<String>,
     pub sessions: Vec<String>,
@@ -1800,6 +1804,22 @@ pub fn build_interactive_harness(
     });
     let wrapper_plan = headroom_plan.wrapper_plan.clone();
     let session_lifecycle_plan = headroom_plan.session_lifecycle_plan.clone();
+    let adoption_plan = build_harness_adoption_plan(HarnessAdoptionPlanOptions {
+        shim_dir: &options.shim_dir,
+        executor: &options.executor,
+        project_root: Some(&project_root),
+        workflow_id: options.workflow_id.as_deref(),
+        task_id: options.task_id.as_deref(),
+        run_id: options.run_id.as_deref(),
+        forge_first: options.forge_first,
+        observe_only: options.observe_only,
+        context_budget: runtime_policy.context_budget,
+        context_budget_source: &runtime_policy.context_budget_source,
+        token_headroom: runtime_policy.token_headroom,
+        token_headroom_source: &runtime_policy.token_headroom_source,
+        require_token_headroom_for_forge_first: runtime_policy
+            .require_token_headroom_for_forge_first,
+    })?;
     let headroom_preview = analyze_token_headroom(
         "Forge harness preview: route bounded context, shell receipts, logs, tool output and CLI stdout through local token headroom while preserving retrieval references.",
         Some("text"),
@@ -1827,6 +1847,10 @@ pub fn build_interactive_harness(
         "headroom recommended action: {}",
         headroom_stats.recommended_action
     ));
+    next_actions.push(format!(
+        "harness adoption next action: {}",
+        adoption_plan.next_action
+    ));
     next_actions.push("forge interactive readiness --output json".to_string());
     next_actions.push("forge interactive home --output json".to_string());
     let headroom_operational_status = headroom_stats.operational_status.clone();
@@ -1847,6 +1871,7 @@ pub fn build_interactive_harness(
         shim_status,
         wrapper_plan,
         headroom_plan,
+        adoption_plan,
         headroom_stats,
         headroom_operational_status,
         headroom_recommended_action,
@@ -5355,6 +5380,40 @@ fn interactive_harness_commands(
             "--output".to_string(),
             "json".to_string(),
         ],
+        adoption_plan: vec![
+            "harness".to_string(),
+            "adoption-plan".to_string(),
+            "--executor".to_string(),
+            executor.to_string(),
+            "--shim-dir".to_string(),
+            shim_dir.clone(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--context-budget".to_string(),
+            context_budget.to_string(),
+            if token_headroom {
+                "--token-headroom".to_string()
+            } else {
+                "--no-token-headroom".to_string()
+            },
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        bootstrap_project_harness: vec![
+            "harness".to_string(),
+            "bootstrap".to_string(),
+            "--executor".to_string(),
+            executor.to_string(),
+            "--shim-dir".to_string(),
+            shim_dir.clone(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--apply".to_string(),
+            "--approved-by".to_string(),
+            "<operator>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
         install_shims: vec![
             "harness".to_string(),
             "install-shims".to_string(),
@@ -6588,7 +6647,7 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         panel.next_actions.join(" | ")
     };
     format!(
-        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; headroom-plan {headroom_plan}; headroom-stats {headroom_stats} ({headroom_blob_count} blobs); headroom action {headroom_action}; session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | headroom-plan | headroom-stats | install-shims | exec\nWrapper plan: {wrapper_plan}\nOrchestration: {orchestration}\nLifecycle gates: {lifecycle_gates}\nHeadroom stats: {headroom_details}\nNext actions: {next_actions}\n",
+        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; headroom-plan {headroom_plan}; adoption-plan {adoption_plan}; headroom-stats {headroom_stats} ({headroom_blob_count} blobs); headroom action {headroom_action}; adoption action {adoption_action}; session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | headroom-plan | adoption-plan | bootstrap | headroom-stats | install-shims | exec\nWrapper plan: {wrapper_plan}\nOrchestration: {orchestration}\nLifecycle gates: {lifecycle_gates}\nHeadroom stats: {headroom_details}\nNext actions: {next_actions}\n",
         status = panel.status,
         executor = panel.executor,
         mode = panel.mode.effective_mode,
@@ -6596,9 +6655,11 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         shim = panel.shim_status.status,
         headroom = panel.headroom_preview.status,
         headroom_plan = panel.headroom_plan.status,
+        adoption_plan = panel.adoption_plan.status,
         headroom_stats = panel.headroom_stats.status,
         headroom_blob_count = panel.headroom_stats.total_blobs,
         headroom_action = panel.headroom_recommended_action,
+        adoption_action = panel.adoption_plan.next_action,
         session_lifecycle_status = panel.session_lifecycle_plan.status,
         session_id = panel.session_lifecycle_plan.session_id,
         project_root = panel.project_root,
