@@ -3086,6 +3086,233 @@ tenant_policy_mode: enforce
 }
 
 #[test]
+fn event_inbox_enforces_project_tenant_policy_for_inbound_event_reads() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let visible_root = temp.path().join("visible");
+    let hidden_root = temp.path().join("hidden");
+    fs::create_dir_all(visible_root.join(".forge")).unwrap();
+    fs::create_dir_all(hidden_root.join(".forge")).unwrap();
+    fs::write(
+        visible_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: inbox-org
+  label: Inbox Org
+brand:
+  scope: brand
+  id: inbox-brand
+  label: Inbox Brand
+product:
+  scope: product
+  id: inbox-product
+  label: Inbox Product
+user:
+  scope: user
+  id: inbox-user
+  label: Inbox User
+channel:
+  scope: channel
+  id: webhook
+  label: Webhook
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+    fs::write(
+        hidden_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: other-inbox-org
+  label: Other Inbox Org
+brand:
+  scope: brand
+  id: other-inbox-brand
+  label: Other Inbox Brand
+product:
+  scope: product
+  id: other-inbox-product
+  label: Other Inbox Product
+user:
+  scope: user
+  id: other-inbox-user
+  label: Other Inbox User
+channel:
+  scope: channel
+  id: webhook
+  label: Webhook
+tenant_policy_mode: enforce
+"#,
+    )
+    .unwrap();
+
+    for project_root in [&visible_root, &hidden_root] {
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "identity",
+                "sync",
+                "--project-root",
+                project_root.to_str().unwrap(),
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "ingest",
+            "--project-root",
+            visible_root.to_str().unwrap(),
+            "--origin",
+            "partner_webhook",
+            "--action",
+            "start_workflow",
+            "--input",
+            r#"{"goal":"visible tenant inbound event"}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "ingest",
+            "--project-root",
+            hidden_root.to_str().unwrap(),
+            "--origin",
+            "partner_webhook",
+            "--action",
+            "start_workflow",
+            "--input",
+            r#"{"goal":"hidden tenant inbound event"}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let inbox_output = forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "inbox",
+            "--limit",
+            "10",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inbox_json: Value = serde_json::from_slice(&inbox_output).unwrap();
+    assert_eq!(inbox_json["filters"]["organization_id"], "inbox-org");
+    assert_eq!(inbox_json["event_count"], 1);
+    assert_eq!(
+        inbox_json["events"][0]["tenant_context"]["organization"]["id"],
+        "inbox-org"
+    );
+    assert_eq!(
+        inbox_json["events"][0]["data"]["goal"],
+        "visible tenant inbound event"
+    );
+    assert!(!inbox_json["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["data"]["goal"] == "hidden tenant inbound event"));
+
+    let mcp_inbox_input = serde_json::json!({
+        "project_root": visible_root.display().to_string(),
+        "limit": 10
+    });
+    let mcp_inbox_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.events.inbox",
+            "--input",
+            &mcp_inbox_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_inbox_json: Value = serde_json::from_slice(&mcp_inbox_output).unwrap();
+    assert_eq!(
+        mcp_inbox_json["result"]["filters"]["organization_id"],
+        "inbox-org"
+    );
+    assert_eq!(mcp_inbox_json["result"]["event_count"], 1);
+
+    forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "membership-update",
+            "--subject",
+            "inbox-user",
+            "--organization",
+            "inbox-org",
+            "--brand",
+            "inbox-brand",
+            "--product",
+            "inbox-product",
+            "--deny",
+            "context:read",
+            "--source",
+            "test-cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let denied_output = forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "inbox",
+            "--limit",
+            "10",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let denied_stderr = String::from_utf8(denied_output).unwrap();
+    assert!(denied_stderr.contains("multi-tenant enforcement blocked events inbox list"));
+    assert!(denied_stderr.contains("context:read"));
+}
+
+#[test]
 fn event_observability_enforces_project_tenant_policy_for_global_index_reads() {
     let temp = tempdir().unwrap();
     let forge_dir = temp.path().join(".forge");

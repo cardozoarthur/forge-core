@@ -41,7 +41,7 @@ use crate::event::{
     build_event_improvement_policy_for_context, build_event_observability_history_for_context,
     build_event_observability_index_for_context, build_event_service_plan,
     build_global_event_timeline_for_context, build_workflow_event_stream, emit_event_egress,
-    ingest_inbound_event, list_event_services, list_inbound_event_inbox,
+    ingest_inbound_event_with_context, list_event_services, list_inbound_event_inbox_for_context,
     recover_stale_event_services, route_inbound_event, run_event_runtime_daemon,
     run_event_runtime_reconcile, run_event_service_supervisor, run_event_webhook_ingress_service,
     run_event_worker_service, run_inbound_event_worker_loop, scan_inbound_event_inbox,
@@ -1125,9 +1125,19 @@ struct CostLedgerRetentionInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct InboundEventMcpIngestInput {
+    origin: String,
+    action: String,
+    #[serde(default)]
+    data: Value,
+    project_root: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct InboundEventInboxInput {
     status: Option<String>,
     limit: Option<usize>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2188,6 +2198,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         ("origin", "string", "event origin, for example telegram|api|cron"),
                         ("action", "string", "event action, for example start_workflow"),
                         ("data", "object", "event payload"),
+                        ("project_root", "string", "project root for operating context"),
                     ],
                     &["origin", "action"],
                 ),
@@ -2215,6 +2226,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     &[
                         ("status", "string", "optional status filter"),
                         ("limit", "integer", "maximum events"),
+                        ("project_root", "string", "project root for tenant-aware inbox filtering"),
                     ],
                     &[],
                 ),
@@ -6377,15 +6389,34 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             )?)?
         }
         "forge.events.ingest" => {
-            let input: InboundEventIngestInput = parse_input(input)?;
-            serde_json::to_value(ingest_inbound_event(store, input)?)?
+            let input: InboundEventMcpIngestInput = parse_input(input)?;
+            let project_root = input
+                .project_root
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let operating_context = load_project_operating_context(&project_root)?;
+            serde_json::to_value(ingest_inbound_event_with_context(
+                store,
+                InboundEventIngestInput {
+                    origin: input.origin,
+                    action: input.action,
+                    data: input.data,
+                },
+                &operating_context,
+            )?)?
         }
         "forge.events.inbox" => {
             let input: InboundEventInboxInput = parse_input(input)?;
-            serde_json::to_value(list_inbound_event_inbox(
+            let project_root = input
+                .project_root
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let operating_context = load_project_operating_context(&project_root)?;
+            serde_json::to_value(list_inbound_event_inbox_for_context(
                 store,
                 input.status.as_deref(),
                 input.limit.unwrap_or(20),
+                &operating_context,
             )?)?
         }
         "forge.events.scan" => {

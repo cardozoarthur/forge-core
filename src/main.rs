@@ -50,7 +50,7 @@ use forge_core::event::{
     build_event_improvement_policy_for_context, build_event_observability_history_for_context,
     build_event_observability_index_for_context, build_event_service_plan,
     build_global_event_timeline_for_context, build_workflow_event_stream, emit_event_egress,
-    ingest_inbound_event, list_event_services, list_inbound_event_inbox,
+    ingest_inbound_event_with_context, list_event_services, list_inbound_event_inbox_for_context,
     recover_stale_event_services, route_inbound_event, run_event_runtime_daemon,
     run_event_runtime_reconcile, run_event_service_supervisor, run_event_webhook_ingress_server,
     run_event_webhook_ingress_service, run_event_worker_service, run_inbound_event_worker_loop,
@@ -1502,6 +1502,8 @@ enum EventCommands {
         origin: String,
         #[arg(long)]
         action: String,
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
         #[arg(long)]
         input: Option<String>,
         #[arg(long = "input-file")]
@@ -1514,6 +1516,8 @@ enum EventCommands {
         status: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        #[arg(long = "project-root", default_value = ".")]
+        project_root: PathBuf,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -4161,19 +4165,22 @@ fn run() -> Result<i32> {
             EventCommands::Ingest {
                 origin,
                 action,
+                project_root,
                 input,
                 input_file,
                 output,
             } => {
                 let store = ForgeStore::open(cli.store)?;
                 let data = read_mcp_input(input, input_file)?;
-                let report = ingest_inbound_event(
+                let operating_context = load_project_operating_context(&project_root)?;
+                let report = ingest_inbound_event_with_context(
                     &store,
                     InboundEventIngestInput {
                         origin,
                         action,
                         data,
                     },
+                    &operating_context,
                 )?;
                 print_response(output, &report)?;
                 Ok(0)
@@ -4181,10 +4188,17 @@ fn run() -> Result<i32> {
             EventCommands::Inbox {
                 status,
                 limit,
+                project_root,
                 output,
             } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = list_inbound_event_inbox(&store, status.as_deref(), limit)?;
+                let operating_context = load_project_operating_context(&project_root)?;
+                let report = list_inbound_event_inbox_for_context(
+                    &store,
+                    status.as_deref(),
+                    limit,
+                    &operating_context,
+                )?;
                 print_response(output, &report)?;
                 Ok(0)
             }

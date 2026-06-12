@@ -14,6 +14,12 @@ type InboundEventRow = (
     String,
     String,
     Option<String>,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
 );
 
 pub struct ForgeStore {
@@ -270,6 +276,12 @@ pub struct InboundEventRecord {
     pub data: serde_json::Value,
     pub created_at: String,
     pub processed_at: Option<String>,
+    pub organization_id: String,
+    pub brand_id: String,
+    pub product_id: String,
+    pub user_id: String,
+    pub channel_id: String,
+    pub tenant_context: serde_json::Value,
 }
 
 #[derive(Debug, Clone)]
@@ -731,6 +743,12 @@ impl ForgeStore {
                 origin TEXT NOT NULL,
                 action TEXT NOT NULL,
                 status TEXT NOT NULL,
+                organization_id TEXT NOT NULL DEFAULT '',
+                brand_id TEXT NOT NULL DEFAULT '',
+                product_id TEXT NOT NULL DEFAULT '',
+                user_id TEXT NOT NULL DEFAULT '',
+                channel_id TEXT NOT NULL DEFAULT '',
+                tenant_context_json TEXT NOT NULL DEFAULT '{}',
                 data_json TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 processed_at TEXT
@@ -1033,6 +1051,7 @@ impl ForgeStore {
         )?;
         self.ensure_event_observability_context_columns()?;
         self.backfill_event_observability_index()?;
+        self.ensure_event_inbox_tenant_columns()?;
         self.ensure_memory_promotion_tenant_columns()?;
         self.ensure_operational_tenant_columns()?;
         Ok(())
@@ -1100,6 +1119,74 @@ impl ForgeStore {
                 ON memory_promotions (workflow_id);
             CREATE INDEX IF NOT EXISTS idx_memory_promotions_tenant
                 ON memory_promotions (organization_id, brand_id, product_id);
+            "#,
+        )?;
+        Ok(())
+    }
+
+    fn ensure_event_inbox_tenant_columns(&self) -> Result<()> {
+        for column in [
+            "organization_id",
+            "brand_id",
+            "product_id",
+            "user_id",
+            "channel_id",
+        ] {
+            if !self.table_has_column("event_inbox", column)? {
+                let result = self.connection.execute(
+                    &format!(
+                        "ALTER TABLE event_inbox ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                    ),
+                    [],
+                );
+                if let Err(error) = result {
+                    if !error.to_string().contains("duplicate column name") {
+                        return Err(error.into());
+                    }
+                }
+            }
+        }
+        if !self.table_has_column("event_inbox", "tenant_context_json")? {
+            let result = self.connection.execute(
+                "ALTER TABLE event_inbox ADD COLUMN tenant_context_json TEXT NOT NULL DEFAULT '{}'",
+                [],
+            );
+            if let Err(error) = result {
+                if !error.to_string().contains("duplicate column name") {
+                    return Err(error.into());
+                }
+            }
+        }
+        let default_context = default_operating_context_json();
+        self.connection.execute(
+            r#"
+            UPDATE event_inbox
+            SET organization_id = ?1,
+                brand_id = ?2,
+                product_id = ?3,
+                user_id = ?4,
+                channel_id = ?5,
+                tenant_context_json = ?6
+            WHERE organization_id = ''
+               OR brand_id = ''
+               OR product_id = ''
+               OR user_id = ''
+               OR channel_id = ''
+               OR tenant_context_json = '{}'
+            "#,
+            params![
+                tenant_context_identity_id(&default_context, "organization"),
+                tenant_context_identity_id(&default_context, "brand"),
+                tenant_context_identity_id(&default_context, "product"),
+                tenant_context_identity_id(&default_context, "user"),
+                tenant_context_identity_id(&default_context, "channel"),
+                serde_json::to_string(&default_context)?,
+            ],
+        )?;
+        self.connection.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_event_inbox_tenant
+                ON event_inbox (organization_id, brand_id, product_id, status, created_at);
             "#,
         )?;
         Ok(())
@@ -3882,13 +3969,35 @@ impl ForgeStore {
         action: &str,
         status: &str,
         data: &serde_json::Value,
+        tenant_context: &serde_json::Value,
     ) -> Result<()> {
+        let organization_id = tenant_context_identity_id(tenant_context, "organization");
+        let brand_id = tenant_context_identity_id(tenant_context, "brand");
+        let product_id = tenant_context_identity_id(tenant_context, "product");
+        let user_id = tenant_context_identity_id(tenant_context, "user");
+        let channel_id = tenant_context_identity_id(tenant_context, "channel");
         self.connection.execute(
             r#"
-            INSERT INTO event_inbox (id, origin, action, status, data_json)
-            VALUES (?1, ?2, ?3, ?4, ?5)
+            INSERT INTO event_inbox (
+                id, origin, action, status,
+                organization_id, brand_id, product_id, user_id, channel_id,
+                tenant_context_json, data_json
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
             "#,
-            params![id, origin, action, status, serde_json::to_string(data)?],
+            params![
+                id,
+                origin,
+                action,
+                status,
+                organization_id,
+                brand_id,
+                product_id,
+                user_id,
+                channel_id,
+                serde_json::to_string(tenant_context)?,
+                serde_json::to_string(data)?
+            ],
         )?;
         self.insert_global_event(GlobalEventWrite {
             source: "event_inbox",
@@ -3904,7 +4013,7 @@ impl ForgeStore {
                 "status": status,
                 "data": data,
             }),
-            tenant_context: &default_operating_context_json(),
+            tenant_context,
         })?;
         Ok(())
     }
@@ -3945,7 +4054,7 @@ impl ForgeStore {
                     "status": status,
                     "data": data,
                 }),
-                tenant_context: &default_operating_context_json(),
+                tenant_context: &event.tenant_context,
             })?;
         }
         Ok(())
@@ -3956,7 +4065,8 @@ impl ForgeStore {
             .connection
             .query_row(
                 r#"
-                SELECT id, origin, action, status, data_json, created_at, processed_at
+                SELECT id, origin, action, status, data_json, created_at, processed_at,
+                       organization_id, brand_id, product_id, user_id, channel_id, tenant_context_json
                 FROM event_inbox
                 WHERE id = ?1
                 "#,
@@ -3970,12 +4080,31 @@ impl ForgeStore {
                         row.get(4)?,
                         row.get(5)?,
                         row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                        row.get(12)?,
                     ))
                 },
             )
             .optional()?;
-        let (id, origin, action, status, data_json, created_at, processed_at) =
-            row.with_context(|| format!("inbound event not found: {id}"))?;
+        let (
+            id,
+            origin,
+            action,
+            status,
+            data_json,
+            created_at,
+            processed_at,
+            organization_id,
+            brand_id,
+            product_id,
+            user_id,
+            channel_id,
+            tenant_context_json,
+        ) = row.with_context(|| format!("inbound event not found: {id}"))?;
         Ok(InboundEventRecord {
             id,
             origin,
@@ -3984,6 +4113,12 @@ impl ForgeStore {
             data: serde_json::from_str(&data_json)?,
             created_at,
             processed_at,
+            organization_id,
+            brand_id,
+            product_id,
+            user_id,
+            channel_id,
+            tenant_context: serde_json::from_str(&tenant_context_json)?,
         })
     }
 
@@ -3991,25 +4126,28 @@ impl ForgeStore {
         &self,
         status: Option<&str>,
         limit: usize,
+        organization_id: Option<&str>,
+        brand_id: Option<&str>,
+        product_id: Option<&str>,
     ) -> Result<Vec<InboundEventRecord>> {
         let limit = limit.max(1) as i64;
-        let query = if status.is_some() {
+        let status_filter = normalize_optional_filter(status);
+        let organization_filter = normalize_optional_filter(organization_id);
+        let brand_filter = normalize_optional_filter(brand_id);
+        let product_filter = normalize_optional_filter(product_id);
+        let mut statement = self.connection.prepare(
             r#"
-            SELECT id, origin, action, status, data_json, created_at, processed_at
+            SELECT id, origin, action, status, data_json, created_at, processed_at,
+                   organization_id, brand_id, product_id, user_id, channel_id, tenant_context_json
             FROM event_inbox
-            WHERE status = ?1
+            WHERE (?1 IS NULL OR status = ?1)
+              AND (?2 IS NULL OR organization_id = ?2)
+              AND (?3 IS NULL OR brand_id = ?3)
+              AND (?4 IS NULL OR product_id = ?4)
             ORDER BY created_at DESC, id DESC
-            LIMIT ?2
-            "#
-        } else {
-            r#"
-            SELECT id, origin, action, status, data_json, created_at, processed_at
-            FROM event_inbox
-            ORDER BY created_at DESC, id DESC
-            LIMIT ?1
-            "#
-        };
-        let mut statement = self.connection.prepare(query)?;
+            LIMIT ?5
+            "#,
+        )?;
         let map_row = |row: &rusqlite::Row<'_>| {
             Ok(InboundEventRecord {
                 id: row.get(0)?,
@@ -4025,13 +4163,32 @@ impl ForgeStore {
                 })?,
                 created_at: row.get(5)?,
                 processed_at: row.get(6)?,
+                organization_id: row.get(7)?,
+                brand_id: row.get(8)?,
+                product_id: row.get(9)?,
+                user_id: row.get(10)?,
+                channel_id: row.get(11)?,
+                tenant_context: serde_json::from_str(&row.get::<_, String>(12)?).map_err(
+                    |error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            12,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    },
+                )?,
             })
         };
-        let rows = if let Some(status) = status {
-            statement.query_map(params![status, limit], map_row)?
-        } else {
-            statement.query_map(params![limit], map_row)?
-        };
+        let rows = statement.query_map(
+            params![
+                status_filter,
+                organization_filter,
+                brand_filter,
+                product_filter,
+                limit
+            ],
+            map_row,
+        )?;
         let mut events = Vec::new();
         for row in rows {
             events.push(row?);

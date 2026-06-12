@@ -513,8 +513,22 @@ pub struct InboundEventIngestReport {
 pub struct InboundEventInboxReport {
     pub schema_version: String,
     pub status: String,
+    pub filters: InboundEventInboxFilters,
     pub event_count: usize,
     pub events: Vec<InboundEventView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InboundEventInboxFilters {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    pub limit: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brand_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1083,6 +1097,7 @@ pub struct InboundEventView {
     pub origin: String,
     pub action: String,
     pub status: String,
+    pub tenant_context: EventTenantContext,
     pub data: Value,
     pub created_at: String,
     pub processed_at: Option<String>,
@@ -2652,10 +2667,26 @@ pub fn ingest_inbound_event(
     store: &ForgeStore,
     input: InboundEventIngestInput,
 ) -> Result<InboundEventIngestReport> {
+    ingest_inbound_event_with_context(store, input, &OperatingContextSpec::default())
+}
+
+pub fn ingest_inbound_event_with_context(
+    store: &ForgeStore,
+    input: InboundEventIngestInput,
+    operating_context: &OperatingContextSpec,
+) -> Result<InboundEventIngestReport> {
     let origin = required_text("origin", &input.origin)?;
     let action = required_text("action", &input.action)?;
     let event_id = format!("evtin_{}", Uuid::new_v4().to_string().replace('-', ""));
-    store.save_inbound_event(&event_id, &origin, &action, "pending", &input.data)?;
+    let tenant_context = serde_json::to_value(operating_context)?;
+    store.save_inbound_event(
+        &event_id,
+        &origin,
+        &action,
+        "pending",
+        &input.data,
+        &tenant_context,
+    )?;
     let event = store.load_inbound_event(&event_id)?;
     Ok(InboundEventIngestReport {
         schema_version: EVENT_INGEST_SCHEMA_VERSION.to_string(),
@@ -2669,15 +2700,39 @@ pub fn list_inbound_event_inbox(
     status: Option<&str>,
     limit: usize,
 ) -> Result<InboundEventInboxReport> {
+    list_inbound_event_inbox_for_context(store, status, limit, &OperatingContextSpec::default())
+}
+
+pub fn list_inbound_event_inbox_for_context(
+    store: &ForgeStore,
+    status: Option<&str>,
+    limit: usize,
+    operating_context: &OperatingContextSpec,
+) -> Result<InboundEventInboxReport> {
     let status = status.map(str::trim).filter(|status| !status.is_empty());
+    let (organization_id, brand_id, product_id) =
+        event_inbox_tenant_filters_for_context(store, operating_context, "events inbox list")?;
     let events = store
-        .list_inbound_events(status, limit)?
+        .list_inbound_events(
+            status,
+            limit,
+            organization_id.as_deref(),
+            brand_id.as_deref(),
+            product_id.as_deref(),
+        )?
         .into_iter()
         .map(InboundEventView::from)
         .collect::<Vec<_>>();
     Ok(InboundEventInboxReport {
         schema_version: EVENT_INBOX_SCHEMA_VERSION.to_string(),
         status: "event_inbox_loaded".to_string(),
+        filters: InboundEventInboxFilters {
+            status: status.map(ToString::to_string),
+            limit,
+            organization_id,
+            brand_id,
+            product_id,
+        },
         event_count: events.len(),
         events,
     })
@@ -2691,7 +2746,16 @@ pub fn scan_inbound_event_inbox(
 ) -> Result<InboundEventWorkerReport> {
     let requested_status = normalize_text(status).unwrap_or_else(|| "pending".to_string());
     let limit = limit.max(1);
-    let records = store.list_inbound_events(Some(&requested_status), limit)?;
+    let operating_context = load_project_operating_context(project_root)?;
+    let (organization_id, brand_id, product_id) =
+        event_inbox_tenant_filters_for_context(store, &operating_context, "events inbox scan")?;
+    let records = store.list_inbound_events(
+        Some(&requested_status),
+        limit,
+        organization_id.as_deref(),
+        brand_id.as_deref(),
+        product_id.as_deref(),
+    )?;
     let mut entries = Vec::new();
     for record in records {
         let before_status = record.status.clone();
@@ -4215,7 +4279,19 @@ pub fn run_event_runtime_reconcile(
         actionable_workflows,
     };
 
-    let pending_events = store.list_inbound_events(Some(&requested_status), limit)?;
+    let operating_context = load_project_operating_context(&project_root)?;
+    let (organization_id, brand_id, product_id) = event_inbox_tenant_filters_for_context(
+        store,
+        &operating_context,
+        "events runtime reconcile inbox scan",
+    )?;
+    let pending_events = store.list_inbound_events(
+        Some(&requested_status),
+        limit,
+        organization_id.as_deref(),
+        brand_id.as_deref(),
+        product_id.as_deref(),
+    )?;
     let inbox = EventRuntimeInboxSnapshot {
         schema_version: "forge.event_runtime_inbox_snapshot.v1".to_string(),
         status_filter: requested_status.clone(),
@@ -6293,7 +6369,8 @@ fn handle_webhook_ingress_stream(
     )?;
     let origin = inbound_input.origin.clone();
     let action = inbound_input.action.clone();
-    let ingest = ingest_inbound_event(store, inbound_input)?;
+    let operating_context = load_project_operating_context(project_root)?;
+    let ingest = ingest_inbound_event_with_context(store, inbound_input, &operating_context)?;
     let event_id = ingest.event.id.clone();
     let route = if route_after_ingest {
         match route_inbound_event(store, &event_id, project_root) {
@@ -6749,6 +6826,22 @@ fn global_event_matches_filters(
         && filter_matches(organization_id, &event.organization_id)
         && filter_matches(brand_id, &event.brand_id)
         && filter_matches(product_id, &event.product_id)
+}
+
+fn event_inbox_tenant_filters_for_context(
+    store: &ForgeStore,
+    operating_context: &OperatingContextSpec,
+    action: &str,
+) -> Result<(Option<String>, Option<String>, Option<String>)> {
+    if operating_context.tenant_policy_mode != "enforce" {
+        return Ok((None, None, None));
+    }
+    ensure_operating_context_policy(store, operating_context, action)?;
+    Ok((
+        Some(operating_context.organization.id.clone()),
+        Some(operating_context.brand.id.clone()),
+        Some(operating_context.product.id.clone()),
+    ))
 }
 
 fn enforce_timeline_tenant_filter(
@@ -7491,11 +7584,15 @@ fn required_text(name: &str, value: &str) -> Result<String> {
 
 impl From<InboundEventRecord> for InboundEventView {
     fn from(event: InboundEventRecord) -> Self {
+        let operating_context =
+            serde_json::from_value::<OperatingContextSpec>(event.tenant_context)
+                .unwrap_or_default();
         Self {
             id: event.id,
             origin: event.origin,
             action: event.action,
             status: event.status,
+            tenant_context: EventTenantContext::from(&operating_context),
             data: event.data,
             created_at: event.created_at,
             processed_at: event.processed_at,
