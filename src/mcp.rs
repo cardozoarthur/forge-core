@@ -1224,6 +1224,7 @@ struct InboundEventScanInput {
     status: Option<String>,
     limit: Option<usize>,
     project_root: Option<String>,
+    dispatch_activations: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1234,6 +1235,7 @@ struct InboundEventWorkerLoopInput {
     max_cycles: Option<usize>,
     interval_seconds: Option<u64>,
     idle_exit: Option<bool>,
+    dispatch_activations: Option<bool>,
     stop_file: Option<String>,
 }
 
@@ -1247,6 +1249,7 @@ struct EventServicePlanInput {
     max_cycles: Option<usize>,
     interval_seconds: Option<u64>,
     idle_exit: Option<bool>,
+    dispatch_activations: Option<bool>,
     host: Option<String>,
     port: Option<u16>,
     path: Option<String>,
@@ -1275,6 +1278,7 @@ struct EventServiceRunInput {
     max_cycles: Option<usize>,
     interval_seconds: Option<u64>,
     idle_exit: Option<bool>,
+    dispatch_activations: Option<bool>,
     stop_file: Option<String>,
     host: Option<String>,
     port: Option<u16>,
@@ -1302,6 +1306,7 @@ struct EventServiceSuperviseInput {
     max_cycles: Option<usize>,
     interval_seconds: Option<u64>,
     idle_exit: Option<bool>,
+    dispatch_activations: Option<bool>,
     stop_file: Option<String>,
     host: Option<String>,
     port: Option<u16>,
@@ -2335,6 +2340,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         ("status", "string", "event status to scan; defaults to pending"),
                         ("limit", "integer", "maximum events to scan"),
                         ("project_root", "string", "project root for context/addons"),
+                        ("dispatch_activations", "boolean", "enqueue matched Addon event workflow activations while scanning"),
                     ],
                     &[],
                 ),
@@ -2362,6 +2368,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         ("max_cycles", "integer", "maximum worker cycles; defaults to 1"),
                         ("interval_seconds", "integer", "sleep between cycles; defaults to 300"),
                         ("idle_exit", "boolean", "stop early when a cycle scans no events"),
+                        ("dispatch_activations", "boolean", "enqueue matched Addon event workflow activations during worker scans"),
                         ("stop_file", "string", "cooperative shutdown file checked between cycles"),
                     ],
                     &[],
@@ -2393,6 +2400,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         ("max_cycles", "integer", "bounded cycles for the generated worker command"),
                         ("interval_seconds", "integer", "sleep between worker cycles"),
                         ("idle_exit", "boolean", "worker exits early when idle"),
+                        ("dispatch_activations", "boolean", "worker command enqueues matched Addon event workflow activations"),
                         ("host", "string", "webhook host; defaults to 127.0.0.1"),
                         ("port", "integer", "webhook port"),
                         ("path", "string", "webhook path"),
@@ -2432,6 +2440,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         ("max_cycles", "integer", "maximum worker cycles"),
                         ("interval_seconds", "integer", "sleep between cycles"),
                         ("idle_exit", "boolean", "stop early when idle"),
+                        ("dispatch_activations", "boolean", "worker service enqueues matched Addon event workflow activations"),
                         ("stop_file", "string", "cooperative shutdown file checked between worker cycles or webhook requests"),
                         ("host", "string", "webhook bind host"),
                         ("port", "integer", "webhook bind port"),
@@ -2475,6 +2484,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         ("max_cycles", "integer", "maximum worker cycles per run"),
                         ("interval_seconds", "integer", "sleep between worker cycles"),
                         ("idle_exit", "boolean", "stop a worker run early when idle"),
+                        ("dispatch_activations", "boolean", "worker service runs enqueue matched Addon event workflow activations"),
                         ("stop_file", "string", "cooperative supervisor shutdown file"),
                         ("host", "string", "webhook bind host"),
                         ("port", "integer", "webhook bind port"),
@@ -6713,6 +6723,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 &project_root,
                 input.status.as_deref(),
                 input.limit.unwrap_or(20),
+                input.dispatch_activations.unwrap_or(false),
             )?)?
         }
         "forge.events.worker" => {
@@ -6731,6 +6742,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     max_cycles: input.max_cycles.unwrap_or(1),
                     interval_seconds: input.interval_seconds.unwrap_or(300),
                     idle_exit: input.idle_exit.unwrap_or(false),
+                    dispatch_activations: input.dispatch_activations.unwrap_or(false),
                     stop_file: stop_file.as_deref(),
                 },
             )?)?
@@ -6754,6 +6766,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.max_cycles.unwrap_or(1),
                 input.interval_seconds.unwrap_or(300),
                 input.idle_exit.unwrap_or(false),
+                input.dispatch_activations.unwrap_or(false),
                 input.host.as_deref().unwrap_or("127.0.0.1"),
                 input.port.unwrap_or(8787),
                 input.path.as_deref().unwrap_or("/webhook"),
@@ -6796,6 +6809,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     input.max_cycles.unwrap_or(1),
                     input.interval_seconds.unwrap_or(300),
                     input.idle_exit.unwrap_or(false),
+                    input.dispatch_activations.unwrap_or(false),
                     stop_file.as_deref(),
                     input
                         .lease_owner
@@ -6857,6 +6871,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.max_cycles.unwrap_or(1),
                 input.interval_seconds.unwrap_or(300),
                 input.idle_exit.unwrap_or(false),
+                input.dispatch_activations.unwrap_or(false),
                 input.host.as_deref().unwrap_or("127.0.0.1"),
                 input.port.unwrap_or(8787),
                 input.path.as_deref().unwrap_or("/webhook"),

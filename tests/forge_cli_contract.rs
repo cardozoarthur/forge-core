@@ -24896,11 +24896,7 @@ event_adapters:
     );
 }
 
-#[test]
-fn inbound_event_dispatch_activations_enqueues_addon_runtime_contracts() {
-    let temp = tempdir().unwrap();
-    let store = temp.path().join("forge.sqlite");
-    let project_root = temp.path().join("event-activation-dispatch-project");
+fn write_event_activation_dispatch_demo_project(project_root: &Path) {
     let addon_dir = project_root.join(".forge/addons");
     fs::create_dir_all(&addon_dir).unwrap();
     fs::write(
@@ -25030,6 +25026,14 @@ event_adapters:
 "#,
     )
     .unwrap();
+}
+
+#[test]
+fn inbound_event_dispatch_activations_enqueues_addon_runtime_contracts() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("event-activation-dispatch-project");
+    write_event_activation_dispatch_demo_project(&project_root);
 
     forge()
         .args([
@@ -25208,6 +25212,257 @@ event_adapters:
         .clone();
     let final_ledger: Value = serde_json::from_slice(&final_ledger_output).unwrap();
     assert_eq!(final_ledger["dispatch_count"], 2);
+}
+
+#[test]
+fn inbound_event_scan_can_dispatch_activation_runtime_contracts() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("event-activation-scan-project");
+    write_event_activation_dispatch_demo_project(&project_root);
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let default_ingest_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "ingest",
+            "--origin",
+            "demo",
+            "--action",
+            "start_workflow",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--input",
+            r#"{"goal":"Route without dispatching addon activations","transport":"demo","event_type":"demo.dispatch","auth_verified":true}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let default_ingest: Value = serde_json::from_slice(&default_ingest_output).unwrap();
+    let default_event_id = default_ingest["event"]["id"].as_str().unwrap();
+
+    let default_scan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "scan",
+            "--status",
+            "pending",
+            "--limit",
+            "1",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let default_scan: Value = serde_json::from_slice(&default_scan_output).unwrap();
+    assert_eq!(default_scan["routed_count"], 1);
+    assert_eq!(default_scan["events"][0]["event_id"], default_event_id);
+    assert!(default_scan["events"][0]["activation_dispatch"].is_null());
+
+    let empty_ledger_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "dispatches",
+            "--addon",
+            "forge.addon.event_activation_dispatch_demo",
+            "--status",
+            "queued",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let empty_ledger: Value = serde_json::from_slice(&empty_ledger_output).unwrap();
+    assert_eq!(empty_ledger["dispatch_count"], 0);
+
+    let dispatch_ingest_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "ingest",
+            "--origin",
+            "demo",
+            "--action",
+            "start_workflow",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--input",
+            r#"{"goal":"Route and dispatch addon activations from worker scan","transport":"demo","event_type":"demo.dispatch","auth_verified":true}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let dispatch_ingest: Value = serde_json::from_slice(&dispatch_ingest_output).unwrap();
+    let dispatch_event_id = dispatch_ingest["event"]["id"].as_str().unwrap();
+
+    let dispatch_scan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "scan",
+            "--status",
+            "pending",
+            "--limit",
+            "1",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--dispatch-activations",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let dispatch_scan: Value = serde_json::from_slice(&dispatch_scan_output).unwrap();
+    assert_eq!(dispatch_scan["routed_count"], 1);
+    assert_eq!(dispatch_scan["events"][0]["event_id"], dispatch_event_id);
+    assert_eq!(
+        dispatch_scan["events"][0]["activation_dispatch"]["schema_version"],
+        "forge.event_activation_dispatch.v1"
+    );
+    assert_eq!(
+        dispatch_scan["events"][0]["activation_dispatch"]["status"],
+        "event_activation_dispatch_queued"
+    );
+    assert_eq!(
+        dispatch_scan["events"][0]["activation_dispatch"]["route"]["status"],
+        "event_routed"
+    );
+    assert_eq!(
+        dispatch_scan["events"][0]["activation_dispatch"]["queued_count"],
+        2
+    );
+
+    let ledger_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "dispatches",
+            "--addon",
+            "forge.addon.event_activation_dispatch_demo",
+            "--status",
+            "queued",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ledger: Value = serde_json::from_slice(&ledger_output).unwrap();
+    assert_eq!(ledger["dispatch_count"], 2);
+    assert_eq!(ledger["queued_count"], 2);
+
+    let mcp_ingest_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "ingest",
+            "--origin",
+            "demo",
+            "--action",
+            "start_workflow",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--input",
+            r#"{"goal":"Route and dispatch addon activations from MCP scan","transport":"demo","event_type":"demo.dispatch","auth_verified":true}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_ingest: Value = serde_json::from_slice(&mcp_ingest_output).unwrap();
+    let mcp_event_id = mcp_ingest["event"]["id"].as_str().unwrap();
+    let mcp_input = serde_json::json!({
+        "status": "pending",
+        "limit": 1,
+        "project_root": project_root.to_str().unwrap(),
+        "dispatch_activations": true
+    });
+    let mcp_scan_output = forge()
+        .args(["--store", store.to_str().unwrap(), "mcp", "call"])
+        .arg("forge.events.scan")
+        .arg("--input")
+        .arg(mcp_input.to_string())
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_scan: Value = serde_json::from_slice(&mcp_scan_output).unwrap();
+    assert_eq!(mcp_scan["result"]["events"][0]["event_id"], mcp_event_id);
+    assert_eq!(
+        mcp_scan["result"]["events"][0]["activation_dispatch"]["queued_count"],
+        2
+    );
+
+    let final_ledger_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "dispatches",
+            "--addon",
+            "forge.addon.event_activation_dispatch_demo",
+            "--status",
+            "queued",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let final_ledger: Value = serde_json::from_slice(&final_ledger_output).unwrap();
+    assert_eq!(final_ledger["dispatch_count"], 4);
+    assert_eq!(final_ledger["queued_count"], 4);
 }
 
 #[test]

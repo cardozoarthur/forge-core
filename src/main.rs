@@ -1621,6 +1621,8 @@ enum EventCommands {
         limit: usize,
         #[arg(long = "project-root", default_value = ".")]
         project_root: PathBuf,
+        #[arg(long = "dispatch-activations")]
+        dispatch_activations: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -1637,6 +1639,8 @@ enum EventCommands {
         interval_seconds: u64,
         #[arg(long = "idle-exit")]
         idle_exit: bool,
+        #[arg(long = "dispatch-activations")]
+        dispatch_activations: bool,
         #[arg(long = "stop-file")]
         stop_file: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -1657,6 +1661,8 @@ enum EventCommands {
         interval_seconds: u64,
         #[arg(long = "idle-exit")]
         idle_exit: bool,
+        #[arg(long = "dispatch-activations")]
+        dispatch_activations: bool,
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
         #[arg(long, default_value_t = 8787)]
@@ -1707,6 +1713,8 @@ enum EventCommands {
         interval_seconds: u64,
         #[arg(long = "idle-exit")]
         idle_exit: bool,
+        #[arg(long = "dispatch-activations")]
+        dispatch_activations: bool,
         #[arg(long = "stop-file")]
         stop_file: Option<PathBuf>,
         #[arg(long, default_value = "127.0.0.1")]
@@ -1755,6 +1763,8 @@ enum EventCommands {
         interval_seconds: u64,
         #[arg(long = "idle-exit")]
         idle_exit: bool,
+        #[arg(long = "dispatch-activations")]
+        dispatch_activations: bool,
         #[arg(long = "stop-file")]
         stop_file: Option<PathBuf>,
         #[arg(long, default_value = "127.0.0.1")]
@@ -4321,11 +4331,17 @@ fn run() -> Result<i32> {
                 status,
                 limit,
                 project_root,
+                dispatch_activations,
                 output,
             } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report =
-                    scan_inbound_event_inbox(&store, &project_root, status.as_deref(), limit)?;
+                let report = scan_inbound_event_inbox(
+                    &store,
+                    &project_root,
+                    status.as_deref(),
+                    limit,
+                    dispatch_activations,
+                )?;
                 print_response(output, &report)?;
                 Ok(if report.failed_count > 0 { 1 } else { 0 })
             }
@@ -4336,6 +4352,7 @@ fn run() -> Result<i32> {
                 max_cycles,
                 interval_seconds,
                 idle_exit,
+                dispatch_activations,
                 stop_file,
                 output,
             } => {
@@ -4349,6 +4366,7 @@ fn run() -> Result<i32> {
                         max_cycles,
                         interval_seconds,
                         idle_exit,
+                        dispatch_activations,
                         stop_file: stop_file.as_deref(),
                     },
                 )?;
@@ -4363,6 +4381,7 @@ fn run() -> Result<i32> {
                 max_cycles,
                 interval_seconds,
                 idle_exit,
+                dispatch_activations,
                 host,
                 port,
                 path,
@@ -4391,6 +4410,7 @@ fn run() -> Result<i32> {
                     max_cycles,
                     interval_seconds,
                     idle_exit,
+                    dispatch_activations,
                     &host,
                     port,
                     &path,
@@ -4419,6 +4439,7 @@ fn run() -> Result<i32> {
                 max_cycles,
                 interval_seconds,
                 idle_exit,
+                dispatch_activations,
                 stop_file,
                 host,
                 port,
@@ -4447,6 +4468,7 @@ fn run() -> Result<i32> {
                         max_cycles,
                         interval_seconds,
                         idle_exit,
+                        dispatch_activations,
                         stop_file.as_deref(),
                         &lease_owner,
                         lease_seconds,
@@ -4497,6 +4519,7 @@ fn run() -> Result<i32> {
                 max_cycles,
                 interval_seconds,
                 idle_exit,
+                dispatch_activations,
                 stop_file,
                 host,
                 port,
@@ -4527,6 +4550,7 @@ fn run() -> Result<i32> {
                     max_cycles,
                     interval_seconds,
                     idle_exit,
+                    dispatch_activations,
                     &host,
                     port,
                     &path,

@@ -125,6 +125,7 @@ pub struct InboundEventWorkerLoopOptions<'a> {
     pub max_cycles: usize,
     pub interval_seconds: u64,
     pub idle_exit: bool,
+    pub dispatch_activations: bool,
     pub stop_file: Option<&'a Path>,
 }
 
@@ -569,6 +570,8 @@ pub struct InboundEventWorkerEntry {
     pub route_decision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub addon_event_adapter_plan: Option<InboundEventAddonAdapterPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_dispatch: Option<InboundEventActivationDispatchReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -2897,6 +2900,7 @@ pub fn scan_inbound_event_inbox(
     project_root: &Path,
     status: Option<&str>,
     limit: usize,
+    dispatch_activations: bool,
 ) -> Result<InboundEventWorkerReport> {
     let requested_status = normalize_text(status).unwrap_or_else(|| "pending".to_string());
     let limit = limit.max(1);
@@ -2914,18 +2918,34 @@ pub fn scan_inbound_event_inbox(
     for record in records {
         let before_status = record.status.clone();
         match route_inbound_event(store, &record.id, project_root) {
-            Ok(route) => entries.push(InboundEventWorkerEntry {
-                event_id: record.id,
-                origin: record.origin,
-                action: record.action,
-                before_status,
-                after_status: route.event.status.clone(),
-                identity_context: route.event.identity_context.clone(),
-                workflow_id: route.workflow_id,
-                route_decision: Some(route.route_decision),
-                addon_event_adapter_plan: Some(route.addon_event_adapter_plan),
-                error: None,
-            }),
+            Ok(route) => {
+                let (activation_dispatch, error) = if dispatch_activations {
+                    match dispatch_inbound_event_activations_for_route(
+                        store,
+                        &route,
+                        project_root,
+                        false,
+                    ) {
+                        Ok(report) => (Some(report), None),
+                        Err(error) => (None, Some(format!("activation dispatch failed: {error}"))),
+                    }
+                } else {
+                    (None, None)
+                };
+                entries.push(InboundEventWorkerEntry {
+                    event_id: record.id,
+                    origin: record.origin,
+                    action: record.action,
+                    before_status,
+                    after_status: route.event.status.clone(),
+                    identity_context: route.event.identity_context.clone(),
+                    workflow_id: route.workflow_id,
+                    route_decision: Some(route.route_decision),
+                    addon_event_adapter_plan: Some(route.addon_event_adapter_plan),
+                    activation_dispatch,
+                    error,
+                })
+            }
             Err(error) => {
                 let error_message = error.to_string();
                 let identity_context = inbound_event_identity_context(store, &record);
@@ -2951,6 +2971,7 @@ pub fn scan_inbound_event_inbox(
                     workflow_id: None,
                     route_decision: None,
                     addon_event_adapter_plan: None,
+                    activation_dispatch: None,
                     error: Some(error_message),
                 });
             }
@@ -2962,7 +2983,7 @@ pub fn scan_inbound_event_inbox(
         .count();
     let failed_count = entries
         .iter()
-        .filter(|entry| entry.after_status == "failed")
+        .filter(|entry| entry.after_status == "failed" || entry.error.is_some())
         .count();
     Ok(InboundEventWorkerReport {
         schema_version: EVENT_WORKER_SCHEMA_VERSION.to_string(),
@@ -3000,7 +3021,13 @@ pub fn run_inbound_event_worker_loop(
             stopped_reason = "stop_file_requested".to_string();
             break;
         }
-        let report = scan_inbound_event_inbox(store, project_root, Some(&requested_status), limit)?;
+        let report = scan_inbound_event_inbox(
+            store,
+            project_root,
+            Some(&requested_status),
+            limit,
+            options.dispatch_activations,
+        )?;
         scanned_count += report.scanned_count;
         routed_count += report.routed_count;
         failed_count += report.failed_count;
@@ -3079,6 +3106,7 @@ pub fn build_event_service_plan(
     max_cycles: usize,
     interval_seconds: u64,
     idle_exit: bool,
+    dispatch_activations: bool,
     host: &str,
     port: u16,
     path: &str,
@@ -3133,6 +3161,9 @@ pub fn build_event_service_plan(
         if idle_exit {
             command.push("--idle-exit".to_string());
         }
+        if dispatch_activations {
+            command.push("--dispatch-activations".to_string());
+        }
         command.extend(["--output".to_string(), "json".to_string()]);
         (
             command,
@@ -3142,6 +3173,7 @@ pub fn build_event_service_plan(
                 "max_cycles": max_cycles,
                 "interval_seconds": interval_seconds,
                 "idle_exit": idle_exit,
+                "dispatch_activations": dispatch_activations,
             }),
         )
     } else {
@@ -3278,6 +3310,7 @@ pub fn run_event_worker_service(
     max_cycles: usize,
     interval_seconds: u64,
     idle_exit: bool,
+    dispatch_activations: bool,
     stop_file: Option<&Path>,
     lease_owner: &str,
     lease_seconds: u64,
@@ -3295,6 +3328,7 @@ pub fn run_event_worker_service(
         max_cycles,
         interval_seconds,
         idle_exit,
+        dispatch_activations,
         "127.0.0.1",
         8787,
         "/webhook",
@@ -3389,7 +3423,13 @@ pub fn run_event_worker_service(
             stopped_reason = "stop_file_requested".to_string();
             break;
         }
-        let report = scan_inbound_event_inbox(store, project_root, Some(&requested_status), limit)?;
+        let report = scan_inbound_event_inbox(
+            store,
+            project_root,
+            Some(&requested_status),
+            limit,
+            dispatch_activations,
+        )?;
         scanned_count += report.scanned_count;
         routed_count += report.routed_count;
         failed_count += report.failed_count;
@@ -3452,6 +3492,7 @@ pub fn run_event_worker_service(
                 "max_cycles": max_cycles,
                 "interval_seconds": interval_seconds,
                 "idle_exit": idle_exit,
+                "dispatch_activations": dispatch_activations,
                 "cycle_count": cycles.len(),
                 "scanned_count": scanned_count,
                 "routed_count": routed_count,
@@ -3643,6 +3684,7 @@ pub fn run_event_webhook_ingress_service(
         1,
         1,
         0,
+        false,
         false,
         host,
         port,
@@ -3985,6 +4027,7 @@ pub fn run_event_service_supervisor(
     max_cycles: usize,
     interval_seconds: u64,
     idle_exit: bool,
+    dispatch_activations: bool,
     host: &str,
     port: u16,
     path: &str,
@@ -4039,6 +4082,7 @@ pub fn run_event_service_supervisor(
                 max_cycles,
                 interval_seconds,
                 idle_exit,
+                dispatch_activations,
                 stop_file,
                 &lease_owner,
                 lease_seconds,
@@ -4646,6 +4690,7 @@ pub fn run_event_runtime_reconcile(
                     max_cycles,
                     interval_seconds,
                     idle_exit,
+                    false,
                     "127.0.0.1",
                     8787,
                     "/webhook",
@@ -5552,6 +5597,15 @@ pub fn dispatch_inbound_event_activations(
     dry_run: bool,
 ) -> Result<InboundEventActivationDispatchReport> {
     let route = route_inbound_event(store, event_id, project_root)?;
+    dispatch_inbound_event_activations_for_route(store, &route, project_root, dry_run)
+}
+
+fn dispatch_inbound_event_activations_for_route(
+    store: &ForgeStore,
+    route: &InboundEventRouteReport,
+    project_root: &Path,
+    dry_run: bool,
+) -> Result<InboundEventActivationDispatchReport> {
     let project_root = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
@@ -5574,7 +5628,7 @@ pub fn dispatch_inbound_event_activations(
             .iter()
             .filter(|contract| contract.dispatch_allowed)
         {
-            let input = event_activation_dispatch_input(&route, activation, contract);
+            let input = event_activation_dispatch_input(route, activation, contract);
             let source = format!(
                 "event_inbox:{}:{}:{}",
                 route.event_id, activation.source_kind, activation.source_id
@@ -5630,7 +5684,7 @@ pub fn dispatch_inbound_event_activations(
         dry_run_count,
         blocked_count,
         skipped_count,
-        route,
+        route: route.clone(),
         dispatch_reports,
         notes,
     })
