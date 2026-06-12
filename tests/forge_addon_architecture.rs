@@ -15285,6 +15285,30 @@ capabilities:
     assert_eq!(install_json["schema_version"], "forge.addon_lifecycle.v1");
     assert_eq!(install_json["status"], "installed");
     assert_eq!(install_json["addon"]["id"], "forge.addon.fiscal");
+    assert_eq!(
+        install_json["operation_plan"]["schema_version"],
+        "forge.addon_lifecycle_operation_plan.v1"
+    );
+    assert_eq!(install_json["operation_plan"]["state_change"], "installed");
+    assert_eq!(
+        install_json["operation_plan"]["impact"]["added_capabilities"],
+        serde_json::json!(["fiscal_audit"])
+    );
+    assert_eq!(
+        install_json["operation_plan"]["safety"]["rollback_action"],
+        "uninstall"
+    );
+    assert_eq!(
+        install_json["operation_plan"]["commands"]["rollback"],
+        serde_json::json!([
+            "forge",
+            "addons",
+            "uninstall",
+            "forge.addon.fiscal",
+            "--output",
+            "json"
+        ])
+    );
 
     let installed_output = forge()
         .args([
@@ -15360,6 +15384,24 @@ capabilities:
     assert_eq!(upgrade_json["status"], "upgraded");
     assert_eq!(upgrade_json["action"], "upgrade");
     assert_eq!(upgrade_json["addon"]["version"], "0.2.0");
+    assert_eq!(
+        upgrade_json["operation_plan"]["state_change"],
+        "version_changed"
+    );
+    assert_eq!(upgrade_json["operation_plan"]["version_before"], "0.1.0");
+    assert_eq!(upgrade_json["operation_plan"]["version_after"], "0.2.0");
+    assert_eq!(
+        upgrade_json["operation_plan"]["impact"]["added_capabilities"],
+        serde_json::json!(["fiscal_invoice"])
+    );
+    assert_eq!(
+        upgrade_json["operation_plan"]["safety"]["rollback_action"],
+        "downgrade"
+    );
+    assert_eq!(
+        upgrade_json["operation_plan"]["safety"]["rollback_available"],
+        true
+    );
 
     let upgraded_capabilities_output = forge()
         .args([
@@ -15420,6 +15462,22 @@ capabilities:
     assert_eq!(downgrade_json["result"]["status"], "downgraded");
     assert_eq!(downgrade_json["result"]["action"], "downgrade");
     assert_eq!(downgrade_json["result"]["addon"]["version"], "0.1.0");
+    assert_eq!(
+        downgrade_json["result"]["operation_plan"]["version_before"],
+        "0.2.0"
+    );
+    assert_eq!(
+        downgrade_json["result"]["operation_plan"]["version_after"],
+        "0.1.0"
+    );
+    assert_eq!(
+        downgrade_json["result"]["operation_plan"]["impact"]["removed_capabilities"],
+        serde_json::json!(["fiscal_invoice"])
+    );
+    assert_eq!(
+        downgrade_json["result"]["operation_plan"]["safety"]["rollback_action"],
+        "upgrade"
+    );
 
     let downgraded_capabilities_output = forge()
         .args([
@@ -15468,7 +15526,7 @@ capabilities:
         .iter()
         .any(|capability| capability["id"] == "fiscal_audit"));
 
-    forge()
+    let disable_output = forge()
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -15479,7 +15537,31 @@ capabilities:
             "json",
         ])
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let disable_json: Value = serde_json::from_slice(&disable_output).unwrap();
+    assert_eq!(
+        disable_json["operation_plan"]["state_change"],
+        "lifecycle_changed"
+    );
+    assert_eq!(
+        disable_json["operation_plan"]["lifecycle_before"],
+        "enabled"
+    );
+    assert_eq!(
+        disable_json["operation_plan"]["lifecycle_after"],
+        "disabled"
+    );
+    assert_eq!(
+        disable_json["operation_plan"]["impact"]["active_capabilities_after"],
+        0
+    );
+    assert_eq!(
+        disable_json["operation_plan"]["safety"]["rollback_action"],
+        "enable"
+    );
 
     let resolve_disabled = forge()
         .args([
@@ -15530,7 +15612,7 @@ capabilities:
     assert_eq!(disabled_capabilities_json["result"]["capability_count"], 1);
     assert_eq!(disabled_capabilities_json["result"]["disabled_count"], 1);
 
-    forge()
+    let enable_output = forge()
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -15543,7 +15625,23 @@ capabilities:
             "json",
         ])
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let enable_json: Value = serde_json::from_slice(&enable_output).unwrap();
+    assert_eq!(
+        enable_json["result"]["operation_plan"]["state_change"],
+        "lifecycle_changed"
+    );
+    assert_eq!(
+        enable_json["result"]["operation_plan"]["lifecycle_after"],
+        "enabled"
+    );
+    assert_eq!(
+        enable_json["result"]["operation_plan"]["safety"]["rollback_action"],
+        "disable"
+    );
 
     let resolve_reenabled = forge()
         .args([
@@ -15568,7 +15666,7 @@ capabilities:
         .iter()
         .any(|capability| capability["id"] == "fiscal_audit"));
 
-    forge()
+    let uninstall_output = forge()
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -15579,7 +15677,25 @@ capabilities:
             "json",
         ])
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let uninstall_json: Value = serde_json::from_slice(&uninstall_output).unwrap();
+    assert_eq!(uninstall_json["operation_plan"]["state_change"], "removed");
+    assert_eq!(uninstall_json["operation_plan"]["version_before"], "0.1.0");
+    assert_eq!(
+        uninstall_json["operation_plan"]["impact"]["removed_capabilities"],
+        serde_json::json!(["fiscal_audit"])
+    );
+    assert_eq!(
+        uninstall_json["operation_plan"]["safety"]["rollback_action"],
+        "install"
+    );
+    assert_eq!(
+        uninstall_json["operation_plan"]["commands"]["rollback"][2],
+        "install"
+    );
 
     let installed_empty = forge()
         .args([
@@ -16498,6 +16614,22 @@ compatibility:
         .as_str()
         .unwrap()
         .to_string();
+    assert_eq!(
+        upgrade_json["operation_plan"]["safety"]["requires_migration_workflow"],
+        true
+    );
+    assert_eq!(
+        upgrade_json["operation_plan"]["safety"]["migration_workflow_id"],
+        migration_workflow_id
+    );
+    assert_eq!(
+        upgrade_json["operation_plan"]["safety"]["rollback_action"],
+        "downgrade"
+    );
+    assert_eq!(
+        upgrade_json["operation_plan"]["compatibility"]["migration_count"],
+        1
+    );
 
     let workflow_list_output = forge()
         .args([

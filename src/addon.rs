@@ -38,6 +38,8 @@ pub const CAPABILITY_DISCOVERY_PLAN_SCHEMA_VERSION: &str = "forge.capability_dis
 pub const ADDON_VALIDATION_SCHEMA_VERSION: &str = "forge.addon_validation.v1";
 pub const INSTALLED_ADDONS_SCHEMA_VERSION: &str = "forge.installed_addons.v1";
 pub const ADDON_LIFECYCLE_SCHEMA_VERSION: &str = "forge.addon_lifecycle.v1";
+pub const ADDON_LIFECYCLE_OPERATION_PLAN_SCHEMA_VERSION: &str =
+    "forge.addon_lifecycle_operation_plan.v1";
 pub const ADDON_CAPABILITY_INDEX_SCHEMA_VERSION: &str = "forge.addon_capability_index.v1";
 pub const ADDON_EVENT_ADAPTERS_SCHEMA_VERSION: &str = "forge.addon_event_adapters.v1";
 pub const ADDON_EVENT_EXTENSIONS_SCHEMA_VERSION: &str = "forge.addon_event_extensions.v1";
@@ -1587,8 +1589,114 @@ pub struct AddonLifecycleReport {
     pub action: String,
     pub addon: InstalledAddonView,
     pub validation: AddonCatalogValidationReport,
+    #[serde(default)]
+    pub operation_plan: AddonLifecycleOperationPlan,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migration_workflow: Option<AddonMigrationWorkflowReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddonLifecycleOperationPlan {
+    #[serde(default = "addon_lifecycle_operation_plan_schema_version")]
+    pub schema_version: String,
+    pub status: String,
+    pub action: String,
+    pub state_change: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_after: Option<String>,
+    pub compatibility: AddonCompatibilitySummary,
+    pub impact: AddonLifecycleImpact,
+    pub safety: AddonLifecycleSafetyPlan,
+    pub commands: AddonLifecycleCommandPlan,
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+impl Default for AddonLifecycleOperationPlan {
+    fn default() -> Self {
+        Self {
+            schema_version: addon_lifecycle_operation_plan_schema_version(),
+            status: "not_planned".to_string(),
+            action: String::new(),
+            state_change: "unknown".to_string(),
+            lifecycle_before: None,
+            lifecycle_after: None,
+            version_before: None,
+            version_after: None,
+            compatibility: AddonCompatibilitySummary::default(),
+            impact: AddonLifecycleImpact::default(),
+            safety: AddonLifecycleSafetyPlan::default(),
+            commands: AddonLifecycleCommandPlan::default(),
+            notes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AddonLifecycleImpact {
+    pub capabilities_before: usize,
+    pub capabilities_after: usize,
+    pub active_capabilities_after: usize,
+    #[serde(default)]
+    pub added_capabilities: Vec<String>,
+    #[serde(default)]
+    pub removed_capabilities: Vec<String>,
+    #[serde(default)]
+    pub retained_capabilities: Vec<String>,
+    #[serde(default)]
+    pub permission_ids: Vec<String>,
+    #[serde(default)]
+    pub runtime_contract_ids: Vec<String>,
+    #[serde(default)]
+    pub view_ids: Vec<String>,
+    #[serde(default)]
+    pub dependency_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddonLifecycleSafetyPlan {
+    pub requires_human_approval: bool,
+    pub permission_approval_required: bool,
+    pub requires_migration_workflow: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_workflow_id: Option<String>,
+    pub rollback_available: bool,
+    pub rollback_action: String,
+    pub risk_level: String,
+    pub reason: String,
+}
+
+impl Default for AddonLifecycleSafetyPlan {
+    fn default() -> Self {
+        Self {
+            requires_human_approval: false,
+            permission_approval_required: false,
+            requires_migration_workflow: false,
+            migration_workflow_id: None,
+            rollback_available: false,
+            rollback_action: "inspect".to_string(),
+            risk_level: "unknown".to_string(),
+            reason: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AddonLifecycleCommandPlan {
+    #[serde(default)]
+    pub validate: Vec<String>,
+    #[serde(default)]
+    pub inspect: Vec<String>,
+    #[serde(default)]
+    pub rollback: Vec<String>,
+    #[serde(default)]
+    pub post_change_checks: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5182,6 +5290,7 @@ pub fn install_addon(
     manifest.lifecycle = "enabled".to_string();
     manifest.source = format!("file:{}", manifest_path.display());
     let source = manifest.source.clone();
+    let previous_manifest = load_optional_installed_manifest(store, &manifest.id)?;
     validate_candidate_catalog(store, addon_dirs, Some(manifest.clone()))?;
     ensure_candidate_migration_against_installed(store, &manifest)?;
     ensure_addon_permissions_authorized(store, &manifest)?;
@@ -5194,8 +5303,15 @@ pub fn install_addon(
         &serde_json::to_value(&manifest)?,
     )?;
     materialize_installed_addon_capabilities(store, &manifest, "enabled")?;
-    let mut report = lifecycle_report(store, addon_dirs, &manifest.id, "installed", "install")?;
-    report.migration_workflow = migration_workflow;
+    let mut report = lifecycle_report(
+        store,
+        addon_dirs,
+        &manifest.id,
+        "installed",
+        "install",
+        previous_manifest.as_ref(),
+    )?;
+    attach_migration_workflow_to_lifecycle_report(&mut report, migration_workflow);
     Ok(report)
 }
 
@@ -5886,6 +6002,7 @@ pub fn install_addon_package(
     let mut manifest = package.manifest.clone();
     manifest.lifecycle = "enabled".to_string();
     manifest.source = source.clone();
+    let previous_manifest = load_optional_installed_manifest(store, &manifest.id)?;
     validate_candidate_catalog(store, addon_dirs, Some(manifest.clone()))?;
     ensure_candidate_migration_against_installed(store, &manifest)?;
     ensure_addon_permissions_authorized(store, &manifest)?;
@@ -5908,9 +6025,10 @@ pub fn install_addon_package(
         &manifest.id,
         "installed",
         "install_package",
+        previous_manifest.as_ref(),
     )?;
     let mut lifecycle = lifecycle;
-    lifecycle.migration_workflow = migration_workflow;
+    attach_migration_workflow_to_lifecycle_report(&mut lifecycle, migration_workflow);
     let package_entry = store
         .list_addon_marketplace_packages(
             Some(&policy.repository),
@@ -5988,18 +6106,29 @@ pub fn uninstall_addon(
     addon_dirs: &[PathBuf],
 ) -> Result<AddonLifecycleReport> {
     let record = store.load_installed_addon(addon_id)?;
-    let view = installed_view_from_record(record)?;
+    let previous_manifest = installed_manifest_from_record(&record)?;
+    let view = InstalledAddonView {
+        id: record.id,
+        name: previous_manifest.name.clone(),
+        version: previous_manifest.version.clone(),
+        lifecycle: record.status,
+        source: record.source,
+        capability_count: previous_manifest.capabilities.len(),
+        installed_at: record.installed_at,
+        updated_at: record.updated_at,
+    };
     store.delete_installed_addon(addon_id)?;
     store.delete_addon_capabilities(addon_id)?;
     let catalog = load_addon_catalog_from_store(store, addon_dirs)?;
-    Ok(AddonLifecycleReport {
-        schema_version: addon_lifecycle_schema_version(),
-        status: "uninstalled".to_string(),
-        action: "uninstall".to_string(),
-        addon: view,
-        validation: validate_addon_catalog(&catalog),
-        migration_workflow: None,
-    })
+    let validation = validate_addon_catalog(&catalog);
+    Ok(build_addon_lifecycle_report(
+        view,
+        validation,
+        Some(&previous_manifest),
+        None,
+        "uninstalled",
+        "uninstall",
+    ))
 }
 
 pub fn resolve_goal_capabilities(goal: &str, catalog: &AddonCatalog) -> CapabilityResolutionReport {
@@ -6751,8 +6880,15 @@ fn change_installed_addon_version(
     )?;
     let lifecycle = authorized_lifecycle_for_manifest(store, &manifest, &record.status)?;
     materialize_installed_addon_capabilities(store, &manifest, &lifecycle)?;
-    let mut report = lifecycle_report(store, addon_dirs, &manifest.id, status, action)?;
-    report.migration_workflow = migration_workflow;
+    let mut report = lifecycle_report(
+        store,
+        addon_dirs,
+        &manifest.id,
+        status,
+        action,
+        Some(&previous_manifest),
+    )?;
+    attach_migration_workflow_to_lifecycle_report(&mut report, migration_workflow);
     Ok(report)
 }
 
@@ -6773,7 +6909,15 @@ fn update_addon_lifecycle(
     }
     store.update_installed_addon_status(addon_id, lifecycle)?;
     materialize_installed_addon_capabilities(store, &manifest, lifecycle)?;
-    lifecycle_report(store, addon_dirs, addon_id, status, action)
+    let previous_manifest = installed_manifest_from_record(&record)?;
+    lifecycle_report(
+        store,
+        addon_dirs,
+        addon_id,
+        status,
+        action,
+        Some(&previous_manifest),
+    )
 }
 
 fn lifecycle_report(
@@ -6782,17 +6926,484 @@ fn lifecycle_report(
     addon_id: &str,
     status: &str,
     action: &str,
+    previous_manifest: Option<&AddonManifest>,
 ) -> Result<AddonLifecycleReport> {
     let record = store.load_installed_addon(addon_id)?;
+    let current_manifest = installed_manifest_from_record(&record)?;
     let catalog = load_addon_catalog_from_store(store, addon_dirs)?;
-    Ok(AddonLifecycleReport {
+    let addon = InstalledAddonView {
+        id: record.id,
+        name: current_manifest.name.clone(),
+        version: current_manifest.version.clone(),
+        lifecycle: record.status,
+        source: record.source,
+        capability_count: current_manifest.capabilities.len(),
+        installed_at: record.installed_at,
+        updated_at: record.updated_at,
+    };
+    let validation = validate_addon_catalog(&catalog);
+    Ok(build_addon_lifecycle_report(
+        addon,
+        validation,
+        previous_manifest,
+        Some(&current_manifest),
+        status,
+        action,
+    ))
+}
+
+fn build_addon_lifecycle_report(
+    addon: InstalledAddonView,
+    validation: AddonCatalogValidationReport,
+    previous_manifest: Option<&AddonManifest>,
+    current_manifest: Option<&AddonManifest>,
+    status: &str,
+    action: &str,
+) -> AddonLifecycleReport {
+    let operation_plan = addon_lifecycle_operation_plan(
+        &addon,
+        &validation,
+        previous_manifest,
+        current_manifest,
+        status,
+        action,
+    );
+    AddonLifecycleReport {
         schema_version: addon_lifecycle_schema_version(),
         status: status.to_string(),
         action: action.to_string(),
-        addon: installed_view_from_record(record)?,
-        validation: validate_addon_catalog(&catalog),
+        addon,
+        validation,
+        operation_plan,
         migration_workflow: None,
+    }
+}
+
+fn attach_migration_workflow_to_lifecycle_report(
+    report: &mut AddonLifecycleReport,
+    migration_workflow: Option<AddonMigrationWorkflowReport>,
+) {
+    if let Some(workflow) = &migration_workflow {
+        report.operation_plan.safety.requires_migration_workflow = true;
+        report.operation_plan.safety.migration_workflow_id = Some(workflow.workflow_id.clone());
+        report.operation_plan.notes.push(format!(
+            "migration workflow {} was created",
+            workflow.workflow_id
+        ));
+    }
+    report.migration_workflow = migration_workflow;
+}
+
+fn addon_lifecycle_operation_plan(
+    addon: &InstalledAddonView,
+    validation: &AddonCatalogValidationReport,
+    previous_manifest: Option<&AddonManifest>,
+    current_manifest: Option<&AddonManifest>,
+    status: &str,
+    action: &str,
+) -> AddonLifecycleOperationPlan {
+    let compatibility_source = current_manifest.or(previous_manifest);
+    let compatibility = compatibility_source
+        .map(|manifest| addon_compatibility_summary(&manifest.compatibility))
+        .unwrap_or_default();
+    let impact = addon_lifecycle_impact(previous_manifest, current_manifest);
+    let lifecycle_before = previous_manifest.map(|manifest| manifest.lifecycle.clone());
+    let lifecycle_after = current_manifest.map(|manifest| manifest.lifecycle.clone());
+    let version_before = previous_manifest.map(|manifest| manifest.version.clone());
+    let version_after = current_manifest.map(|manifest| manifest.version.clone());
+    let migration = previous_manifest
+        .zip(current_manifest)
+        .and_then(|(previous, current)| required_addon_migration_plan(previous, current).ok())
+        .flatten();
+    let requires_migration_workflow = migration.is_some();
+    let permission_approval_required =
+        lifecycle_permission_approval_required(previous_manifest, current_manifest);
+    let requires_human_approval = permission_approval_required
+        || requires_migration_workflow
+        || matches!(
+            action,
+            "upgrade" | "downgrade" | "disable" | "uninstall" | "install_package"
+        );
+    let rollback_action = addon_lifecycle_rollback_action(action);
+    let rollback_command =
+        addon_lifecycle_rollback_command(action, &addon.id, previous_manifest, current_manifest);
+    let rollback_available = !rollback_command.is_empty()
+        && (!lifecycle_rollback_requires_previous_manifest(action)
+            || manifest_source_path(previous_manifest).is_some()
+            || migration
+                .map(|plan| !plan.rollback.trim().is_empty())
+                .unwrap_or(false));
+    let risk_level = addon_lifecycle_risk_level(
+        action,
+        validation,
+        requires_migration_workflow,
+        permission_approval_required,
+    );
+    let commands = AddonLifecycleCommandPlan {
+        validate: vec![
+            "forge".to_string(),
+            "addons".to_string(),
+            "validate".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        inspect: vec![
+            "forge".to_string(),
+            "addons".to_string(),
+            "installed".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        rollback: rollback_command,
+        post_change_checks: vec![
+            vec![
+                "forge".to_string(),
+                "addons".to_string(),
+                "capabilities".to_string(),
+                "--addon".to_string(),
+                addon.id.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            vec![
+                "forge".to_string(),
+                "addons".to_string(),
+                "validate".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        ],
+    };
+    let mut notes = vec![format!(
+        "catalog validation status `{}` with {} issue(s)",
+        validation.status, validation.issue_count
+    )];
+    if requires_migration_workflow {
+        if let Some(migration) = migration {
+            notes.push(format!(
+                "version change requires migration strategy `{}` and rollback `{}`",
+                migration.strategy, migration.rollback
+            ));
+        }
+    }
+    if !impact.added_capabilities.is_empty() {
+        notes.push(format!(
+            "added capabilities: {}",
+            impact.added_capabilities.join(", ")
+        ));
+    }
+    if !impact.removed_capabilities.is_empty() {
+        notes.push(format!(
+            "removed capabilities: {}",
+            impact.removed_capabilities.join(", ")
+        ));
+    }
+
+    AddonLifecycleOperationPlan {
+        schema_version: addon_lifecycle_operation_plan_schema_version(),
+        status: status.to_string(),
+        action: action.to_string(),
+        state_change: addon_lifecycle_state_change(previous_manifest, current_manifest),
+        lifecycle_before,
+        lifecycle_after,
+        version_before,
+        version_after,
+        compatibility,
+        impact,
+        safety: AddonLifecycleSafetyPlan {
+            requires_human_approval,
+            permission_approval_required,
+            requires_migration_workflow,
+            migration_workflow_id: None,
+            rollback_available,
+            rollback_action,
+            risk_level,
+            reason: addon_lifecycle_safety_reason(
+                action,
+                requires_migration_workflow,
+                permission_approval_required,
+                validation,
+            ),
+        },
+        commands,
+        notes,
+    }
+}
+
+fn addon_lifecycle_impact(
+    previous_manifest: Option<&AddonManifest>,
+    current_manifest: Option<&AddonManifest>,
+) -> AddonLifecycleImpact {
+    let previous_capabilities = manifest_capability_ids(previous_manifest);
+    let current_capabilities = manifest_capability_ids(current_manifest);
+    AddonLifecycleImpact {
+        capabilities_before: previous_capabilities.len(),
+        capabilities_after: current_capabilities.len(),
+        active_capabilities_after: current_manifest
+            .filter(|manifest| addon_enabled(manifest))
+            .map(|_| current_capabilities.len())
+            .unwrap_or(0),
+        added_capabilities: sorted_set_difference(&current_capabilities, &previous_capabilities),
+        removed_capabilities: sorted_set_difference(&previous_capabilities, &current_capabilities),
+        retained_capabilities: sorted_set_intersection(
+            &previous_capabilities,
+            &current_capabilities,
+        ),
+        permission_ids: manifest_union_ids(previous_manifest, current_manifest, |manifest| {
+            manifest
+                .permissions
+                .iter()
+                .map(|permission| permission.id.clone())
+                .collect()
+        }),
+        runtime_contract_ids: manifest_union_ids(previous_manifest, current_manifest, |manifest| {
+            manifest
+                .runtime_contracts
+                .iter()
+                .map(|contract| contract.id.clone())
+                .collect()
+        }),
+        view_ids: manifest_union_ids(previous_manifest, current_manifest, |manifest| {
+            manifest.views.iter().map(|view| view.id.clone()).collect()
+        }),
+        dependency_ids: manifest_union_ids(previous_manifest, current_manifest, |manifest| {
+            manifest
+                .dependencies
+                .iter()
+                .map(|dependency| {
+                    if dependency.version_req.trim().is_empty() {
+                        dependency.id.clone()
+                    } else {
+                        format!("{} {}", dependency.id, dependency.version_req)
+                    }
+                })
+                .collect()
+        }),
+    }
+}
+
+fn load_optional_installed_manifest(
+    store: &ForgeStore,
+    addon_id: &str,
+) -> Result<Option<AddonManifest>> {
+    match store.load_installed_addon(addon_id) {
+        Ok(record) => installed_manifest_from_record(&record).map(Some),
+        Err(error) if error.to_string().contains("installed addon not found") => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn manifest_capability_ids(manifest: Option<&AddonManifest>) -> BTreeSet<String> {
+    manifest
+        .into_iter()
+        .flat_map(|manifest| manifest.capabilities.iter())
+        .map(|capability| capability.id.clone())
+        .collect()
+}
+
+fn manifest_union_ids<F>(
+    previous_manifest: Option<&AddonManifest>,
+    current_manifest: Option<&AddonManifest>,
+    collect_ids: F,
+) -> Vec<String>
+where
+    F: Fn(&AddonManifest) -> Vec<String>,
+{
+    let mut ids = BTreeSet::new();
+    if let Some(manifest) = previous_manifest {
+        ids.extend(collect_ids(manifest));
+    }
+    if let Some(manifest) = current_manifest {
+        ids.extend(collect_ids(manifest));
+    }
+    ids.into_iter().collect()
+}
+
+fn sorted_set_difference(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Vec<String> {
+    left.difference(right).cloned().collect()
+}
+
+fn sorted_set_intersection(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Vec<String> {
+    left.intersection(right).cloned().collect()
+}
+
+fn addon_lifecycle_state_change(
+    previous_manifest: Option<&AddonManifest>,
+    current_manifest: Option<&AddonManifest>,
+) -> String {
+    match (previous_manifest, current_manifest) {
+        (None, Some(_)) => "installed".to_string(),
+        (Some(_), None) => "removed".to_string(),
+        (Some(previous), Some(current)) if previous.version != current.version => {
+            "version_changed".to_string()
+        }
+        (Some(previous), Some(current)) if previous.lifecycle != current.lifecycle => {
+            "lifecycle_changed".to_string()
+        }
+        (Some(_), Some(_)) => "refreshed".to_string(),
+        (None, None) => "unknown".to_string(),
+    }
+}
+
+fn lifecycle_permission_approval_required(
+    previous_manifest: Option<&AddonManifest>,
+    current_manifest: Option<&AddonManifest>,
+) -> bool {
+    previous_manifest
+        .into_iter()
+        .chain(current_manifest)
+        .flat_map(|manifest| manifest.permissions.iter())
+        .any(|permission| {
+            permission.requires_human_approval
+                || matches!(permission.risk.as_str(), "high" | "critical")
+        })
+}
+
+fn addon_lifecycle_rollback_action(action: &str) -> String {
+    match action {
+        "install" | "install_package" => "uninstall".to_string(),
+        "enable" => "disable".to_string(),
+        "disable" => "enable".to_string(),
+        "upgrade" => "downgrade".to_string(),
+        "downgrade" => "upgrade".to_string(),
+        "uninstall" => "install".to_string(),
+        _ => "inspect".to_string(),
+    }
+}
+
+fn addon_lifecycle_rollback_command(
+    action: &str,
+    addon_id: &str,
+    previous_manifest: Option<&AddonManifest>,
+    current_manifest: Option<&AddonManifest>,
+) -> Vec<String> {
+    match action {
+        "install" | "install_package" => vec![
+            "forge".to_string(),
+            "addons".to_string(),
+            "uninstall".to_string(),
+            addon_id.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        "enable" => vec![
+            "forge".to_string(),
+            "addons".to_string(),
+            "disable".to_string(),
+            addon_id.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        "disable" => vec![
+            "forge".to_string(),
+            "addons".to_string(),
+            "enable".to_string(),
+            addon_id.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        "upgrade" | "downgrade" => version_change_rollback_command(action, previous_manifest),
+        "uninstall" => reinstall_rollback_command(previous_manifest.or(current_manifest)),
+        _ => Vec::new(),
+    }
+}
+
+fn version_change_rollback_command(
+    action: &str,
+    previous_manifest: Option<&AddonManifest>,
+) -> Vec<String> {
+    let manifest_path = manifest_source_path(previous_manifest)
+        .unwrap_or_else(|| "<previous-manifest.yaml>".to_string());
+    vec![
+        "forge".to_string(),
+        "addons".to_string(),
+        addon_lifecycle_rollback_action(action),
+        "--manifest".to_string(),
+        manifest_path,
+        "--output".to_string(),
+        "json".to_string(),
+    ]
+}
+
+fn reinstall_rollback_command(previous_manifest: Option<&AddonManifest>) -> Vec<String> {
+    let manifest_path = manifest_source_path(previous_manifest)
+        .unwrap_or_else(|| "<previous-manifest.yaml>".to_string());
+    vec![
+        "forge".to_string(),
+        "addons".to_string(),
+        "install".to_string(),
+        "--manifest".to_string(),
+        manifest_path,
+        "--output".to_string(),
+        "json".to_string(),
+    ]
+}
+
+fn lifecycle_rollback_requires_previous_manifest(action: &str) -> bool {
+    matches!(action, "upgrade" | "downgrade" | "uninstall")
+}
+
+fn manifest_source_path(manifest: Option<&AddonManifest>) -> Option<String> {
+    manifest.and_then(|manifest| {
+        manifest
+            .source
+            .strip_prefix("file:")
+            .map(|source| source.to_string())
     })
+}
+
+fn addon_lifecycle_risk_level(
+    action: &str,
+    validation: &AddonCatalogValidationReport,
+    requires_migration_workflow: bool,
+    permission_approval_required: bool,
+) -> String {
+    if validation.status != "valid" || validation.issue_count > 0 {
+        "blocked".to_string()
+    } else if requires_migration_workflow
+        || permission_approval_required
+        || matches!(action, "upgrade" | "downgrade" | "uninstall")
+    {
+        "high".to_string()
+    } else if matches!(action, "install_package" | "disable" | "enable") {
+        "medium".to_string()
+    } else {
+        "low".to_string()
+    }
+}
+
+fn addon_lifecycle_safety_reason(
+    action: &str,
+    requires_migration_workflow: bool,
+    permission_approval_required: bool,
+    validation: &AddonCatalogValidationReport,
+) -> String {
+    if validation.status != "valid" || validation.issue_count > 0 {
+        return "catalog validation reported issues; block promotion until validation is clean"
+            .to_string();
+    }
+    if requires_migration_workflow {
+        return "version change crosses a migration boundary and requires an audited workflow"
+            .to_string();
+    }
+    if permission_approval_required {
+        return "Addon declares high-risk or human-approved permissions".to_string();
+    }
+    match action {
+        "uninstall" => "removes the installed manifest and capability index entries".to_string(),
+        "disable" => {
+            "removes the Addon from active planning without deleting the manifest".to_string()
+        }
+        "enable" => "re-exposes installed Addon capabilities to planning".to_string(),
+        "install_package" => {
+            "installs a marketplace package after trust and lock checks".to_string()
+        }
+        "install" => "installs a manifest into the persistent Addon lifecycle registry".to_string(),
+        "upgrade" | "downgrade" => {
+            "changes the installed Addon version and rebuilds the capability index".to_string()
+        }
+        _ => "inspect the Addon lifecycle state before applying follow-up actions".to_string(),
+    }
 }
 
 fn installed_manifest_from_record(record: &StoredAddonRecord) -> Result<AddonManifest> {
@@ -11969,6 +12580,10 @@ fn installed_addons_schema_version() -> String {
 
 fn addon_lifecycle_schema_version() -> String {
     ADDON_LIFECYCLE_SCHEMA_VERSION.to_string()
+}
+
+fn addon_lifecycle_operation_plan_schema_version() -> String {
+    ADDON_LIFECYCLE_OPERATION_PLAN_SCHEMA_VERSION.to_string()
 }
 
 fn addon_capability_index_schema_version() -> String {
