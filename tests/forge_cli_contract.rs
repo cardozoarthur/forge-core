@@ -42390,6 +42390,15 @@ fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
         "forge.harness.doctor.v1"
     );
     assert_eq!(
+        readiness["harness_adoption_plan"]["schema_version"],
+        "forge.harness.adoption_plan.v1"
+    );
+    assert!(readiness["harness_adoption_plan"]["adoption_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|step| step["id"] == "bootstrap_project_harness"));
+    assert_eq!(
         readiness["headroom_stats"]["schema_version"],
         "forge.harness.headroom_stats.v1"
     );
@@ -42418,6 +42427,14 @@ fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
             .as_str()
             .unwrap_or_default()
             .contains(readiness["headroom_recommended_action"].as_str().unwrap())));
+    assert!(readiness["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action
+            .as_str()
+            .unwrap_or_default()
+            .contains("forge harness bootstrap")));
     assert!(readiness["commands"]["sync"]
         .as_array()
         .unwrap()
@@ -42434,6 +42451,14 @@ fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("headroom-plan")));
+    assert!(readiness["commands"]["harness_adoption_plan"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("adoption-plan")));
+    assert!(readiness["commands"]["bootstrap_project_harness"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("bootstrap")));
 
     let readiness_text = forge()
         .args([
@@ -42450,6 +42475,8 @@ fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
     let text = String::from_utf8(readiness_text).unwrap();
     assert!(text.contains("Interactive readiness"));
     assert!(text.contains("harness doctor"));
+    assert!(text.contains("adoption-plan"));
+    assert!(text.contains("bootstrap"));
     assert!(text.contains("selected brain"));
     assert!(text.contains(readiness["headroom_recommended_action"].as_str().unwrap()));
 
@@ -42486,10 +42513,18 @@ fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
         mcp_json["result"]["headroom_operational_status"],
         mcp_json["result"]["headroom_stats"]["operational_status"]
     );
+    assert_eq!(
+        mcp_json["result"]["harness_adoption_plan"]["schema_version"],
+        "forge.harness.adoption_plan.v1"
+    );
     assert!(mcp_json["result"]["commands"]["headroom_stats"]
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("headroom-stats")));
+    assert!(mcp_json["result"]["commands"]["bootstrap_project_harness"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("bootstrap")));
 }
 
 #[test]

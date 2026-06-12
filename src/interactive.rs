@@ -247,6 +247,7 @@ pub struct InteractiveReadinessPanel {
     pub shell_entrypoints: Vec<String>,
     pub harness_mode: HarnessModeReport,
     pub harness_doctor: HarnessDoctorReport,
+    pub harness_adoption_plan: HarnessAdoptionPlanReport,
     pub headroom_stats: HeadroomStatsReport,
     pub headroom_operational_status: String,
     pub headroom_recommended_action: String,
@@ -262,6 +263,8 @@ pub struct InteractiveReadinessCommands {
     pub shells: Vec<String>,
     pub harness_mode: Vec<String>,
     pub harness_doctor: Vec<String>,
+    pub harness_adoption_plan: Vec<String>,
+    pub bootstrap_project_harness: Vec<String>,
     pub headroom_plan: Vec<String>,
     pub headroom_stats: Vec<String>,
 }
@@ -1961,6 +1964,21 @@ pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveRead
         token_headroom_source: "interactive_default",
         require_token_headroom_for_forge_first: false,
     })?;
+    let harness_adoption_plan = build_harness_adoption_plan(HarnessAdoptionPlanOptions {
+        shim_dir: &harness_shim_dir,
+        executor: "codex",
+        project_root: Some(&repository_context_path),
+        workflow_id: None,
+        task_id: None,
+        run_id: None,
+        forge_first: false,
+        observe_only: false,
+        context_budget: 1200,
+        context_budget_source: "interactive_default",
+        token_headroom: true,
+        token_headroom_source: "interactive_default",
+        require_token_headroom_for_forge_first: false,
+    })?;
     let headroom_stats = build_headroom_stats_report(
         store,
         HeadroomStatsOptions {
@@ -2001,6 +2019,10 @@ pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveRead
         "headroom recommended action: {}",
         headroom_stats.recommended_action
     ));
+    next_actions.push(format!(
+        "harness adoption next action: {}",
+        harness_adoption_plan.next_action
+    ));
     let headroom_operational_status = headroom_stats.operational_status.clone();
     let headroom_recommended_action = headroom_stats.recommended_action.clone();
 
@@ -2028,6 +2050,7 @@ pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveRead
         shell_entrypoints,
         harness_mode,
         harness_doctor,
+        harness_adoption_plan,
         headroom_stats,
         headroom_operational_status,
         headroom_recommended_action,
@@ -5278,7 +5301,11 @@ fn readiness_next_actions(
     }
     if !harness_doctor.forge_first_ready || !harness_doctor.shim_ready {
         actions.push(
-            "forge harness install-shims --shim-dir $HOME/.forge/bin --executor codex --project-root . --output json"
+            "forge harness adoption-plan --executor codex --shim-dir $HOME/.forge/bin --project-root . --output json"
+                .to_string(),
+        );
+        actions.push(
+            "forge harness bootstrap --executor codex --shim-dir $HOME/.forge/bin --project-root . --apply --approved-by <operator> --output json"
                 .to_string(),
         );
     }
@@ -5615,6 +5642,33 @@ fn readiness_commands() -> InteractiveReadinessCommands {
             "$HOME/.forge/bin".to_string(),
             "--project-root".to_string(),
             ".".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        harness_adoption_plan: vec![
+            "harness".to_string(),
+            "adoption-plan".to_string(),
+            "--executor".to_string(),
+            "codex".to_string(),
+            "--shim-dir".to_string(),
+            "$HOME/.forge/bin".to_string(),
+            "--project-root".to_string(),
+            ".".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        bootstrap_project_harness: vec![
+            "harness".to_string(),
+            "bootstrap".to_string(),
+            "--executor".to_string(),
+            "codex".to_string(),
+            "--shim-dir".to_string(),
+            "$HOME/.forge/bin".to_string(),
+            "--project-root".to_string(),
+            ".".to_string(),
+            "--apply".to_string(),
+            "--approved-by".to_string(),
+            "<operator>".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -6483,7 +6537,7 @@ pub fn render_interactive_readiness(panel: &InteractiveReadinessPanel) -> String
         panel.next_actions.join(" | ")
     };
     format!(
-        "Interactive readiness: {status}; executors {usable_executor_count}/{executor_count}, brains {brain_count}, shells {forge_first_shell_count}/{shell_count} Forge-first, selected brain {selected_brain}\nHarness mode: {harness_mode}; harness doctor: {harness_doctor}; headroom {headroom_status}; headroom action {headroom_action}; usable executors: {usable_executors}\nNext actions: {next_actions}\n",
+        "Interactive readiness: {status}; executors {usable_executor_count}/{executor_count}, brains {brain_count}, shells {forge_first_shell_count}/{shell_count} Forge-first, selected brain {selected_brain}\nHarness mode: {harness_mode}; harness doctor: {harness_doctor}; adoption-plan {harness_adoption_plan}; bootstrap {bootstrap_action}; headroom {headroom_status}; headroom action {headroom_action}; usable executors: {usable_executors}\nNext actions: {next_actions}\n",
         status = panel.status,
         usable_executor_count = panel.usable_executor_count,
         executor_count = panel.executor_count,
@@ -6493,6 +6547,8 @@ pub fn render_interactive_readiness(panel: &InteractiveReadinessPanel) -> String
         selected_brain = panel.selected_brain,
         harness_mode = panel.harness_mode.status,
         harness_doctor = panel.harness_doctor.status,
+        harness_adoption_plan = panel.harness_adoption_plan.status,
+        bootstrap_action = panel.harness_adoption_plan.next_action,
         headroom_status = panel.headroom_operational_status,
         headroom_action = panel.headroom_recommended_action,
         usable_executors = usable_executors,
