@@ -8,6 +8,7 @@ use crate::credential_vault::resolve_credential_vault_bin;
 use crate::graph::{create_workflow, Workflow};
 use crate::identity::{
     ensure_operating_context_policy, ensure_workflow_policy, load_project_operating_context,
+    resolve_identity, IdentityAliasView,
 };
 use crate::intent::parse_intent_with_catalog_and_context;
 use crate::intent::{
@@ -58,6 +59,7 @@ pub const EVENT_IMPROVEMENT_POLICY_SCHEMA_VERSION: &str = "forge.event_improveme
 pub const EVENT_INBOX_SCHEMA_VERSION: &str = "forge.event_inbox.v1";
 pub const EVENT_INGEST_SCHEMA_VERSION: &str = "forge.event_ingest.v1";
 pub const EVENT_ROUTE_SCHEMA_VERSION: &str = "forge.event_route.v1";
+pub const EVENT_IDENTITY_CONTEXT_SCHEMA_VERSION: &str = "forge.event_identity_context.v1";
 pub const EVENT_WORKER_SCHEMA_VERSION: &str = "forge.event_worker.v1";
 pub const EVENT_WORKER_LOOP_SCHEMA_VERSION: &str = "forge.event_worker_loop.v1";
 pub const EVENT_SERVICE_PLAN_SCHEMA_VERSION: &str = "forge.event_service_plan.v1";
@@ -551,6 +553,8 @@ pub struct InboundEventWorkerEntry {
     pub action: String,
     pub before_status: String,
     pub after_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_context: Option<EventIdentityContext>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1103,9 +1107,21 @@ pub struct InboundEventView {
     pub action: String,
     pub status: String,
     pub tenant_context: EventTenantContext,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_context: Option<EventIdentityContext>,
     pub data: Value,
     pub created_at: String,
     pub processed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EventIdentityContext {
+    pub schema_version: String,
+    pub resolution_status: String,
+    pub source_identity: ContextIdentityRef,
+    pub canonical_identity: IdentityAliasView,
+    pub identity_count: usize,
+    pub link_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2696,7 +2712,7 @@ pub fn ingest_inbound_event_with_context(
     Ok(InboundEventIngestReport {
         schema_version: EVENT_INGEST_SCHEMA_VERSION.to_string(),
         status: "event_ingested".to_string(),
-        event: InboundEventView::from(event),
+        event: inbound_event_view(store, event),
     })
 }
 
@@ -2726,7 +2742,7 @@ pub fn list_inbound_event_inbox_for_context(
             product_id.as_deref(),
         )?
         .into_iter()
-        .map(InboundEventView::from)
+        .map(|event| inbound_event_view(store, event))
         .collect::<Vec<_>>();
     Ok(InboundEventInboxReport {
         schema_version: EVENT_INBOX_SCHEMA_VERSION.to_string(),
@@ -2771,12 +2787,14 @@ pub fn scan_inbound_event_inbox(
                 action: record.action,
                 before_status,
                 after_status: route.event.status.clone(),
+                identity_context: route.event.identity_context.clone(),
                 workflow_id: route.workflow_id,
                 route_decision: Some(route.route_decision),
                 error: None,
             }),
             Err(error) => {
                 let error_message = error.to_string();
+                let identity_context = inbound_event_identity_context(store, &record);
                 let event_id = record.id.clone();
                 let origin = record.origin.clone();
                 let action = record.action.clone();
@@ -2795,6 +2813,7 @@ pub fn scan_inbound_event_inbox(
                     action: record.action,
                     before_status,
                     after_status: "failed".to_string(),
+                    identity_context,
                     workflow_id: None,
                     route_decision: None,
                     error: Some(error_message),
@@ -5344,7 +5363,7 @@ pub fn route_inbound_event(
                 .map(str::to_string),
             created_workflow: None,
             route_result: None,
-            event: InboundEventView::from(event),
+            event: inbound_event_view(store, event),
         });
     }
 
@@ -6490,7 +6509,7 @@ fn handle_webhook_ingress_stream(
         action,
         auth_verified,
         event_id: Some(event_id),
-        event: Some(InboundEventView::from(event)),
+        event: Some(inbound_event_view(store, event)),
         route,
         error: None,
     })
@@ -7238,7 +7257,7 @@ fn route_start_workflow(
         workflow_goal: Some(workflow.goal.clone()),
         created_workflow: Some(workflow),
         route_result: None,
-        event: InboundEventView::from(routed_event),
+        event: inbound_event_view(store, routed_event),
     })
 }
 
@@ -7277,7 +7296,7 @@ fn route_modify_workflow(
         workflow_goal: Some(workflow.goal.clone()),
         created_workflow: Some(workflow),
         route_result: Some(serde_json::to_value(&update)?),
-        event: InboundEventView::from(routed_event),
+        event: inbound_event_view(store, routed_event),
     })
 }
 
@@ -7331,7 +7350,7 @@ fn route_continue_workflow(
         workflow_goal: Some(workflow.goal.clone()),
         created_workflow: Some(workflow),
         route_result: Some(route_result),
-        event: InboundEventView::from(routed_event),
+        event: inbound_event_view(store, routed_event),
     })
 }
 
@@ -7374,7 +7393,7 @@ fn route_status_workflow(
         workflow_goal: Some(workflow.goal.clone()),
         created_workflow: Some(workflow),
         route_result: Some(serde_json::to_value(&status_report)?),
-        event: InboundEventView::from(routed_event),
+        event: inbound_event_view(store, routed_event),
     })
 }
 
@@ -7549,12 +7568,14 @@ fn record_inbound_event_routed(
     adapter_policy: &InboundEventAdapterPolicyReport,
     route_decision: &str,
 ) -> Result<()> {
-    let data = inbound_event_routed_runtime_data(workflow, event, adapter_policy, route_decision);
+    let data =
+        inbound_event_routed_runtime_data(store, workflow, event, adapter_policy, route_decision);
     store.record_event(&workflow.id, "inbound_event_routed", &data)?;
     Ok(())
 }
 
 fn inbound_event_routed_runtime_data(
+    store: &ForgeStore,
     workflow: &Workflow,
     event: &InboundEventRecord,
     adapter_policy: &InboundEventAdapterPolicyReport,
@@ -7589,6 +7610,7 @@ fn inbound_event_routed_runtime_data(
         "transport": transport,
         "event_type": event_type,
         "schema": adapter_policy.schema,
+        "identity_context": inbound_event_identity_context(store, event),
         "adapter_policy": adapter_policy,
     })
 }
@@ -7701,6 +7723,68 @@ fn required_text(name: &str, value: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
+fn inbound_event_view(store: &ForgeStore, event: InboundEventRecord) -> InboundEventView {
+    let operating_context =
+        serde_json::from_value::<OperatingContextSpec>(event.tenant_context.clone())
+            .unwrap_or_default();
+    let identity_context = inbound_event_identity_context(store, &event);
+    InboundEventView {
+        id: event.id,
+        origin: event.origin,
+        action: event.action,
+        status: event.status,
+        tenant_context: EventTenantContext::from(&operating_context),
+        identity_context,
+        data: event.data,
+        created_at: event.created_at,
+        processed_at: event.processed_at,
+    }
+}
+
+fn inbound_event_identity_context(
+    store: &ForgeStore,
+    event: &InboundEventRecord,
+) -> Option<EventIdentityContext> {
+    let source_identity = extract_inbound_event_source_identity(&event.data)?;
+    let resolved = resolve_identity(store, &source_identity.scope, &source_identity.id).ok()?;
+    Some(EventIdentityContext {
+        schema_version: EVENT_IDENTITY_CONTEXT_SCHEMA_VERSION.to_string(),
+        resolution_status: resolved.status,
+        source_identity,
+        canonical_identity: resolved.canonical_identity,
+        identity_count: resolved.identity_count,
+        link_count: resolved.link_count,
+    })
+}
+
+fn extract_inbound_event_source_identity(data: &Value) -> Option<ContextIdentityRef> {
+    [
+        data.get("identity"),
+        data.get("source_identity"),
+        data.get("actor").and_then(|actor| actor.get("identity")),
+        data.get("sender").and_then(|sender| sender.get("identity")),
+        data.get("payload")
+            .and_then(|payload| payload.get("identity")),
+        data.get("message")
+            .and_then(|message| message.get("identity")),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(context_identity_ref_from_value)
+}
+
+fn context_identity_ref_from_value(value: &Value) -> Option<ContextIdentityRef> {
+    let scope = extract_string(value, &["scope", "kind", "type"])?;
+    let id = extract_string(value, &["id", "identity_id", "user_id"])?;
+    let label = extract_string(value, &["label", "name"])
+        .unwrap_or_else(|| format!("{}:{}", scope.trim(), id.trim()));
+    Some(ContextIdentityRef {
+        scope: scope.trim().to_string(),
+        id: id.trim().to_string(),
+        label,
+    })
+}
+
 impl From<InboundEventRecord> for InboundEventView {
     fn from(event: InboundEventRecord) -> Self {
         let operating_context =
@@ -7712,6 +7796,7 @@ impl From<InboundEventRecord> for InboundEventView {
             action: event.action,
             status: event.status,
             tenant_context: EventTenantContext::from(&operating_context),
+            identity_context: None,
             data: event.data,
             created_at: event.created_at,
             processed_at: event.processed_at,

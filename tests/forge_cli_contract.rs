@@ -23275,6 +23275,245 @@ tenant_policy_mode: audit
 }
 
 #[test]
+fn inbound_events_project_resolved_channel_identity_for_inbox_route_and_worker() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("tenant-project");
+    fs::create_dir_all(project_root.join(".forge")).unwrap();
+    fs::write(
+        project_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: digital-directive
+  label: Digital Directive
+brand:
+  scope: brand
+  id: forge
+  label: Forge
+product:
+  scope: product
+  id: core
+  label: Forge Core
+user:
+  scope: user
+  id: arthur
+  label: Arthur
+channel:
+  scope: channel
+  id: telegram
+  label: Telegram
+tenant_policy_mode: audit
+"#,
+    )
+    .unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "link",
+            "--left-scope",
+            "telegram",
+            "--left-id",
+            "123",
+            "--right-scope",
+            "user",
+            "--right-id",
+            "arthur",
+            "--reason",
+            "Telegram sender is the same governed operator",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "authorize-permission",
+            "--addon",
+            "forge.addon.notification",
+            "--permission",
+            "telegram.send_message",
+            "--risk",
+            "medium",
+            "--approved-by",
+            "arthur",
+            "--source",
+            "test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let ingest_payload = r#"{"goal":"Criar operação persistente a partir do Telegram","identity":{"scope":"telegram","id":"123","label":"Arthur no Telegram"},"auth_verified":true}"#;
+    let ingest_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "ingest",
+            "--origin",
+            "telegram",
+            "--action",
+            "start_workflow",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--input",
+            ingest_payload,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ingest: Value = serde_json::from_slice(&ingest_output).unwrap();
+    assert_eq!(ingest["status"], "event_ingested");
+    let event_id = ingest["event"]["id"].as_str().unwrap();
+    assert_eq!(
+        ingest["event"]["identity_context"]["schema_version"],
+        "forge.event_identity_context.v1"
+    );
+    assert_eq!(
+        ingest["event"]["identity_context"]["source_identity"]["scope"],
+        "telegram"
+    );
+    assert_eq!(
+        ingest["event"]["identity_context"]["source_identity"]["id"],
+        "123"
+    );
+    assert_eq!(
+        ingest["event"]["identity_context"]["canonical_identity"]["scope"],
+        "user"
+    );
+    assert_eq!(
+        ingest["event"]["identity_context"]["canonical_identity"]["id"],
+        "arthur"
+    );
+    assert_eq!(ingest["event"]["identity_context"]["link_count"], 1);
+
+    let inbox_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "inbox",
+            "--status",
+            "pending",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inbox: Value = serde_json::from_slice(&inbox_output).unwrap();
+    assert_eq!(
+        inbox["events"][0]["identity_context"]["canonical_identity"]["id"],
+        "arthur"
+    );
+
+    let route_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "route",
+            "--event",
+            event_id,
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let route: Value = serde_json::from_slice(&route_output).unwrap();
+    assert_eq!(route["status"], "event_routed");
+    assert_eq!(
+        route["event"]["identity_context"]["canonical_identity"]["id"],
+        "arthur"
+    );
+
+    let second_payload = r#"{"goal":"Criar outra operação via worker","identity":{"scope":"telegram","id":"123"},"auth_verified":true}"#;
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "ingest",
+            "--origin",
+            "telegram",
+            "--action",
+            "start_workflow",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--input",
+            second_payload,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let scan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "scan",
+            "--status",
+            "pending",
+            "--limit",
+            "1",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let scan: Value = serde_json::from_slice(&scan_output).unwrap();
+    assert_eq!(scan["status"], "event_worker_scanned");
+    assert_eq!(scan["routed_count"], 1);
+    assert_eq!(
+        scan["events"][0]["identity_context"]["canonical_identity"]["id"],
+        "arthur"
+    );
+}
+
+#[test]
 fn request_status_reflects_current_workflow_mutations_for_async_callers() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
