@@ -42257,6 +42257,39 @@ views:
     );
     assert_eq!(ready["action"]["action_id"], "patch.diff");
 
+    let headroom_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-invocation",
+            "--action",
+            "harness.headroom_stats",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let headroom: Value = serde_json::from_slice(&headroom_output).unwrap();
+    assert_eq!(headroom["status"], "action_invocation_ready");
+    assert_eq!(headroom["requested_action_id"], "harness.headroom_stats");
+    assert_eq!(headroom["can_execute"], true);
+    assert_eq!(headroom["not_executed"], true);
+    assert_eq!(
+        headroom["selected_command"],
+        serde_json::json!(["harness", "headroom-stats", "--output", "json"])
+    );
+    assert_eq!(
+        headroom["selected_command_text"],
+        "harness headroom-stats --output json"
+    );
+    assert_eq!(headroom["action"]["source_panel"], "harness_panel");
+    assert_eq!(headroom["operation_plan"]["status"], "ready");
+
     let blocked_output = forge()
         .current_dir(temp.path())
         .args([
@@ -42351,6 +42384,31 @@ views:
     assert!(text.contains("Action invocation"));
     assert!(text.contains("patch.diff"));
     assert!(text.contains("not executed"));
+    assert!(text.contains("source patch_workbench_panel"));
+    assert!(text.contains("risk low"));
+    assert!(text.contains("mutates_workflow false"));
+    assert!(text.contains("requires_approval false"));
+
+    let headroom_text_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-invocation",
+            "--action",
+            "harness.headroom_stats",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let headroom_text = String::from_utf8(headroom_text_output).unwrap();
+    assert!(headroom_text.contains("harness.headroom_stats"));
+    assert!(headroom_text.contains("harness headroom-stats --output json"));
+    assert!(headroom_text.contains("source harness_panel"));
+    assert!(headroom_text.contains("risk low"));
 
     let manifest = forge()
         .args(["mcp", "tools", "--output", "json"])

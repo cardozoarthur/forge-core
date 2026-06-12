@@ -6460,14 +6460,30 @@ pub fn render_interactive_action_invocation(report: &InteractiveActionInvocation
     } else {
         report.selected_command_text.clone()
     };
+    let (source_panel, risk_level, mutates_workflow, requires_approval) = report
+        .action
+        .as_ref()
+        .map(|action| {
+            (
+                action.source_panel.as_str(),
+                action.risk_level.as_str(),
+                action.mutates_workflow,
+                action.requires_approval,
+            )
+        })
+        .unwrap_or(("none", "unknown", false, false));
     format!(
-        "Action invocation: {status}; action {action_id}; matches {match_count}; can_execute {can_execute}; diagnostic_only {diagnostic_only}; not executed\nSelected command: {command}\nRecommended action: {recommended_action}; blocked_reason {blocked_reason}\n",
+        "Action invocation: {status}; action {action_id}; matches {match_count}; can_execute {can_execute}; diagnostic_only {diagnostic_only}; not executed\nSelected command: {command}\nSource: source {source_panel}; risk {risk_level}; mutates_workflow {mutates_workflow}; requires_approval {requires_approval}\nRecommended action: {recommended_action}; blocked_reason {blocked_reason}\n",
         status = report.status,
         action_id = report.requested_action_id,
         match_count = report.match_count,
         can_execute = report.can_execute,
         diagnostic_only = report.diagnostic_only,
         command = command,
+        source_panel = source_panel,
+        risk_level = risk_level,
+        mutates_workflow = mutates_workflow,
+        requires_approval = requires_approval,
         recommended_action = report.recommended_action,
         blocked_reason = report.blocked_reason,
     )
