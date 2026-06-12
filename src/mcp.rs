@@ -97,13 +97,14 @@ use crate::interactive::{
     build_interactive_artifacts, build_interactive_autocomplete, build_interactive_command_palette,
     build_interactive_context_memory, build_interactive_harness,
     build_interactive_home_with_options, build_interactive_identity,
-    build_interactive_multimodal_runtime, build_interactive_operational_cockpit,
-    build_interactive_patch_workbench, build_interactive_permissions, build_interactive_readiness,
-    build_interactive_release_gates, build_interactive_replacement_cli,
-    build_interactive_schedules, build_interactive_sessions, build_interactive_structured_logs,
-    build_interactive_task_board, build_interactive_token_usage, build_interactive_workflow_dag,
-    build_interactive_workflow_sidebar, route_interactive_input, slash_command_catalog,
-    InteractiveHarnessOptions, InteractiveHomeOptions, InteractiveSessionsOptions,
+    build_interactive_multimodal_runtime, build_interactive_operating_context,
+    build_interactive_operational_cockpit, build_interactive_patch_workbench,
+    build_interactive_permissions, build_interactive_readiness, build_interactive_release_gates,
+    build_interactive_replacement_cli, build_interactive_schedules, build_interactive_sessions,
+    build_interactive_structured_logs, build_interactive_task_board, build_interactive_token_usage,
+    build_interactive_workflow_dag, build_interactive_workflow_sidebar, route_interactive_input,
+    slash_command_catalog, InteractiveHarnessOptions, InteractiveHomeOptions,
+    InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -3298,6 +3299,25 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ], &[]),
                 "forge.interactive.identity.v1",
                 &["forge", "interactive", "identity", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.operating_context",
+                "Inspect Interactive Operating Context",
+                "Return the unified Forge operating-context panel with tenant identity, memory policy, personality routing, brand/design context, prompt-packet gates, company-work checklist and handoff readiness without mutating state.",
+                object_schema(&[
+                    ("project_root", "string", "optional project root used to load .forge/operating-context and memory governance"),
+                ], &[]),
+                "forge.interactive.operating_context.v1",
+                &[
+                    "forge",
+                    "interactive",
+                    "operating-context",
+                    "--project-root",
+                    "<project-root>",
+                    "--output",
+                    "json",
+                ],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7711,6 +7731,18 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));
             serde_json::to_value(build_interactive_identity(store, &project_root)?)?
+        }
+        "forge.interactive.operating_context" => {
+            let input: InteractiveIdentityInput = if input.is_null() {
+                InteractiveIdentityInput::default()
+            } else {
+                parse_input(input)?
+            };
+            let project_root = input
+                .project_root
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            serde_json::to_value(build_interactive_operating_context(store, &project_root)?)?
         }
         "forge.interactive.task_board" => {
             serde_json::to_value(build_interactive_task_board(store)?)?

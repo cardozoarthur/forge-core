@@ -87,6 +87,7 @@ const INTERACTIVE_ARTIFACTS_SCHEMA_VERSION: &str = "forge.interactive.artifacts.
 const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
 const INTERACTIVE_SCHEDULES_SCHEMA_VERSION: &str = "forge.interactive.schedules.v1";
 const INTERACTIVE_CONTEXT_MEMORY_SCHEMA_VERSION: &str = "forge.interactive.context_memory.v1";
+const INTERACTIVE_OPERATING_CONTEXT_SCHEMA_VERSION: &str = "forge.interactive.operating_context.v1";
 const INTERACTIVE_READINESS_SCHEMA_VERSION: &str = "forge.interactive.readiness.v1";
 const INTERACTIVE_RELEASE_GATES_SCHEMA_VERSION: &str = "forge.interactive.release_gates.v1";
 const INTERACTIVE_HARNESS_SCHEMA_VERSION: &str = "forge.interactive.harness.v1";
@@ -195,6 +196,7 @@ pub struct InteractiveDashboard {
     pub structured_logs_panel: InteractiveStructuredLogsPanel,
     pub cost_panel: InteractiveCostPanel,
     pub context_memory_panel: InteractiveContextMemoryPanel,
+    pub operating_context_panel: InteractiveOperatingContextPanel,
     pub digital_twin_panel: OpsOperationalDigitalTwin,
     pub operational_cockpit_panel: InteractiveOperationalCockpitPanel,
     pub architecture_compass_panel: InteractiveArchitectureCompassPanel,
@@ -1923,6 +1925,94 @@ pub struct InteractiveContextMemoryPanel {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct InteractiveOperatingContextPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub project_root: String,
+    pub context_status: String,
+    pub tenant_path: String,
+    pub organization_id: String,
+    pub organization_label: String,
+    pub brand_id: String,
+    pub brand_label: String,
+    pub product_id: String,
+    pub product_label: String,
+    pub user_id: String,
+    pub channel_id: String,
+    pub tenant_policy_mode: String,
+    pub tenant_policy_status: String,
+    pub memory_scope: String,
+    pub memory_policy_status: String,
+    pub memory_level: String,
+    pub memory_scopes: Vec<String>,
+    pub memory_audience: String,
+    pub memory_governance_status: String,
+    pub personality_scope: String,
+    pub personality_status: String,
+    pub brand_voice: String,
+    pub brand_tone: String,
+    pub brand_value_count: usize,
+    pub design_token_source: String,
+    pub component_source: String,
+    pub prompt_packet_contract: InteractiveOperatingPromptPacketContract,
+    pub company_work_contract: InteractiveOperatingCompanyWorkContract,
+    pub identity_summary: InteractiveOperatingIdentitySummary,
+    pub handoff_context_summary: InteractiveOperatingHandoffContextSummary,
+    pub commands: InteractiveOperatingContextCommands,
+    pub next_actions: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveOperatingPromptPacketContract {
+    pub schema_version: String,
+    pub status: String,
+    pub required_gates: Vec<String>,
+    pub organization_context_required: bool,
+    pub personality_decision_required: bool,
+    pub company_work_decision_required: bool,
+    pub evidence_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveOperatingCompanyWorkContract {
+    pub schema_version: String,
+    pub status: String,
+    pub operating_depth: String,
+    pub departments: Vec<String>,
+    pub required_decisions: Vec<String>,
+    pub sensitive_action_rule: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveOperatingIdentitySummary {
+    pub identity_count: usize,
+    pub channel_alias_count: usize,
+    pub membership_count: usize,
+    pub active_membership_count: usize,
+    pub tenant_audit_missing_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveOperatingHandoffContextSummary {
+    pub ready_for_handoff: usize,
+    pub blocked_tasks: usize,
+    pub context_budget_pressure: usize,
+    pub context_quality_status: String,
+    pub required_context_missing: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveOperatingContextCommands {
+    pub refresh: Vec<String>,
+    pub identity: Vec<String>,
+    pub context_memory: Vec<String>,
+    pub memory_policy: Vec<String>,
+    pub context_packet: Vec<String>,
+    pub task_handoff: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct InteractiveAddonRendererPanel {
     pub status: String,
     pub renderer_count: usize,
@@ -2084,6 +2174,15 @@ pub fn build_interactive_architecture_compass(
 ) -> Result<InteractiveArchitectureCompassPanel> {
     let report = build_interactive_home(store)?;
     Ok(report.dashboard.architecture_compass_panel)
+}
+
+pub fn build_interactive_operating_context(
+    store: &ForgeStore,
+    project_root: &Path,
+) -> Result<InteractiveOperatingContextPanel> {
+    let identity_panel = build_interactive_identity(store, project_root)?;
+    let context_memory_panel = build_interactive_context_memory(store, project_root)?;
+    build_operating_context_panel(project_root, &identity_panel, &context_memory_panel)
 }
 
 pub fn build_interactive_home_with_options(
@@ -2360,6 +2459,11 @@ pub fn build_interactive_home_with_options(
     let patch_workbench_panel = build_interactive_patch_workbench(store)?;
     let permissions_panel = build_interactive_permissions(store)?;
     let identity_panel = build_interactive_identity(store, &repository_context_path)?;
+    let operating_context_panel = build_operating_context_panel(
+        &repository_context_path,
+        &identity_panel,
+        &context_memory_panel,
+    )?;
     let replacement_cli_panel = build_interactive_replacement_cli(store)?;
     let multimodal_runtime_panel =
         build_interactive_multimodal_runtime(store, &repository_context_path, false)?;
@@ -2398,8 +2502,7 @@ pub fn build_interactive_home_with_options(
         operational_cockpit_panel: &operational_cockpit_panel,
         harness_panel: &harness_panel,
         release_gates_panel: &release_gates_panel,
-        identity_panel: &identity_panel,
-        permissions_panel: &permissions_panel,
+        operating_context_panel: &operating_context_panel,
         digital_twin_panel: &digital_twin_panel,
         replacement_cli_panel: &replacement_cli_panel,
         multimodal_runtime_panel: &multimodal_runtime_panel,
@@ -2450,6 +2553,7 @@ pub fn build_interactive_home_with_options(
             patch_workbench_panel,
             permissions_panel,
             identity_panel,
+            operating_context_panel,
             dag_panel,
             task_board_panel,
             artifact_panel,
@@ -2526,6 +2630,7 @@ pub fn build_interactive_home_with_options(
                 "/validate".to_string(),
                 "/logs".to_string(),
                 "/workers".to_string(),
+                "/operating-context".to_string(),
                 "/context-memory".to_string(),
                 "/context".to_string(),
                 "/handoff".to_string(),
@@ -2553,8 +2658,7 @@ struct ArchitectureCompassInputs<'a> {
     operational_cockpit_panel: &'a InteractiveOperationalCockpitPanel,
     harness_panel: &'a InteractiveHarnessPanel,
     release_gates_panel: &'a InteractiveReleaseGatesPanel,
-    identity_panel: &'a InteractiveIdentityPanel,
-    permissions_panel: &'a InteractivePermissionsPanel,
+    operating_context_panel: &'a InteractiveOperatingContextPanel,
     digital_twin_panel: &'a OpsOperationalDigitalTwin,
     replacement_cli_panel: &'a InteractiveReplacementCliPanel,
     multimodal_runtime_panel: &'a InteractiveMultimodalRuntimePanel,
@@ -2712,50 +2816,51 @@ fn build_architecture_compass_panel(
             "Multi-tenant, identidade, memória e personality/context routing",
             &["goal1:Fase 5", "goal1:Fase 5.5", "goal2:Fase 5.7", "goal2:Fase 5.8"],
             architecture_status(
-                inputs.identity_panel.context_status == "project_context_loaded"
-                    && inputs.context_memory_panel.memory_policy_status != "memory_policy_unavailable"
-                    && inputs.permissions_panel.status == "permissions_ready",
-                inputs.identity_panel.identity_count > 0
-                    || inputs.identity_panel.membership_count > 0
-                    || inputs.context_memory_panel.ready_for_handoff > 0
-                    || inputs.context_memory_panel.blocked_tasks > 0,
+                inputs.operating_context_panel.status == "operating_context_ready"
+                    && inputs
+                        .operating_context_panel
+                        .prompt_packet_contract
+                        .organization_context_required
+                    && inputs
+                        .operating_context_panel
+                        .prompt_packet_contract
+                        .personality_decision_required
+                    && inputs
+                        .operating_context_panel
+                        .prompt_packet_contract
+                        .company_work_decision_required,
+                inputs.operating_context_panel.status != "operating_context_needs_attention",
             ),
             vec![
                 format!(
-                    "identity:{} memberships={} tenant_missing={}",
-                    inputs.identity_panel.context_status,
-                    inputs.identity_panel.membership_count,
-                    inputs.identity_panel.tenant_audit_missing_count
+                    "operating_context:{} tenant={} policy={}",
+                    inputs.operating_context_panel.status,
+                    inputs.operating_context_panel.tenant_path,
+                    inputs.operating_context_panel.tenant_policy_status
                 ),
                 format!(
                     "memory:{} level={} scopes={}",
-                    inputs.context_memory_panel.memory_policy_status,
-                    inputs
-                        .context_memory_panel
-                        .memory_policy
-                        .effective_defaults
-                        .memory_level
-                        .as_str(),
-                    inputs
-                        .context_memory_panel
-                        .memory_policy
-                        .effective_defaults
-                        .default_scopes
-                        .join("+")
+                    inputs.operating_context_panel.memory_policy_status,
+                    inputs.operating_context_panel.memory_level,
+                    inputs.operating_context_panel.memory_scopes.join("+")
                 ),
                 format!(
-                    "permissions:{} pending={}",
-                    inputs.permissions_panel.status,
-                    inputs.permissions_panel.pending_human_approval_count
+                    "prompt_packet:{} gates={}",
+                    inputs.operating_context_panel.prompt_packet_contract.status,
+                    inputs
+                        .operating_context_panel
+                        .prompt_packet_contract
+                        .required_gates
+                        .join("+")
                 ),
             ],
             vec![
-                "Tornar mais visível no TUI quando personalidade por node difere da personalidade do workflow."
+                "Evidenciar personalidade por node com amostras de context packet reais no painel."
                     .to_string(),
-                "Adicionar mais evidência de memória organizacional isolada por empresa/marca/produto."
+                "Adicionar mais evidência de memória organizacional isolada por empresa/marca/produto em stores com contexto explícito."
                     .to_string(),
             ],
-            "Cruzar identity, memory policy e handoff prompt-packet em um painel operacional único.",
+            "Usar forge interactive operating-context para decidir identity, memory policy, prompt-packet gates e handoff readiness antes de executar brains.",
             "Core decide escopo/isolamento; personas, brand assets e dados de domínio ficam em contexto/Addons.",
         ),
         architecture_track(
@@ -3612,6 +3717,38 @@ pub fn build_operational_tui_smoke(
             "forge interactive permissions --output json",
         ),
         operational_tui_smoke_check(
+            "shows_operating_context",
+            "TUI shows operating context, memory, personality and prompt gates",
+            d.operating_context_panel.schema_version
+                == INTERACTIVE_OPERATING_CONTEXT_SCHEMA_VERSION
+                && d.operating_context_panel
+                    .prompt_packet_contract
+                    .organization_context_required
+                && d.operating_context_panel
+                    .prompt_packet_contract
+                    .personality_decision_required
+                && d.operating_context_panel
+                    .prompt_packet_contract
+                    .company_work_decision_required
+                && d.operating_context_panel
+                    .company_work_contract
+                    .departments
+                    .iter()
+                    .any(|department| department == "product"),
+            format!(
+                "{}; tenant {}; memory {}; personality {}; gates {}",
+                d.operating_context_panel.status,
+                d.operating_context_panel.tenant_path,
+                d.operating_context_panel.memory_policy_status,
+                d.operating_context_panel.personality_status,
+                d.operating_context_panel
+                    .prompt_packet_contract
+                    .required_gates
+                    .join(",")
+            ),
+            "forge interactive operating-context --output json",
+        ),
+        operational_tui_smoke_check(
             "runs_end_to_end_demo_flow",
             "Smoke runs an end-to-end demo flow",
             !request.workflow_id.is_empty()
@@ -3657,6 +3794,7 @@ pub fn build_operational_tui_smoke(
             "forge interactive event-runtime --output json".to_string(),
             "forge interactive structured-logs --output json".to_string(),
             "forge interactive addon-capabilities --output json".to_string(),
+            "forge interactive operating-context --output json".to_string(),
             "forge cost ledger --output json".to_string(),
             "forge smoke operational-tui --output json".to_string(),
         ],
@@ -9010,6 +9148,269 @@ fn build_context_memory_panel_from_summary(
     }
 }
 
+fn build_operating_context_panel(
+    project_root: &Path,
+    identity: &InteractiveIdentityPanel,
+    context_memory: &InteractiveContextMemoryPanel,
+) -> Result<InteractiveOperatingContextPanel> {
+    let context_report = inspect_project_operating_context(project_root)?;
+    let context = &context_report.context;
+    let memory_defaults = &context_memory.memory_policy.effective_defaults;
+    let required_gates = vec![
+        "organization_context_required".to_string(),
+        "personality_decision_required".to_string(),
+        "company_work_decision_required".to_string(),
+    ];
+    let prompt_packet_contract = InteractiveOperatingPromptPacketContract {
+        schema_version: "forge.interactive.operating_prompt_packet_contract.v1".to_string(),
+        status: "prompt_packet_gates_declared".to_string(),
+        required_gates: required_gates.clone(),
+        organization_context_required: required_gates
+            .iter()
+            .any(|gate| gate == "organization_context_required"),
+        personality_decision_required: required_gates
+            .iter()
+            .any(|gate| gate == "personality_decision_required"),
+        company_work_decision_required: required_gates
+            .iter()
+            .any(|gate| gate == "company_work_decision_required"),
+        evidence_commands: vec![
+            "forge context --workflow <workflow-id> --task <task-id> --project-root <project-root> --strict --output json".to_string(),
+            "forge task handoff --workflow <workflow-id> --task <task-id> --executor <executor> --project-root <project-root> --output json".to_string(),
+        ],
+    };
+    let company_work_contract = InteractiveOperatingCompanyWorkContract {
+        schema_version: "forge.interactive.company_work_contract.v1".to_string(),
+        status: "company_work_decision_required".to_string(),
+        operating_depth: "compact_multidisciplinary_review".to_string(),
+        departments: vec![
+            "product".to_string(),
+            "technical".to_string(),
+            "financial".to_string(),
+            "administrative".to_string(),
+            "marketing".to_string(),
+            "communication".to_string(),
+            "delivery".to_string(),
+        ],
+        required_decisions: vec![
+            "what_will_be_done".to_string(),
+            "how_it_will_be_done".to_string(),
+            "delivery_acceptance_and_evidence".to_string(),
+            "how_the_delivery_will_be_communicated".to_string(),
+            "cost_time_risk_owner".to_string(),
+        ],
+        sensitive_action_rule: "Public communication, shared memory writes, external broadcasts, financial commitments and customer-impacting actions require explicit governance.".to_string(),
+    };
+    let identity_summary = InteractiveOperatingIdentitySummary {
+        identity_count: identity.identity_count,
+        channel_alias_count: identity.channel_alias_count,
+        membership_count: identity.membership_count,
+        active_membership_count: identity.active_membership_count,
+        tenant_audit_missing_count: identity.tenant_audit_missing_count,
+    };
+    let context_quality_status = if context_memory.context_quality.blocked > 0 {
+        "context_quality_blocked"
+    } else if context_memory.context_quality.total_warnings > 0 {
+        "context_quality_warn"
+    } else {
+        "context_quality_ready"
+    };
+    let handoff_context_summary = InteractiveOperatingHandoffContextSummary {
+        ready_for_handoff: context_memory.ready_for_handoff,
+        blocked_tasks: context_memory.blocked_tasks,
+        context_budget_pressure: context_memory.context_budget_pressure,
+        context_quality_status: context_quality_status.to_string(),
+        required_context_missing: context_memory.context_quality.required_context_missing,
+    };
+    let tenant_policy_status = operating_context_tenant_policy_status(
+        &context.tenant_policy_mode,
+        identity.active_membership_count,
+    );
+    let personality_status = operating_context_personality_status(&context.personality_scope);
+    let memory_ready = context_memory.memory_policy_status == "memory_policy_ready";
+    let prompt_ready = prompt_packet_contract.organization_context_required
+        && prompt_packet_contract.personality_decision_required
+        && prompt_packet_contract.company_work_decision_required;
+    let status = if !memory_ready || !prompt_ready {
+        "operating_context_needs_attention"
+    } else if context_report.status == "loaded" || context_report.status == "project_context_loaded"
+    {
+        "operating_context_ready"
+    } else {
+        "operating_context_defaulted"
+    };
+    let tenant_path = format!(
+        "{}/{}/{}",
+        context.organization.id, context.brand.id, context.product.id
+    );
+
+    Ok(InteractiveOperatingContextPanel {
+        schema_version: INTERACTIVE_OPERATING_CONTEXT_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        project_root: context_report.project_root,
+        context_status: context_report.status,
+        tenant_path,
+        organization_id: context.organization.id.clone(),
+        organization_label: context.organization.label.clone(),
+        brand_id: context.brand.id.clone(),
+        brand_label: context.brand.label.clone(),
+        product_id: context.product.id.clone(),
+        product_label: context.product.label.clone(),
+        user_id: context.user.id.clone(),
+        channel_id: context.channel.id.clone(),
+        tenant_policy_mode: context.tenant_policy_mode.clone(),
+        tenant_policy_status,
+        memory_scope: context.memory_scope.clone(),
+        memory_policy_status: context_memory.memory_policy_status.clone(),
+        memory_level: memory_defaults.memory_level.as_str().to_string(),
+        memory_scopes: memory_defaults.default_scopes.clone(),
+        memory_audience: memory_defaults.default_audience.as_str().to_string(),
+        memory_governance_status: context_memory
+            .memory_policy
+            .project_governance
+            .status
+            .as_str()
+            .to_string(),
+        personality_scope: context.personality_scope.clone(),
+        personality_status,
+        brand_voice: context.brand_identity.voice.clone(),
+        brand_tone: context.brand_identity.tone.clone(),
+        brand_value_count: context.brand_identity.values.len(),
+        design_token_source: context.design_system.token_source.clone(),
+        component_source: context.design_system.component_source.clone(),
+        prompt_packet_contract,
+        company_work_contract,
+        identity_summary,
+        handoff_context_summary,
+        commands: operating_context_commands(project_root),
+        next_actions: operating_context_next_actions(
+            status,
+            &context_report.warnings,
+            identity.active_membership_count,
+        ),
+        notes: vec![
+            "This panel is read-only and composes identity, memory policy, personality routing and prompt-packet gates from existing Forge state.".to_string(),
+            "Organization context, personality decision and company-work decision are enforced in generated context and handoff packets, not delegated to a brain prompt alone.".to_string(),
+        ],
+    })
+}
+
+fn operating_context_tenant_policy_status(
+    tenant_policy_mode: &str,
+    active_membership_count: usize,
+) -> String {
+    if tenant_policy_mode == "enforce" && active_membership_count == 0 {
+        "tenant_policy_enforce_needs_active_membership".to_string()
+    } else if tenant_policy_mode == "enforce" {
+        "tenant_policy_enforced".to_string()
+    } else {
+        "tenant_policy_audit".to_string()
+    }
+}
+
+fn operating_context_personality_status(personality_scope: &str) -> String {
+    let normalized = personality_scope.trim().to_ascii_lowercase();
+    if normalized.contains("workflow") && normalized.contains("node") {
+        "workflow_and_node_personality_ready".to_string()
+    } else if normalized.contains("workflow") {
+        "workflow_personality_ready".to_string()
+    } else {
+        "personality_scope_limited".to_string()
+    }
+}
+
+fn operating_context_commands(project_root: &Path) -> InteractiveOperatingContextCommands {
+    let project_root = project_root.display().to_string();
+    InteractiveOperatingContextCommands {
+        refresh: vec![
+            "forge".to_string(),
+            "interactive".to_string(),
+            "operating-context".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        identity: vec![
+            "forge".to_string(),
+            "interactive".to_string(),
+            "identity".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        context_memory: vec![
+            "forge".to_string(),
+            "interactive".to_string(),
+            "context-memory".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        memory_policy: vec![
+            "forge".to_string(),
+            "memory".to_string(),
+            "policy".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        context_packet: vec![
+            "forge".to_string(),
+            "context".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--task".to_string(),
+            "<task-id>".to_string(),
+            "--project-root".to_string(),
+            project_root.clone(),
+            "--strict".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        task_handoff: vec![
+            "forge".to_string(),
+            "task".to_string(),
+            "handoff".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--task".to_string(),
+            "<task-id>".to_string(),
+            "--executor".to_string(),
+            "<executor>".to_string(),
+            "--project-root".to_string(),
+            project_root,
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
+fn operating_context_next_actions(
+    status: &str,
+    warnings: &[String],
+    active_membership_count: usize,
+) -> Vec<String> {
+    let mut actions = Vec::new();
+    if status == "operating_context_defaulted" || !warnings.is_empty() {
+        actions.push(
+            "Create .forge/operating-context.yaml when this project needs non-default organization, brand, product or policy.".to_string(),
+        );
+    }
+    if active_membership_count == 0 {
+        actions.push(
+            "Run forge identity sync --project-root <project-root> --output json to materialize the current tenant and active operator membership.".to_string(),
+        );
+    }
+    actions.push(
+        "Use forge context --workflow <id> --task <id> --project-root <project-root> --strict --output json before external brain handoff.".to_string(),
+    );
+    actions
+}
+
 fn context_memory_memory_commands(project_root: &Path) -> BTreeMap<String, Vec<String>> {
     let project_root = project_root.display().to_string();
     BTreeMap::from([
@@ -10237,6 +10638,11 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         d.identity_panel.current_context.user_id,
         d.identity_panel.current_context.channel_id
     );
+    let operating_context_gates = d
+        .operating_context_panel
+        .prompt_packet_contract
+        .required_gates
+        .join("+");
     let task_board_lanes = render_task_board_lane_summary(&d.task_board_panel);
     let artifact_workflows = render_artifact_workflow_summary(&d.artifact_panel);
     let artifact_entries = render_artifact_entry_summary(&d.artifact_panel);
@@ -10333,6 +10739,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Patch workbench: {patch_workbench_status}; clean {patch_workbench_clean}, files {patch_workbench_files_count}, staged {patch_workbench_staged}, unstaged {patch_workbench_unstaged}, untracked {patch_workbench_untracked}, diff {patch_workbench_diff_present}, check {patch_workbench_diff_check}; {patch_workbench_files}\n\
          Permission center: {permissions_status}; memberships {permissions_memberships}, active {permissions_active}, addon permissions {permissions_addons}, approved {permissions_approved_addons}, pending approvals {permissions_pending}, timed out {permissions_timed_out}; memberships {permission_memberships}; approvals {permission_approvals}\n\
          Identity center: {identity_status}; context {identity_context}, identities {identity_count}, aliases {identity_alias_count}, memberships {identity_membership_count}, tenant audit missing {identity_tenant_missing}; aliases {identity_aliases}; memberships {identity_memberships}\n\
+         Operating context: {operating_context_status}; tenant {operating_tenant_path}, policy {operating_tenant_policy_status}, memory {operating_memory_level}/{operating_memory_scopes}, audience {operating_memory_audience}, personality {operating_personality_status}, gates {operating_prompt_gates}\n\
          Operational digital twin: {digital_twin_status}; workflows {digital_twin_workflows_count}, happening {digital_twin_happening}, done {digital_twin_done}, remaining {digital_twin_remaining}, validated {digital_twin_validated}, rejected {digital_twin_rejected}, approvals {digital_twin_approvals}; {digital_twin_workflows}\n\
          DAG panel: {dag_status}; workflows {dag_workflows_count}, nodes {dag_nodes}, edges {dag_edges}, running {dag_running}, blocked {dag_blocked}, waits {dag_waits}, human waits {dag_human_waits}; {dag_workflows}\n\
          Task board: {task_board_status}; workflows {task_board_workflows}, tasks {task_board_tasks}, ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, checkpoints {task_board_checkpoints}, artifacts {task_board_artifacts}; lanes {task_board_lanes}\n\
@@ -10487,6 +10894,14 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         identity_tenant_missing = d.identity_panel.tenant_audit_missing_count,
         identity_aliases = identity_aliases,
         identity_memberships = identity_memberships,
+        operating_context_status = d.operating_context_panel.status,
+        operating_tenant_path = d.operating_context_panel.tenant_path,
+        operating_tenant_policy_status = d.operating_context_panel.tenant_policy_status,
+        operating_memory_level = d.operating_context_panel.memory_level,
+        operating_memory_scopes = d.operating_context_panel.memory_scopes.join("+"),
+        operating_memory_audience = d.operating_context_panel.memory_audience,
+        operating_personality_status = d.operating_context_panel.personality_status,
+        operating_prompt_gates = operating_context_gates,
         digital_twin_status = d.digital_twin_panel.schema_version,
         digital_twin_workflows_count = d.digital_twin_panel.workflow_count,
         digital_twin_happening = d.digital_twin_panel.global_counts.happening_now_count,
@@ -11114,6 +11529,59 @@ pub fn render_interactive_identity(panel: &InteractiveIdentityPanel) -> String {
         aliases = render_identity_alias_summary(panel),
         memberships = render_identity_membership_summary(panel),
         commands = render_identity_command_summary(panel),
+    )
+}
+
+pub fn render_interactive_operating_context(panel: &InteractiveOperatingContextPanel) -> String {
+    format!(
+        "Operating context: {status}; tenant {tenant_path}, policy {tenant_policy_status}, project {project_root}\nOrganization: {organization}/{brand}/{product}; user {user}; channel {channel}; context {context_status}\nMemory: policy {memory_policy_status}, level {memory_level}, scopes {memory_scopes}, audience {memory_audience}, governance {memory_governance_status}\nPersonality: {personality_status}; scope {personality_scope}; voice {brand_voice}; tone {brand_tone}; brand values {brand_value_count}; design tokens {design_token_source}; components {component_source}\nPrompt packet: {prompt_packet_status}; gates {prompt_packet_gates}\nCompany work: {company_work_status}; departments {company_work_departments}; decisions {company_work_decisions}\nIdentity summary: identities {identity_count}, aliases {alias_count}, memberships {membership_count}, active {active_membership_count}, tenant missing {tenant_missing}\nHandoff context: ready {ready_handoffs}, blocked {blocked_tasks}, budget pressure {budget_pressure}, quality {quality_status}, missing required {required_missing}\nCommands: refresh {refresh}; identity {identity}; memory {context_memory}; context {context_packet}; handoff {task_handoff}\nNext: {next_actions}\n",
+        status = panel.status,
+        tenant_path = panel.tenant_path,
+        tenant_policy_status = panel.tenant_policy_status,
+        project_root = panel.project_root,
+        organization = panel.organization_id,
+        brand = panel.brand_id,
+        product = panel.product_id,
+        user = panel.user_id,
+        channel = panel.channel_id,
+        context_status = panel.context_status,
+        memory_policy_status = panel.memory_policy_status,
+        memory_level = panel.memory_level,
+        memory_scopes = panel.memory_scopes.join(","),
+        memory_audience = panel.memory_audience,
+        memory_governance_status = panel.memory_governance_status,
+        personality_status = panel.personality_status,
+        personality_scope = panel.personality_scope,
+        brand_voice = panel.brand_voice,
+        brand_tone = panel.brand_tone,
+        brand_value_count = panel.brand_value_count,
+        design_token_source = panel.design_token_source,
+        component_source = panel.component_source,
+        prompt_packet_status = panel.prompt_packet_contract.status,
+        prompt_packet_gates = panel.prompt_packet_contract.required_gates.join(","),
+        company_work_status = panel.company_work_contract.status,
+        company_work_departments = panel.company_work_contract.departments.join(","),
+        company_work_decisions = panel.company_work_contract.required_decisions.join(","),
+        identity_count = panel.identity_summary.identity_count,
+        alias_count = panel.identity_summary.channel_alias_count,
+        membership_count = panel.identity_summary.membership_count,
+        active_membership_count = panel.identity_summary.active_membership_count,
+        tenant_missing = panel.identity_summary.tenant_audit_missing_count,
+        ready_handoffs = panel.handoff_context_summary.ready_for_handoff,
+        blocked_tasks = panel.handoff_context_summary.blocked_tasks,
+        budget_pressure = panel.handoff_context_summary.context_budget_pressure,
+        quality_status = panel.handoff_context_summary.context_quality_status,
+        required_missing = panel.handoff_context_summary.required_context_missing,
+        refresh = panel.commands.refresh.join(" "),
+        identity = panel.commands.identity.join(" "),
+        context_memory = panel.commands.context_memory.join(" "),
+        context_packet = panel.commands.context_packet.join(" "),
+        task_handoff = panel.commands.task_handoff.join(" "),
+        next_actions = if panel.next_actions.is_empty() {
+            "none".to_string()
+        } else {
+            panel.next_actions.join(" | ")
+        },
     )
 }
 
@@ -13402,6 +13870,15 @@ fn build_ui_composition_panel(
                     "standard",
                     "half",
                     vec!["forge interactive context-memory --output json".to_string()],
+                ),
+                core_ui_widget(
+                    "operating_context_panel",
+                    "Operating context",
+                    "operating_context_panel",
+                    "tenant_context_renderer",
+                    "standard",
+                    "full",
+                    vec!["forge interactive operating-context --output json".to_string()],
                 ),
                 core_ui_widget(
                     "permissions_panel",
@@ -15970,6 +16447,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/operating-context",
+            "Operating Context",
+            "Show tenant identity, memory policy, personality routing and prompt-packet gates before executor handoff.",
+            &["forge", "interactive", "operating-context"],
+            false,
+            "low",
+        ),
+        slash(
             "/context-memory",
             "Context/Memory",
             "Show context readiness, routing quality and project memory governance without building a task packet.",
@@ -16406,6 +16891,10 @@ fn repl_focus_panels() -> Vec<InteractiveReplFocusPanel> {
             title: "Context/memory",
         },
         InteractiveReplFocusPanel {
+            panel_id: "operating_context_panel",
+            title: "Operating context",
+        },
+        InteractiveReplFocusPanel {
             panel_id: "permissions_panel",
             title: "Permissions",
         },
@@ -16504,6 +16993,11 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
             let project_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             let panel = build_interactive_context_memory(store, &project_root)?;
             Ok(render_interactive_context_memory(&panel))
+        }
+        "operating_context_panel" => {
+            let project_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let panel = build_interactive_operating_context(store, &project_root)?;
+            Ok(render_interactive_operating_context(&panel))
         }
         "permissions_panel" => {
             let panel = build_interactive_permissions(store)?;
@@ -16618,6 +17112,12 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
             let project_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             let panel = build_interactive_context_memory(store, &project_root)?;
             println!("{}", render_interactive_context_memory(&panel));
+            Ok(true)
+        }
+        "/operating-context" => {
+            let project_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let panel = build_interactive_operating_context(store, &project_root)?;
+            println!("{}", render_interactive_operating_context(&panel));
             Ok(true)
         }
         "/permissions" => {

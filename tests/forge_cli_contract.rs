@@ -40234,6 +40234,332 @@ fn interactive_context_memory_command_and_mcp_surface_are_dedicated() {
 }
 
 #[test]
+fn interactive_operating_context_command_home_slash_and_mcp_surface_are_dedicated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("operating-context-project");
+    fs::create_dir_all(project_root.join(".forge")).unwrap();
+    fs::write(
+        project_root.join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: digital-directive
+  label: Digital Directive
+brand:
+  scope: brand
+  id: forge
+  label: Forge
+product:
+  scope: product
+  id: core
+  label: Forge Core
+user:
+  scope: user
+  id: operator-oc
+  label: Operator OC
+channel:
+  scope: channel
+  id: local_tui
+  label: Local TUI
+memory_scope: organization_project_processing
+personality_scope: organization_workflow_node
+tenant_policy_mode: audit
+brand_identity:
+  voice: direta
+  tone: pragmatica
+  values:
+    - clareza
+    - rigor
+design_system:
+  token_source: .forge/design/tokens.json
+  component_source: .forge/design/components
+"#,
+    )
+    .unwrap();
+
+    forge()
+        .args([
+            "memory",
+            "configure",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--memory-level",
+            "standard",
+            "--default-scope",
+            "organization",
+            "--default-scope",
+            "project",
+            "--default-scope",
+            "processing",
+            "--default-audience",
+            "internal",
+            "--privacy-mode",
+            "private_by_default",
+            "--retention-mode",
+            "processing_auto_archive",
+            "--approved-by",
+            "test-operator",
+            "--reason",
+            "interactive operating context contract",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    forge()
+        .current_dir(&project_root)
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "plan",
+            "--goal",
+            "Demonstrate operating context before external brain handoff",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "interactive",
+            "operating-context",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.interactive.operating_context.v1"
+    );
+    assert_eq!(json["status"], "operating_context_ready");
+    assert_eq!(json["context_status"], "loaded");
+    assert_eq!(json["tenant_path"], "digital-directive/forge/core");
+    assert_eq!(json["tenant_policy_status"], "tenant_policy_audit");
+    assert_eq!(json["memory_policy_status"], "memory_policy_ready");
+    assert_eq!(json["memory_level"], "MEMORY_STANDARD");
+    assert!(json["memory_scopes"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("organization")));
+    assert_eq!(json["memory_audience"], "internal");
+    assert_eq!(json["memory_governance_status"], "configured");
+    assert_eq!(
+        json["personality_status"],
+        "workflow_and_node_personality_ready"
+    );
+    assert_eq!(json["brand_voice"], "direta");
+    assert_eq!(json["brand_tone"], "pragmatica");
+    assert_eq!(json["brand_value_count"], 2);
+    assert_eq!(json["design_token_source"], ".forge/design/tokens.json");
+    assert_eq!(json["component_source"], ".forge/design/components");
+    assert_eq!(
+        json["prompt_packet_contract"]["schema_version"],
+        "forge.interactive.operating_prompt_packet_contract.v1"
+    );
+    for gate in [
+        "organization_context_required",
+        "personality_decision_required",
+        "company_work_decision_required",
+    ] {
+        assert!(json["prompt_packet_contract"]["required_gates"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(gate)));
+    }
+    assert_eq!(
+        json["prompt_packet_contract"]["organization_context_required"],
+        true
+    );
+    assert_eq!(
+        json["prompt_packet_contract"]["personality_decision_required"],
+        true
+    );
+    assert_eq!(
+        json["prompt_packet_contract"]["company_work_decision_required"],
+        true
+    );
+    for department in [
+        "product",
+        "technical",
+        "financial",
+        "administrative",
+        "marketing",
+        "communication",
+        "delivery",
+    ] {
+        assert!(json["company_work_contract"]["departments"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(department)));
+    }
+    assert!(json["company_work_contract"]["required_decisions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("delivery_acceptance_and_evidence")));
+    assert_eq!(json["identity_summary"]["active_membership_count"], 1);
+    assert!(
+        json["handoff_context_summary"]["ready_for_handoff"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(json["commands"]["context_packet"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("context")));
+    assert!(json["commands"]["task_handoff"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("handoff")));
+
+    let text_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "interactive",
+            "operating-context",
+            "--project-root",
+            project_root.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Operating context: operating_context_ready"));
+    assert!(text.contains("digital-directive/forge/core"));
+    assert!(text.contains("Prompt packet: prompt_packet_gates_declared"));
+    assert!(text.contains("Company work: company_work_decision_required"));
+    assert!(text.contains("forge task handoff"));
+
+    let home_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "interactive",
+            "home",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["operating_context_panel"]["schema_version"],
+        "forge.interactive.operating_context.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["operating_context_panel"]["tenant_path"],
+        "digital-directive/forge/core"
+    );
+    assert!(home["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/operating-context")));
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |region| region["widgets"].as_array().unwrap().iter().any(|widget| {
+                widget["widget_id"] == "operating_context_panel"
+                    && widget["commands"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!(
+                            "forge interactive operating-context --output json"
+                        ))
+            })
+        ));
+
+    let catalog_output = forge()
+        .args(["interactive", "slash-commands", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let catalog: Value = serde_json::from_slice(&catalog_output).unwrap();
+    let operating_context_slash = find_slash_command(&catalog, "/operating-context");
+    assert_eq!(
+        operating_context_slash["equivalent_command"],
+        serde_json::json!(["forge", "interactive", "operating-context"])
+    );
+    assert_eq!(operating_context_slash["mutates_workflow"], false);
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.operating_context");
+    assert_eq!(
+        tool["output_schema"],
+        "forge.interactive.operating_context.v1"
+    );
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.operating_context"])
+        .arg("--input")
+        .arg(format!(
+            r#"{{"project_root":{}}}"#,
+            serde_json::to_string(project_root.to_str().unwrap()).unwrap()
+        ))
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.operating_context.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["company_work_contract"]["status"],
+        "company_work_decision_required"
+    );
+}
+
+#[test]
 fn schedule_create_cli_models_daily_goal_research_with_multiple_goals() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -49016,6 +49342,7 @@ fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
         "shows_addons_and_capabilities",
         "shows_costs",
         "shows_handoffs_and_approvals",
+        "shows_operating_context",
         "runs_end_to_end_demo_flow",
         "readme_five_minute_intro",
     ] {
@@ -49047,6 +49374,12 @@ fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
         .unwrap()
         .contains(&serde_json::json!(
             "forge interactive event-runtime --output json"
+        )));
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge interactive operating-context --output json"
         )));
     assert!(json["commands"]
         .as_array()
@@ -49570,6 +49903,7 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         "/update",
         "/workers",
         "/context-memory",
+        "/operating-context",
         "/context",
         "/handoff",
         "/pm",
@@ -49616,6 +49950,14 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         .as_array()
         .unwrap()
         .contains(&Value::String("context-memory".to_string())));
+
+    let operating_context = find_slash_command(&json, "/operating-context");
+    assert_eq!(operating_context["risk_level"], "low");
+    assert_eq!(operating_context["mutates_workflow"], false);
+    assert!(operating_context["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("operating-context".to_string())));
 
     let handoff = find_slash_command(&json, "/handoff");
     assert_eq!(handoff["risk_level"], "medium");
@@ -50681,6 +51023,11 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
             "forge.interactive.identity.v1",
             false,
         ),
+        (
+            "forge.interactive.operating_context",
+            "forge.interactive.operating_context.v1",
+            false,
+        ),
         ("forge.brain_router", "forge.brain_router.v1", false),
         (
             "forge.interactive.slash_commands",
@@ -50835,6 +51182,17 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         home_json["result"]["dashboard"]["context_memory_panel"]["memory_policy_status"]
             .is_string(),
         "interactive home should expose context and memory policy state for agent dashboards"
+    );
+    assert_eq!(
+        home_json["result"]["dashboard"]["operating_context_panel"]["schema_version"],
+        "forge.interactive.operating_context.v1"
+    );
+    assert!(
+        home_json["result"]["dashboard"]["operating_context_panel"]["prompt_packet_contract"]
+            ["organization_context_required"]
+            .as_bool()
+            .unwrap(),
+        "interactive home should expose operating-context prompt packet gates before handoff"
     );
     assert_eq!(
         home_json["result"]["dashboard"]["identity_panel"]["schema_version"],
@@ -51006,6 +51364,12 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.task_board"),
         "the packaged Forge skill should expose the dedicated interactive task board through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.operating_context")
+            && forge_core::skill::SKILL_MD.contains("forge interactive operating-context")
+            && forge_core::skill::SKILL_MD.contains("dashboard.operating_context_panel"),
+        "the packaged Forge skill should expose the operating context panel through MCP, CLI and home"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.workflow_sidebar")

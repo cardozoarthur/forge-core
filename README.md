@@ -30,13 +30,14 @@ O fluxo mental é simples:
 2. `forge plan --goal "<objetivo>"` cria o grafo de tarefas.
 3. `forge request start --goal "<objetivo>" --origin codex` cria um run assíncrono.
 4. `forge interactive task-board` mostra tarefas, handoffs, aprovações e checkpoints.
-5. `forge interactive event-runtime` mostra inbox, workers e o ciclo `start_workflow`, `continue_workflow`, `pause_workflow`, `resume_workflow`, `modify_workflow` e `end_workflow`.
-6. `forge interactive architecture` mostra a bússola entre goal1/goal2/goal3, evidências atuais, gaps, plano incremental, dependências, reuso e benchmarks.
-7. `forge smoke operational-tui --output json` prova localmente que a TUI abre, cria um fluxo demonstrável e expõe workflows, eventos/schedules, Addons/capabilities, custos e handoffs/approvals.
-8. `forge smoke forge-first-harness --output json` prova localmente que headroom, adoption-plan, bootstrap dry-run, shim Forge-owned e exec dry-run funcionam sem executar ou modificar a CLI externa.
-9. `forge smoke replacement-cli-evidence --output json` prova que o gate de CLI substituta coleta as evidências prontas, reporta os skips que dependem de manifesto aprovado e não promove o milestone automaticamente.
+5. `forge interactive operating-context` mostra tenant, memória, personalidade, contexto de marca/design, gates de prompt-packet e checklist de empresa antes do handoff.
+6. `forge interactive event-runtime` mostra inbox, workers e o ciclo `start_workflow`, `continue_workflow`, `pause_workflow`, `resume_workflow`, `modify_workflow` e `end_workflow`.
+7. `forge interactive architecture` mostra a bússola entre goal1/goal2/goal3, evidências atuais, gaps, plano incremental, dependências, reuso e benchmarks.
+8. `forge smoke operational-tui --output json` prova localmente que a TUI abre, cria um fluxo demonstrável e expõe workflows, eventos/schedules, Addons/capabilities, custos e handoffs/approvals.
+9. `forge smoke forge-first-harness --output json` prova localmente que headroom, adoption-plan, bootstrap dry-run, shim Forge-owned e exec dry-run funcionam sem executar ou modificar a CLI externa.
+10. `forge smoke replacement-cli-evidence --output json` prova que o gate de CLI substituta coleta as evidências prontas, reporta os skips que dependem de manifesto aprovado e não promove o milestone automaticamente.
 
-Use `j`/`k` para mover o foco no REPL, `enter` para abrir o painel focado, `m` para alternar modo de visualização, `t` para alternar tema e `q`, `quit`, `exit`, `/quit` ou `/exit` para sair sem criar workflow. Os comandos slash como `/cockpit`, `/architecture`, `/task-board`, `/readiness`, `/addons`, `/sessions`, `/logs`, `/permissions` e `/dag` renderizam painéis dentro do próprio REPL.
+Use `j`/`k` para mover o foco no REPL, `enter` para abrir o painel focado, `m` para alternar modo de visualização, `t` para alternar tema e `q`, `quit`, `exit`, `/quit` ou `/exit` para sair sem criar workflow. Os comandos slash como `/cockpit`, `/architecture`, `/task-board`, `/operating-context`, `/readiness`, `/addons`, `/sessions`, `/logs`, `/permissions` e `/dag` renderizam painéis dentro do próprio REPL.
 
 ## Status
 
@@ -96,6 +97,7 @@ This is the first functional CLI + Skill version:
 - replacement-grade CLI readiness through `forge interactive replacement-cli` and MCP `forge.interactive.replacement_cli`, using `forge.interactive.replacement_cli.v1` to aggregate operator home, workflow operations, patch editing UX, action discovery, harness/session controls, observability, approvals and milestone evidence without launching child CLIs or mutating state
 - Addon-owned multimodal runtime readiness through `forge interactive multimodal-runtime --project-root <project-root>` and MCP `forge.interactive.multimodal_runtime`, using `forge.interactive.multimodal_runtime.v1` to expose the `forge.addon.multimodal` capability boundary, feature flag, guard state, safe install/readiness/benchmark/demo templates and production evidence blockers without installing models, executing models, accessing devices or mutating workflows
 - interactive task board through `forge interactive task-board` and MCP `forge.interactive.task_board`, using `forge.interactive.task_board.v1` to expose workflow lanes, operable per-task cards, ready handoffs, blocked/failed/running task counts, checkpoint resume candidates, pending human interactions, artifact counts and direct next-action commands for TUI/web/agent dashboards
+- interactive operating context through `forge interactive operating-context --project-root <project-root>` and MCP `forge.interactive.operating_context`, using `forge.interactive.operating_context.v1` to compose tenant identity, memory policy, personality routing, brand/design context, prompt-packet gates, company-work checklist and handoff readiness before external brain execution
 - 0.5 milestone status, promotion manifest, release-gates panel, evidence-plan, collect-evidence, collect-ready-evidence and attached-evidence ledger surfaces for release-gate inspection, including project-root-aware secret-free `manifest_templates` for missing project evidence manifests such as `.forge/connected-brain-runtimes.json`, `.forge/multimodal.json` and `.forge/multimodal-runtimes.json`
 - native daily Goal research workflow planning and smoke execution for `hackathon` reports with Markdown/PDF artifacts and redacted Telegram delivery records
 - scheduler worker status includes a deterministic assignment plan that shows which due scheduled workflows fit the current bounded worker pool and which remain queued under backpressure
@@ -182,6 +184,10 @@ forge list --context-actions --output json
 forge list --context-action wait_for_dependencies --output json
 forge list --quality-actions --output json
 forge list --quality-action increase_context_budget --output json
+forge
+forge interactive home --project-root . --output json
+forge interactive operating-context --project-root . --output json
+forge smoke operational-tui --output json
 forge harness token-headroom --content "$(cat logs/build.log)" --kind log --budget-tokens 1200 --source build-log --persist --output json
 forge harness retrieve-headroom --ref forge://harness/headroom/<sha256> --include-content --output json
 forge harness headroom-stats --source build-log --output json
