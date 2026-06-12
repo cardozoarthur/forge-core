@@ -41016,6 +41016,15 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
         gate["capability_id"] == "replacement_grade_cli"
             && gate["status"] == "groundwork"
             && gate["promotion_ready"] == false
+            && gate["attached_evidence_state"] == "required_attached_evidence_missing"
+            && gate["required_attached_evidence_kinds"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("external_brain_provider_execution"))
+            && gate["missing_attached_evidence_kinds"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("external_brain_provider_execution"))
             && gate["next_commands"]
                 .as_array()
                 .unwrap()
@@ -41027,6 +41036,15 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
         gate["capability_id"] == "experimental_multimodal_runtime"
             && gate["status"] == "groundwork"
             && gate["attached_evidence_count"] == 1
+            && gate["attached_evidence_state"] == "required_attached_evidence_present"
+            && gate["required_attached_evidence_kinds"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("production_runtime_benchmark"))
+            && gate["missing_attached_evidence_kinds"]
+                .as_array()
+                .unwrap()
+                .is_empty()
             && gate["attached_evidence"]
                 .as_array()
                 .unwrap()

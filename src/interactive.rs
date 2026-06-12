@@ -274,6 +274,10 @@ pub struct InteractiveReleaseGateCard {
     pub promotion_ready: bool,
     pub required_evidence: String,
     pub evidence: String,
+    pub attached_evidence_state: String,
+    pub required_attached_evidence_kinds: Vec<String>,
+    pub attached_evidence_kinds: Vec<String>,
+    pub missing_attached_evidence_kinds: Vec<String>,
     pub attached_evidence_count: usize,
     pub attached_evidence: Vec<MilestoneAttachedEvidence>,
     pub gap_before_promotion: String,
@@ -1848,6 +1852,28 @@ pub fn build_interactive_release_gates(
                 .cloned()
                 .unwrap_or_default();
             let attached_evidence_count = attached_evidence.len();
+            let required_attached_evidence_kinds =
+                release_gate_required_attached_evidence_kinds(&capability.id);
+            let attached_evidence_kinds = attached_evidence
+                .iter()
+                .map(|evidence| evidence.kind.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let attached_evidence_kind_set = attached_evidence_kinds
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let missing_attached_evidence_kinds = required_attached_evidence_kinds
+                .iter()
+                .filter(|kind| !attached_evidence_kind_set.contains(*kind))
+                .cloned()
+                .collect::<Vec<_>>();
+            let attached_evidence_state = release_gate_attached_evidence_state(
+                &required_attached_evidence_kinds,
+                &missing_attached_evidence_kinds,
+                attached_evidence_count,
+            );
             InteractiveReleaseGateCard {
                 capability_id: capability.id.clone(),
                 title: capability.title.clone(),
@@ -1858,6 +1884,10 @@ pub fn build_interactive_release_gates(
                     .cloned()
                     .unwrap_or_else(|| "milestone evidence required".to_string()),
                 evidence: capability.evidence.clone(),
+                attached_evidence_state,
+                required_attached_evidence_kinds,
+                attached_evidence_kinds,
+                missing_attached_evidence_kinds,
                 attached_evidence_count,
                 attached_evidence,
                 gap_before_promotion: capability.gap_before_promotion.clone(),
@@ -4967,6 +4997,34 @@ fn release_gate_next_commands(capability_id: &str) -> Vec<String> {
             "forge milestone status --version 0.5 --output json".to_string(),
             "forge milestone manifest --version 0.5 --output json".to_string(),
         ],
+    }
+}
+
+fn release_gate_required_attached_evidence_kinds(capability_id: &str) -> Vec<String> {
+    match capability_id {
+        "replacement_grade_cli" => vec![
+            "external_brain_provider_execution".to_string(),
+            "broader_project_coding_research_workflow".to_string(),
+            "terminal_file_editing_ux".to_string(),
+        ],
+        "experimental_multimodal_runtime" => vec!["production_runtime_benchmark".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+fn release_gate_attached_evidence_state(
+    required_kinds: &[String],
+    missing_kinds: &[String],
+    attached_count: usize,
+) -> String {
+    if required_kinds.is_empty() {
+        "no_required_attached_evidence".to_string()
+    } else if missing_kinds.is_empty() {
+        "required_attached_evidence_present".to_string()
+    } else if attached_count > 0 {
+        "partial_required_attached_evidence".to_string()
+    } else {
+        "required_attached_evidence_missing".to_string()
     }
 }
 
