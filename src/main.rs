@@ -1821,6 +1821,8 @@ enum EventCommands {
         interval_seconds: u64,
         #[arg(long = "idle-exit")]
         idle_exit: bool,
+        #[arg(long = "dispatch-activations")]
+        dispatch_activations: bool,
         #[arg(long = "recover-stale-services")]
         recover_stale_services: bool,
         #[arg(long = "stop-file")]
@@ -1865,6 +1867,8 @@ enum EventCommands {
         interval_seconds: u64,
         #[arg(long = "idle-exit")]
         idle_exit: bool,
+        #[arg(long = "dispatch-activations")]
+        dispatch_activations: bool,
         #[arg(long = "continuous")]
         continuous: bool,
         #[arg(long = "cycle-retention", default_value_t = 100)]
@@ -4590,6 +4594,7 @@ fn run() -> Result<i32> {
                 max_cycles,
                 interval_seconds,
                 idle_exit,
+                dispatch_activations,
                 recover_stale_services,
                 stop_file,
                 lease_owner,
@@ -4615,6 +4620,7 @@ fn run() -> Result<i32> {
                     max_cycles,
                     interval_seconds,
                     idle_exit,
+                    dispatch_activations,
                     recover_stale_services,
                     stop_file.as_deref(),
                     &lease_owner,
@@ -4646,6 +4652,7 @@ fn run() -> Result<i32> {
                 max_cycles,
                 interval_seconds,
                 idle_exit,
+                dispatch_activations,
                 continuous,
                 cycle_retention,
                 recover_stale_services,
@@ -4673,6 +4680,7 @@ fn run() -> Result<i32> {
                     max_cycles,
                     interval_seconds,
                     idle_exit,
+                    dispatch_activations,
                     continuous,
                     cycle_retention,
                     recover_stale_services,

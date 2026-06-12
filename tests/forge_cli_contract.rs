@@ -25466,6 +25466,229 @@ fn inbound_event_scan_can_dispatch_activation_runtime_contracts() {
 }
 
 #[test]
+fn event_runtime_reconcile_can_dispatch_activation_runtime_contracts() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("event-runtime-activation-project");
+    write_event_activation_dispatch_demo_project(&project_root);
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "identity",
+            "sync",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let ingest_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "ingest",
+            "--origin",
+            "demo",
+            "--action",
+            "start_workflow",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--input",
+            r#"{"goal":"Runtime reconcile dispatches addon activations","transport":"demo","event_type":"demo.dispatch","auth_verified":true}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ingest: Value = serde_json::from_slice(&ingest_output).unwrap();
+    let event_id = ingest["event"]["id"].as_str().unwrap();
+
+    let reconcile_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "runtime-reconcile",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--status",
+            "pending",
+            "--limit",
+            "1",
+            "--service-limit",
+            "10",
+            "--execute",
+            "--max-cycles",
+            "1",
+            "--interval-seconds",
+            "0",
+            "--max-runs",
+            "1",
+            "--backoff-initial-seconds",
+            "0",
+            "--backoff-max-seconds",
+            "0",
+            "--lease-owner",
+            "runtime-activation-test",
+            "--lease-seconds",
+            "60",
+            "--heartbeat-seconds",
+            "10",
+            "--dispatch-activations",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let reconcile: Value = serde_json::from_slice(&reconcile_output).unwrap();
+    assert_eq!(reconcile["status"], "event_runtime_reconcile_executed");
+    assert!(reconcile["recommendations"][0]["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|part| part == "--dispatch-activations"));
+    assert_eq!(reconcile["execution_count"], 1);
+    assert_eq!(
+        reconcile["executions"][0]["runs"][0]["report"]["worker_report"]["cycles"][0]["report"]
+            ["events"][0]["event_id"],
+        event_id
+    );
+    assert_eq!(
+        reconcile["executions"][0]["runs"][0]["report"]["worker_report"]["cycles"][0]["report"]
+            ["events"][0]["activation_dispatch"]["queued_count"],
+        2
+    );
+
+    let ledger_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "dispatches",
+            "--addon",
+            "forge.addon.event_activation_dispatch_demo",
+            "--status",
+            "queued",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ledger: Value = serde_json::from_slice(&ledger_output).unwrap();
+    assert_eq!(ledger["dispatch_count"], 2);
+    assert_eq!(ledger["queued_count"], 2);
+
+    let daemon_ingest_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "ingest",
+            "--origin",
+            "demo",
+            "--action",
+            "start_workflow",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--input",
+            r#"{"goal":"Runtime daemon dispatches addon activations","transport":"demo","event_type":"demo.dispatch","auth_verified":true}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let daemon_ingest: Value = serde_json::from_slice(&daemon_ingest_output).unwrap();
+    let daemon_event_id = daemon_ingest["event"]["id"].as_str().unwrap();
+    let daemon_input = serde_json::json!({
+        "project_root": project_root.to_str().unwrap(),
+        "status": "pending",
+        "limit": 1,
+        "service_limit": 10,
+        "execute": true,
+        "max_cycles": 1,
+        "interval_seconds": 0,
+        "max_runs": 1,
+        "backoff_initial_seconds": 0,
+        "backoff_max_seconds": 0,
+        "lease_owner": "runtime-activation-daemon-test",
+        "lease_seconds": 60,
+        "heartbeat_seconds": 10,
+        "dispatch_activations": true
+    });
+    let daemon_output = forge()
+        .args(["--store", store.to_str().unwrap(), "mcp", "call"])
+        .arg("forge.events.runtime_daemon")
+        .arg("--input")
+        .arg(daemon_input.to_string())
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let daemon: Value = serde_json::from_slice(&daemon_output).unwrap();
+    assert_eq!(
+        daemon["result"]["schema_version"],
+        "forge.event_runtime_daemon.v1"
+    );
+    assert_eq!(daemon["result"]["dispatch_activations"], true);
+    assert_eq!(
+        daemon["result"]["cycles"][0]["report"]["dispatch_activations"],
+        true
+    );
+    assert_eq!(
+        daemon["result"]["cycles"][0]["report"]["executions"][0]["runs"][0]["report"]
+            ["worker_report"]["cycles"][0]["report"]["events"][0]["event_id"],
+        daemon_event_id
+    );
+    assert_eq!(
+        daemon["result"]["cycles"][0]["report"]["executions"][0]["runs"][0]["report"]
+            ["worker_report"]["cycles"][0]["report"]["events"][0]["activation_dispatch"]
+            ["queued_count"],
+        2
+    );
+
+    let final_ledger_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "dispatches",
+            "--addon",
+            "forge.addon.event_activation_dispatch_demo",
+            "--status",
+            "queued",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let final_ledger: Value = serde_json::from_slice(&final_ledger_output).unwrap();
+    assert_eq!(final_ledger["dispatch_count"], 4);
+    assert_eq!(final_ledger["queued_count"], 4);
+}
+
+#[test]
 fn addon_event_adapters_project_declared_event_triggers_listeners_and_channels() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

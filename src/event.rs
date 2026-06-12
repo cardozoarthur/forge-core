@@ -712,6 +712,7 @@ pub struct EventRuntimeReconcileReport {
     pub reconcile_id: String,
     pub project_root: String,
     pub execute: bool,
+    pub dispatch_activations: bool,
     pub registry: EventRuntimeRegistrySnapshot,
     pub inbox: EventRuntimeInboxSnapshot,
     pub services: EventRuntimeServiceSnapshot,
@@ -815,6 +816,7 @@ pub struct EventRuntimeDaemonReport {
     pub max_cycles: usize,
     pub interval_seconds: u64,
     pub idle_exit: bool,
+    pub dispatch_activations: bool,
     pub continuous: bool,
     pub cycle_retention: usize,
     pub recover_stale_services: bool,
@@ -4455,6 +4457,7 @@ pub fn run_event_runtime_reconcile(
     max_cycles: usize,
     interval_seconds: u64,
     idle_exit: bool,
+    dispatch_activations: bool,
     recover_stale_services: bool,
     stop_file: Option<&Path>,
     lease_owner: &str,
@@ -4666,6 +4669,7 @@ pub fn run_event_runtime_reconcile(
                 max_cycles,
                 interval_seconds,
                 idle_exit,
+                dispatch_activations,
                 stop_file,
                 &lease_owner,
                 lease_seconds,
@@ -4690,7 +4694,7 @@ pub fn run_event_runtime_reconcile(
                     max_cycles,
                     interval_seconds,
                     idle_exit,
-                    false,
+                    dispatch_activations,
                     "127.0.0.1",
                     8787,
                     "/webhook",
@@ -4777,6 +4781,7 @@ pub fn run_event_runtime_reconcile(
         reconcile_id,
         project_root: project_root.display().to_string(),
         execute,
+        dispatch_activations,
         registry,
         inbox,
         services: service_snapshot,
@@ -4822,6 +4827,7 @@ fn event_worker_supervisor_command(
     max_cycles: usize,
     interval_seconds: u64,
     idle_exit: bool,
+    dispatch_activations: bool,
     stop_file: Option<&Path>,
     lease_owner: &str,
     lease_seconds: u64,
@@ -4862,6 +4868,9 @@ fn event_worker_supervisor_command(
     if idle_exit {
         command.push("--idle-exit".to_string());
     }
+    if dispatch_activations {
+        command.push("--dispatch-activations".to_string());
+    }
     if let Some(stop_file) = stop_file {
         command.extend(["--stop-file".to_string(), stop_file.display().to_string()]);
     }
@@ -4880,6 +4889,7 @@ pub fn run_event_runtime_daemon(
     max_cycles: usize,
     interval_seconds: u64,
     idle_exit: bool,
+    dispatch_activations: bool,
     continuous: bool,
     cycle_retention: usize,
     recover_stale_services: bool,
@@ -4932,6 +4942,7 @@ pub fn run_event_runtime_daemon(
         "max_cycles": max_cycles,
         "interval_seconds": interval_seconds,
         "idle_exit": idle_exit,
+        "dispatch_activations": dispatch_activations,
         "continuous": continuous,
         "cycle_retention": cycle_retention,
         "recover_stale_services": recover_stale_services,
@@ -5007,6 +5018,7 @@ pub fn run_event_runtime_daemon(
             1,
             0,
             true,
+            dispatch_activations,
             recover_stale_services,
             stop_file,
             &lease_owner,
@@ -5155,6 +5167,7 @@ pub fn run_event_runtime_daemon(
         "max_cycles": max_cycles,
         "interval_seconds": interval_seconds,
         "idle_exit": idle_exit,
+        "dispatch_activations": dispatch_activations,
         "continuous": continuous,
         "cycle_retention": cycle_retention,
         "recover_stale_services": recover_stale_services,
@@ -5198,6 +5211,7 @@ pub fn run_event_runtime_daemon(
         max_cycles,
         interval_seconds,
         idle_exit,
+        dispatch_activations,
         continuous,
         cycle_retention,
         recover_stale_services,
