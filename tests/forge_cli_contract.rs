@@ -47349,6 +47349,32 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
         .unwrap();
     assert_eq!(compatibility["executor"], "codex");
     assert_eq!(compatibility["native_entrypoint"], "codex");
+    assert_eq!(
+        compatibility["adoption_posture"],
+        "needs_forge_owned_path_shim"
+    );
+    assert_eq!(compatibility["ready_as_forge_first_default"], false);
+    assert_eq!(compatibility["readiness_score_percent"], 85);
+    assert!(compatibility["ready_surfaces"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("env_overlay")));
+    assert!(compatibility["blocked_surfaces"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("path_shim")));
+    assert!(compatibility["blocked_surfaces"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("session_lifecycle")));
+    assert!(compatibility["recommended_surfaces"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(compatibility["disabled_surfaces"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     assert!(compatibility["supported_surfaces"]
         .as_array()
         .unwrap()
@@ -47403,6 +47429,13 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
             .as_str()
             .unwrap_or("")
             .contains("forge harness install-shims")));
+    assert!(json["executor_compatibility"]["compatibility_matrix"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["executor"] == "gemini"
+            && item["adoption_posture"] == "inspect_required"
+            && item["ready_as_forge_first_default"] == false));
     let headroom_next_commands = json["headroom_plan"]["next_commands"].as_array().unwrap();
     assert!(headroom_next_commands
         .iter()
@@ -47497,7 +47530,11 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("gates prompt_packet_required, context_budget_enforced"));
     assert!(text.contains("Compatibility: forge.harness.executor_compatibility.v1"));
     assert!(text.contains("selected codex via codex_cli"));
+    assert!(text.contains("posture needs_forge_owned_path_shim"));
+    assert!(text.contains("default_ready false"));
+    assert!(text.contains("score 85%"));
     assert!(text.contains("surfaces env_overlay, path_shim, harness_exec"));
+    assert!(text.contains("blocked path_shim, session_lifecycle"));
     assert!(text.contains("path_shim:blocked"));
     assert!(text.contains("token_headroom:ready"));
     assert!(text.contains("Lifecycle gates: codex-shell lineage false"));
@@ -47661,6 +47698,10 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert_eq!(
         mcp_json["result"]["executor_compatibility"]["selected_adapter_family"],
         "codex_cli"
+    );
+    assert_eq!(
+        mcp_json["result"]["executor_compatibility"]["selected_compatibility"]["adoption_posture"],
+        "needs_forge_owned_path_shim"
     );
 }
 

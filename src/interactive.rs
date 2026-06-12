@@ -14143,11 +14143,14 @@ fn render_harness_executor_compatibility(report: &HarnessExecutorCompatibilityRe
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "{} status {}; selected {} via {}; native {}; surfaces {}; readiness {}; families {}",
+        "{} status {}; selected {} via {}; posture {}; default_ready {}; score {}%; native {}; surfaces {}; readiness {}; blocked {}; recommended {}; families {}",
         report.schema_version,
         report.status,
         report.selected_executor,
         report.selected_adapter_family,
+        selected.adoption_posture,
+        selected.ready_as_forge_first_default,
+        selected.readiness_score_percent,
         selected.native_entrypoint,
         if surfaces.is_empty() {
             "none".to_string()
@@ -14158,6 +14161,16 @@ fn render_harness_executor_compatibility(report: &HarnessExecutorCompatibilityRe
             "none".to_string()
         } else {
             readiness
+        },
+        if selected.blocked_surfaces.is_empty() {
+            "none".to_string()
+        } else {
+            selected.blocked_surfaces.join(", ")
+        },
+        if selected.recommended_surfaces.is_empty() {
+            "none".to_string()
+        } else {
+            selected.recommended_surfaces.join(", ")
         },
         if families.is_empty() {
             "none".to_string()

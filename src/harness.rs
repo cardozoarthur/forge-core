@@ -404,6 +404,13 @@ pub struct HarnessExecutorCompatibility {
     pub native_entrypoint: String,
     pub selected: bool,
     pub compatibility_status: String,
+    pub adoption_posture: String,
+    pub ready_as_forge_first_default: bool,
+    pub readiness_score_percent: usize,
+    pub ready_surfaces: Vec<String>,
+    pub blocked_surfaces: Vec<String>,
+    pub recommended_surfaces: Vec<String>,
+    pub disabled_surfaces: Vec<String>,
     pub supported_surfaces: Vec<String>,
     pub readiness: Vec<HarnessExecutorSurfaceReadiness>,
     pub next_commands: Vec<String>,
@@ -2231,12 +2238,19 @@ fn harness_executor_compatibility(
         non_selected_harness_executor_readiness(&family, project_root, shim_dir)
     };
     let compatibility_status = harness_executor_compatibility_status(selected, &readiness);
+    let surface_summary = harness_executor_surface_summary(&readiness);
+    let adoption_posture =
+        harness_executor_adoption_posture(selected, &surface_summary, &compatibility_status);
+    let ready_as_forge_first_default =
+        selected && adoption_posture == "ready_as_forge_first_default";
+    let readiness_score_percent = harness_executor_readiness_score(&readiness);
     let next_commands =
         harness_executor_next_commands(&family, project_root, shim_dir, selected, &readiness);
     let notes = if selected {
         vec![
             "Selected executor readiness is derived from harness doctor, wrapper plan, shim status, lineage policy and headroom policy.".to_string(),
             "A blocked surface does not remove the executor; it tells the TUI/operator which Forge-first capability must be enabled before real child execution.".to_string(),
+            "adoption_posture is the compact operator decision for whether this brain can become the Forge-first default without more setup.".to_string(),
         ]
     } else {
         vec![
@@ -2255,10 +2269,97 @@ fn harness_executor_compatibility(
         native_entrypoint: family.native_entrypoint,
         selected,
         compatibility_status,
+        adoption_posture,
+        ready_as_forge_first_default,
+        readiness_score_percent,
+        ready_surfaces: surface_summary.ready,
+        blocked_surfaces: surface_summary.blocked,
+        recommended_surfaces: surface_summary.recommended,
+        disabled_surfaces: surface_summary.disabled,
         supported_surfaces,
         readiness,
         next_commands,
         notes,
+    }
+}
+
+#[derive(Debug, Default)]
+struct HarnessExecutorSurfaceSummary {
+    ready: Vec<String>,
+    blocked: Vec<String>,
+    recommended: Vec<String>,
+    disabled: Vec<String>,
+}
+
+fn harness_executor_surface_summary(
+    readiness: &[HarnessExecutorSurfaceReadiness],
+) -> HarnessExecutorSurfaceSummary {
+    let mut summary = HarnessExecutorSurfaceSummary::default();
+    for item in readiness {
+        match item.status.as_str() {
+            "ready" => summary.ready.push(item.surface.clone()),
+            "blocked" => summary.blocked.push(item.surface.clone()),
+            "recommended" => summary.recommended.push(item.surface.clone()),
+            "disabled" => summary.disabled.push(item.surface.clone()),
+            _ => {}
+        }
+    }
+    summary
+}
+
+fn harness_executor_readiness_score(readiness: &[HarnessExecutorSurfaceReadiness]) -> usize {
+    if readiness.is_empty() {
+        return 0;
+    }
+    let ready_count = readiness
+        .iter()
+        .filter(|item| item.status == "ready")
+        .count();
+    ((ready_count * 100) + (readiness.len() / 2)) / readiness.len()
+}
+
+fn harness_executor_adoption_posture(
+    selected: bool,
+    summary: &HarnessExecutorSurfaceSummary,
+    compatibility_status: &str,
+) -> String {
+    if !selected {
+        return "inspect_required".to_string();
+    }
+    if summary.blocked.iter().any(|surface| surface == "path_shim") {
+        return "needs_forge_owned_path_shim".to_string();
+    }
+    if summary
+        .blocked
+        .iter()
+        .any(|surface| surface == "harness_exec" || surface == "session_lifecycle")
+    {
+        return "needs_workflow_lineage".to_string();
+    }
+    if summary
+        .blocked
+        .iter()
+        .any(|surface| surface == "token_headroom")
+    {
+        return "needs_token_headroom".to_string();
+    }
+    if !summary.blocked.is_empty() {
+        return "blocked".to_string();
+    }
+    if !summary.disabled.is_empty() {
+        return "ready_with_optional_surfaces_disabled".to_string();
+    }
+    if summary
+        .recommended
+        .iter()
+        .any(|surface| surface == "project_policy")
+    {
+        return "ready_but_project_policy_recommended".to_string();
+    }
+    if compatibility_status == "ready" {
+        "ready_as_forge_first_default".to_string()
+    } else {
+        "ready_with_recommendations".to_string()
     }
 }
 
