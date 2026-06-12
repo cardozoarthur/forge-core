@@ -42667,6 +42667,67 @@ views:
     assert_eq!(headroom["action"]["source_panel"], "harness_panel");
     assert_eq!(headroom["operation_plan"]["status"], "ready");
 
+    let bootstrap_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-invocation",
+            "--action",
+            "harness.bootstrap_project_harness",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let bootstrap: Value = serde_json::from_slice(&bootstrap_output).unwrap();
+    assert_eq!(bootstrap["status"], "action_invocation_ready");
+    assert_eq!(
+        bootstrap["requested_action_id"],
+        "harness.bootstrap_project_harness"
+    );
+    assert_eq!(bootstrap["can_execute"], true);
+    assert_eq!(bootstrap["not_executed"], true);
+    assert_eq!(
+        bootstrap["selected_command"],
+        serde_json::json!([
+            "harness",
+            "bootstrap",
+            "--executor",
+            "codex",
+            "--shim-dir",
+            "$HOME/.forge/bin",
+            "--project-root",
+            ".",
+            "--apply",
+            "--approved-by",
+            "<operator>",
+            "--output",
+            "json"
+        ])
+    );
+    assert_eq!(
+        bootstrap["selected_command_text"],
+        "harness bootstrap --executor codex --shim-dir $HOME/.forge/bin --project-root . --apply --approved-by <operator> --output json"
+    );
+    assert_eq!(bootstrap["source_panel"], "harness_panel");
+    assert_eq!(bootstrap["risk_level"], "medium");
+    assert_eq!(bootstrap["mutates_workflow"], true);
+    assert_eq!(bootstrap["requires_approval"], true);
+    assert_eq!(
+        bootstrap["execution_boundary"],
+        "external_command_not_executed"
+    );
+    assert_eq!(bootstrap["operation_plan"]["status"], "ready");
+    assert_eq!(
+        bootstrap["operation_plan"]["recommended_action"],
+        "execute_command"
+    );
+
     let blocked_output = forge()
         .current_dir(temp.path())
         .args([
@@ -43272,6 +43333,78 @@ fn interactive_command_palette_surfaces_contextual_actions_for_replacement_cli()
                         && entry["operation_plan"]["status"] == "ready"
                         && entry["operation_plan"]["recommended_action"] == "execute_command"
                         && entry["operation_plan"]["diagnostic_only"] == false
+                })
+        }));
+    let bootstrap_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "command-palette",
+            "--query",
+            "bootstrap",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let bootstrap_json: Value = serde_json::from_slice(&bootstrap_output).unwrap();
+    assert!(bootstrap_json["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|group| {
+            group["group_id"] == "harness"
+                && group["entries"].as_array().unwrap().iter().any(|entry| {
+                    entry["action_id"] == "harness.adoption_plan"
+                        && entry["title"] == "Inspect harness adoption plan"
+                        && entry["source_panel"] == "harness_panel"
+                        && entry["commands"]
+                            == serde_json::json!([
+                                "harness",
+                                "adoption-plan",
+                                "--executor",
+                                "codex",
+                                "--shim-dir",
+                                "$HOME/.forge/bin",
+                                "--project-root",
+                                ".",
+                                "--output",
+                                "json"
+                            ])
+                        && entry["mutates_workflow"] == false
+                        && entry["requires_approval"] == false
+                        && entry["risk_level"] == "low"
+                        && entry["operation_plan"]["status"] == "ready"
+                })
+                && group["entries"].as_array().unwrap().iter().any(|entry| {
+                    entry["action_id"] == "harness.bootstrap_project_harness"
+                        && entry["title"] == "Bootstrap project harness"
+                        && entry["source_panel"] == "harness_panel"
+                        && entry["commands"]
+                            == serde_json::json!([
+                                "harness",
+                                "bootstrap",
+                                "--executor",
+                                "codex",
+                                "--shim-dir",
+                                "$HOME/.forge/bin",
+                                "--project-root",
+                                ".",
+                                "--apply",
+                                "--approved-by",
+                                "<operator>",
+                                "--output",
+                                "json"
+                            ])
+                        && entry["mutates_workflow"] == true
+                        && entry["requires_approval"] == true
+                        && entry["risk_level"] == "medium"
+                        && entry["operation_plan"]["status"] == "ready"
+                        && entry["operation_plan"]["recommended_action"] == "execute_command"
                 })
         }));
 
