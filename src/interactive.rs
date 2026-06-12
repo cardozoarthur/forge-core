@@ -7027,37 +7027,148 @@ fn addon_action_operation_plan(
 fn workflow_command_palette_entries(
     workflows: &[WorkflowRegistryRow],
 ) -> Vec<InteractiveCommandPaletteEntry> {
-    workflows
-        .iter()
-        .take(24)
-        .map(|workflow| {
-            let goal = truncate_display(&workflow.current_goal, 80);
-            let mut entry = command_palette_entry(
-                &format!("workflow.inspect.{}", workflow.workflow_id),
+    let mut entries = Vec::new();
+    for workflow in workflows.iter().take(24) {
+        let goal = truncate_display(&workflow.current_goal, 80);
+        let mut inspect_entry = command_palette_entry(
+            &format!("workflow.inspect.{}", workflow.workflow_id),
+            "workflow",
+            &format!("Inspect {}", workflow.workflow_id),
+            &format!("Inspect workflow state before patch, handoff or validation work: {goal}"),
+            "task_board_panel",
+            Some(workflow.workflow_id.clone()),
+            &["inspect", &workflow.workflow_id, "--output", "json"],
+            false,
+            false,
+            "low",
+            &[
                 "workflow",
-                &format!("Inspect {}", workflow.workflow_id),
-                &format!("Inspect workflow state before patch, handoff or validation work: {goal}"),
-                "task_board_panel",
-                Some(workflow.workflow_id.clone()),
-                &["inspect", &workflow.workflow_id, "--output", "json"],
-                false,
-                false,
-                "low",
-                &[
-                    "workflow",
-                    "inspect",
-                    "task-board",
-                    "patch",
-                    "handoff",
-                    "validation",
-                ],
-            );
-            entry.keywords.push(workflow.workflow_id.clone());
-            entry.keywords.push(workflow.lifecycle_state.clone());
-            entry.keywords.push(goal);
-            entry
-        })
-        .collect()
+                "inspect",
+                "task-board",
+                "patch",
+                "handoff",
+                "validation",
+            ],
+        );
+        enrich_workflow_palette_entry(&mut inspect_entry, workflow, &goal);
+        entries.push(inspect_entry);
+
+        if entries.len() < 72 {
+            entries.extend(workflow_mutation_command_palette_entries(workflow, &goal));
+        }
+    }
+    entries
+}
+
+fn workflow_mutation_command_palette_entries(
+    workflow: &WorkflowRegistryRow,
+    goal: &str,
+) -> Vec<InteractiveCommandPaletteEntry> {
+    let task_id = workflow
+        .context_action_refs
+        .first()
+        .map(|action| action.task_id.clone())
+        .unwrap_or_else(|| "<task-id>".to_string());
+    let workflow_id = workflow.workflow_id.clone();
+    let mut entries = vec![
+        command_palette_entry_from_commands(
+            &format!("workflow.update_goal.{workflow_id}"),
+            "workflow",
+            &format!("Update goal {workflow_id}"),
+            &format!("Preview a governed workflow goal mutation without stopping the run: {goal}"),
+            "workflow_mutation_panel",
+            Some(workflow_id.clone()),
+            vec![
+                "workflow".to_string(),
+                "update-goal".to_string(),
+                "--workflow".to_string(),
+                workflow_id.clone(),
+                "--goal".to_string(),
+                "<new-goal>".to_string(),
+                "--origin".to_string(),
+                "forge_cli".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            true,
+            true,
+            "medium",
+            &["workflow", "mutation", "goal", "replan", "update-goal"],
+        ),
+        command_palette_entry_from_commands(
+            &format!("workflow.update_node_brain.{workflow_id}"),
+            "workflow",
+            &format!("Update node brain {workflow_id}"),
+            "Preview node-level brain routing mutation while preserving workflow lineage.",
+            "workflow_mutation_panel",
+            Some(workflow_id.clone()),
+            vec![
+                "workflow".to_string(),
+                "update-node-brain".to_string(),
+                "--workflow".to_string(),
+                workflow_id.clone(),
+                "--task".to_string(),
+                task_id,
+                "--default-brain".to_string(),
+                "<brain>".to_string(),
+                "--origin".to_string(),
+                "forge_cli".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            true,
+            true,
+            "medium",
+            &[
+                "workflow",
+                "mutation",
+                "node",
+                "brain",
+                "routing",
+                "update-node-brain",
+            ],
+        ),
+        command_palette_entry_from_commands(
+            &format!("workflow.attach_artifact.{workflow_id}"),
+            "workflow",
+            &format!("Attach artifact {workflow_id}"),
+            "Preview attaching an artifact to the workflow audit trail.",
+            "workflow_mutation_panel",
+            Some(workflow_id.clone()),
+            vec![
+                "workflow".to_string(),
+                "attach-artifact".to_string(),
+                "--workflow".to_string(),
+                workflow_id,
+                "--path".to_string(),
+                "<artifact-path>".to_string(),
+                "--kind".to_string(),
+                "<kind>".to_string(),
+                "--origin".to_string(),
+                "forge_cli".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            true,
+            true,
+            "medium",
+            &["workflow", "mutation", "artifact", "attach-artifact"],
+        ),
+    ];
+    for entry in &mut entries {
+        enrich_workflow_palette_entry(entry, workflow, goal);
+    }
+    entries
+}
+
+fn enrich_workflow_palette_entry(
+    entry: &mut InteractiveCommandPaletteEntry,
+    workflow: &WorkflowRegistryRow,
+    goal: &str,
+) {
+    entry.keywords.push(workflow.workflow_id.clone());
+    entry.keywords.push(workflow.lifecycle_state.clone());
+    entry.keywords.push(goal.to_string());
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7078,6 +7189,35 @@ fn command_palette_entry(
         .iter()
         .map(|command| (*command).to_string())
         .collect::<Vec<_>>();
+    command_palette_entry_from_commands(
+        action_id,
+        group_id,
+        title,
+        description,
+        source_panel,
+        workflow_id,
+        commands,
+        mutates_workflow,
+        requires_approval,
+        risk_level,
+        keywords,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn command_palette_entry_from_commands(
+    action_id: &str,
+    group_id: &str,
+    title: &str,
+    description: &str,
+    source_panel: &str,
+    workflow_id: Option<String>,
+    commands: Vec<String>,
+    mutates_workflow: bool,
+    requires_approval: bool,
+    risk_level: &str,
+    keywords: &[&str],
+) -> InteractiveCommandPaletteEntry {
     let operation_plan = ready_command_palette_action_plan(&commands);
     InteractiveCommandPaletteEntry {
         action_id: action_id.to_string(),

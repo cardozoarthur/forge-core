@@ -51035,6 +51035,86 @@ fn interactive_workflow_mutation_planner_is_home_cli_slash_action_and_mcp_surfac
         .iter()
         .any(|action| action["action_id"] == "workflow.mutation"
             && action["source_panel"] == "workflow_mutation_panel"));
+    let mutation_action_id = format!("workflow.update_goal.{workflow_id}");
+    let mutation_action = action_json["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["action_id"] == mutation_action_id)
+        .expect("workflow update-goal action should be exposed through the action registry");
+    assert_eq!(mutation_action["source_panel"], "workflow_mutation_panel");
+    assert_eq!(mutation_action["workflow_id"], workflow_id);
+    assert_eq!(mutation_action["mutates_workflow"], true);
+    assert_eq!(mutation_action["requires_approval"], true);
+    assert_eq!(mutation_action["risk_level"], "medium");
+    assert_eq!(mutation_action["operation_plan"]["status"], "ready");
+    assert_eq!(
+        mutation_action["operation_plan"]["recommended_action"],
+        "execute_command"
+    );
+    assert!(mutation_action["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("update-goal")));
+    assert!(action_json["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |action| action["action_id"] == format!("workflow.update_node_brain.{workflow_id}")
+                && action["requires_approval"] == true
+                && action["commands"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("update-node-brain"))
+        ));
+    assert!(action_json["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |action| action["action_id"] == format!("workflow.attach_artifact.{workflow_id}")
+                && action["requires_approval"] == true
+                && action["commands"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("attach-artifact"))
+        ));
+
+    let invocation_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "interactive",
+            "action-invocation",
+            "--action",
+            &mutation_action_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let invocation_json: Value = serde_json::from_slice(&invocation_output).unwrap();
+    assert_eq!(
+        invocation_json["schema_version"],
+        "forge.interactive.action_invocation.v1"
+    );
+    assert_eq!(invocation_json["status"], "action_invocation_ready");
+    assert_eq!(invocation_json["can_execute"], true);
+    assert_eq!(invocation_json["not_executed"], true);
+    assert_eq!(
+        invocation_json["execution_boundary"],
+        "external_command_not_executed"
+    );
+    assert_eq!(invocation_json["mutates_workflow"], true);
+    assert_eq!(invocation_json["requires_approval"], true);
+    assert!(invocation_json["selected_command"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("update-goal")));
 
     let manifest = forge()
         .args(["mcp", "tools", "--output", "json"])
