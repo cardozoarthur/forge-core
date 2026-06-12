@@ -1295,6 +1295,7 @@ fn mcp_manifest_exposes_addon_capability_tools() {
         "forge.addons.marketplace",
         "forge.addons.install_package",
         "forge.addons.migration_workflow",
+        "forge.addons.lifecycle_plan",
         "forge.addons.upgrade",
         "forge.addons.downgrade",
         "forge.addons.enable",
@@ -15732,6 +15733,240 @@ capabilities:
         .clone();
     let capabilities_empty_json: Value = serde_json::from_slice(&capabilities_empty).unwrap();
     assert_eq!(capabilities_empty_json["capability_count"], 0);
+}
+
+#[test]
+fn addon_lifecycle_plan_previews_impact_without_mutating_registry() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let manifest_v1 = temp.path().join("support-v1.yaml");
+    let manifest_v2 = temp.path().join("support-v2.yaml");
+    fs::write(
+        &manifest_v1,
+        r#"
+id: forge.addon.support
+name: Support Addon
+version: 0.1.0
+capabilities:
+  - id: support_ticket
+    title: Support ticket
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &manifest_v2,
+        r#"
+id: forge.addon.support
+name: Support Addon
+version: 0.2.0
+capabilities:
+  - id: support_ticket
+    title: Support ticket
+  - id: support_sla
+    title: Support SLA
+"#,
+    )
+    .unwrap();
+
+    let install_plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "lifecycle-plan",
+            "--action",
+            "install",
+            "--manifest",
+            manifest_v1.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let install_plan_json: Value = serde_json::from_slice(&install_plan_output).unwrap();
+    assert_eq!(
+        install_plan_json["schema_version"],
+        "forge.addon_lifecycle_plan.v1"
+    );
+    assert_eq!(install_plan_json["dry_run"], true);
+    assert_eq!(install_plan_json["mutates_state"], false);
+    assert_eq!(install_plan_json["ready_to_apply"], true);
+    assert_eq!(
+        install_plan_json["operation_plan"]["state_change"],
+        "installed"
+    );
+    assert_eq!(
+        install_plan_json["operation_plan"]["impact"]["added_capabilities"],
+        serde_json::json!(["support_ticket"])
+    );
+
+    let empty_installed_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "installed",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let empty_installed_json: Value = serde_json::from_slice(&empty_installed_output).unwrap();
+    assert_eq!(empty_installed_json["addon_count"], 0);
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "install",
+            "--manifest",
+            manifest_v1.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let upgrade_plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "lifecycle-plan",
+            "--action",
+            "upgrade",
+            "--manifest",
+            manifest_v2.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let upgrade_plan_json: Value = serde_json::from_slice(&upgrade_plan_output).unwrap();
+    assert_eq!(upgrade_plan_json["status"], "lifecycle_plan_ready");
+    assert_eq!(
+        upgrade_plan_json["operation_plan"]["state_change"],
+        "version_changed"
+    );
+    assert_eq!(
+        upgrade_plan_json["operation_plan"]["version_before"],
+        "0.1.0"
+    );
+    assert_eq!(
+        upgrade_plan_json["operation_plan"]["version_after"],
+        "0.2.0"
+    );
+    assert_eq!(
+        upgrade_plan_json["operation_plan"]["impact"]["added_capabilities"],
+        serde_json::json!(["support_sla"])
+    );
+    assert_eq!(
+        upgrade_plan_json["apply_command"],
+        serde_json::json!([
+            "forge",
+            "addons",
+            "upgrade",
+            "--manifest",
+            manifest_v2.to_string_lossy(),
+            "--output",
+            "json"
+        ])
+    );
+
+    let capabilities_after_preview = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "capabilities",
+            "--addon",
+            "forge.addon.support",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let capabilities_after_preview_json: Value =
+        serde_json::from_slice(&capabilities_after_preview).unwrap();
+    assert_eq!(capabilities_after_preview_json["capability_count"], 1);
+    assert_eq!(
+        capabilities_after_preview_json["capabilities"][0]["addon_version"],
+        "0.1.0"
+    );
+
+    let disable_plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.addons.lifecycle_plan",
+            "--input",
+            r#"{"action":"disable","id":"forge.addon.support"}"#,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let disable_plan_json: Value = serde_json::from_slice(&disable_plan_output).unwrap();
+    assert_eq!(
+        disable_plan_json["result"]["schema_version"],
+        "forge.addon_lifecycle_plan.v1"
+    );
+    assert_eq!(
+        disable_plan_json["result"]["operation_plan"]["lifecycle_before"],
+        "enabled"
+    );
+    assert_eq!(
+        disable_plan_json["result"]["operation_plan"]["lifecycle_after"],
+        "disabled"
+    );
+    assert_eq!(
+        disable_plan_json["result"]["operation_plan"]["impact"]["active_capabilities_after"],
+        0
+    );
+
+    let installed_after_disable_preview = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "installed",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let installed_after_disable_preview_json: Value =
+        serde_json::from_slice(&installed_after_disable_preview).unwrap();
+    assert_eq!(installed_after_disable_preview_json["addon_count"], 1);
+    assert_eq!(
+        installed_after_disable_preview_json["addons"][0]["lifecycle"],
+        "enabled"
+    );
+    assert_eq!(
+        installed_after_disable_preview_json["addons"][0]["version"],
+        "0.1.0"
+    );
 }
 
 #[test]

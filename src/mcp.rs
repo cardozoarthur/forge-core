@@ -10,7 +10,7 @@ use crate::addon::{
     list_addon_permission_authorizations, list_addon_planner_registry,
     list_addon_runtime_contract_dispatches, list_addon_runtime_contracts,
     list_addon_runtime_workers, list_addon_trust_store, list_addon_views, list_installed_addons,
-    load_addon_catalog_from_store, package_addon, publish_addon_package,
+    load_addon_catalog_from_store, package_addon, plan_addon_lifecycle, publish_addon_package,
     register_addon_runtime_worker, resolve_goal_capabilities_with_registry_sync,
     resolve_goal_capabilities_with_store, revoke_addon_permission,
     run_addon_runtime_contract_dispatch, run_addon_runtime_contract_dispatch_worker,
@@ -892,6 +892,17 @@ struct AddonResolveInput {
 #[derive(Debug, Deserialize)]
 struct AddonInstallInput {
     manifest: String,
+    addon_dirs: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddonLifecyclePlanInput {
+    action: String,
+    id: Option<String>,
+    addon_id: Option<String>,
+    manifest: Option<String>,
+    package: Option<String>,
+    package_path: Option<String>,
     addon_dirs: Option<Vec<String>>,
 }
 
@@ -4412,6 +4423,40 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ),
                 "forge.addon_validation.v1",
                 &["forge", "addons", "validate", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.addons.lifecycle_plan",
+                "Preview Addon Lifecycle Operation",
+                "Dry-run an Addon lifecycle operation before applying it, returning validation, impact, rollback, approval gates and exact apply command without mutating the installed registry.",
+                object_schema(
+                    &[
+                        ("action", "string", "install|install_package|upgrade|downgrade|enable|disable|uninstall"),
+                        ("id", "string", "addon id for enable, disable or uninstall"),
+                        ("addon_id", "string", "alias for id"),
+                        ("manifest", "string", "addon manifest path for install, upgrade or downgrade"),
+                        ("package", "string", "Addon package JSON path for install_package"),
+                        ("package_path", "string", "alias for package"),
+                        (
+                            "addon_dirs",
+                            "array",
+                            "optional addon manifest directories used for dependency validation",
+                        ),
+                    ],
+                    &["action"],
+                ),
+                "forge.addon_lifecycle_plan.v1",
+                &[
+                    "forge",
+                    "addons",
+                    "lifecycle-plan",
+                    "--action",
+                    "upgrade",
+                    "--manifest",
+                    "<manifest>",
+                    "--output",
+                    "json",
+                ],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -8460,6 +8505,21 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let addon_dirs = addon_dirs_from_input(input.addon_dirs);
             let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
             serde_json::to_value(validate_addon_catalog(&catalog))?
+        }
+        "forge.addons.lifecycle_plan" => {
+            let input: AddonLifecyclePlanInput = parse_input(input)?;
+            let addon_dirs = addon_dirs_from_input(input.addon_dirs);
+            let addon_id = input.id.or(input.addon_id);
+            let manifest = input.manifest.map(PathBuf::from);
+            let package_path = input.package.or(input.package_path).map(PathBuf::from);
+            serde_json::to_value(plan_addon_lifecycle(
+                store,
+                &input.action,
+                addon_id.as_deref(),
+                manifest.as_deref(),
+                package_path.as_deref(),
+                &addon_dirs,
+            )?)?
         }
         "forge.addons.install" => {
             let input: AddonInstallInput = parse_input(input)?;

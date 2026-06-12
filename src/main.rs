@@ -13,7 +13,7 @@ use forge_core::addon::{
     list_addon_permission_authorizations, list_addon_planner_registry,
     list_addon_runtime_contract_dispatches, list_addon_runtime_contracts,
     list_addon_runtime_workers, list_addon_trust_store, list_addon_views, list_installed_addons,
-    load_addon_catalog_from_store, package_addon, publish_addon_package,
+    load_addon_catalog_from_store, package_addon, plan_addon_lifecycle, publish_addon_package,
     register_addon_runtime_worker, resolve_goal_capabilities_with_registry_sync,
     resolve_goal_capabilities_with_store, revoke_addon_permission,
     run_addon_runtime_contract_dispatch, run_addon_runtime_contract_dispatch_worker,
@@ -1350,6 +1350,20 @@ enum AddonCommands {
         output: OutputFormat,
     },
     Validate {
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    LifecyclePlan {
+        #[arg(long)]
+        action: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        #[arg(long = "package", alias = "package-path")]
+        package_path: Option<PathBuf>,
         #[arg(long = "addon-dir")]
         addon_dirs: Vec<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -5953,6 +5967,27 @@ fn run() -> Result<i32> {
                 let report = validate_addon_catalog(&catalog);
                 print_response(output, &report)?;
                 Ok(if report.status == "valid" { 0 } else { 1 })
+            }
+            AddonCommands::LifecyclePlan {
+                action,
+                id,
+                manifest,
+                package_path,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let report = plan_addon_lifecycle(
+                    &store,
+                    &action,
+                    id.as_deref(),
+                    manifest.as_deref(),
+                    package_path.as_deref(),
+                    &dirs,
+                )?;
+                print_response(output, &report)?;
+                Ok(if report.ready_to_apply { 0 } else { 1 })
             }
             AddonCommands::Install {
                 manifest,

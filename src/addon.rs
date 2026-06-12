@@ -40,6 +40,7 @@ pub const INSTALLED_ADDONS_SCHEMA_VERSION: &str = "forge.installed_addons.v1";
 pub const ADDON_LIFECYCLE_SCHEMA_VERSION: &str = "forge.addon_lifecycle.v1";
 pub const ADDON_LIFECYCLE_OPERATION_PLAN_SCHEMA_VERSION: &str =
     "forge.addon_lifecycle_operation_plan.v1";
+pub const ADDON_LIFECYCLE_PLAN_SCHEMA_VERSION: &str = "forge.addon_lifecycle_plan.v1";
 pub const ADDON_CAPABILITY_INDEX_SCHEMA_VERSION: &str = "forge.addon_capability_index.v1";
 pub const ADDON_EVENT_ADAPTERS_SCHEMA_VERSION: &str = "forge.addon_event_adapters.v1";
 pub const ADDON_EVENT_EXTENSIONS_SCHEMA_VERSION: &str = "forge.addon_event_extensions.v1";
@@ -1593,6 +1594,28 @@ pub struct AddonLifecycleReport {
     pub operation_plan: AddonLifecycleOperationPlan,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migration_workflow: Option<AddonMigrationWorkflowReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddonLifecyclePlanReport {
+    #[serde(default = "addon_lifecycle_plan_schema_version")]
+    pub schema_version: String,
+    pub status: String,
+    pub action: String,
+    pub addon_id: String,
+    pub dry_run: bool,
+    pub mutates_state: bool,
+    pub ready_to_apply: bool,
+    pub validation: AddonCatalogValidationReport,
+    pub operation_plan: AddonLifecycleOperationPlan,
+    #[serde(default)]
+    pub apply_command: Vec<String>,
+    #[serde(default)]
+    pub mcp_tool: String,
+    #[serde(default)]
+    pub issues: Vec<String>,
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5315,6 +5338,94 @@ pub fn install_addon(
     Ok(report)
 }
 
+pub fn plan_addon_lifecycle(
+    store: &ForgeStore,
+    action: &str,
+    addon_id: Option<&str>,
+    manifest_path: Option<&Path>,
+    package_path: Option<&Path>,
+    addon_dirs: &[PathBuf],
+) -> Result<AddonLifecyclePlanReport> {
+    let action = normalize_addon_lifecycle_action(action)?;
+    let lifecycle_input = lifecycle_plan_manifests_and_apply_command(
+        store,
+        action,
+        addon_id,
+        manifest_path,
+        package_path,
+    )?;
+    let report_addon_id = lifecycle_input
+        .current_manifest
+        .as_ref()
+        .or(lifecycle_input.previous_manifest.as_ref())
+        .map(|manifest| manifest.id.clone())
+        .with_context(|| "addon lifecycle plan requires an addon id or manifest")?;
+    let catalog = candidate_lifecycle_catalog(
+        store,
+        addon_dirs,
+        lifecycle_input.current_manifest.as_ref(),
+        &report_addon_id,
+    )?;
+    let validation = validate_addon_catalog(&catalog);
+    let mut issues = lifecycle_input.preflight_issues;
+    if validation.status != "valid" {
+        issues.extend(
+            validation
+                .issues
+                .iter()
+                .map(|issue| format!("{}:{}:{}", issue.severity, issue.code, issue.subject)),
+        );
+    }
+    collect_lifecycle_plan_issues(
+        store,
+        action,
+        lifecycle_input.previous_manifest.as_ref(),
+        lifecycle_input.current_manifest.as_ref(),
+        &mut issues,
+    );
+    let addon = addon_view_for_lifecycle_plan(
+        &report_addon_id,
+        lifecycle_input.previous_manifest.as_ref(),
+        lifecycle_input.current_manifest.as_ref(),
+    );
+    let operation_plan = addon_lifecycle_operation_plan(
+        &addon,
+        &validation,
+        lifecycle_input.previous_manifest.as_ref(),
+        lifecycle_input.current_manifest.as_ref(),
+        "planned",
+        action,
+    );
+    let ready_to_apply = issues.is_empty() && validation.status == "valid";
+    let status = if ready_to_apply {
+        "lifecycle_plan_ready"
+    } else {
+        "lifecycle_plan_blocked"
+    };
+    let notes = vec![
+        "dry-run preview only; no installed Addon, capability index, marketplace package or workflow state was mutated".to_string(),
+        format!(
+            "apply with `{}` after explicit operator confirmation",
+            lifecycle_input.apply_command.join(" ")
+        ),
+    ];
+    Ok(AddonLifecyclePlanReport {
+        schema_version: addon_lifecycle_plan_schema_version(),
+        status: status.to_string(),
+        action: action.to_string(),
+        addon_id: report_addon_id,
+        dry_run: true,
+        mutates_state: false,
+        ready_to_apply,
+        validation,
+        operation_plan,
+        apply_command: lifecycle_input.apply_command,
+        mcp_tool: lifecycle_input.mcp_tool,
+        issues,
+        notes,
+    })
+}
+
 pub fn package_addon(
     store: &ForgeStore,
     input: AddonPackageInput<'_>,
@@ -6976,6 +7087,260 @@ fn build_addon_lifecycle_report(
         validation,
         operation_plan,
         migration_workflow: None,
+    }
+}
+
+fn normalize_addon_lifecycle_action(action: &str) -> Result<&'static str> {
+    match action.trim() {
+        "install" => Ok("install"),
+        "install-package" | "install_package" => Ok("install_package"),
+        "upgrade" => Ok("upgrade"),
+        "downgrade" => Ok("downgrade"),
+        "enable" => Ok("enable"),
+        "disable" => Ok("disable"),
+        "uninstall" => Ok("uninstall"),
+        other => bail!("unsupported Addon lifecycle plan action `{other}`"),
+    }
+}
+
+struct AddonLifecyclePlanInputs {
+    previous_manifest: Option<AddonManifest>,
+    current_manifest: Option<AddonManifest>,
+    apply_command: Vec<String>,
+    mcp_tool: String,
+    preflight_issues: Vec<String>,
+}
+
+fn lifecycle_plan_manifests_and_apply_command(
+    store: &ForgeStore,
+    action: &str,
+    addon_id: Option<&str>,
+    manifest_path: Option<&Path>,
+    package_path: Option<&Path>,
+) -> Result<AddonLifecyclePlanInputs> {
+    match action {
+        "install" => {
+            let manifest_path = manifest_path
+                .with_context(|| "manifest is required for Addon lifecycle plan action install")?;
+            let mut candidate = load_addon_manifest_from_path(manifest_path)?;
+            candidate.lifecycle = "enabled".to_string();
+            candidate.source = format!("file:{}", manifest_path.display());
+            let previous = load_optional_installed_manifest(store, &candidate.id)?;
+            Ok(AddonLifecyclePlanInputs {
+                previous_manifest: previous,
+                current_manifest: Some(candidate),
+                apply_command: vec![
+                    "forge".to_string(),
+                    "addons".to_string(),
+                    "install".to_string(),
+                    "--manifest".to_string(),
+                    manifest_path.display().to_string(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ],
+                mcp_tool: "forge.addons.install".to_string(),
+                preflight_issues: Vec::new(),
+            })
+        }
+        "install_package" => {
+            let package_path = package_path.with_context(|| {
+                "package is required for Addon lifecycle plan action install_package"
+            })?;
+            let (package, _bytes, package_sha256) = load_addon_package_from_path(package_path)?;
+            let policy = evaluate_addon_package_policy(store, &package, Some(&package_sha256))?;
+            let preflight_issues = if policy.install_allowed {
+                Vec::new()
+            } else {
+                policy
+                    .issues
+                    .iter()
+                    .map(|issue| format!("addon package policy blocked install: {issue}"))
+                    .collect()
+            };
+            let source = format!(
+                "marketplace:{}:{}:{}#{}",
+                policy.repository, policy.channel, package.package_id, package_sha256
+            );
+            let mut candidate = package.manifest;
+            candidate.lifecycle = "enabled".to_string();
+            candidate.source = source;
+            let previous = load_optional_installed_manifest(store, &candidate.id)?;
+            Ok(AddonLifecyclePlanInputs {
+                previous_manifest: previous,
+                current_manifest: Some(candidate),
+                apply_command: vec![
+                    "forge".to_string(),
+                    "addons".to_string(),
+                    "install-package".to_string(),
+                    "--package".to_string(),
+                    package_path.display().to_string(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ],
+                mcp_tool: "forge.addons.install_package".to_string(),
+                preflight_issues,
+            })
+        }
+        "upgrade" | "downgrade" => {
+            let manifest_path = manifest_path.with_context(|| {
+                format!("manifest is required for Addon lifecycle plan action {action}")
+            })?;
+            let candidate = load_addon_manifest_from_path(manifest_path)?;
+            let previous_record = store.load_installed_addon(&candidate.id)?;
+            let previous = installed_manifest_from_record(&previous_record)?;
+            let mut current = candidate;
+            current.lifecycle = previous_record.status;
+            current.source = format!("file:{}", manifest_path.display());
+            Ok(AddonLifecyclePlanInputs {
+                previous_manifest: Some(previous),
+                current_manifest: Some(current),
+                apply_command: vec![
+                    "forge".to_string(),
+                    "addons".to_string(),
+                    action.replace('_', "-"),
+                    "--manifest".to_string(),
+                    manifest_path.display().to_string(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ],
+                mcp_tool: format!("forge.addons.{action}"),
+                preflight_issues: Vec::new(),
+            })
+        }
+        "enable" | "disable" => {
+            let addon_id = addon_id.with_context(|| {
+                format!("id is required for Addon lifecycle plan action {action}")
+            })?;
+            let record = store.load_installed_addon(addon_id)?;
+            let previous = installed_manifest_from_record(&record)?;
+            let mut current = previous.clone();
+            current.lifecycle = if action == "enable" {
+                "enabled".to_string()
+            } else {
+                "disabled".to_string()
+            };
+            Ok(AddonLifecyclePlanInputs {
+                previous_manifest: Some(previous),
+                current_manifest: Some(current),
+                apply_command: vec![
+                    "forge".to_string(),
+                    "addons".to_string(),
+                    action.to_string(),
+                    addon_id.to_string(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ],
+                mcp_tool: format!("forge.addons.{action}"),
+                preflight_issues: Vec::new(),
+            })
+        }
+        "uninstall" => {
+            let addon_id = addon_id
+                .with_context(|| "id is required for Addon lifecycle plan action uninstall")?;
+            let record = store.load_installed_addon(addon_id)?;
+            let previous = installed_manifest_from_record(&record)?;
+            Ok(AddonLifecyclePlanInputs {
+                previous_manifest: Some(previous),
+                current_manifest: None,
+                apply_command: vec![
+                    "forge".to_string(),
+                    "addons".to_string(),
+                    "uninstall".to_string(),
+                    addon_id.to_string(),
+                    "--output".to_string(),
+                    "json".to_string(),
+                ],
+                mcp_tool: "forge.addons.uninstall".to_string(),
+                preflight_issues: Vec::new(),
+            })
+        }
+        _ => unreachable!("unsupported action normalized earlier"),
+    }
+}
+
+fn candidate_lifecycle_catalog(
+    store: &ForgeStore,
+    addon_dirs: &[PathBuf],
+    current_manifest: Option<&AddonManifest>,
+    addon_id: &str,
+) -> Result<AddonCatalog> {
+    let mut catalog = load_addon_catalog_from_store(store, addon_dirs)?;
+    match current_manifest {
+        Some(manifest) => upsert_addon(&mut catalog.addons, manifest.clone()),
+        None => catalog.addons.retain(|addon| addon.id != addon_id),
+    }
+    Ok(finalize_catalog(catalog.addons, catalog.addon_dirs))
+}
+
+fn collect_lifecycle_plan_issues(
+    store: &ForgeStore,
+    action: &str,
+    previous_manifest: Option<&AddonManifest>,
+    current_manifest: Option<&AddonManifest>,
+    issues: &mut Vec<String>,
+) {
+    match action {
+        "install" | "install_package" => {
+            if let Some(current) = current_manifest {
+                if let Err(error) = ensure_candidate_migration_against_installed(store, current) {
+                    issues.push(error.to_string());
+                }
+            }
+        }
+        "upgrade" | "downgrade" => match (previous_manifest, current_manifest) {
+            (Some(previous), Some(current)) => {
+                if let Err(error) =
+                    validate_addon_version_change_direction(previous, current, action)
+                {
+                    issues.push(error.to_string());
+                }
+                if let Err(error) = ensure_version_change_migration_plan(previous, current) {
+                    issues.push(error.to_string());
+                }
+            }
+            _ => issues.push(format!(
+                "Addon lifecycle plan action {action} requires previous and candidate manifests"
+            )),
+        },
+        "enable" | "disable" | "uninstall" => {}
+        _ => issues.push(format!(
+            "unsupported Addon lifecycle plan action `{action}`"
+        )),
+    }
+    if let Some(current) = current_manifest {
+        if addon_enabled(current) {
+            if let Err(error) = ensure_addon_permissions_authorized(store, current) {
+                issues.push(error.to_string());
+            }
+        }
+    }
+}
+
+fn addon_view_for_lifecycle_plan(
+    addon_id: &str,
+    previous_manifest: Option<&AddonManifest>,
+    current_manifest: Option<&AddonManifest>,
+) -> InstalledAddonView {
+    let manifest = current_manifest.or(previous_manifest);
+    InstalledAddonView {
+        id: addon_id.to_string(),
+        name: manifest
+            .map(|manifest| manifest.name.clone())
+            .unwrap_or_else(|| addon_id.to_string()),
+        version: manifest
+            .map(|manifest| manifest.version.clone())
+            .unwrap_or_default(),
+        lifecycle: manifest
+            .map(|manifest| manifest.lifecycle.clone())
+            .unwrap_or_else(|| "missing".to_string()),
+        source: manifest
+            .map(|manifest| manifest.source.clone())
+            .unwrap_or_default(),
+        capability_count: manifest
+            .map(|manifest| manifest.capabilities.len())
+            .unwrap_or_default(),
+        installed_at: String::new(),
+        updated_at: String::new(),
     }
 }
 
@@ -12584,6 +12949,10 @@ fn addon_lifecycle_schema_version() -> String {
 
 fn addon_lifecycle_operation_plan_schema_version() -> String {
     ADDON_LIFECYCLE_OPERATION_PLAN_SCHEMA_VERSION.to_string()
+}
+
+fn addon_lifecycle_plan_schema_version() -> String {
+    ADDON_LIFECYCLE_PLAN_SCHEMA_VERSION.to_string()
 }
 
 fn addon_capability_index_schema_version() -> String {
