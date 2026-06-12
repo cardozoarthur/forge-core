@@ -204,6 +204,56 @@ pub struct MilestoneEvidencePlanReport {
     pub promotion_impact: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct MilestonePrepareEvidenceInputsOptions<'a> {
+    pub version: &'a str,
+    pub capability_id: &'a str,
+    pub project_root: Option<&'a Path>,
+    pub connected_brain: Option<&'a str>,
+    pub connected_runtime: Option<&'a str>,
+    pub apply: bool,
+    pub approved_by: Option<&'a str>,
+    pub force: bool,
+    pub origin: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestonePrepareEvidenceInputsReport {
+    pub schema_version: String,
+    pub milestone: String,
+    pub capability_id: String,
+    pub status: String,
+    pub project_root: String,
+    pub apply: bool,
+    pub mutates_files: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approved_by: Option<String>,
+    pub force: bool,
+    pub origin: String,
+    pub template_count: usize,
+    pub written_count: usize,
+    pub skipped_count: usize,
+    pub prepared_files: Vec<MilestonePreparedEvidenceInputFile>,
+    pub evidence_plan: MilestoneEvidencePlanReport,
+    pub next_commands: Vec<String>,
+    pub next_action: String,
+    pub promotion_impact: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestonePreparedEvidenceInputFile {
+    pub template_id: String,
+    pub target_path: String,
+    pub secret_free: bool,
+    pub existed_before: bool,
+    pub created_parent_dir: bool,
+    pub write_status: String,
+    pub bytes: usize,
+    pub sha256: String,
+    pub summary: String,
+    pub validation_commands: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MilestoneEvidencePlanConfigCheck {
     pub id: String,
@@ -782,6 +832,141 @@ pub fn build_milestone_evidence_plan(
         attach_commands,
         next_action,
         promotion_impact: "planning_only_not_auto_promoted".to_string(),
+    })
+}
+
+pub fn prepare_milestone_evidence_inputs(
+    store: &ForgeStore,
+    options: MilestonePrepareEvidenceInputsOptions<'_>,
+) -> Result<MilestonePrepareEvidenceInputsReport> {
+    let plan = build_milestone_evidence_plan(
+        store,
+        MilestoneEvidencePlanOptions {
+            version: options.version,
+            capability_id: options.capability_id,
+            project_root: options.project_root,
+            connected_brain: options.connected_brain,
+            connected_runtime: options.connected_runtime,
+        },
+    )?;
+    let project_root = plan.project_root.clone().unwrap_or_else(|| {
+        options
+            .project_root
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| ".".to_string())
+    });
+
+    if options.apply && options.approved_by.unwrap_or_default().trim().is_empty() {
+        bail!("--approved-by is required when using --apply");
+    }
+    for template in &plan.manifest_templates {
+        if !template.secret_free {
+            bail!(
+                "refusing to prepare non-secret-free milestone evidence template `{}`",
+                template.id
+            );
+        }
+    }
+    if options.apply && !options.force {
+        for template in &plan.manifest_templates {
+            let target_path = PathBuf::from(&template.target_path);
+            if target_path.exists() {
+                bail!(
+                    "refusing to overwrite existing evidence input manifest {}; pass --force after review",
+                    target_path.display()
+                );
+            }
+        }
+    }
+
+    let mut prepared_files = Vec::new();
+    let mut written_count = 0usize;
+    let mut skipped_count = 0usize;
+    for template in &plan.manifest_templates {
+        let target_path = PathBuf::from(&template.target_path);
+        let existed_before = target_path.exists();
+        let rendered = serde_json::to_string_pretty(&template.template_json)
+            .context("render milestone evidence input template")?;
+        let content = format!("{rendered}\n");
+        let created_parent_dir = if options.apply {
+            let parent = target_path
+                .parent()
+                .context("evidence input target has no parent")?;
+            let missing_parent = !parent.exists();
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create evidence input directory {}", parent.display()))?;
+            missing_parent
+        } else {
+            false
+        };
+        let write_status = if options.apply {
+            fs::write(&target_path, &content)
+                .with_context(|| format!("write evidence input {}", target_path.display()))?;
+            written_count += 1;
+            if existed_before {
+                "overwritten"
+            } else {
+                "written"
+            }
+        } else {
+            skipped_count += 1;
+            "planned"
+        };
+        prepared_files.push(MilestonePreparedEvidenceInputFile {
+            template_id: template.id.clone(),
+            target_path: template.target_path.clone(),
+            secret_free: template.secret_free,
+            existed_before,
+            created_parent_dir,
+            write_status: write_status.to_string(),
+            bytes: content.len(),
+            sha256: hex_sha256(content.as_bytes()),
+            summary: template.summary.clone(),
+            validation_commands: template.validation_commands.clone(),
+        });
+    }
+
+    let mut next_commands = plan
+        .manifest_templates
+        .iter()
+        .flat_map(|template| template.validation_commands.clone())
+        .collect::<Vec<_>>();
+    next_commands.extend(plan.evidence_collection_commands.clone());
+    next_commands.sort();
+    next_commands.dedup();
+
+    let status = if !options.apply {
+        "manifest_templates_planned"
+    } else if written_count > 0 {
+        "manifest_templates_written"
+    } else {
+        "no_manifest_templates"
+    };
+    let next_action = if options.apply {
+        "Review the prepared manifest files, replace placeholders with approved local commands or runtime ids, then rerun evidence-plan before collecting evidence."
+    } else {
+        "Review the planned secret-free manifest templates, then rerun with --apply --approved-by <operator> to write them."
+    };
+
+    Ok(MilestonePrepareEvidenceInputsReport {
+        schema_version: "forge.milestone.prepare_evidence_inputs.v1".to_string(),
+        milestone: plan.milestone.clone(),
+        capability_id: plan.capability_id.clone(),
+        status: status.to_string(),
+        project_root,
+        apply: options.apply,
+        mutates_files: options.apply,
+        approved_by: options.approved_by.map(str::to_string),
+        force: options.force,
+        origin: options.origin.to_string(),
+        template_count: plan.manifest_templates.len(),
+        written_count,
+        skipped_count,
+        prepared_files,
+        evidence_plan: plan,
+        next_commands,
+        next_action: next_action.to_string(),
+        promotion_impact: "prepares_inputs_only_not_evidence_not_auto_promoted".to_string(),
     })
 }
 

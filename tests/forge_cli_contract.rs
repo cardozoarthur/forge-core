@@ -3935,6 +3935,12 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
             && tool["mutates_workflow"] == false
     }));
     assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["name"] == "forge.milestone.prepare_evidence_inputs"
+            && tool["output_schema"] == "forge.milestone.prepare_evidence_inputs.v1"
+            && tool["async_safe"] == true
+            && tool["mutates_workflow"] == true
+    }));
+    assert!(manifest["tools"].as_array().unwrap().iter().any(|tool| {
         tool["name"] == "forge.milestone.collect_evidence"
             && tool["output_schema"] == "forge.milestone.collect_evidence.v1"
             && tool["async_safe"] == true
@@ -4016,6 +4022,38 @@ fn mcp_exposes_milestone_status_for_agent_runtime_boundaries() {
         evidence_plan_json["result"]["capability_id"],
         "replacement_grade_cli"
     );
+
+    let project = temp.path().join("mcp-prepare-project");
+    let prepare = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.milestone.prepare_evidence_inputs"])
+        .arg("--input")
+        .arg(format!(
+            r#"{{"version":"0.5","capability_id":"replacement_grade_cli","project_root":{},"connected_brain":"project-provider"}}"#,
+            serde_json::to_string(project.to_str().unwrap()).unwrap()
+        ))
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prepare_json: Value = serde_json::from_slice(&prepare).unwrap();
+    assert_eq!(prepare_json["status"], "ok");
+    assert_eq!(
+        prepare_json["result"]["schema_version"],
+        "forge.milestone.prepare_evidence_inputs.v1"
+    );
+    assert_eq!(prepare_json["result"]["apply"], false);
+    assert_eq!(prepare_json["result"]["template_count"], 1);
+    assert_eq!(
+        prepare_json["result"]["prepared_files"][0]["write_status"],
+        "planned"
+    );
+    assert!(!project
+        .join(".forge/connected-brain-runtimes.json")
+        .exists());
 }
 
 #[test]
@@ -4946,6 +4984,208 @@ fn milestone_evidence_plan_inspects_project_inputs_without_collecting_evidence()
             .as_str()
             .unwrap()
             .contains("--kind production_runtime_benchmark")));
+}
+
+#[test]
+fn milestone_prepare_evidence_inputs_writes_secret_free_manifest_templates_with_approval() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("prepare-project");
+
+    let dry_run_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "prepare-evidence-inputs",
+            "--version",
+            "0.5",
+            "--capability",
+            "replacement_grade_cli",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args(["--connected-brain", "project-provider", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let dry_run_json: Value = serde_json::from_slice(&dry_run_output).unwrap();
+    assert_eq!(
+        dry_run_json["schema_version"],
+        "forge.milestone.prepare_evidence_inputs.v1"
+    );
+    assert_eq!(dry_run_json["status"], "manifest_templates_planned");
+    assert_eq!(dry_run_json["mutates_files"], false);
+    assert_eq!(dry_run_json["apply"], false);
+    assert_eq!(dry_run_json["template_count"], 1);
+    assert_eq!(dry_run_json["written_count"], 0);
+    assert_eq!(dry_run_json["skipped_count"], 1);
+    assert_eq!(
+        dry_run_json["prepared_files"][0]["template_id"],
+        "connected_brain_runtime_manifest"
+    );
+    assert_eq!(
+        dry_run_json["prepared_files"][0]["target_path"],
+        project
+            .join(".forge/connected-brain-runtimes.json")
+            .display()
+            .to_string()
+    );
+    assert_eq!(dry_run_json["prepared_files"][0]["write_status"], "planned");
+    assert_eq!(dry_run_json["prepared_files"][0]["secret_free"], true);
+    assert!(!project
+        .join(".forge/connected-brain-runtimes.json")
+        .exists());
+
+    let apply_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "prepare-evidence-inputs",
+            "--version",
+            "0.5",
+            "--capability",
+            "replacement_grade_cli",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args([
+            "--connected-brain",
+            "project-provider",
+            "--apply",
+            "--approved-by",
+            "arthur",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let apply_json: Value = serde_json::from_slice(&apply_output).unwrap();
+    assert_eq!(apply_json["status"], "manifest_templates_written");
+    assert_eq!(apply_json["mutates_files"], true);
+    assert_eq!(apply_json["apply"], true);
+    assert_eq!(apply_json["approved_by"], "arthur");
+    assert_eq!(apply_json["written_count"], 1);
+    assert_eq!(apply_json["prepared_files"][0]["write_status"], "written");
+    assert_eq!(apply_json["prepared_files"][0]["existed_before"], false);
+    assert_eq!(apply_json["prepared_files"][0]["created_parent_dir"], true);
+    assert!(apply_json["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("forge milestone evidence-plan --version 0.5")));
+
+    let manifest_path = project.join(".forge/connected-brain-runtimes.json");
+    let manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest["providers"][0]["id"], "project-provider");
+    assert_eq!(manifest["providers"][0]["network_access"], false);
+    assert_eq!(manifest["providers"][0]["allow_model_execution"], true);
+
+    let idempotent_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "prepare-evidence-inputs",
+            "--version",
+            "0.5",
+            "--capability",
+            "replacement_grade_cli",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args([
+            "--connected-brain",
+            "project-provider",
+            "--apply",
+            "--approved-by",
+            "arthur",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let idempotent_json: Value = serde_json::from_slice(&idempotent_output).unwrap();
+    assert_eq!(idempotent_json["status"], "no_manifest_templates");
+    assert_eq!(idempotent_json["written_count"], 0);
+
+    let overwrite_project = temp.path().join("overwrite-project");
+    fs::create_dir_all(overwrite_project.join(".forge")).unwrap();
+    fs::write(
+        overwrite_project.join(".forge/connected-brain-runtimes.json"),
+        "{}",
+    )
+    .unwrap();
+    forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "prepare-evidence-inputs",
+            "--version",
+            "0.5",
+            "--capability",
+            "replacement_grade_cli",
+            "--project-root",
+        ])
+        .arg(overwrite_project.to_str().unwrap())
+        .args([
+            "--connected-brain",
+            "project-provider",
+            "--apply",
+            "--approved-by",
+            "arthur",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("refusing to overwrite"));
+
+    let multimodal_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "prepare-evidence-inputs",
+            "--version",
+            "0.5",
+            "--capability",
+            "experimental_multimodal_runtime",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args([
+            "--connected-runtime",
+            "production-vision-runtime",
+            "--apply",
+            "--approved-by",
+            "arthur",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let multimodal_json: Value = serde_json::from_slice(&multimodal_output).unwrap();
+    assert_eq!(multimodal_json["template_count"], 2);
+    assert_eq!(multimodal_json["written_count"], 2);
+    assert!(project.join(".forge/multimodal.json").exists());
+    assert!(project.join(".forge/multimodal-runtimes.json").exists());
 }
 
 #[test]

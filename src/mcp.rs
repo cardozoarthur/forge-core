@@ -112,8 +112,9 @@ use crate::milestone::{
     attach_milestone_evidence, build_milestone_evidence_plan, build_milestone_export_demo,
     build_milestone_manifest_with_store, build_milestone_research, build_milestone_status,
     build_replacement_cli_demo_with_options, collect_milestone_evidence,
-    MilestoneAttachEvidenceOptions, MilestoneCliDemoOptions, MilestoneCollectEvidenceOptions,
-    MilestoneEvidencePlanOptions,
+    prepare_milestone_evidence_inputs, MilestoneAttachEvidenceOptions, MilestoneCliDemoOptions,
+    MilestoneCollectEvidenceOptions, MilestoneEvidencePlanOptions,
+    MilestonePrepareEvidenceInputsOptions,
 };
 use crate::multimodal::{
     build_multimodal_benchmark_result, build_multimodal_benchmark_template,
@@ -1781,6 +1782,20 @@ struct MilestoneEvidencePlanInput {
     project_root: Option<String>,
     connected_brain: Option<String>,
     connected_runtime: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MilestonePrepareEvidenceInputsInput {
+    version: Option<String>,
+    capability: Option<String>,
+    capability_id: Option<String>,
+    project_root: Option<String>,
+    connected_brain: Option<String>,
+    connected_runtime: Option<String>,
+    apply: Option<bool>,
+    approved_by: Option<String>,
+    force: Option<bool>,
+    origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6092,6 +6107,37 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, false),
             ),
             tool(
+                "forge.milestone.prepare_evidence_inputs",
+                "Prepare Milestone Evidence Inputs",
+                "Materialize secret-free milestone evidence manifest templates under a project .forge directory. Dry-run by default; apply requires approved_by and refuses overwrite unless force is true.",
+                object_schema(&[
+                    ("version", "string", "milestone version, currently 0.5"),
+                    ("capability_id", "string", "milestone capability id"),
+                    ("project_root", "string", "project root where .forge manifests are prepared"),
+                    ("connected_brain", "string", "optional connected brain provider id"),
+                    ("connected_runtime", "string", "optional connected multimodal runtime id"),
+                    ("apply", "boolean", "write files when true; dry-run when false or omitted"),
+                    ("approved_by", "string", "operator approving file writes when apply is true"),
+                    ("force", "boolean", "allow overwriting existing template targets after review"),
+                    ("origin", "string", "codex|opencode|gemini|forge_cli|skill|mcp"),
+                ], &["capability_id"]),
+                "forge.milestone.prepare_evidence_inputs.v1",
+                &[
+                    "forge",
+                    "milestone",
+                    "prepare-evidence-inputs",
+                    "--version",
+                    "0.5",
+                    "--capability",
+                    "<capability-id>",
+                    "--project-root",
+                    "<project-root>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, true),
+            ),
+            tool(
                 "forge.milestone.collect_evidence",
                 "Collect and Attach Milestone Evidence",
                 "Run a ready, approval-gated milestone evidence source, persist the generated receipt artifact and attach it to the milestone without auto-promoting.",
@@ -9439,6 +9485,30 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     project_root: project_root.as_deref(),
                     connected_brain: input.connected_brain.as_deref(),
                     connected_runtime: input.connected_runtime.as_deref(),
+                },
+            )?)?
+        }
+        "forge.milestone.prepare_evidence_inputs" => {
+            let input: MilestonePrepareEvidenceInputsInput = parse_input(input)?;
+            let version = input.version.unwrap_or_else(|| "0.5".to_string());
+            let capability_id = input
+                .capability_id
+                .or(input.capability)
+                .context("capability_id is required")?;
+            let project_root = input.project_root.map(PathBuf::from);
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            serde_json::to_value(prepare_milestone_evidence_inputs(
+                store,
+                MilestonePrepareEvidenceInputsOptions {
+                    version: &version,
+                    capability_id: &capability_id,
+                    project_root: project_root.as_deref(),
+                    connected_brain: input.connected_brain.as_deref(),
+                    connected_runtime: input.connected_runtime.as_deref(),
+                    apply: input.apply.unwrap_or(false),
+                    approved_by: input.approved_by.as_deref(),
+                    force: input.force.unwrap_or(false),
+                    origin: &origin,
                 },
             )?)?
         }
