@@ -7251,11 +7251,12 @@ fn render_command_palette_entry_summary(panel: &InteractiveCommandPalettePanel) 
         .map(|entry| {
             let workflow = entry.workflow_id.as_deref().unwrap_or("global");
             format!(
-                "{} [{}] {} workflow={} mutates={} approval={}",
+                "{} [{}] {} workflow={} risk={} mutates={} approval={}",
                 entry.action_id,
                 entry.source_panel,
                 entry.commands.join(" "),
                 workflow,
+                entry.risk_level,
                 entry.mutates_workflow,
                 entry.requires_approval
             )
@@ -7275,10 +7276,13 @@ fn render_action_registry_action_summary(panel: &InteractiveActionRegistryPanel)
         .take(12)
         .map(|action| {
             format!(
-                "{} [{}] enabled={} plan={} next={}",
+                "{} [{}] enabled={} risk={} mutates={} approval={} plan={} next={}",
                 action.action_id,
                 action.source_panel,
                 action.enabled,
+                action.risk_level,
+                action.mutates_workflow,
+                action.requires_approval,
                 action.operation_plan.status,
                 action
                     .operation_plan

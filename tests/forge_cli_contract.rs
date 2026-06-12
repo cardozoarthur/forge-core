@@ -42654,6 +42654,9 @@ views:
     assert!(text.contains("Action registry"));
     assert!(text.contains("zzdemo.ready"));
     assert!(text.contains("zzdemo.blocked"));
+    assert!(text.contains("risk=low"));
+    assert!(text.contains("mutates=false"));
+    assert!(text.contains("approval=false"));
 
     let home_output = forge()
         .current_dir(temp.path())
@@ -42926,6 +42929,7 @@ fn interactive_command_palette_surfaces_contextual_actions_for_replacement_cli()
     assert!(text.contains("Command palette"));
     assert!(text.contains("patch.diff"));
     assert!(text.contains(workflow_id));
+    assert!(text.contains("risk=low"));
 
     let home_output = forge()
         .args([
