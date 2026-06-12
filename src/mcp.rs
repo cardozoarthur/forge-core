@@ -1670,6 +1670,7 @@ struct MilestoneCollectEvidenceInput {
     version: Option<String>,
     capability: Option<String>,
     capability_id: Option<String>,
+    kind: Option<String>,
     project_root: Option<String>,
     connected_brain: Option<String>,
     connected_runtime: Option<String>,
@@ -5724,6 +5725,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[
                     ("version", "string", "milestone version, currently 0.5"),
                     ("capability_id", "string", "milestone capability id"),
+                    ("kind", "string", "optional evidence kind; defaults to the capability collector default"),
                     ("project_root", "string", "project root containing .forge manifests"),
                     ("connected_brain", "string", "optional connected brain provider id"),
                     ("connected_runtime", "string", "optional connected multimodal runtime id"),
@@ -5764,6 +5766,8 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "0.5",
                     "--capability",
                     "<capability-id>",
+                    "--kind",
+                    "<evidence-kind>",
                     "--approved-by",
                     "<operator>",
                     "--output",
@@ -8901,6 +8905,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 MilestoneCollectEvidenceOptions {
                     version: &version,
                     capability_id: &capability_id,
+                    kind: input.kind.as_deref(),
                     project_root: project_root.as_deref(),
                     connected_brain: input.connected_brain.as_deref(),
                     connected_runtime: input.connected_runtime.as_deref(),

@@ -260,6 +260,9 @@ forge improve --workflow <workflow-id> --output json
 forge artifacts --workflow <workflow-id> --output json
 forge milestone manifest --version 0.5 --output json
 forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root . --connected-runtime <runtime-id> --output json
+forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root . --connected-brain <provider-id> --approved-by arthur --origin codex --output json
+forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind broader_project_coding_research_workflow --project-root . --approved-by arthur --origin codex --output json
+forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind terminal_file_editing_ux --project-root . --approved-by arthur --origin codex --output json
 forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root . --connected-runtime <runtime-id> --approved-by arthur --output json
 forge milestone attach-evidence --version 0.5 --capability experimental_multimodal_runtime --kind production_runtime_benchmark --summary "Operator-approved runtime receipt." --artifact ./runtime-receipt.json --approved-by arthur --output json
 forge multimodal benchmark-template --capability image_understanding --output json

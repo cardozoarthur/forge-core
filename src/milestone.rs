@@ -217,6 +217,7 @@ pub struct MilestoneEvidencePlanConfigCheck {
 pub struct MilestoneCollectEvidenceOptions<'a> {
     pub version: &'a str,
     pub capability_id: &'a str,
+    pub kind: Option<&'a str>,
     pub project_root: Option<&'a Path>,
     pub connected_brain: Option<&'a str>,
     pub connected_runtime: Option<&'a str>,
@@ -721,7 +722,21 @@ pub fn collect_milestone_evidence(
     options: MilestoneCollectEvidenceOptions<'_>,
 ) -> Result<MilestoneCollectEvidenceReport> {
     let version = normalize_required(options.version, "version")?;
+    if version != SUPPORTED_MILESTONE {
+        bail!("unsupported milestone {version}; currently supported: {SUPPORTED_MILESTONE}");
+    }
     let capability_id = normalize_required(options.capability_id, "capability")?;
+    if !forge_05_capabilities()
+        .iter()
+        .any(|capability| capability.id == capability_id)
+    {
+        bail!("unknown milestone capability `{capability_id}` for milestone {version}");
+    }
+    let kind = match options.kind {
+        Some(kind) => normalize_required(kind, "kind")?,
+        None => default_milestone_collection_kind(&capability_id)?,
+    };
+    ensure_milestone_collection_kind(&capability_id, &kind)?;
     let approved_by = normalize_required(options.approved_by, "approved-by")?;
     let origin = normalize_required(options.origin, "origin")?;
     let project_root = options
@@ -729,22 +744,24 @@ pub fn collect_milestone_evidence(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    let plan = build_milestone_evidence_plan(
-        store,
-        MilestoneEvidencePlanOptions {
-            version: &version,
-            capability_id: &capability_id,
-            project_root: Some(&project_root),
-            connected_brain: options.connected_brain,
-            connected_runtime: options.connected_runtime,
-        },
-    )?;
-    if !plan.ready_to_collect_evidence {
-        bail!(
-            "milestone evidence inputs for `{capability_id}` are not ready: {}; {}",
-            plan.status,
-            plan.next_action
-        );
+    if milestone_collection_kind_requires_project_plan(&capability_id, &kind) {
+        let plan = build_milestone_evidence_plan(
+            store,
+            MilestoneEvidencePlanOptions {
+                version: &version,
+                capability_id: &capability_id,
+                project_root: Some(&project_root),
+                connected_brain: options.connected_brain,
+                connected_runtime: options.connected_runtime,
+            },
+        )?;
+        if !plan.ready_to_collect_evidence {
+            bail!(
+                "milestone evidence inputs for `{capability_id}` are not ready: {}; {}",
+                plan.status,
+                plan.next_action
+            );
+        }
     }
 
     let collected = match capability_id.as_str() {
@@ -752,6 +769,7 @@ pub fn collect_milestone_evidence(
             store,
             &version,
             &project_root,
+            &kind,
             options.connected_brain,
             &origin,
         )?,
@@ -816,7 +834,70 @@ struct CollectedMilestoneEvidence {
     collection_summary: String,
 }
 
+fn default_milestone_collection_kind(capability_id: &str) -> Result<String> {
+    match capability_id {
+        "replacement_grade_cli" => Ok("external_brain_provider_execution".to_string()),
+        "experimental_multimodal_runtime" => Ok("production_runtime_benchmark".to_string()),
+        _ => bail!("capability `{capability_id}` does not have a default evidence collector"),
+    }
+}
+
+fn ensure_milestone_collection_kind(capability_id: &str, kind: &str) -> Result<()> {
+    if milestone_required_attached_evidence_kinds(capability_id)
+        .iter()
+        .any(|required| required == kind)
+    {
+        return Ok(());
+    }
+    bail!("evidence kind `{kind}` is not required by capability `{capability_id}`")
+}
+
+fn milestone_collection_kind_requires_project_plan(capability_id: &str, kind: &str) -> bool {
+    matches!(
+        (capability_id, kind),
+        ("replacement_grade_cli", "external_brain_provider_execution")
+            | (
+                "experimental_multimodal_runtime",
+                "production_runtime_benchmark"
+            )
+    )
+}
+
 fn collect_replacement_grade_cli_evidence(
+    store: &ForgeStore,
+    version: &str,
+    project_root: &Path,
+    kind: &str,
+    connected_brain: Option<&str>,
+    origin: &str,
+) -> Result<CollectedMilestoneEvidence> {
+    match kind {
+        "external_brain_provider_execution" => collect_replacement_grade_cli_provider_evidence(
+            store,
+            version,
+            project_root,
+            connected_brain,
+            origin,
+        ),
+        "broader_project_coding_research_workflow" => {
+            collect_replacement_grade_cli_real_project_evidence(
+                store,
+                version,
+                project_root,
+                origin,
+            )
+        }
+        "terminal_file_editing_ux" => collect_replacement_grade_cli_terminal_editing_evidence(
+            store,
+            version,
+            project_root,
+            origin,
+        ),
+        _ => bail!("unsupported replacement-grade CLI evidence kind `{kind}`"),
+    }
+}
+
+fn collect_replacement_grade_cli_provider_evidence(
     store: &ForgeStore,
     version: &str,
     project_root: &Path,
@@ -878,6 +959,134 @@ fn collect_replacement_grade_cli_evidence(
             "connected_brain_provider:{}",
             provider_contract.provider_id
         ),
+        collection_promotion_ready,
+        collection_artifact_path,
+        collection_artifact_sha256,
+        collection_summary,
+    })
+}
+
+fn collect_replacement_grade_cli_real_project_evidence(
+    store: &ForgeStore,
+    version: &str,
+    project_root: &Path,
+    origin: &str,
+) -> Result<CollectedMilestoneEvidence> {
+    let report =
+        build_replacement_cli_demo_with_options(store, origin, MilestoneCliDemoOptions::default())?;
+    let flow = report
+        .flows
+        .iter()
+        .find(|flow| flow.kind == "real_project_coding_research")
+        .context(
+            "replacement-grade CLI demo did not produce real-project coding/research evidence",
+        )?;
+    let real_project = flow
+        .real_project
+        .as_ref()
+        .context("real-project coding/research flow is missing its evidence payload")?;
+    let collection_promotion_ready = flow.completed_through_forge
+        && real_project.status == "real_project_workflow_demo_completed"
+        && real_project.handoff_ready
+        && real_project.exec_event_recorded
+        && real_project.validation_status == "validated"
+        && !real_project.external_resources_mutated
+        && !real_project.target_paths.is_empty();
+    let collection_summary = if collection_promotion_ready {
+        "Replacement-grade CLI real-project coding and research workflow produced validated multi-file evidence under Forge lineage.".to_string()
+    } else {
+        "Replacement-grade CLI real-project coding and research workflow did not satisfy all collection gates.".to_string()
+    };
+    let payload = serde_json::json!({
+        "schema_version": "forge.milestone.collection.broader_project_coding_research_workflow.v1",
+        "milestone": version,
+        "capability_id": "replacement_grade_cli",
+        "kind": "broader_project_coding_research_workflow",
+        "collected_at": Utc::now().to_rfc3339(),
+        "requested_project_root": project_root.display().to_string(),
+        "collection_promotion_ready": collection_promotion_ready,
+        "real_project": real_project,
+        "source_flow": flow,
+        "source_demo": &report,
+    });
+    let (collection_artifact_path, collection_artifact_sha256) =
+        write_milestone_collection_artifact(
+            store,
+            version,
+            "replacement_grade_cli",
+            "broader_project_coding_research_workflow",
+            &payload,
+        )?;
+
+    Ok(CollectedMilestoneEvidence {
+        kind: "broader_project_coding_research_workflow".to_string(),
+        configured_evidence_source: "replacement_cli_demo:real_project_coding_research".to_string(),
+        collection_promotion_ready,
+        collection_artifact_path,
+        collection_artifact_sha256,
+        collection_summary,
+    })
+}
+
+fn collect_replacement_grade_cli_terminal_editing_evidence(
+    store: &ForgeStore,
+    version: &str,
+    project_root: &Path,
+    origin: &str,
+) -> Result<CollectedMilestoneEvidence> {
+    let report =
+        build_replacement_cli_demo_with_options(store, origin, MilestoneCliDemoOptions::default())?;
+    let flow = report
+        .flows
+        .iter()
+        .find(|flow| flow.kind == "coding_task")
+        .context("replacement-grade CLI demo did not produce coding-task patch evidence")?;
+    let patch_lifecycle = flow
+        .patch_lifecycle
+        .as_ref()
+        .context("coding-task flow is missing patch lifecycle evidence")?;
+    let collection_promotion_ready = flow.completed_through_forge
+        && patch_lifecycle.status == "patch_lifecycle_demo_ready"
+        && patch_lifecycle.restored_to_clean_state
+        && !patch_lifecycle.external_resources_mutated
+        && patch_lifecycle.artifact_refs.len() >= 6
+        && patch_lifecycle
+            .gates
+            .iter()
+            .any(|gate| gate == "review_before_apply")
+        && patch_lifecycle
+            .gates
+            .iter()
+            .any(|gate| gate == "human_restore_approval_recorded");
+    let collection_summary = if collection_promotion_ready {
+        "Replacement-grade CLI terminal file-editing UX produced validated plan/review/diff/apply/revert/restore evidence.".to_string()
+    } else {
+        "Replacement-grade CLI terminal file-editing UX did not satisfy all patch lifecycle collection gates.".to_string()
+    };
+    let payload = serde_json::json!({
+        "schema_version": "forge.milestone.collection.terminal_file_editing_ux.v1",
+        "milestone": version,
+        "capability_id": "replacement_grade_cli",
+        "kind": "terminal_file_editing_ux",
+        "collected_at": Utc::now().to_rfc3339(),
+        "requested_project_root": project_root.display().to_string(),
+        "collection_promotion_ready": collection_promotion_ready,
+        "patch_lifecycle": patch_lifecycle,
+        "source_flow": flow,
+        "source_demo": &report,
+    });
+    let (collection_artifact_path, collection_artifact_sha256) =
+        write_milestone_collection_artifact(
+            store,
+            version,
+            "replacement_grade_cli",
+            "terminal_file_editing_ux",
+            &payload,
+        )?;
+
+    Ok(CollectedMilestoneEvidence {
+        kind: "terminal_file_editing_ux".to_string(),
+        configured_evidence_source: "replacement_cli_demo:patch_lifecycle".to_string(),
         collection_promotion_ready,
         collection_artifact_path,
         collection_artifact_sha256,
@@ -1061,9 +1270,13 @@ fn plan_replacement_grade_cli_evidence(
             ),
         });
         evidence_collection_commands.push(format!(
-            "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --project-root {} --connected-brain <provider-id> --approved-by <operator> --origin codex --output json",
+            "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root {} --connected-brain <provider-id> --approved-by <operator> --origin codex --output json",
             project_root.display()
         ));
+        push_replacement_grade_cli_demo_collection_commands(
+            project_root,
+            evidence_collection_commands,
+        );
         evidence_collection_commands.push(format!(
             "forge milestone cli-demo --origin codex --project-root {} --connected-brain <provider-id> --output json",
             project_root.display()
@@ -1132,17 +1345,35 @@ fn plan_replacement_grade_cli_evidence(
         summary,
     });
     configured_evidence_sources.push(format!("connected_brain_provider:{}", provider.id));
+    configured_evidence_sources
+        .push("replacement_cli_demo:real_project_coding_research".to_string());
+    configured_evidence_sources.push("replacement_cli_demo:patch_lifecycle".to_string());
     evidence_collection_commands.push(format!(
-        "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --project-root {} --connected-brain {} --approved-by <operator> --origin codex --output json",
+        "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root {} --connected-brain {} --approved-by <operator> --origin codex --output json",
         project_root.display(),
         provider.id
     ));
+    push_replacement_grade_cli_demo_collection_commands(project_root, evidence_collection_commands);
     evidence_collection_commands.push(format!(
         "forge milestone cli-demo --origin codex --project-root {} --connected-brain {} --output json",
         project_root.display(),
         provider.id
     ));
     Ok(())
+}
+
+fn push_replacement_grade_cli_demo_collection_commands(
+    project_root: &Path,
+    evidence_collection_commands: &mut Vec<String>,
+) {
+    evidence_collection_commands.push(format!(
+        "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind broader_project_coding_research_workflow --project-root {} --approved-by <operator> --origin codex --output json",
+        project_root.display()
+    ));
+    evidence_collection_commands.push(format!(
+        "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind terminal_file_editing_ux --project-root {} --approved-by <operator> --origin codex --output json",
+        project_root.display()
+    ));
 }
 
 fn plan_experimental_multimodal_evidence(

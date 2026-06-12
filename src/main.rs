@@ -3365,6 +3365,8 @@ enum MilestoneCommands {
         version: String,
         #[arg(long = "capability", alias = "capability-id")]
         capability_id: String,
+        #[arg(long)]
+        kind: Option<String>,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
         #[arg(long = "connected-brain")]
@@ -8068,6 +8070,7 @@ fn run() -> Result<i32> {
             MilestoneCommands::CollectEvidence {
                 version,
                 capability_id,
+                kind,
                 project_root,
                 connected_brain,
                 connected_runtime,
@@ -8081,6 +8084,7 @@ fn run() -> Result<i32> {
                     MilestoneCollectEvidenceOptions {
                         version: &version,
                         capability_id: &capability_id,
+                        kind: kind.as_deref(),
                         project_root: project_root.as_deref(),
                         connected_brain: connected_brain.as_deref(),
                         connected_runtime: connected_runtime.as_deref(),

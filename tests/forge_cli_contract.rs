@@ -3864,6 +3864,22 @@ fn milestone_evidence_plan_inspects_project_inputs_without_collecting_evidence()
         .any(|command| command
             .as_str()
             .unwrap()
+            .contains("--kind broader_project_coding_research_workflow")));
+    assert!(missing_json["evidence_collection_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("--kind terminal_file_editing_ux")));
+    assert!(missing_json["evidence_collection_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
             .contains("forge milestone cli-demo --origin codex --project-root")));
 
     let provider_script = temp.path().join("project-provider.sh");
@@ -3969,6 +3985,22 @@ fn milestone_evidence_plan_inspects_project_inputs_without_collecting_evidence()
             .as_str()
             .unwrap()
             .contains("--kind external_brain_provider_execution")));
+    assert!(provider_json["evidence_collection_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("--kind broader_project_coding_research_workflow")));
+    assert!(provider_json["evidence_collection_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("--kind terminal_file_editing_ux")));
 
     let multimodal_output = forge()
         .arg("--store")
@@ -4239,6 +4271,90 @@ printf 'real_provider_ok\n'
     assert!(attached.iter().any(|evidence| {
         evidence["capability_id"] == "experimental_multimodal_runtime"
             && evidence["kind"] == "production_runtime_benchmark"
+    }));
+    assert_eq!(manifest_json["promotion_decision"]["decision"], "fail");
+}
+
+#[test]
+fn milestone_collect_evidence_selects_replacement_cli_demo_evidence_kinds() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("collect-demo-kinds-project");
+    fs::create_dir_all(&project).unwrap();
+
+    for kind in [
+        "broader_project_coding_research_workflow",
+        "terminal_file_editing_ux",
+    ] {
+        let output = forge()
+            .arg("--store")
+            .arg(store.to_str().unwrap())
+            .args([
+                "milestone",
+                "collect-evidence",
+                "--version",
+                "0.5",
+                "--capability",
+                "replacement_grade_cli",
+                "--kind",
+                kind,
+                "--project-root",
+            ])
+            .arg(project.to_str().unwrap())
+            .args([
+                "--approved-by",
+                "arthur",
+                "--origin",
+                "codex",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            json["schema_version"],
+            "forge.milestone.collect_evidence.v1"
+        );
+        assert_eq!(json["capability_id"], "replacement_grade_cli");
+        assert_eq!(json["kind"], kind);
+        assert_eq!(json["status"], "collected_and_attached");
+        assert_eq!(json["collection_promotion_ready"], true);
+        assert_eq!(json["attached_evidence"]["kind"], kind);
+        assert_eq!(
+            json["promotion_impact"],
+            "collected_and_attached_not_auto_promoted"
+        );
+    }
+
+    let manifest_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "manifest",
+            "--version",
+            "0.5",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest_output).unwrap();
+    let attached = manifest_json["attached_evidence"].as_array().unwrap();
+    assert!(attached.iter().any(|evidence| {
+        evidence["capability_id"] == "replacement_grade_cli"
+            && evidence["kind"] == "broader_project_coding_research_workflow"
+    }));
+    assert!(attached.iter().any(|evidence| {
+        evidence["capability_id"] == "replacement_grade_cli"
+            && evidence["kind"] == "terminal_file_editing_ux"
     }));
     assert_eq!(manifest_json["promotion_decision"]["decision"], "fail");
 }
