@@ -4345,6 +4345,31 @@ fn milestone_evidence_plan_inspects_project_inputs_without_collecting_evidence()
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("external_brain_provider_execution")));
+    let promotion_gate_templates = missing_json["promotion_gate_templates"]
+        .as_array()
+        .expect("evidence-plan should expose promotion gate templates");
+    assert_eq!(promotion_gate_templates.len(), 3);
+    assert!(promotion_gate_templates.iter().any(|template| {
+        template["evidence_kind"] == "external_brain_provider_execution"
+            && template["gate_ids"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("real_provider_execution_performed"))
+    }));
+    assert!(promotion_gate_templates.iter().any(|template| {
+        template["evidence_kind"] == "broader_project_coding_research_workflow"
+            && template["gate_ids"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("validated_multi_file_artifacts"))
+    }));
+    assert!(promotion_gate_templates.iter().any(|template| {
+        template["evidence_kind"] == "terminal_file_editing_ux"
+            && template["gate_ids"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("review_before_apply"))
+    }));
     assert!(missing_json["config_checks"]
         .as_array()
         .unwrap()
@@ -42942,6 +42967,15 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
             && gate["evidence_plan"]["ready_to_collect_evidence"] == false
             && gate["evidence_plan"]["project_root"] == project.display().to_string()
             && gate["evidence_plan"]["manifest_template_count"] == 1
+            && gate["evidence_plan"]["promotion_gate_templates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|template| template["evidence_kind"] == "terminal_file_editing_ux"
+                    && template["gate_ids"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!("restore_approval_recorded")))
             && gate["evidence_plan"]["manifest_templates"]
                 .as_array()
                 .unwrap()
@@ -42992,6 +43026,15 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
             && gate["evidence_plan"]["status"] == "missing_project_evidence_inputs"
             && gate["evidence_plan"]["ready_to_collect_evidence"] == false
             && gate["evidence_plan"]["manifest_template_count"] == 2
+            && gate["evidence_plan"]["promotion_gate_templates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|template| template["evidence_kind"] == "production_runtime_benchmark"
+                    && template["gate_ids"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!("network_access_blocked")))
             && gate["evidence_plan"]["manifest_templates"]
                 .as_array()
                 .unwrap()

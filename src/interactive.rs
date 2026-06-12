@@ -30,7 +30,7 @@ use crate::milestone::{
     build_milestone_evidence_plan, build_milestone_manifest_with_store, build_milestone_status,
     milestone_required_attached_evidence_kinds, MilestoneAttachedEvidence,
     MilestoneEvidencePlanManifestTemplate, MilestoneEvidencePlanOptions,
-    MilestonePromotionDecision, MilestoneStatusSummary,
+    MilestonePromotionDecision, MilestonePromotionGateTemplate, MilestoneStatusSummary,
 };
 use crate::ops::{
     build_addon_view_renderer_report, build_operational_digital_twin, load_modifier_lane,
@@ -309,6 +309,7 @@ pub struct InteractiveReleaseGateEvidencePlan {
     pub manifest_template_ids: Vec<String>,
     pub manifest_template_paths: Vec<String>,
     pub manifest_templates: Vec<MilestoneEvidencePlanManifestTemplate>,
+    pub promotion_gate_templates: Vec<MilestonePromotionGateTemplate>,
     pub evidence_collection_commands: Vec<String>,
     pub next_action: String,
 }
@@ -2129,6 +2130,7 @@ fn interactive_release_gate_evidence_plan(
         manifest_template_ids,
         manifest_template_paths,
         manifest_templates: plan.manifest_templates,
+        promotion_gate_templates: plan.promotion_gate_templates,
         evidence_collection_commands: plan.evidence_collection_commands,
         next_action: plan.next_action,
     })

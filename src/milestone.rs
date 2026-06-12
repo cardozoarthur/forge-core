@@ -194,6 +194,7 @@ pub struct MilestoneEvidencePlanReport {
     pub required_attached_evidence_kinds: Vec<String>,
     pub attached_evidence_kinds: Vec<String>,
     pub missing_attached_evidence_kinds: Vec<String>,
+    pub promotion_gate_templates: Vec<MilestonePromotionGateTemplate>,
     pub config_checks: Vec<MilestoneEvidencePlanConfigCheck>,
     pub manifest_templates: Vec<MilestoneEvidencePlanManifestTemplate>,
     pub configured_evidence_sources: Vec<String>,
@@ -211,6 +212,13 @@ pub struct MilestoneEvidencePlanConfigCheck {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_id: Option<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MilestonePromotionGateTemplate {
+    pub evidence_kind: String,
+    pub gate_ids: Vec<String>,
     pub summary: String,
 }
 
@@ -737,6 +745,7 @@ pub fn build_milestone_evidence_plan(
         "Create or fix the required project .forge manifests before collecting milestone evidence."
             .to_string()
     };
+    let promotion_gate_templates = milestone_promotion_gate_templates(&capability_id);
 
     Ok(MilestoneEvidencePlanReport {
         schema_version: "forge.milestone.evidence_plan.v1".to_string(),
@@ -748,6 +757,7 @@ pub fn build_milestone_evidence_plan(
         required_attached_evidence_kinds,
         attached_evidence_kinds,
         missing_attached_evidence_kinds,
+        promotion_gate_templates,
         config_checks,
         manifest_templates,
         configured_evidence_sources,
@@ -1445,6 +1455,73 @@ pub fn milestone_required_attached_evidence_kinds(capability_id: &str) -> Vec<St
         ],
         "experimental_multimodal_runtime" => vec!["production_runtime_benchmark".to_string()],
         _ => Vec::new(),
+    }
+}
+
+fn milestone_promotion_gate_templates(capability_id: &str) -> Vec<MilestonePromotionGateTemplate> {
+    match capability_id {
+        "replacement_grade_cli" => vec![
+            milestone_promotion_gate_template(
+                "external_brain_provider_execution",
+                &[
+                    "provider_contract_validated",
+                    "output_schema_valid",
+                    "real_provider_execution_performed",
+                    "model_execution_performed",
+                    "harness_exec_event_recorded",
+                    "external_resources_untouched",
+                ],
+                "Connected brain provider evidence must prove a validated provider contract, real/model execution declaration, harness lineage and no external resource mutation.",
+            ),
+            milestone_promotion_gate_template(
+                "broader_project_coding_research_workflow",
+                &[
+                    "completed_through_forge",
+                    "real_project_demo_completed",
+                    "handoff_ready",
+                    "exec_event_recorded",
+                    "validated_multi_file_artifacts",
+                    "external_resources_untouched",
+                ],
+                "Broader project evidence must prove Forge-owned handoff, harness lineage, validated multi-file code/research artifacts and no external mutation.",
+            ),
+            milestone_promotion_gate_template(
+                "terminal_file_editing_ux",
+                &[
+                    "completed_through_forge",
+                    "patch_lifecycle_ready",
+                    "review_before_apply",
+                    "restore_approval_recorded",
+                    "restored_to_clean_state",
+                    "artifact_lineage_complete",
+                    "external_resources_untouched",
+                ],
+                "Terminal editing evidence must prove review-before-apply, approved restore, clean rollback state and complete patch artifact lineage.",
+            ),
+        ],
+        "experimental_multimodal_runtime" => vec![milestone_promotion_gate_template(
+            "production_runtime_benchmark",
+            &[
+                "runtime_benchmark_promotion_ready",
+                "model_guard_approved",
+                "network_access_blocked",
+                "device_access_blocked",
+            ],
+            "Production multimodal evidence must prove threshold-ready benchmark output, approved model guard and blocked network/device access.",
+        )],
+        _ => Vec::new(),
+    }
+}
+
+fn milestone_promotion_gate_template(
+    evidence_kind: &str,
+    gate_ids: &[&str],
+    summary: &str,
+) -> MilestonePromotionGateTemplate {
+    MilestonePromotionGateTemplate {
+        evidence_kind: evidence_kind.to_string(),
+        gate_ids: gate_ids.iter().map(|gate| (*gate).to_string()).collect(),
+        summary: summary.to_string(),
     }
 }
 
