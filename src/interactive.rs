@@ -5513,19 +5513,21 @@ fn build_interactive_harness_forge_first_adoption_readiness(
 
     let mut next_commands = Vec::new();
     if !mode.forge_first {
-        next_commands.push(commands.adoption_plan.join(" "));
-        next_commands.push(commands.bootstrap_project_harness.join(" "));
+        next_commands.push(interactive_forge_command_line(&commands.adoption_plan));
+        next_commands.push(interactive_forge_command_line(
+            &commands.bootstrap_project_harness,
+        ));
     }
     if !doctor.shim_ready && harness_shim_file_ready_for_activation(doctor) {
-        next_commands.push(commands.activation_profile.join(" "));
+        next_commands.push(interactive_forge_command_line(&commands.activation_profile));
     } else if !doctor.shim_ready {
-        next_commands.push(commands.install_shims.join(" "));
+        next_commands.push(interactive_forge_command_line(&commands.install_shims));
     }
     if mode.require_lineage_for_exec && !session_lifecycle_plan.lineage_complete {
-        next_commands.push(commands.sessions.join(" "));
+        next_commands.push(interactive_forge_command_line(&commands.sessions));
     }
-    next_commands.push(commands.wrap_plan.join(" "));
-    next_commands.push(commands.headroom_plan.join(" "));
+    next_commands.push(interactive_forge_command_line(&commands.wrap_plan));
+    next_commands.push(interactive_forge_command_line(&commands.headroom_plan));
 
     let ready_to_use_as_default = blocked_reasons.is_empty();
     let status = if ready_to_use_as_default {
@@ -5580,6 +5582,32 @@ fn build_interactive_harness_forge_first_adoption_readiness(
                 .to_string(),
         ],
     }
+}
+
+fn interactive_forge_command_line(command: &[String]) -> String {
+    let mut parts = Vec::with_capacity(command.len() + 1);
+    if command.first().is_none_or(|part| part != "forge") {
+        parts.push("forge");
+    }
+    parts.extend(command.iter().map(String::as_str));
+    parts
+        .into_iter()
+        .map(interactive_shell_arg)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn interactive_shell_arg(arg: &str) -> String {
+    if (arg.starts_with('<') && arg.ends_with('>')) || arg.starts_with('$') {
+        return arg.to_string();
+    }
+    if arg
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        return arg.to_string();
+    }
+    format!("'{}'", arg.replace('\'', "'\"'\"'"))
 }
 
 fn harness_shim_file_ready_for_activation(doctor: &HarnessDoctorReport) -> bool {

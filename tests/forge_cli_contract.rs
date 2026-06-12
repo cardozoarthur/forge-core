@@ -2008,6 +2008,40 @@ fn harness_activation_profile_projects_shell_profile_for_forge_first_cli_default
     assert_eq!(json["forge_first"], true);
     assert_eq!(json["token_headroom"], true);
     assert_eq!(json["context_budget"], 4096);
+    assert!(
+        json["path_precedence_before_activation"]
+            .as_str()
+            .unwrap()
+            .ends_with("_path")
+            || json["path_precedence_before_activation"]
+                .as_str()
+                .unwrap()
+                .contains("shim")
+    );
+    assert_eq!(json["activation_required"], true);
+    assert!(
+        json["current_shell_activation_status"]
+            .as_str()
+            .unwrap()
+            .contains("activation")
+            || json["current_shell_activation_status"]
+                .as_str()
+                .unwrap()
+                .contains("shim_not_ready")
+    );
+    assert!(json["one_shot_activation_test_command"]
+        .as_str()
+        .unwrap()
+        .contains("PATH="));
+    assert!(json["one_shot_activation_test_command"]
+        .as_str()
+        .unwrap()
+        .contains("forge harness shim-status"));
+    assert!(json["verification_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command.as_str().unwrap().contains("forge harness doctor")));
     assert!(json["activation_commands"]
         .as_array()
         .unwrap()
@@ -3915,7 +3949,7 @@ printf 'native:%s\n' "$*"
         .any(|command| command
             .as_str()
             .unwrap()
-            .contains("harness activation-profile")));
+            .starts_with("forge harness activation-profile")));
     let inactive_compatibility = &inactive["executor_compatibility"]["selected_compatibility"];
     assert_eq!(
         inactive_compatibility["adoption_posture"],
@@ -3928,7 +3962,7 @@ printf 'native:%s\n' "$*"
         .any(|command| command
             .as_str()
             .unwrap()
-            .contains("harness activation-profile")));
+            .contains("forge harness activation-profile")));
 
     let mcp_input = serde_json::json!({
         "shim_dir": shim_dir,
@@ -47330,7 +47364,10 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|command| command.as_str().unwrap().contains("harness install-shims")));
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .starts_with("forge harness install-shims")));
     assert_eq!(
         json["adoption_plan"]["commands"]["bootstrap_project_harness"]
             .as_array()

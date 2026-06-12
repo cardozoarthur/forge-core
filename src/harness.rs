@@ -364,6 +364,11 @@ pub struct HarnessActivationProfileReport {
     pub token_headroom: bool,
     pub token_headroom_source: String,
     pub path_prepend: String,
+    pub path_precedence_before_activation: String,
+    pub current_shell_activation_status: String,
+    pub activation_required: bool,
+    pub one_shot_activation_test_command: String,
+    pub verification_commands: Vec<String>,
     pub env: Vec<CliWrapperEnvVar>,
     pub activation_commands: Vec<String>,
     pub deactivation_commands: Vec<String>,
@@ -1482,6 +1487,40 @@ pub fn build_harness_activation_profile(
         });
     let shim_dir_display = shim_dir.display().to_string();
     let project_root_display = project_root.display().to_string();
+    let shim_status = inspect_cli_harness_shim_status(CliShimStatusOptions {
+        shim_dir: &shim_dir,
+        executor: &executor,
+    })?;
+    let activation_required = shim_status.path_precedence != "shim_first";
+    let current_shell_activation_status = if shim_status.path_precedence == "shim_first" {
+        "activation_active"
+    } else if shim_status.shim_exists
+        && shim_status.forge_owned
+        && shim_status.executable
+        && !shim_status.would_recurse
+    {
+        "activation_required"
+    } else {
+        "shim_not_ready_for_activation"
+    }
+    .to_string();
+    let path_activation_prefix = format!("PATH={}:$PATH", shell_quote(&shim_dir_display));
+    let one_shot_activation_test_command = format!(
+        "{} forge harness shim-status --shim-dir {} --executor {} --output json",
+        path_activation_prefix,
+        shell_quote(&shim_dir_display),
+        shell_quote(&executor)
+    );
+    let verification_commands = vec![
+        one_shot_activation_test_command.clone(),
+        format!(
+            "{} forge harness doctor --shim-dir {} --executor {} --project-root {} --output json",
+            path_activation_prefix,
+            shell_quote(&shim_dir_display),
+            shell_quote(&executor),
+            shell_quote(&project_root_display)
+        ),
+    ];
     let token_headroom_value = if options.token_headroom {
         "enabled"
     } else {
@@ -1651,6 +1690,7 @@ pub fn build_harness_activation_profile(
             }),
     ];
     let mut next_commands = vec![
+        one_shot_activation_test_command.clone(),
         format!(
             "forge harness shim-status --shim-dir {} --executor {} --output json",
             shell_quote(&shim_dir_display),
@@ -1703,6 +1743,11 @@ pub fn build_harness_activation_profile(
         token_headroom: options.token_headroom,
         token_headroom_source: options.token_headroom_source.to_string(),
         path_prepend: shim_dir_display.clone(),
+        path_precedence_before_activation: shim_status.path_precedence,
+        current_shell_activation_status,
+        activation_required,
+        one_shot_activation_test_command,
+        verification_commands,
         env,
         activation_commands,
         deactivation_commands,
