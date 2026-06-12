@@ -732,6 +732,9 @@ pub struct InteractiveReplacementCliPanel {
     pub milestone: String,
     pub capability_id: String,
     pub promotion_ready: bool,
+    pub required_attached_evidence_kinds: Vec<String>,
+    pub attached_evidence_kinds: Vec<String>,
+    pub missing_attached_evidence_kinds: Vec<String>,
     pub surface_count: usize,
     pub ready_surface_count: usize,
     pub blocked_surface_count: usize,
@@ -9166,20 +9169,22 @@ pub fn build_interactive_replacement_cli(
     let promotion_ready = replacement_gate
         .map(|gate| gate.promotion_ready)
         .unwrap_or(false);
-    let mut blockers = replacement_gate
+    let required_attached_evidence_kinds = replacement_gate
+        .map(|gate| gate.required_attached_evidence_kinds.clone())
+        .unwrap_or_default();
+    let attached_evidence_kinds = replacement_gate
+        .map(|gate| gate.attached_evidence_kinds.clone())
+        .unwrap_or_default();
+    let missing_attached_evidence_kinds = replacement_gate
         .map(|gate| gate.missing_attached_evidence_kinds.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|kind| format!("missing attached evidence kind: {kind}"))
-        .collect::<Vec<_>>();
-    blockers.push(
-        "external-brain coding/research workflow evidence is still required before promotion"
-            .to_string(),
+        .unwrap_or_default();
+    let blockers = replacement_cli_evidence_blockers(
+        replacement_gate.is_some(),
+        promotion_ready,
+        &missing_attached_evidence_kinds,
     );
-    blockers.push(
-        "terminal file-editing approval ergonomics still need broader operator evidence"
-            .to_string(),
-    );
+    let next_actions =
+        replacement_cli_next_actions(promotion_ready, &missing_attached_evidence_kinds);
 
     let mut surfaces = vec![
         replacement_cli_surface(
@@ -9339,27 +9344,27 @@ pub fn build_interactive_replacement_cli(
                 "forge interactive release-gates --output json",
             ],
         ),
-        replacement_cli_surface(
-            "milestone_evidence",
-            "Replacement-grade CLI milestone evidence",
-            replacement_gate
-                .map(|gate| gate.status.as_str())
-                .unwrap_or("missing"),
-            promotion_ready,
-            &["release_gates_panel"],
-            &[
-                "milestone_cli_demo_command_available",
-                "evidence_plan_lists_connected_brain_manifest",
-                "promotion_requires_attached_operator_evidence",
-            ],
-            &blockers.iter().map(String::as_str).collect::<Vec<_>>(),
-            &[
-                "forge milestone cli-demo --origin codex --output json",
-                "forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root <project-root> --connected-brain <provider-id> --output json",
-                "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root <project-root> --connected-brain <provider-id> --approved-by <operator> --origin codex --output json",
-            ],
-        ),
     ];
+    surfaces.push(replacement_cli_surface_owned(
+        "milestone_evidence",
+        "Replacement-grade CLI milestone evidence",
+        replacement_gate
+            .map(|gate| gate.status.as_str())
+            .unwrap_or("missing"),
+        promotion_ready,
+        vec!["release_gates_panel".to_string()],
+        replacement_cli_milestone_evidence_items(
+            &required_attached_evidence_kinds,
+            &attached_evidence_kinds,
+            &missing_attached_evidence_kinds,
+        ),
+        blockers.clone(),
+        vec![
+            "forge milestone cli-demo --origin codex --output json".to_string(),
+            "forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root <project-root> --connected-brain <provider-id> --output json".to_string(),
+            "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution --project-root <project-root> --connected-brain <provider-id> --approved-by <operator> --origin codex --output json".to_string(),
+        ],
+    ));
 
     let ready_surface_count = surfaces.iter().filter(|surface| surface.ready).count();
     let surface_count = surfaces.len();
@@ -9391,17 +9396,16 @@ pub fn build_interactive_replacement_cli(
         milestone: "0.5".to_string(),
         capability_id: "replacement_grade_cli".to_string(),
         promotion_ready,
+        required_attached_evidence_kinds,
+        attached_evidence_kinds,
+        missing_attached_evidence_kinds,
         surface_count,
         ready_surface_count,
         blocked_surface_count,
         readiness_percent,
         surfaces,
         blockers,
-        next_actions: vec![
-            "Run forge milestone cli-demo and inspect the replacement-grade flow evidence.".to_string(),
-            "Collect operator-approved external-brain coding/research evidence from a project manifest.".to_string(),
-            "Use patch-workbench intake and approval gates as the terminal file-editing UX contract.".to_string(),
-        ],
+        next_actions,
         commands: replacement_cli_commands(),
         notes: vec![
             "This panel is read-only; it aggregates replacement-grade CLI readiness without launching child CLIs or collecting evidence.".to_string(),
@@ -9424,19 +9428,163 @@ fn replacement_cli_surface(
     blockers: &[&str],
     commands: &[&str],
 ) -> InteractiveReplacementCliSurface {
+    replacement_cli_surface_owned(
+        surface_id,
+        title,
+        status,
+        ready,
+        source_panels
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        evidence.iter().map(|value| (*value).to_string()).collect(),
+        blockers.iter().map(|value| (*value).to_string()).collect(),
+        commands.iter().map(|value| (*value).to_string()).collect(),
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owned readiness surface metadata mirrors the static helper while allowing dynamic milestone evidence"
+)]
+fn replacement_cli_surface_owned(
+    surface_id: &str,
+    title: &str,
+    status: &str,
+    ready: bool,
+    source_panels: Vec<String>,
+    evidence: Vec<String>,
+    blockers: Vec<String>,
+    commands: Vec<String>,
+) -> InteractiveReplacementCliSurface {
     InteractiveReplacementCliSurface {
         surface_id: surface_id.to_string(),
         title: title.to_string(),
         status: status.to_string(),
         ready,
-        source_panels: source_panels
-            .iter()
-            .map(|value| (*value).to_string())
-            .collect(),
-        evidence: evidence.iter().map(|value| (*value).to_string()).collect(),
-        blockers: blockers.iter().map(|value| (*value).to_string()).collect(),
-        commands: commands.iter().map(|value| (*value).to_string()).collect(),
+        source_panels,
+        evidence,
+        blockers,
+        commands,
     }
+}
+
+fn replacement_cli_milestone_evidence_items(
+    required: &[String],
+    attached: &[String],
+    missing: &[String],
+) -> Vec<String> {
+    let mut evidence = vec![
+        "milestone_cli_demo_command_available".to_string(),
+        "evidence_plan_lists_connected_brain_manifest".to_string(),
+        "promotion_requires_attached_operator_evidence".to_string(),
+    ];
+    evidence.extend(
+        required
+            .iter()
+            .map(|kind| format!("required_evidence:{kind}")),
+    );
+    evidence.extend(
+        attached
+            .iter()
+            .map(|kind| format!("attached_evidence:{kind}")),
+    );
+    evidence.extend(
+        missing
+            .iter()
+            .map(|kind| format!("missing_evidence:{kind}")),
+    );
+    evidence
+}
+
+fn replacement_cli_evidence_blockers(
+    gate_present: bool,
+    promotion_ready: bool,
+    missing: &[String],
+) -> Vec<String> {
+    if promotion_ready {
+        return Vec::new();
+    }
+    if !gate_present {
+        return vec![
+            "replacement_grade_cli release gate is missing from the 0.5 manifest".to_string(),
+        ];
+    }
+    let mut blockers = missing
+        .iter()
+        .map(|kind| replacement_cli_missing_evidence_blocker(kind))
+        .collect::<Vec<_>>();
+    if blockers.is_empty() {
+        blockers.push(
+            "replacement_grade_cli release gate is not promotable yet; inspect release gates for the current non-evidence blocker"
+                .to_string(),
+        );
+    }
+    blockers
+}
+
+fn replacement_cli_missing_evidence_blocker(kind: &str) -> String {
+    match kind {
+        "external_brain_provider_execution" => {
+            "missing attached evidence kind: external_brain_provider_execution; approve a connected brain provider wrapper that emits forge.connected_external_brain.provider_output.v1 with real/model execution evidence"
+                .to_string()
+        }
+        "broader_project_coding_research_workflow" => {
+            "missing attached evidence kind: broader_project_coding_research_workflow; collect the deterministic Forge-owned multi-file coding/research workflow receipt"
+                .to_string()
+        }
+        "terminal_file_editing_ux" => {
+            "missing attached evidence kind: terminal_file_editing_ux; collect plan/review/diff/apply/revert/restore patch lifecycle evidence"
+                .to_string()
+        }
+        other => format!("missing attached evidence kind: {other}"),
+    }
+}
+
+fn replacement_cli_next_actions(promotion_ready: bool, missing: &[String]) -> Vec<String> {
+    if promotion_ready {
+        return vec![
+            "Inspect forge milestone manifest --version 0.5 before claiming replacement-grade CLI promotion."
+                .to_string(),
+        ];
+    }
+    let mut actions = vec![
+        "Run forge milestone cli-demo and inspect the replacement-grade flow evidence.".to_string(),
+    ];
+    if missing
+        .iter()
+        .any(|kind| kind == "external_brain_provider_execution")
+    {
+        actions.push(
+            "Create or approve .forge/connected-brain-runtimes.json with a safe provider wrapper, then collect external_brain_provider_execution evidence."
+                .to_string(),
+        );
+    }
+    if missing
+        .iter()
+        .any(|kind| kind == "broader_project_coding_research_workflow")
+    {
+        actions.push(
+            "Collect broader_project_coding_research_workflow evidence through Forge milestone evidence collection."
+                .to_string(),
+        );
+    }
+    if missing
+        .iter()
+        .any(|kind| kind == "terminal_file_editing_ux")
+    {
+        actions.push(
+            "Collect terminal_file_editing_ux evidence from the patch lifecycle before treating terminal editing as promotion-ready."
+                .to_string(),
+        );
+    }
+    if actions.len() == 1 {
+        actions.push(
+            "Inspect forge interactive release-gates --version 0.5 --output json for the remaining non-evidence blocker."
+                .to_string(),
+        );
+    }
+    actions
 }
 
 fn replacement_cli_commands() -> InteractiveReplacementCliCommands {

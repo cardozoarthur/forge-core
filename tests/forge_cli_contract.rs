@@ -51284,6 +51284,71 @@ fn replacement_cli_evidence_smoke_collects_ready_receipts_and_reports_manifest_g
         .unwrap()
         .contains(&serde_json::json!("external_brain_provider_execution")));
 
+    let panel_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "replacement-cli",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let panel: Value = serde_json::from_slice(&panel_output).unwrap();
+    assert!(panel["attached_evidence_kinds"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "broader_project_coding_research_workflow"
+        )));
+    assert!(panel["attached_evidence_kinds"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("terminal_file_editing_ux")));
+    assert_eq!(
+        panel["missing_attached_evidence_kinds"],
+        serde_json::json!(["external_brain_provider_execution"])
+    );
+    let blocker_text = panel["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|blocker| blocker.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(blocker_text.contains("external_brain_provider_execution"));
+    assert!(!blocker_text.contains("broader_project_coding_research_workflow"));
+    assert!(!blocker_text.contains("terminal_file_editing_ux"));
+    let milestone_surface = panel["surfaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|surface| surface["surface_id"] == "milestone_evidence")
+        .expect("milestone evidence surface should be present");
+    assert!(milestone_surface["evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "attached_evidence:broader_project_coding_research_workflow"
+        )));
+    assert!(milestone_surface["evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "attached_evidence:terminal_file_editing_ux"
+        )));
+    assert!(milestone_surface["evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "missing_evidence:external_brain_provider_execution"
+        )));
+
     for check_id in [
         "collects_broader_project_coding_research_workflow",
         "collects_terminal_file_editing_ux",
@@ -52279,6 +52344,16 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
     assert_eq!(panel["capability_id"], "replacement_grade_cli");
     assert_eq!(panel["promotion_ready"], false);
     assert!(panel["readiness_percent"].as_u64().unwrap() >= 80);
+    assert!(panel["required_attached_evidence_kinds"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("external_brain_provider_execution")));
+    assert!(panel["missing_attached_evidence_kinds"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "broader_project_coding_research_workflow"
+        )));
     assert!(panel["blockers"]
         .as_array()
         .unwrap()
@@ -52286,7 +52361,7 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
         .any(|blocker| blocker
             .as_str()
             .unwrap()
-            .contains("external-brain coding/research")));
+            .contains("external_brain_provider_execution")));
     assert!(panel["commands"]["refresh"]
         .as_array()
         .unwrap()
