@@ -6462,7 +6462,7 @@ pub fn render_interactive_release_gates(panel: &InteractiveReleaseGatesPanel) ->
         panel.next_actions.join(" | ")
     };
     format!(
-        "Release gates: {status}; milestone {milestone}; promotion {decision}; blocked {blocked_gate_count}/{gate_count}; attached evidence {attached_evidence_count}; blocked by {blocked_by}\nGates: {gate_summary}\nNext actions: {next_actions}\n",
+        "Release gates: {status}; milestone {milestone}; promotion {decision}; blocked {blocked_gate_count}/{gate_count}; attached evidence {attached_evidence_count}; blocked by {blocked_by}\nGates: {gate_summary}\nGate details: {gate_details}\nNext actions: {next_actions}\n",
         status = panel.status,
         milestone = panel.milestone,
         decision = panel.promotion_decision.decision,
@@ -6471,8 +6471,112 @@ pub fn render_interactive_release_gates(panel: &InteractiveReleaseGatesPanel) ->
         attached_evidence_count = panel.attached_evidence_count,
         blocked_by = blocked_by,
         gate_summary = gate_summary,
+        gate_details = render_release_gate_details(panel),
         next_actions = next_actions,
     )
+}
+
+fn render_release_gate_details(panel: &InteractiveReleaseGatesPanel) -> String {
+    let details = panel
+        .gate_cards
+        .iter()
+        .filter(|gate| !gate.promotion_ready || gate.attached_evidence_count > 0)
+        .take(8)
+        .map(render_release_gate_card_detail)
+        .collect::<Vec<_>>();
+    if details.is_empty() {
+        "none".to_string()
+    } else {
+        details.join(" | ")
+    }
+}
+
+fn render_release_gate_card_detail(gate: &InteractiveReleaseGateCard) -> String {
+    format!(
+        "{} [{}] ready {}; evidence_state {}; required {}; missing {}; attached {}; plan {}; commands {}; collect {}; next {}",
+        gate.capability_id,
+        gate.status,
+        gate.promotion_ready,
+        gate.attached_evidence_state,
+        render_release_gate_list(&gate.required_attached_evidence_kinds),
+        render_release_gate_list(&gate.missing_attached_evidence_kinds),
+        render_release_gate_attached_summary(gate),
+        render_release_gate_evidence_plan_summary(&gate.evidence_plan),
+        render_release_gate_command_summary(&gate.next_commands),
+        render_release_gate_command_summary(&gate.evidence_plan.evidence_collection_commands),
+        gate.evidence_plan.next_action,
+    )
+}
+
+fn render_release_gate_evidence_plan_summary(plan: &InteractiveReleaseGateEvidencePlan) -> String {
+    format!(
+        "{} ready {}; missing_config {}/{}; templates {}; paths {}; gates {}",
+        plan.status,
+        plan.ready_to_collect_evidence,
+        plan.missing_config_check_count,
+        plan.config_check_count,
+        render_release_gate_list(&plan.manifest_template_ids),
+        render_release_gate_list(&plan.manifest_template_paths),
+        render_release_gate_template_summary(&plan.promotion_gate_templates),
+    )
+}
+
+fn render_release_gate_template_summary(templates: &[MilestonePromotionGateTemplate]) -> String {
+    if templates.is_empty() {
+        return "none".to_string();
+    }
+    templates
+        .iter()
+        .take(6)
+        .map(|template| {
+            format!(
+                "{} gates {}",
+                template.evidence_kind,
+                render_release_gate_list(&template.gate_ids)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn render_release_gate_attached_summary(gate: &InteractiveReleaseGateCard) -> String {
+    if gate.attached_evidence.is_empty() {
+        return gate.attached_evidence_count.to_string();
+    }
+    let evidence = gate
+        .attached_evidence
+        .iter()
+        .take(4)
+        .map(|evidence| {
+            format!(
+                "{}:{}:{}",
+                evidence.kind, evidence.promotion_impact, evidence.artifact_sha256
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{} ({})", gate.attached_evidence_count, evidence)
+}
+
+fn render_release_gate_command_summary(commands: &[String]) -> String {
+    if commands.is_empty() {
+        "none".to_string()
+    } else {
+        commands
+            .iter()
+            .take(6)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" -> ")
+    }
+}
+
+fn render_release_gate_list(items: &[String]) -> String {
+    if items.is_empty() {
+        "none".to_string()
+    } else {
+        items.join(", ")
+    }
 }
 
 pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {

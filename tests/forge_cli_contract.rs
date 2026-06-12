@@ -45216,6 +45216,8 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
             "release-gates",
             "--version",
             "0.5",
+            "--project-root",
+            project.to_str().unwrap(),
         ])
         .assert()
         .success()
@@ -45226,6 +45228,27 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("Release gates"));
     assert!(text.contains("replacement_grade_cli"));
     assert!(text.contains("attached evidence 1"));
+    assert!(text.contains("Gate details:"));
+    assert!(text.contains("replacement_grade_cli [groundwork] ready false"));
+    assert!(text.contains("evidence_state required_attached_evidence_missing"));
+    assert!(text.contains(
+        "missing external_brain_provider_execution, broader_project_coding_research_workflow, terminal_file_editing_ux"
+    ));
+    assert!(text.contains("plan missing_project_evidence_inputs ready false"));
+    assert!(text.contains("missing_config 1/1"));
+    assert!(text.contains("templates connected_brain_runtime_manifest"));
+    assert!(text.contains(".forge/connected-brain-runtimes.json"));
+    assert!(text.contains("external_brain_provider_execution gates provider_contract_validated"));
+    assert!(text.contains(
+        "commands forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli"
+    ));
+    assert!(text.contains(
+        "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind external_brain_provider_execution"
+    ));
+    assert!(text.contains("experimental_multimodal_runtime [groundwork] ready false"));
+    assert!(text.contains("templates multimodal_feature_flag, multimodal_runtime_manifest"));
+    assert!(text.contains(".forge/multimodal-runtimes.json"));
+    assert!(text.contains("production_runtime_benchmark gates runtime_benchmark_promotion_ready"));
 
     let home_output = forge()
         .args([
