@@ -922,6 +922,7 @@ pub struct InteractiveHarnessPanel {
     pub wrapper_plan: CliWrapperPlanReport,
     pub headroom_plan: HarnessHeadroomPlanReport,
     pub adoption_plan: HarnessAdoptionPlanReport,
+    pub forge_first_adoption_readiness: InteractiveHarnessForgeFirstAdoptionReadiness,
     pub headroom_stats: HeadroomStatsReport,
     pub headroom_operational_status: String,
     pub headroom_recommended_action: String,
@@ -931,6 +932,26 @@ pub struct InteractiveHarnessPanel {
     pub next_actions: Vec<String>,
     pub notes: Vec<String>,
     pub commands: InteractiveHarnessCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveHarnessForgeFirstAdoptionReadiness {
+    pub schema_version: String,
+    pub status: String,
+    pub executor: String,
+    pub forge_first_default_active: bool,
+    pub ready_to_use_as_default: bool,
+    pub token_headroom_ready: bool,
+    pub token_headroom_required: bool,
+    pub shim_ready: bool,
+    pub lineage_policy_ready: bool,
+    pub wrapper_strategy: String,
+    pub wrapper_interception_points: Vec<String>,
+    pub controlled_routes: Vec<String>,
+    pub readiness_gates: Vec<String>,
+    pub blocked_reasons: Vec<String>,
+    pub next_commands: Vec<String>,
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3271,6 +3292,14 @@ pub fn build_interactive_harness(
         &wrapper_plan,
         &session_lifecycle_plan,
     );
+    let forge_first_adoption_readiness = build_interactive_harness_forge_first_adoption_readiness(
+        &options.executor,
+        &mode,
+        &doctor,
+        &wrapper_plan,
+        &session_lifecycle_plan,
+        &commands,
+    );
     let mut next_actions = doctor.next_actions.clone();
     next_actions.push(format!(
         "headroom recommended action: {}",
@@ -3303,6 +3332,7 @@ pub fn build_interactive_harness(
         wrapper_plan,
         headroom_plan,
         adoption_plan,
+        forge_first_adoption_readiness,
         headroom_stats,
         headroom_operational_status,
         headroom_recommended_action,
@@ -3319,6 +3349,101 @@ pub fn build_interactive_harness(
         ],
         commands,
     })
+}
+
+fn build_interactive_harness_forge_first_adoption_readiness(
+    executor: &str,
+    mode: &HarnessModeReport,
+    doctor: &HarnessDoctorReport,
+    wrapper_plan: &CliWrapperPlanReport,
+    session_lifecycle_plan: &HarnessSessionLifecyclePlan,
+    commands: &InteractiveHarnessCommands,
+) -> InteractiveHarnessForgeFirstAdoptionReadiness {
+    let mut blocked_reasons = Vec::new();
+    if !mode.forge_first {
+        blocked_reasons.push("forge_first_default_not_active".to_string());
+    }
+    if !doctor.token_headroom_ready {
+        blocked_reasons.push("token_headroom_not_ready".to_string());
+    }
+    if mode.require_token_headroom_for_forge_first && !wrapper_plan.token_headroom_enabled {
+        blocked_reasons.push("token_headroom_required_but_disabled".to_string());
+    }
+    if !doctor.shim_ready {
+        blocked_reasons.push("forge_owned_path_shim_not_ready".to_string());
+    }
+    if !doctor.lineage_policy_ready {
+        blocked_reasons.push("lineage_policy_not_ready".to_string());
+    }
+    if mode.require_lineage_for_exec && !session_lifecycle_plan.lineage_complete {
+        blocked_reasons.push("required_session_lineage_missing".to_string());
+    }
+
+    let mut next_commands = Vec::new();
+    if !mode.forge_first {
+        next_commands.push(commands.adoption_plan.join(" "));
+        next_commands.push(commands.bootstrap_project_harness.join(" "));
+    }
+    if !doctor.shim_ready {
+        next_commands.push(commands.install_shims.join(" "));
+    }
+    if mode.require_lineage_for_exec && !session_lifecycle_plan.lineage_complete {
+        next_commands.push(commands.sessions.join(" "));
+    }
+    next_commands.push(commands.wrap_plan.join(" "));
+    next_commands.push(commands.headroom_plan.join(" "));
+
+    let ready_to_use_as_default = blocked_reasons.is_empty();
+    let status = if ready_to_use_as_default {
+        "forge_first_default_ready"
+    } else {
+        "forge_first_default_blocked"
+    };
+    let wrapper_interception_points = wrapper_plan
+        .headroom_runtime_plan
+        .interception_points
+        .iter()
+        .map(|point| format!("{}:{}", point.point_id, point.action))
+        .collect::<Vec<_>>();
+    let controlled_routes = wrapper_plan
+        .orchestration_contract
+        .routing_stages
+        .iter()
+        .map(|stage| format!("{}:{}->{}", stage.id, stage.owner, stage.target))
+        .collect::<Vec<_>>();
+    let mut readiness_gates = wrapper_plan.orchestration_contract.gates.clone();
+    readiness_gates.extend(
+        session_lifecycle_plan
+            .gates
+            .iter()
+            .map(|gate| format!("{}:{}", gate.gate_id, gate.status)),
+    );
+    next_commands.sort();
+    next_commands.dedup();
+
+    InteractiveHarnessForgeFirstAdoptionReadiness {
+        schema_version: "forge.interactive.harness_forge_first_adoption.v1".to_string(),
+        status: status.to_string(),
+        executor: executor.to_string(),
+        forge_first_default_active: mode.forge_first,
+        ready_to_use_as_default,
+        token_headroom_ready: doctor.token_headroom_ready,
+        token_headroom_required: mode.require_token_headroom_for_forge_first,
+        shim_ready: doctor.shim_ready,
+        lineage_policy_ready: doctor.lineage_policy_ready,
+        wrapper_strategy: wrapper_plan.wrapper_strategy.clone(),
+        wrapper_interception_points,
+        controlled_routes,
+        readiness_gates,
+        blocked_reasons,
+        next_commands,
+        notes: vec![
+            "This contract is read-only and does not install shims, modify PATH or launch child CLIs."
+                .to_string(),
+            "Treat Codex, OpenCode, Gemini and Claude as replaceable execution brains; Forge remains the workflow, context, memory, permission, headroom and session control plane."
+                .to_string(),
+        ],
+    }
 }
 
 pub fn build_interactive_sessions(
@@ -10102,7 +10227,7 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         panel.next_actions.join(" | ")
     };
     format!(
-        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; headroom-plan {headroom_plan}; adoption-plan {adoption_plan}; compatibility {compatibility_status}; headroom-stats {headroom_stats} ({headroom_blob_count} blobs); headroom action {headroom_action}; adoption action {adoption_action}; session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | headroom-plan | adoption-plan | bootstrap | headroom-stats | install-shims | exec\nWrapper plan: {wrapper_plan}\nHeadroom runtime: {headroom_runtime}\nOrchestration: {orchestration}\nCompatibility: {compatibility}\nLifecycle gates: {lifecycle_gates}\nHeadroom stats: {headroom_details}\nNext actions: {next_actions}\n",
+        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; headroom-plan {headroom_plan}; adoption-plan {adoption_plan}; forge-first readiness {forge_first_readiness}; compatibility {compatibility_status}; headroom-stats {headroom_stats} ({headroom_blob_count} blobs); headroom action {headroom_action}; adoption action {adoption_action}; session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | headroom-plan | adoption-plan | bootstrap | headroom-stats | install-shims | exec\nWrapper plan: {wrapper_plan}\nForge-first adoption: {forge_first_adoption}\nHeadroom runtime: {headroom_runtime}\nOrchestration: {orchestration}\nCompatibility: {compatibility}\nLifecycle gates: {lifecycle_gates}\nHeadroom stats: {headroom_details}\nNext actions: {next_actions}\n",
         status = panel.status,
         executor = panel.executor,
         mode = panel.mode.effective_mode,
@@ -10111,6 +10236,7 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         headroom = panel.headroom_preview.status,
         headroom_plan = panel.headroom_plan.status,
         adoption_plan = panel.adoption_plan.status,
+        forge_first_readiness = panel.forge_first_adoption_readiness.status,
         compatibility_status = panel.executor_compatibility.status,
         headroom_stats = panel.headroom_stats.status,
         headroom_blob_count = panel.headroom_stats.total_blobs,
@@ -10121,12 +10247,56 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         project_root = panel.project_root,
         shim_dir = panel.shim_dir,
         wrapper_plan = render_harness_wrapper_plan(&panel.wrapper_plan),
+        forge_first_adoption = render_harness_forge_first_adoption(
+            &panel.forge_first_adoption_readiness
+        ),
         headroom_runtime = render_harness_headroom_runtime(&panel.wrapper_plan),
         orchestration = render_harness_orchestration(&panel.wrapper_plan),
         compatibility = render_harness_executor_compatibility(&panel.executor_compatibility),
         lifecycle_gates = render_harness_lifecycle_gates(&panel.session_lifecycle_plan),
         headroom_details = render_harness_headroom_stats(&panel.headroom_stats),
         next_actions = next_actions,
+    )
+}
+
+fn render_harness_forge_first_adoption(
+    readiness: &InteractiveHarnessForgeFirstAdoptionReadiness,
+) -> String {
+    format!(
+        "{} ready {}; active {}; shim {}; headroom {}; lineage {}; blockers {}; next {}; routes {}",
+        readiness.schema_version,
+        readiness.ready_to_use_as_default,
+        readiness.forge_first_default_active,
+        readiness.shim_ready,
+        readiness.token_headroom_ready,
+        readiness.lineage_policy_ready,
+        if readiness.blocked_reasons.is_empty() {
+            "none".to_string()
+        } else {
+            readiness.blocked_reasons.join(", ")
+        },
+        if readiness.next_commands.is_empty() {
+            "none".to_string()
+        } else {
+            readiness
+                .next_commands
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" | ")
+        },
+        if readiness.controlled_routes.is_empty() {
+            "none".to_string()
+        } else {
+            readiness
+                .controlled_routes
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
     )
 }
 

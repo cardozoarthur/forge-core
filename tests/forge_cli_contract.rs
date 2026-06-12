@@ -45517,6 +45517,67 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
         "forge.harness.adoption_plan.v1"
     );
     assert_eq!(
+        json["forge_first_adoption_readiness"]["schema_version"],
+        "forge.interactive.harness_forge_first_adoption.v1"
+    );
+    assert_eq!(
+        json["forge_first_adoption_readiness"]["status"],
+        "forge_first_default_blocked"
+    );
+    assert_eq!(json["forge_first_adoption_readiness"]["executor"], "codex");
+    assert_eq!(
+        json["forge_first_adoption_readiness"]["forge_first_default_active"],
+        true
+    );
+    assert_eq!(
+        json["forge_first_adoption_readiness"]["ready_to_use_as_default"],
+        false
+    );
+    assert_eq!(
+        json["forge_first_adoption_readiness"]["token_headroom_ready"],
+        true
+    );
+    assert_eq!(
+        json["forge_first_adoption_readiness"]["token_headroom_required"],
+        true
+    );
+    assert_eq!(json["forge_first_adoption_readiness"]["shim_ready"], false);
+    assert_eq!(
+        json["forge_first_adoption_readiness"]["lineage_policy_ready"],
+        true
+    );
+    assert!(json["forge_first_adoption_readiness"]["blocked_reasons"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("forge_owned_path_shim_not_ready")));
+    assert!(
+        json["forge_first_adoption_readiness"]["wrapper_interception_points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|point| point
+                .as_str()
+                .unwrap()
+                .contains("tool_output:compress_then_return_retrieval_ref"))
+    );
+    assert!(json["forge_first_adoption_readiness"]["controlled_routes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|route| route
+            .as_str()
+            .unwrap()
+            .contains("context_router:forge->bounded task packet")));
+    assert!(json["forge_first_adoption_readiness"]["readiness_gates"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("prompt_packet_required")));
+    assert!(json["forge_first_adoption_readiness"]["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command.as_str().unwrap().contains("harness install-shims")));
+    assert_eq!(
         json["adoption_plan"]["commands"]["bootstrap_project_harness"]
             .as_array()
             .unwrap(),
@@ -45731,6 +45792,12 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("bootstrap"));
     assert!(text.contains("headroom-plan"));
     assert!(text.contains("headroom-stats"));
+    assert!(text.contains("forge-first readiness forge_first_default_blocked"));
+    assert!(
+        text.contains("Forge-first adoption: forge.interactive.harness_forge_first_adoption.v1")
+    );
+    assert!(text.contains("blockers forge_owned_path_shim_not_ready"));
+    assert!(text.contains("routes prompt_packet:forge->child brain prompt"));
     assert!(text.contains(json["headroom_recommended_action"].as_str().unwrap()));
     assert!(text.contains("session lifecycle"));
     assert!(text.contains("Wrapper plan: forge_first true"));
@@ -45786,6 +45853,14 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert_eq!(
         home["dashboard"]["harness_panel"]["adoption_plan"]["schema_version"],
         "forge.harness.adoption_plan.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["harness_panel"]["forge_first_adoption_readiness"]["schema_version"],
+        "forge.interactive.harness_forge_first_adoption.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["harness_panel"]["forge_first_adoption_readiness"]["status"],
+        "forge_first_default_blocked"
     );
     assert_eq!(
         home["dashboard"]["harness_panel"]["headroom_stats"]["schema_version"],
@@ -45874,6 +45949,14 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert_eq!(
         mcp_json["result"]["adoption_plan"]["schema_version"],
         "forge.harness.adoption_plan.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["forge_first_adoption_readiness"]["schema_version"],
+        "forge.interactive.harness_forge_first_adoption.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["forge_first_adoption_readiness"]["status"],
+        "forge_first_default_blocked"
     );
     assert_eq!(
         mcp_json["result"]["headroom_stats"]["schema_version"],
