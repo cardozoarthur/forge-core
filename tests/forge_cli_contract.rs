@@ -3805,7 +3805,124 @@ fn milestone_attach_evidence_persists_receipts_without_auto_promotion() {
     assert!(manifest_json["promotion_decision"]["blocked_by"]
         .as_array()
         .unwrap()
+        .contains(&serde_json::json!("replacement_grade_cli")));
+    assert!(!manifest_json["promotion_decision"]["blocked_by"]
+        .as_array()
+        .unwrap()
         .contains(&serde_json::json!("experimental_multimodal_runtime")));
+}
+
+#[test]
+fn milestone_manifest_promotes_when_all_required_attached_evidence_is_present() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let receipts = [
+        (
+            "replacement_grade_cli",
+            "external_brain_provider_execution",
+            r#"{"provider":"connected-brain","real_provider_execution":true,"passed":true}"#,
+        ),
+        (
+            "replacement_grade_cli",
+            "broader_project_coding_research_workflow",
+            r#"{"workflow":"real-project-coding-research","passed":true}"#,
+        ),
+        (
+            "replacement_grade_cli",
+            "terminal_file_editing_ux",
+            r#"{"patch_lifecycle":"plan-review-diff-apply-revert-restore","passed":true}"#,
+        ),
+        (
+            "experimental_multimodal_runtime",
+            "production_runtime_benchmark",
+            r#"{"runtime":"connected-production","model_execution":true,"passed":true}"#,
+        ),
+    ];
+
+    for (capability, kind, payload) in receipts {
+        let receipt = temp.path().join(format!("{capability}-{kind}.json"));
+        fs::write(&receipt, payload).unwrap();
+        forge()
+            .arg("--store")
+            .arg(store.to_str().unwrap())
+            .args([
+                "milestone",
+                "attach-evidence",
+                "--version",
+                "0.5",
+                "--capability",
+                capability,
+                "--kind",
+                kind,
+                "--summary",
+                "Operator-approved required milestone receipt.",
+                "--artifact",
+            ])
+            .arg(receipt.to_str().unwrap())
+            .args([
+                "--approved-by",
+                "arthur",
+                "--origin",
+                "codex",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    let manifest_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "manifest",
+            "--version",
+            "0.5",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let manifest_json: Value = serde_json::from_slice(&manifest_output).unwrap();
+    assert_eq!(manifest_json["promotion_decision"]["decision"], "promote");
+    assert_eq!(manifest_json["promotion_decision"]["promotable"], true);
+    assert!(manifest_json["promotion_decision"]["blocked_by"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(manifest_json["completed_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability["id"] == "replacement_grade_cli"
+            && capability["promotion_ready"] == true));
+    assert!(manifest_json["completed_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |capability| capability["id"] == "experimental_multimodal_runtime"
+                && capability["promotion_ready"] == true
+        ));
+    assert!(manifest_json["missing_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|capability| capability["id"] != "replacement_grade_cli"
+            && capability["id"] != "experimental_multimodal_runtime"));
+    assert!(manifest_json["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |evidence| evidence["capability_id"] == "replacement_grade_cli"
+                && evidence["validation_state"] == "attached_evidence_ready"
+        ));
 }
 
 #[test]
@@ -41689,7 +41806,6 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
     let text = String::from_utf8(text_output).unwrap();
     assert!(text.contains("Release gates"));
     assert!(text.contains("replacement_grade_cli"));
-    assert!(text.contains("experimental_multimodal_runtime"));
     assert!(text.contains("attached evidence 1"));
 
     let home_output = forge()
@@ -41764,6 +41880,10 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
     assert_eq!(mcp_json["result"]["promotion_ready"], false);
     assert_eq!(mcp_json["result"]["attached_evidence_count"], 1);
     assert!(mcp_json["result"]["blocked_by"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("replacement_grade_cli")));
+    assert!(!mcp_json["result"]["blocked_by"]
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("experimental_multimodal_runtime")));

@@ -1843,11 +1843,16 @@ pub fn build_interactive_release_gates(
             .or_default()
             .push(evidence.clone());
     }
+    let promotion_ready_capability_ids = manifest
+        .completed_capabilities
+        .iter()
+        .map(|capability| capability.id.clone())
+        .collect::<BTreeSet<_>>();
     let gate_cards = status
         .capabilities
         .iter()
         .map(|capability| {
-            let promotion_ready = matches!(capability.status.as_str(), "implemented" | "validated");
+            let promotion_ready = promotion_ready_capability_ids.contains(&capability.id);
             let attached_evidence = attached_evidence_by_capability
                 .get(&capability.id)
                 .cloned()
@@ -1907,16 +1912,16 @@ pub fn build_interactive_release_gates(
         .map(|gap| format!("{}: {}", gap.capability_id, gap.next_action))
         .collect::<Vec<_>>();
     if next_actions.is_empty() {
-        next_actions.push(status.promotion_decision.next_action.clone());
+        next_actions.push(manifest.promotion_decision.next_action.clone());
     }
 
     Ok(InteractiveReleaseGatesPanel {
         schema_version: INTERACTIVE_RELEASE_GATES_SCHEMA_VERSION.to_string(),
         status: "interactive_release_gates_ready".to_string(),
         milestone: status.milestone,
-        promotion_ready: status.promotion_decision.promotable,
-        promotion_decision: status.promotion_decision.clone(),
-        blocked_by: status.promotion_decision.blocked_by.clone(),
+        promotion_ready: manifest.promotion_decision.promotable,
+        promotion_decision: manifest.promotion_decision.clone(),
+        blocked_by: manifest.promotion_decision.blocked_by.clone(),
         summary: status.summary,
         gate_count: gate_cards.len(),
         blocked_gate_count,

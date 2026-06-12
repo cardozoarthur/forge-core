@@ -390,6 +390,7 @@ pub fn build_milestone_manifest_with_store(
     } else {
         Vec::new()
     };
+    let attached_evidence_kind_map = attached_evidence_kind_map(&attached_evidence);
     let requirements = status
         .capabilities
         .iter()
@@ -403,14 +404,14 @@ pub fn build_milestone_manifest_with_store(
     let completed_capabilities = status
         .capabilities
         .iter()
-        .filter(|capability| is_promotion_ready_status(&capability.status))
-        .map(manifest_capability)
+        .filter(|capability| capability_promotion_ready(capability, &attached_evidence_kind_map))
+        .map(|capability| manifest_capability(capability, true))
         .collect::<Vec<_>>();
     let missing_capabilities = status
         .capabilities
         .iter()
-        .filter(|capability| !is_promotion_ready_status(&capability.status))
-        .map(manifest_capability)
+        .filter(|capability| !capability_promotion_ready(capability, &attached_evidence_kind_map))
+        .map(|capability| manifest_capability(capability, false))
         .collect::<Vec<_>>();
     let validation_evidence = status
         .capabilities
@@ -420,12 +421,7 @@ pub fn build_milestone_manifest_with_store(
             capability_id: capability.id.clone(),
             status: capability.status.clone(),
             summary: capability.evidence.clone(),
-            validation_state: if is_promotion_ready_status(&capability.status) {
-                "promotion_ready"
-            } else {
-                "groundwork_only"
-            }
-            .to_string(),
+            validation_state: manifest_validation_state(capability, &attached_evidence_kind_map),
         })
         .collect::<Vec<_>>();
     let demos = status
@@ -442,7 +438,7 @@ pub fn build_milestone_manifest_with_store(
     let known_gaps = status
         .capabilities
         .iter()
-        .filter(|capability| !is_promotion_ready_status(&capability.status))
+        .filter(|capability| !capability_promotion_ready(capability, &attached_evidence_kind_map))
         .map(|capability| MilestoneManifestGap {
             capability_id: capability.id.clone(),
             status: capability.status.clone(),
@@ -450,6 +446,32 @@ pub fn build_milestone_manifest_with_store(
             next_action: next_action_for_gap(&capability.id).to_string(),
         })
         .collect::<Vec<_>>();
+    let blocked_by = status
+        .capabilities
+        .iter()
+        .filter(|capability| !capability_promotion_ready(capability, &attached_evidence_kind_map))
+        .map(|capability| capability.id.clone())
+        .collect::<Vec<_>>();
+    let promotable = blocked_by.is_empty();
+    let promotion_decision = MilestonePromotionDecision {
+        decision: if promotable { "promote" } else { "fail" }.to_string(),
+        promotable,
+        blocked_by,
+        reason: if promotable {
+            "All required Forge 0.5 capabilities have implementation, validation or operator-approved attached evidence."
+                .to_string()
+        } else {
+            "Forge 0.5 promotion is blocked while required capabilities remain planned, blocked, groundwork-only or missing required attached evidence."
+                .to_string()
+        },
+        next_action: if promotable {
+            "Run an explicit human-controlled release promotion, version-boundary update and artifact bundle before changing the package line to 0.5."
+                .to_string()
+        } else {
+            "Collect and attach the missing required milestone evidence kinds before reconsidering 0.5 promotion."
+                .to_string()
+        },
+    };
 
     Ok(MilestoneManifestReport {
         schema_version: MILESTONE_MANIFEST_SCHEMA_VERSION.to_string(),
@@ -462,7 +484,7 @@ pub fn build_milestone_manifest_with_store(
         attached_evidence,
         demos,
         known_gaps,
-        promotion_decision: status.promotion_decision,
+        promotion_decision,
     })
 }
 
@@ -3853,14 +3875,69 @@ fn forge_05_capabilities() -> Vec<MilestoneCapability> {
     ]
 }
 
-fn manifest_capability(capability: &MilestoneCapability) -> MilestoneManifestCapability {
+fn manifest_capability(
+    capability: &MilestoneCapability,
+    promotion_ready: bool,
+) -> MilestoneManifestCapability {
     MilestoneManifestCapability {
         id: capability.id.clone(),
         title: capability.title.clone(),
         status: capability.status.clone(),
-        promotion_ready: is_promotion_ready_status(&capability.status),
+        promotion_ready,
         evidence: capability.evidence.clone(),
         gap_before_promotion: capability.gap_before_promotion.clone(),
+    }
+}
+
+fn attached_evidence_kind_map(
+    attached_evidence: &[MilestoneAttachedEvidence],
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut by_capability = BTreeMap::new();
+    for evidence in attached_evidence {
+        by_capability
+            .entry(evidence.capability_id.clone())
+            .or_insert_with(BTreeSet::new)
+            .insert(evidence.kind.clone());
+    }
+    by_capability
+}
+
+fn capability_promotion_ready(
+    capability: &MilestoneCapability,
+    attached_evidence_kind_map: &BTreeMap<String, BTreeSet<String>>,
+) -> bool {
+    is_promotion_ready_status(&capability.status)
+        || capability_required_evidence_attached(&capability.id, attached_evidence_kind_map)
+}
+
+fn capability_required_evidence_attached(
+    capability_id: &str,
+    attached_evidence_kind_map: &BTreeMap<String, BTreeSet<String>>,
+) -> bool {
+    let required_kinds = milestone_required_attached_evidence_kinds(capability_id);
+    if required_kinds.is_empty() {
+        return false;
+    }
+    let Some(attached_kinds) = attached_evidence_kind_map.get(capability_id) else {
+        return false;
+    };
+    required_kinds
+        .iter()
+        .all(|required| attached_kinds.contains(required))
+}
+
+fn manifest_validation_state(
+    capability: &MilestoneCapability,
+    attached_evidence_kind_map: &BTreeMap<String, BTreeSet<String>>,
+) -> String {
+    if is_promotion_ready_status(&capability.status) {
+        "promotion_ready".to_string()
+    } else if capability_required_evidence_attached(&capability.id, attached_evidence_kind_map) {
+        "attached_evidence_ready".to_string()
+    } else if !milestone_required_attached_evidence_kinds(&capability.id).is_empty() {
+        "attached_evidence_missing".to_string()
+    } else {
+        "groundwork_only".to_string()
     }
 }
 
