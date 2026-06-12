@@ -52554,6 +52554,39 @@ fn interactive_multimodal_runtime_panel_surfaces_addon_guard_and_evidence_path()
     assert_eq!(panel["model_execution_performed"], false);
     assert_eq!(panel["device_access_performed"], false);
     assert!(panel["readiness_percent"].as_u64().unwrap() >= 70);
+    assert_eq!(
+        panel["required_attached_evidence_kinds"],
+        serde_json::json!(["production_runtime_benchmark"])
+    );
+    assert_eq!(panel["attached_evidence_kinds"], serde_json::json!([]));
+    assert_eq!(
+        panel["missing_attached_evidence_kinds"],
+        serde_json::json!(["production_runtime_benchmark"])
+    );
+    assert_eq!(
+        panel["evidence_plan_status"],
+        "missing_project_evidence_inputs"
+    );
+    assert_eq!(panel["ready_to_collect_evidence"], false);
+    assert_eq!(panel["missing_config_check_count"], 2);
+    assert!(panel["manifest_template_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("multimodal_feature_flag")));
+    assert!(panel["manifest_template_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("multimodal_runtime_manifest")));
+    assert!(panel["config_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["id"] == "multimodal_feature_flag" && check["status"] == "missing"));
+    assert!(panel["config_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["id"] == "multimodal_runtime_manifest" && check["status"] == "missing"));
     assert!(panel["blockers"]
         .as_array()
         .unwrap()
@@ -52561,7 +52594,7 @@ fn interactive_multimodal_runtime_panel_surfaces_addon_guard_and_evidence_path()
         .any(|blocker| blocker
             .as_str()
             .unwrap()
-            .contains("production multimodal runtime benchmark evidence")));
+            .contains("production_runtime_benchmark")));
     assert!(panel["commands"]["runtime_benchmark"]
         .as_array()
         .unwrap()
@@ -52620,6 +52653,24 @@ fn interactive_multimodal_runtime_panel_surfaces_addon_guard_and_evidence_path()
         .find(|surface| surface["surface_id"] == "production_evidence")
         .unwrap();
     assert_eq!(production["ready"], false);
+    assert!(production["evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "missing_evidence:production_runtime_benchmark"
+        )));
+    assert!(production["evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "manifest_template:multimodal_feature_flag"
+        )));
+    assert!(production["evidence"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "manifest_template:multimodal_runtime_manifest"
+        )));
     assert!(production["blockers"]
         .as_array()
         .unwrap()
@@ -52627,7 +52678,7 @@ fn interactive_multimodal_runtime_panel_surfaces_addon_guard_and_evidence_path()
         .any(|blocker| blocker
             .as_str()
             .unwrap()
-            .contains(".forge/multimodal-runtimes.json")));
+            .contains("multimodal_runtime_manifest")));
 
     let home_output = forge()
         .args([

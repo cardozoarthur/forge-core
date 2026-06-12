@@ -51,9 +51,10 @@ use crate::milestone::{
     build_milestone_evidence_plan, build_milestone_manifest_with_store, build_milestone_status,
     collect_ready_milestone_evidence, milestone_required_attached_evidence_kinds,
     MilestoneAttachedEvidence, MilestoneCollectReadyEvidenceOptions,
-    MilestoneCollectReadyEvidenceReport, MilestoneEvidencePlanManifestTemplate,
-    MilestoneEvidencePlanOptions, MilestoneEvidenceProviderCandidate, MilestonePromotionDecision,
-    MilestonePromotionGateTemplate, MilestoneStatusSummary,
+    MilestoneCollectReadyEvidenceReport, MilestoneEvidencePlanConfigCheck,
+    MilestoneEvidencePlanManifestTemplate, MilestoneEvidencePlanOptions,
+    MilestoneEvidenceProviderCandidate, MilestonePromotionDecision, MilestonePromotionGateTemplate,
+    MilestoneStatusSummary,
 };
 use crate::multimodal::{
     build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
@@ -784,6 +785,14 @@ pub struct InteractiveMultimodalRuntimePanel {
     pub feature_flag_source: String,
     pub feature_flag_status: String,
     pub promotion_ready: bool,
+    pub required_attached_evidence_kinds: Vec<String>,
+    pub attached_evidence_kinds: Vec<String>,
+    pub missing_attached_evidence_kinds: Vec<String>,
+    pub evidence_plan_status: String,
+    pub ready_to_collect_evidence: bool,
+    pub missing_config_check_count: usize,
+    pub config_checks: Vec<MilestoneEvidencePlanConfigCheck>,
+    pub manifest_template_ids: Vec<String>,
     pub installs_performed: bool,
     pub model_execution_performed: bool,
     pub device_access_performed: bool,
@@ -919,6 +928,7 @@ pub struct InteractiveReleaseGateEvidencePlan {
     pub project_root: Option<String>,
     pub config_check_count: usize,
     pub missing_config_check_count: usize,
+    pub config_checks: Vec<MilestoneEvidencePlanConfigCheck>,
     pub manifest_template_count: usize,
     pub manifest_template_ids: Vec<String>,
     pub manifest_template_paths: Vec<String>,
@@ -5893,6 +5903,7 @@ fn interactive_release_gate_evidence_plan(
         project_root: plan.project_root,
         config_check_count: plan.config_checks.len(),
         missing_config_check_count,
+        config_checks: plan.config_checks,
         manifest_template_count: plan.manifest_templates.len(),
         manifest_template_ids,
         manifest_template_paths,
@@ -9733,20 +9744,41 @@ pub fn build_interactive_multimodal_runtime(
     let promotion_ready = multimodal_gate
         .map(|gate| gate.promotion_ready)
         .unwrap_or(false);
-    let mut blockers = multimodal_gate
+    let required_attached_evidence_kinds = multimodal_gate
+        .map(|gate| gate.required_attached_evidence_kinds.clone())
+        .unwrap_or_default();
+    let attached_evidence_kinds = multimodal_gate
+        .map(|gate| gate.attached_evidence_kinds.clone())
+        .unwrap_or_default();
+    let missing_attached_evidence_kinds = multimodal_gate
         .map(|gate| gate.missing_attached_evidence_kinds.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|kind| format!("missing attached evidence kind: {kind}"))
-        .collect::<Vec<_>>();
-    blockers.push(
-        "production multimodal runtime benchmark evidence must be attached before promotion"
-            .to_string(),
+        .unwrap_or_default();
+    let evidence_plan_status = multimodal_gate
+        .map(|gate| gate.evidence_plan.status.clone())
+        .unwrap_or_else(|| "missing".to_string());
+    let ready_to_collect_evidence = multimodal_gate
+        .map(|gate| gate.evidence_plan.ready_to_collect_evidence)
+        .unwrap_or(false);
+    let missing_config_check_count = multimodal_gate
+        .map(|gate| gate.evidence_plan.missing_config_check_count)
+        .unwrap_or_default();
+    let config_checks = multimodal_gate
+        .map(|gate| gate.evidence_plan.config_checks.clone())
+        .unwrap_or_default();
+    let manifest_template_ids = multimodal_gate
+        .map(|gate| gate.evidence_plan.manifest_template_ids.clone())
+        .unwrap_or_default();
+    let blockers = multimodal_runtime_evidence_blockers(
+        multimodal_gate.is_some(),
+        promotion_ready,
+        &missing_attached_evidence_kinds,
+        &config_checks,
     );
-    blockers.push(format!(
-        "provide approved connected runtime metadata in {}/.forge/multimodal-runtimes.json",
-        project_root_display
-    ));
+    let next_actions = multimodal_runtime_next_actions(
+        promotion_ready,
+        &missing_attached_evidence_kinds,
+        &config_checks,
+    );
 
     let addon_ready =
         has_addon && has_capability && has_permission && has_view && has_runtime_contract;
@@ -9898,26 +9930,28 @@ pub fn build_interactive_multimodal_runtime(
                 "forge interactive command-palette --query multimodal --output json",
             ],
         ),
-        multimodal_runtime_surface(
+        multimodal_runtime_surface_owned(
             "production_evidence",
             "Production runtime evidence",
             multimodal_gate
                 .map(|gate| gate.status.as_str())
                 .unwrap_or("missing"),
             promotion_ready,
-            &["release_gates_panel", "milestone_evidence_plan"],
-            &[
-                "production_runtime_benchmark_required",
-                "connected_runtime_manifest_template_available",
-                "promotion_requires_attached_operator_evidence",
+            vec![
+                "release_gates_panel".to_string(),
+                "milestone_evidence_plan".to_string(),
             ],
-            &[
-                "missing .forge/multimodal-runtimes.json connected runtime evidence",
-                "production multimodal runtime benchmark evidence is not attached",
-            ],
-            &[
-                "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --output json",
-                "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --approved-by <operator> --output json",
+            multimodal_runtime_milestone_evidence_items(
+                &required_attached_evidence_kinds,
+                &attached_evidence_kinds,
+                &missing_attached_evidence_kinds,
+                &evidence_plan_status,
+                &manifest_template_ids,
+            ),
+            blockers.clone(),
+            vec![
+                "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --output json".to_string(),
+                "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --approved-by <operator> --output json".to_string(),
             ],
         ),
     ];
@@ -9958,6 +9992,14 @@ pub fn build_interactive_multimodal_runtime(
         feature_flag_source: feature_flag.source.clone(),
         feature_flag_status: feature_flag.project_config_status.clone(),
         promotion_ready,
+        required_attached_evidence_kinds,
+        attached_evidence_kinds,
+        missing_attached_evidence_kinds,
+        evidence_plan_status,
+        ready_to_collect_evidence,
+        missing_config_check_count,
+        config_checks,
+        manifest_template_ids,
         installs_performed: status_report.installs_performed
             || install_plan.installs_performed
             || readiness.installs_performed
@@ -9979,13 +10021,7 @@ pub fn build_interactive_multimodal_runtime(
         readiness_percent,
         surfaces,
         blockers,
-        next_actions: vec![
-            "Create or inspect project .forge/multimodal.json before enabling runtime work."
-                .to_string(),
-            "Prepare .forge/multimodal-runtimes.json with approved connected runtime metadata."
-                .to_string(),
-            "Collect production_runtime_benchmark evidence only after opt-in, guard approval and operator approval.".to_string(),
-        ],
+        next_actions,
         commands: multimodal_runtime_commands(project_root),
         notes: vec![
             "This panel is read-only; it does not install models, execute models, access devices, access the network or mutate workflows.".to_string(),
@@ -10034,19 +10070,192 @@ fn multimodal_runtime_surface(
     blockers: &[&str],
     commands: &[&str],
 ) -> InteractiveMultimodalRuntimeSurface {
+    multimodal_runtime_surface_owned(
+        surface_id,
+        title,
+        status,
+        ready,
+        source_panels
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        evidence.iter().map(|value| (*value).to_string()).collect(),
+        blockers.iter().map(|value| (*value).to_string()).collect(),
+        commands.iter().map(|value| (*value).to_string()).collect(),
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owned readiness surface metadata mirrors the static helper while allowing dynamic milestone evidence"
+)]
+fn multimodal_runtime_surface_owned(
+    surface_id: &str,
+    title: &str,
+    status: &str,
+    ready: bool,
+    source_panels: Vec<String>,
+    evidence: Vec<String>,
+    blockers: Vec<String>,
+    commands: Vec<String>,
+) -> InteractiveMultimodalRuntimeSurface {
     InteractiveMultimodalRuntimeSurface {
         surface_id: surface_id.to_string(),
         title: title.to_string(),
         status: status.to_string(),
         ready,
-        source_panels: source_panels
-            .iter()
-            .map(|value| (*value).to_string())
-            .collect(),
-        evidence: evidence.iter().map(|value| (*value).to_string()).collect(),
-        blockers: blockers.iter().map(|value| (*value).to_string()).collect(),
-        commands: commands.iter().map(|value| (*value).to_string()).collect(),
+        source_panels,
+        evidence,
+        blockers,
+        commands,
     }
+}
+
+fn multimodal_runtime_milestone_evidence_items(
+    required: &[String],
+    attached: &[String],
+    missing: &[String],
+    evidence_plan_status: &str,
+    manifest_template_ids: &[String],
+) -> Vec<String> {
+    let mut evidence = vec![
+        "production_runtime_benchmark_required".to_string(),
+        "connected_runtime_manifest_template_available".to_string(),
+        "promotion_requires_attached_operator_evidence".to_string(),
+        format!("evidence_plan_status:{evidence_plan_status}"),
+    ];
+    evidence.extend(
+        required
+            .iter()
+            .map(|kind| format!("required_evidence:{kind}")),
+    );
+    evidence.extend(
+        attached
+            .iter()
+            .map(|kind| format!("attached_evidence:{kind}")),
+    );
+    evidence.extend(
+        missing
+            .iter()
+            .map(|kind| format!("missing_evidence:{kind}")),
+    );
+    evidence.extend(
+        manifest_template_ids
+            .iter()
+            .map(|template| format!("manifest_template:{template}")),
+    );
+    evidence
+}
+
+fn multimodal_runtime_evidence_blockers(
+    gate_present: bool,
+    promotion_ready: bool,
+    missing: &[String],
+    config_checks: &[MilestoneEvidencePlanConfigCheck],
+) -> Vec<String> {
+    if promotion_ready {
+        return Vec::new();
+    }
+    if !gate_present {
+        return vec![
+            "experimental_multimodal_runtime release gate is missing from the 0.5 manifest"
+                .to_string(),
+        ];
+    }
+    let mut blockers = missing
+        .iter()
+        .map(|kind| multimodal_runtime_missing_evidence_blocker(kind))
+        .collect::<Vec<_>>();
+    blockers.extend(
+        config_checks
+            .iter()
+            .filter(|check| matches!(check.status.as_str(), "missing" | "blocked" | "invalid"))
+            .map(|check| {
+                let path = check
+                    .path
+                    .as_deref()
+                    .map(|path| format!(" at {path}"))
+                    .unwrap_or_default();
+                format!(
+                    "config check {} is {}{}: {}",
+                    check.id, check.status, path, check.summary
+                )
+            }),
+    );
+    if blockers.is_empty() {
+        blockers.push(
+            "experimental_multimodal_runtime release gate is not promotable yet; inspect release gates for the current non-evidence blocker"
+                .to_string(),
+        );
+    }
+    blockers
+}
+
+fn multimodal_runtime_missing_evidence_blocker(kind: &str) -> String {
+    match kind {
+        "production_runtime_benchmark" => {
+            "missing attached evidence kind: production_runtime_benchmark; collect an operator-approved connected runtime benchmark with model guard approval and blocked network/device access"
+                .to_string()
+        }
+        other => format!("missing attached evidence kind: {other}"),
+    }
+}
+
+fn multimodal_runtime_next_actions(
+    promotion_ready: bool,
+    missing: &[String],
+    config_checks: &[MilestoneEvidencePlanConfigCheck],
+) -> Vec<String> {
+    if promotion_ready {
+        return vec![
+            "Inspect forge milestone manifest --version 0.5 before claiming multimodal runtime promotion."
+                .to_string(),
+        ];
+    }
+    let mut actions = Vec::new();
+    if config_checks.iter().any(|check| {
+        check.id == "multimodal_feature_flag"
+            && matches!(check.status.as_str(), "missing" | "blocked" | "invalid")
+    }) {
+        actions.push(
+            "Enable the project-scoped .forge/multimodal.json feature flag only after operator approval."
+                .to_string(),
+        );
+    }
+    if config_checks.iter().any(|check| {
+        check.id == "multimodal_runtime_manifest"
+            && matches!(check.status.as_str(), "missing" | "blocked" | "invalid")
+    }) {
+        actions.push(
+            "Prepare .forge/multimodal-runtimes.json with approved connected runtime metadata."
+                .to_string(),
+        );
+    }
+    if config_checks.iter().any(|check| {
+        check.id == "multimodal_connected_runtime"
+            && matches!(check.status.as_str(), "missing" | "blocked" | "invalid")
+    }) {
+        actions.push(
+            "Replace connected runtime placeholders with an approved probe command, model manifest and production evidence metadata."
+                .to_string(),
+        );
+    }
+    if missing
+        .iter()
+        .any(|kind| kind == "production_runtime_benchmark")
+    {
+        actions.push(
+            "Collect production_runtime_benchmark evidence only after opt-in, guard approval and operator approval."
+                .to_string(),
+        );
+    }
+    if actions.is_empty() {
+        actions.push(
+            "Inspect forge interactive release-gates --version 0.5 --output json for the remaining multimodal blocker."
+                .to_string(),
+        );
+    }
+    actions
 }
 
 fn multimodal_runtime_commands(project_root: &Path) -> InteractiveMultimodalRuntimeCommands {
