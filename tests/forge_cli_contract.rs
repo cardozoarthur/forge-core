@@ -5701,6 +5701,204 @@ fn milestone_prepare_evidence_inputs_writes_secret_free_manifest_templates_with_
 }
 
 #[test]
+fn milestone_connected_brain_template_placeholders_do_not_count_as_ready_evidence_inputs() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("placeholder-project");
+
+    forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "prepare-evidence-inputs",
+            "--version",
+            "0.5",
+            "--capability",
+            "replacement_grade_cli",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args([
+            "--connected-brain",
+            "project-provider",
+            "--apply",
+            "--approved-by",
+            "arthur",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let plan_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "evidence-plan",
+            "--version",
+            "0.5",
+            "--capability",
+            "replacement_grade_cli",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args(["--connected-brain", "project-provider", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan_json: Value = serde_json::from_slice(&plan_output).unwrap();
+    assert_eq!(plan_json["status"], "blocked_project_evidence_inputs");
+    assert_eq!(plan_json["ready_to_collect_evidence"], false);
+    let provider_check = plan_json["config_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == "connected_brain_provider")
+        .unwrap();
+    assert_eq!(provider_check["status"], "blocked");
+    assert!(provider_check["summary"]
+        .as_str()
+        .unwrap()
+        .contains("replace placeholders"));
+
+    forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "collect-evidence",
+            "--version",
+            "0.5",
+            "--capability",
+            "replacement_grade_cli",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args([
+            "--connected-brain",
+            "project-provider",
+            "--approved-by",
+            "arthur",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("blocked_project_evidence_inputs"));
+}
+
+#[test]
+fn milestone_multimodal_template_placeholders_do_not_count_as_production_runtime_ready() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("multimodal-placeholder-project");
+
+    forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "prepare-evidence-inputs",
+            "--version",
+            "0.5",
+            "--capability",
+            "experimental_multimodal_runtime",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args([
+            "--connected-runtime",
+            "production-vision-runtime",
+            "--apply",
+            "--approved-by",
+            "arthur",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let plan_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "evidence-plan",
+            "--version",
+            "0.5",
+            "--capability",
+            "experimental_multimodal_runtime",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args([
+            "--connected-runtime",
+            "production-vision-runtime",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan_json: Value = serde_json::from_slice(&plan_output).unwrap();
+    assert_eq!(plan_json["status"], "blocked_project_evidence_inputs");
+    assert_eq!(plan_json["ready_to_collect_evidence"], false);
+    assert!(plan_json["config_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["id"] == "multimodal_feature_flag"
+            && check["status"] == "blocked"
+            && check["summary"]
+                .as_str()
+                .unwrap()
+                .contains("non-placeholder approved_by")));
+    assert!(
+        plan_json["config_checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["id"] == "multimodal_connected_runtime"
+                && check["status"] == "blocked")
+    );
+
+    forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "multimodal",
+            "runtime-benchmark",
+            "--capability",
+            "image_understanding",
+            "--fixture",
+            "static_image_labels",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args([
+            "--connected-runtime",
+            "production-vision-runtime",
+            "--approved-by",
+            "arthur",
+            "--confirm-runtime-execution",
+            "--allow-model",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("placeholder"));
+}
+
+#[test]
 fn milestone_collect_evidence_runs_ready_sources_and_attaches_receipts() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -6428,6 +6626,7 @@ fn multimodal_status_is_experimental_disabled_by_default() {
     let store = temp.path().join("forge.sqlite");
 
     let output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -6668,6 +6867,7 @@ fn multimodal_runtime_guard_requires_feature_flag_and_explicit_allow() {
     let store = temp.path().join("forge.sqlite");
 
     let denied = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -6693,6 +6893,7 @@ fn multimodal_runtime_guard_requires_feature_flag_and_explicit_allow() {
     assert_eq!(denied_json["audit_required"], true);
 
     let allowed = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -6730,6 +6931,7 @@ fn mcp_can_call_multimodal_status_without_enabling_runtime_access() {
     let output = forge()
         .arg("--store")
         .arg(store.to_str().unwrap())
+        .current_dir(temp.path())
         .args(["mcp", "call", "forge.multimodal.status"])
         .args(["--output", "json"])
         .assert()
@@ -6754,6 +6956,7 @@ fn multimodal_benchmark_template_is_plan_only_and_does_not_touch_devices() {
     let store = temp.path().join("forge.sqlite");
 
     let output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -6802,6 +7005,7 @@ fn multimodal_readiness_inspects_candidates_without_executing_models_or_devices(
     let store = temp.path().join("forge.sqlite");
 
     let output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -6869,6 +7073,7 @@ fn multimodal_readiness_inspects_candidates_without_executing_models_or_devices(
     let mcp_output = forge()
         .arg("--store")
         .arg(store.to_str().unwrap())
+        .current_dir(temp.path())
         .args(["mcp", "call", "forge.multimodal.readiness"])
         .arg("--input")
         .arg(r#"{"capability_id":"image_understanding"}"#)
@@ -6895,6 +7100,7 @@ fn multimodal_fixture_benchmark_result_is_approval_gated_and_device_free() {
     let store = temp.path().join("forge.sqlite");
 
     forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -6913,6 +7119,7 @@ fn multimodal_fixture_benchmark_result_is_approval_gated_and_device_free() {
         .stderr(predicates::str::contains("--confirm-fixture-only"));
 
     let output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -6982,6 +7189,7 @@ fn multimodal_fixture_benchmark_result_is_approval_gated_and_device_free() {
     let mcp_output = forge()
         .arg("--store")
         .arg(store.to_str().unwrap())
+        .current_dir(temp.path())
         .args(["mcp", "call", "forge.multimodal.benchmark_result"])
         .arg("--input")
         .arg(
@@ -7411,6 +7619,7 @@ fn multimodal_demo_plan_covers_safe_local_image_audio_and_blender_tracks() {
     let store = temp.path().join("forge.sqlite");
 
     let output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -7456,6 +7665,7 @@ fn multimodal_demo_plan_covers_safe_local_image_audio_and_blender_tracks() {
         "blender_avatar_preparation",
     ] {
         let demo_output = forge()
+            .current_dir(temp.path())
             .args([
                 "--store",
                 store.to_str().unwrap(),
@@ -7786,6 +7996,7 @@ fn milestone_research_baseline_is_source_grounded_and_agent_visible() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
     let output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -11050,6 +11261,7 @@ fn validation_blocks_promotion_until_required_gates_pass() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
     let output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -11068,6 +11280,7 @@ fn validation_blocks_promotion_until_required_gates_pass() {
     let workflow_id = json["workflow_id"].as_str().unwrap();
 
     let validation_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -13952,6 +14165,7 @@ fn inspect_and_request_status_surface_context_routing_quality() {
     );
 
     let status = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -14344,6 +14558,7 @@ fn validation_blocks_promotion_when_persona_routing_is_not_auditable() {
     make_persona_routing_non_auditable(&store, workflow_id, "Generate documentation");
 
     let validation_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -23138,6 +23353,7 @@ fn workflow_goals_can_be_mutated_during_runtime_with_origin_trace() {
     assert!(update["revision"].as_u64().unwrap() >= 1);
 
     let status = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -26096,6 +26312,7 @@ fn inbound_event_dispatch_activations_enqueues_addon_runtime_contracts() {
     );
 
     let ledger_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -26350,6 +26567,7 @@ fn inbound_event_scan_can_dispatch_activation_runtime_contracts() {
     );
 
     let ledger_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -30943,6 +31161,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
     let output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -30987,6 +31206,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     .unwrap();
 
     let validation_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31028,6 +31248,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     assert_eq!(validation["response_sha256"].as_str().unwrap().len(), 64);
 
     let status = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31083,6 +31304,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     assert_eq!(promoted_event.data["trace_ref"], "traces/task-001.jsonl");
 
     let ledger_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31113,6 +31335,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
 
     let mcp_input = format!(r#"{{"workflow_id":"{workflow_id}","organization_id":"default-org"}}"#);
     let mcp_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31136,6 +31359,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     );
 
     let materialized_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31182,6 +31406,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     let mcp_materialize_input =
         format!(r#"{{"workflow_id":"{workflow_id}","source_kind":"observed_event","limit":10}}"#);
     let mcp_materialize_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31214,6 +31439,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     );
 
     let cost_history_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31268,6 +31494,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
         r#"{{"workflow_id":"{workflow_id}","source_kind":"observed_event","group_by":"workflow"}}"#
     );
     let mcp_history_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31297,6 +31524,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     );
 
     let maintenance_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31345,6 +31573,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     let mcp_maintenance_input =
         format!(r#"{{"workflow_id":"{workflow_id}","group_by":"workflow","retention_days":31}}"#);
     let mcp_maintenance_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31372,6 +31601,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     );
 
     let daemon_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31416,6 +31646,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
         r#"{{"workflow_id":"{workflow_id}","group_by":"workflow","retention_days":31,"max_cycles":1,"interval_seconds":0,"origin":"mcp-test"}}"#
     );
     let mcp_daemon_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31480,6 +31711,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     }
 
     let retention_plan_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31509,6 +31741,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     assert_eq!(retention_plan["candidates"][0]["row_key"], stale_row_key);
 
     let retention_apply_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31575,6 +31808,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     }
     let mcp_retention_input = r#"{"organization_id":"default-org","retention_days":31,"apply":true,"approved_by":"mcp-test","reason":"Prune stale Cost OS rows through MCP.","confirm":true}"#;
     let mcp_retention_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31603,6 +31837,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     assert_eq!(mcp_retention["result"]["deleted_row_count"], 1);
 
     let incremental_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31637,6 +31872,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
         .any(|report| report["filters"]["workflow_id"] == workflow_id));
 
     let mcp_incremental_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31664,6 +31900,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
         .contains(&Value::String(workflow_id.to_string())));
 
     let timeline_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31700,6 +31937,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
     let first_sequence = timeline["events"][0]["store_sequence"].as_i64().unwrap();
     let first_sequence_arg = first_sequence.to_string();
     let timeline_page_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -31733,6 +31971,7 @@ fn task_validate_response_accepts_completed_executor_response_with_passing_evide
         r#"{{"workflow_id":"{workflow_id}","organization_id":"default-org","limit":5,"after_sequence":0}}"#
     );
     let timeline_mcp_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),

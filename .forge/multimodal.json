@@ -1,0 +1,6 @@
+{
+  "approved_by": "<operator>",
+  "experimental_enabled": false,
+  "reason": "Operator-approved production multimodal runtime evidence collection.",
+  "scope": "project"
+}

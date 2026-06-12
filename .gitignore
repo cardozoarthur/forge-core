@@ -1,5 +1,11 @@
 /target/
-/.forge/
+/.forge/*
+!/.forge/connected-brain-runtimes.json
+!/.forge/harness.json
+!/.forge/memory-governance.json
+!/.forge/multimodal-runtimes.json
+!/.forge/multimodal.json
+!/.forge/operating-context.yaml
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

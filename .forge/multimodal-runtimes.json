@@ -1,0 +1,28 @@
+{
+  "runtimes": [
+    {
+      "capabilities": [
+        "image_understanding"
+      ],
+      "device_access": false,
+      "id": "production-vision-runtime",
+      "model_id": "<approved-model-id>",
+      "network_access": false,
+      "probe_command": [
+        "<absolute-path-to-approved-runtime-probe-command>"
+      ],
+      "production": {
+        "approval_ref": "<approval-or-change-record>",
+        "approved_by": "<operator>",
+        "evidence_artifacts": [
+          "<operator-reviewed-benchmark-artifact>"
+        ],
+        "max_latency_ms": 1000,
+        "min_quality_score": 0.95,
+        "model_license": "<approved-model-license>",
+        "model_manifest_sha256": "<64-char-model-manifest-sha256>",
+        "runtime_version": "<runtime-version>"
+      }
+    }
+  ]
+}

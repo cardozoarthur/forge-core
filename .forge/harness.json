@@ -1,0 +1,7 @@
+{
+  "default_context_budget": 1200,
+  "default_mode": "forge_first",
+  "default_token_headroom": true,
+  "require_lineage_for_exec": true,
+  "require_token_headroom_for_forge_first": true
+}

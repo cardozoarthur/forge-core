@@ -1,0 +1,57 @@
+operating_context:
+  organization:
+    scope: organization
+    id: digital-directive
+    label: Digital Directive
+  brand:
+    scope: brand
+    id: forge
+    label: Forge
+  product:
+    scope: product
+    id: core
+    label: Forge Core
+  user:
+    scope: user
+    id: arthur
+    label: Arthur Cardozo
+  channel:
+    scope: channel
+    id: local_cli
+    label: Local CLI
+  memory_scope: organization_project_processing
+  personality_scope: organization_workflow_node
+  tenant_policy_mode: audit
+  brand_identity:
+    voice: direta
+    tone: pragmatica
+    audience:
+      - operadores
+      - gestores
+      - agentes de execução
+    values:
+      - clareza
+      - pragmatismo
+      - rigor
+      - operação assistida
+    terminology:
+      - workflow-first
+      - Core mínimo
+      - Addons
+      - handoff
+      - checkpoint
+      - resume
+  design_system:
+    token_source: .forge/design/tokens.json
+    component_source: .forge/design/components
+    guidelines:
+      - interfaces densas e operacionais
+      - painéis auditáveis por workflow, evento, custo e aprovação
+      - ações seguras com preview e rollback explícitos
+  operating_policy:
+    data_classification: internal
+    memory_visibility: organization_project
+    sharing_policy: private_by_default
+    approval_policy: risk_based
+    core_boundary: universal_workflow_os
+    addon_boundary: domain_capabilities_outside_core

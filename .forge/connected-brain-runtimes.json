@@ -1,0 +1,22 @@
+{
+  "providers": [
+    {
+      "allow_model_execution": true,
+      "approval_ref": "<approval-or-change-record>",
+      "approved_by": "<operator>",
+      "brain_id": "codex",
+      "capabilities": [
+        "replacement_grade_cli"
+      ],
+      "command": [
+        "<absolute-path-to-approved-provider-command>"
+      ],
+      "device_access": false,
+      "external_resources_mutated": false,
+      "id": "codex",
+      "model_id": "<approved-model-id>",
+      "network_access": false,
+      "provider_class": "external_cli"
+    }
+  ]
+}

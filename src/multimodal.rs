@@ -2017,6 +2017,18 @@ fn run_connected_runtime_probe(
             runtime.id
         );
     }
+    if runtime
+        .probe_command
+        .iter()
+        .any(|part| multimodal_manifest_placeholder(part))
+        || multimodal_manifest_placeholder(&runtime.id)
+        || multimodal_manifest_placeholder(&runtime.model_id)
+    {
+        bail!(
+            "connected multimodal runtime `{}` still contains placeholder id, model_id or probe command entries",
+            runtime.id
+        );
+    }
     if runtime.network_access || runtime.device_access {
         bail!(
             "connected multimodal runtime `{}` declares network or device access; runtime-benchmark only allows no-network/no-device probes",
@@ -2076,6 +2088,16 @@ fn run_connected_runtime_probe(
         measurements,
         production_runtime,
     })
+}
+
+fn multimodal_manifest_placeholder(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty()
+        || (value.starts_with('<') && value.ends_with('>'))
+        || value.contains("<absolute-path-to-")
+        || value.contains("<approved-")
+        || value.contains("<operator>")
+        || value.contains("<approval-or-change-record>")
 }
 
 fn connected_runtime_measurements(model_output: &Value) -> Vec<MultimodalBenchmarkMeasurement> {

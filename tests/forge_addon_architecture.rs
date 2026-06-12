@@ -3396,6 +3396,7 @@ fn event_stream_projects_legacy_events_into_tenant_aware_envelopes() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
     let plan_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
@@ -5342,6 +5343,7 @@ fn tenant_index_tracks_async_run_resources() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
     let request_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),

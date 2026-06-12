@@ -2043,7 +2043,27 @@ fn plan_replacement_grade_cli_evidence(
         return Ok(());
     };
 
-    let provider_ready = !provider.command.is_empty()
+    let provider_command_ready = !provider.command.is_empty()
+        && provider
+            .command
+            .iter()
+            .all(|part| !milestone_manifest_placeholder(part));
+    let provider_approval_ready = provider
+        .approved_by
+        .as_deref()
+        .is_some_and(|value| !milestone_manifest_placeholder(value))
+        && provider
+            .approval_ref
+            .as_deref()
+            .is_some_and(|value| !milestone_manifest_placeholder(value));
+    let provider_model_ready = provider
+        .model_id
+        .as_deref()
+        .is_some_and(|value| !milestone_manifest_placeholder(value));
+    let provider_ready = provider_command_ready
+        && provider_approval_ready
+        && provider_model_ready
+        && provider.allow_model_execution
         && !provider.network_access
         && !provider.device_access
         && !provider.external_resources_mutated
@@ -2056,7 +2076,7 @@ fn plan_replacement_grade_cli_evidence(
         "Connected brain provider is declared, approved for guarded execution and safe to probe."
             .to_string()
     } else {
-        "Connected brain provider must have a command, replacement_grade_cli capability and no network/device/external-resource mutation declarations."
+        "Connected brain provider must replace placeholders with an approved command, approved_by, approval_ref, model_id, allow model execution, replacement_grade_cli capability and no network/device/external-resource mutation declarations."
             .to_string()
     };
     config_checks.push(MilestoneEvidencePlanConfigCheck {
@@ -2082,6 +2102,16 @@ fn plan_replacement_grade_cli_evidence(
         provider.id
     ));
     Ok(())
+}
+
+fn milestone_manifest_placeholder(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty()
+        || (value.starts_with('<') && value.ends_with('>'))
+        || value.contains("<absolute-path-to-")
+        || value.contains("<approved-")
+        || value.contains("<operator>")
+        || value.contains("<approval-or-change-record>")
 }
 
 fn detect_replacement_cli_provider_candidates() -> Vec<MilestoneEvidenceProviderCandidate> {
@@ -2277,19 +2307,31 @@ fn plan_experimental_multimodal_evidence(
             .get("experimental_enabled")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
+        let feature_approval_ready = feature
+            .get("approved_by")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !milestone_manifest_placeholder(value))
+            && feature
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !milestone_manifest_placeholder(value));
+        let feature_ready = enabled && feature_approval_ready;
         config_checks.push(MilestoneEvidencePlanConfigCheck {
             id: "multimodal_feature_flag".to_string(),
-            status: if enabled { "ready" } else { "blocked" }.to_string(),
+            status: if feature_ready { "ready" } else { "blocked" }.to_string(),
             path: Some(feature_path.display().to_string()),
             selected_id: None,
-            summary: if enabled {
-                "Multimodal experimental feature flag is enabled for this project.".to_string()
+            summary: if feature_ready {
+                "Multimodal experimental feature flag is enabled with operator approval for this project.".to_string()
+            } else if enabled {
+                manifest_templates.push(multimodal_feature_flag_template(project_root));
+                "Multimodal feature flag is enabled but still needs non-placeholder approved_by and reason fields.".to_string()
             } else {
                 manifest_templates.push(multimodal_feature_flag_template(project_root));
                 "Multimodal feature flag exists but experimental_enabled is not true.".to_string()
             },
         });
-        enabled
+        feature_ready
     };
 
     let runtime_id = selected_multimodal_runtime_id(connected_runtime);
@@ -2368,11 +2410,20 @@ fn plan_experimental_multimodal_evidence(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("<runtime-id>")
         .to_string();
+    let runtime_id_ready = !milestone_manifest_placeholder(&runtime_id);
+    let model_id_ready = runtime
+        .get("model_id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| !milestone_manifest_placeholder(value));
     let capabilities = runtime
         .get("capabilities")
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let capabilities_ready = capabilities
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .any(|capability| !milestone_manifest_placeholder(capability));
     let capability = capabilities
         .iter()
         .filter_map(serde_json::Value::as_str)
@@ -2382,7 +2433,14 @@ fn plan_experimental_multimodal_evidence(
     let probe_command_ready = runtime
         .get("probe_command")
         .and_then(serde_json::Value::as_array)
-        .map(|command| !command.is_empty())
+        .map(|command| {
+            !command.is_empty()
+                && command
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .all(|part| !milestone_manifest_placeholder(part))
+                && command.iter().all(serde_json::Value::is_string)
+        })
         .unwrap_or(false);
     let no_network = !runtime
         .get("network_access")
@@ -2398,35 +2456,48 @@ fn plan_experimental_multimodal_evidence(
     let production_ready = production
         .get("approved_by")
         .and_then(serde_json::Value::as_str)
-        .is_some()
+        .is_some_and(|value| !milestone_manifest_placeholder(value))
         && production
             .get("approval_ref")
             .and_then(serde_json::Value::as_str)
-            .is_some()
+            .is_some_and(|value| !milestone_manifest_placeholder(value))
         && production
             .get("runtime_version")
             .and_then(serde_json::Value::as_str)
-            .is_some()
+            .is_some_and(|value| !milestone_manifest_placeholder(value))
         && production
             .get("model_manifest_sha256")
             .and_then(serde_json::Value::as_str)
-            .map(|value| value.len() == 64)
+            .map(|value| {
+                value.len() == 64
+                    && value.chars().all(|character| character.is_ascii_hexdigit())
+                    && !milestone_manifest_placeholder(value)
+            })
             .unwrap_or(false)
         && production
             .get("model_license")
             .and_then(serde_json::Value::as_str)
-            .is_some()
+            .is_some_and(|value| !milestone_manifest_placeholder(value))
         && production
             .get("evidence_artifacts")
             .and_then(serde_json::Value::as_array)
-            .map(|artifacts| !artifacts.is_empty())
+            .map(|artifacts| {
+                !artifacts.is_empty()
+                    && artifacts
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .all(|artifact| !milestone_manifest_placeholder(artifact))
+                    && artifacts.iter().all(serde_json::Value::is_string)
+            })
             .unwrap_or(false);
     let runtime_ready = feature_enabled
+        && runtime_id_ready
+        && model_id_ready
         && probe_command_ready
         && no_network
         && no_device
         && production_ready
-        && !capabilities.is_empty();
+        && capabilities_ready;
     config_checks.push(MilestoneEvidencePlanConfigCheck {
         id: "multimodal_connected_runtime".to_string(),
         status: if runtime_ready { "ready" } else { "blocked" }.to_string(),
@@ -3868,6 +3939,34 @@ fn load_connected_brain_provider_selection(
     if selected_provider.command.is_empty() {
         bail!(
             "connected brain provider `{}` must declare a non-empty command array",
+            selected_provider.id
+        );
+    }
+    if selected_provider
+        .command
+        .iter()
+        .any(|part| milestone_manifest_placeholder(part))
+    {
+        bail!(
+            "connected brain provider `{}` still contains placeholder command entries; replace them with an approved provider command before collecting evidence",
+            selected_provider.id
+        );
+    }
+    if selected_provider
+        .approved_by
+        .as_deref()
+        .is_none_or(milestone_manifest_placeholder)
+        || selected_provider
+            .approval_ref
+            .as_deref()
+            .is_none_or(milestone_manifest_placeholder)
+        || selected_provider
+            .model_id
+            .as_deref()
+            .is_none_or(milestone_manifest_placeholder)
+    {
+        bail!(
+            "connected brain provider `{}` must declare approved_by, approval_ref and model_id before running the connected-brain demo",
             selected_provider.id
         );
     }
