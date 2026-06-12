@@ -46412,6 +46412,45 @@ fn interactive_home_surfaces_operational_cockpit_for_operator_focus() {
 fn interactive_architecture_compass_is_home_cli_slash_and_mcp_surface() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    fs::create_dir_all(temp.path().join(".forge")).unwrap();
+    fs::write(
+        temp.path().join(".forge/operating-context.yaml"),
+        r#"
+organization:
+  scope: organization
+  id: digital-directive
+  label: Digital Directive
+brand:
+  scope: brand
+  id: forge
+  label: Forge
+product:
+  scope: product
+  id: forge-core
+  label: Forge Core
+user:
+  scope: user
+  id: arthur
+  label: Arthur
+channel:
+  scope: channel
+  id: codex
+  label: Codex
+memory_scope: organization_project_session
+personality_scope: organization_workflow_node
+brand_identity:
+  voice: operator_direct
+  tone: precise
+  values:
+    - architecture_correctness
+    - tenant_safety
+design_system:
+  token_source: .forge/design-tokens.json
+  component_source: .forge/components
+tenant_policy_mode: audit
+"#,
+    )
+    .unwrap();
 
     forge()
         .args([
@@ -46451,6 +46490,49 @@ fn interactive_architecture_compass_is_home_cli_slash_and_mcp_surface() {
     );
     assert_eq!(compass["status"], "architecture_compass_actionable");
     assert_eq!(compass["source_documents"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        compass["operating_context"]["schema_version"],
+        "forge.interactive.architecture_operating_context.v1"
+    );
+    assert_eq!(
+        compass["operating_context"]["project_root"],
+        temp.path().to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        compass["operating_context"]["tenant_path"],
+        "digital-directive/forge/forge-core"
+    );
+    assert_eq!(
+        compass["operating_context"]["organization_id"],
+        "digital-directive"
+    );
+    assert_eq!(compass["operating_context"]["brand_id"], "forge");
+    assert_eq!(compass["operating_context"]["product_id"], "forge-core");
+    assert_eq!(
+        compass["operating_context"]["memory_scope"],
+        "organization_project_session"
+    );
+    assert_eq!(
+        compass["operating_context"]["personality_scope"],
+        "organization_workflow_node"
+    );
+    assert_eq!(
+        compass["operating_context"]["brand_voice"],
+        "operator_direct"
+    );
+    assert_eq!(compass["operating_context"]["brand_tone"], "precise");
+    assert!(compass["operating_context"]["prompt_packet_gates"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("organization_context_required")));
+    assert!(compass["operating_context"]["evidence_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("interactive operating-context --project-root")));
     assert!(compass["source_documents"]
         .as_array()
         .unwrap()
@@ -46559,7 +46641,10 @@ fn interactive_architecture_compass_is_home_cli_slash_and_mcp_surface() {
         .contains("domain-specific behavior"));
     assert_eq!(
         compass["execution_plan"]["next_command"],
-        "forge interactive architecture --output json"
+        format!(
+            "forge interactive architecture --project-root {} --output json",
+            temp.path().display()
+        )
     );
     assert!(compass["dependencies"]
         .as_array()
@@ -46582,9 +46667,11 @@ fn interactive_architecture_compass_is_home_cli_slash_and_mcp_surface() {
     assert!(compass["next_commands"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::json!(
-            "forge interactive architecture --output json"
-        )));
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("forge interactive architecture --project-root")));
     assert!(home["dashboard"]["quick_actions"]
         .as_array()
         .unwrap()
@@ -46592,9 +46679,11 @@ fn interactive_architecture_compass_is_home_cli_slash_and_mcp_surface() {
     assert!(home["dashboard"]["useful_next_commands"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::json!(
-            "forge interactive architecture --output json"
-        )));
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("forge interactive architecture --output json")));
     assert!(home["dashboard"]["ui_composition_panel"]["regions"]
         .as_array()
         .unwrap()
@@ -46608,6 +46697,8 @@ fn interactive_architecture_compass_is_home_cli_slash_and_mcp_surface() {
             store.to_str().unwrap(),
             "interactive",
             "architecture",
+            "--project-root",
+            temp.path().to_str().unwrap(),
             "--output",
             "json",
         ])
@@ -46626,6 +46717,10 @@ fn interactive_architecture_compass_is_home_cli_slash_and_mcp_surface() {
         .unwrap()
         .iter()
         .any(|track| track["track_id"] == "harness_headroom_cli_brains"));
+    assert_eq!(
+        compass_json["operating_context"]["tenant_path"],
+        "digital-directive/forge/forge-core"
+    );
 
     let text_output = forge()
         .args([
@@ -46633,6 +46728,8 @@ fn interactive_architecture_compass_is_home_cli_slash_and_mcp_surface() {
             store.to_str().unwrap(),
             "interactive",
             "architecture",
+            "--project-root",
+            temp.path().to_str().unwrap(),
         ])
         .assert()
         .success()
@@ -46642,6 +46739,8 @@ fn interactive_architecture_compass_is_home_cli_slash_and_mcp_surface() {
     let text = String::from_utf8(text_output).unwrap();
     assert!(text.contains("Architecture compass:"));
     assert!(text.contains("harness_headroom_cli_brains"));
+    assert!(text.contains("Operating context:"));
+    assert!(text.contains("digital-directive/forge/forge-core"));
     assert!(text.contains("Execution plan:"));
     assert!(text.contains("forge_first_harness_headroom"));
     assert!(text.contains("Benchmarks:"));
@@ -46724,6 +46823,10 @@ fn interactive_architecture_compass_is_home_cli_slash_and_mcp_surface() {
         tool["output_schema"],
         "forge.interactive.architecture_compass.v1"
     );
+    assert!(tool["input_schema"]["properties"]
+        .as_object()
+        .unwrap()
+        .contains_key("project_root"));
     assert_eq!(tool["mutates_workflow"], false);
 
     let mcp_output = forge()
@@ -46733,6 +46836,8 @@ fn interactive_architecture_compass_is_home_cli_slash_and_mcp_surface() {
             "mcp",
             "call",
             "forge.interactive.architecture",
+            "--input",
+            &format!(r#"{{"project_root":"{}"}}"#, temp.path().display()),
         ])
         .assert()
         .success()
@@ -46749,6 +46854,10 @@ fn interactive_architecture_compass_is_home_cli_slash_and_mcp_surface() {
         .unwrap()
         .iter()
         .any(|track| track["track_id"] == "event_persistent_runtime"));
+    assert_eq!(
+        mcp_json["result"]["operating_context"]["tenant_path"],
+        "digital-directive/forge/forge-core"
+    );
 }
 
 #[test]

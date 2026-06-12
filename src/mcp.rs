@@ -3232,10 +3232,20 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.interactive.architecture",
                 "Inspect Interactive Architecture Compass",
-                "Return the Forge architecture compass with source-of-truth tracks, implementation evidence, open gaps, dependencies, reuse opportunities and benchmark boundaries.",
-                object_schema(&[], &[]),
+                "Return the Forge architecture compass with source-of-truth tracks, project operating context, implementation evidence, open gaps, dependencies, reuse opportunities and benchmark boundaries.",
+                object_schema(&[
+                    ("project_root", "string", "optional project root whose .forge operating context should guide the architecture compass"),
+                ], &[]),
                 "forge.interactive.architecture_compass.v1",
-                &["forge", "interactive", "architecture", "--output", "json"],
+                &[
+                    "forge",
+                    "interactive",
+                    "architecture",
+                    "--project-root",
+                    "<project-root>",
+                    "--output",
+                    "json",
+                ],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7775,7 +7785,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(build_interactive_improvement_loop(store)?)?
         }
         "forge.interactive.architecture" => {
-            serde_json::to_value(build_interactive_architecture_compass(store)?)?
+            let input: InteractiveHomeInput = if input.is_null() {
+                InteractiveHomeInput { project_root: None }
+            } else {
+                parse_input(input)?
+            };
+            let project_root = input.project_root.map(PathBuf::from);
+            serde_json::to_value(build_interactive_architecture_compass(store, project_root)?)?
         }
         "forge.interactive.release_gates" => {
             let input: MilestoneStatusInput = if input.is_null() {

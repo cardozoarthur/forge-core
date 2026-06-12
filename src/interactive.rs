@@ -275,6 +275,7 @@ pub struct InteractiveArchitectureCompassPanel {
     pub schema_version: String,
     pub status: String,
     pub source_documents: Vec<InteractiveArchitectureSourceDocument>,
+    pub operating_context: InteractiveArchitectureOperatingContextSummary,
     pub tracks: Vec<InteractiveArchitectureTrack>,
     pub benchmark_sources: Vec<InteractiveArchitectureBenchmarkSource>,
     pub execution_plan: InteractiveArchitectureExecutionPlan,
@@ -282,6 +283,38 @@ pub struct InteractiveArchitectureCompassPanel {
     pub conflicts: Vec<String>,
     pub reuse_opportunities: Vec<String>,
     pub next_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveArchitectureOperatingContextSummary {
+    pub schema_version: String,
+    pub project_root: String,
+    pub status: String,
+    pub context_status: String,
+    pub tenant_path: String,
+    pub organization_id: String,
+    pub organization_label: String,
+    pub brand_id: String,
+    pub brand_label: String,
+    pub product_id: String,
+    pub product_label: String,
+    pub user_id: String,
+    pub channel_id: String,
+    pub memory_scope: String,
+    pub memory_level: String,
+    pub memory_scopes: Vec<String>,
+    pub memory_audience: String,
+    pub personality_scope: String,
+    pub personality_status: String,
+    pub brand_voice: String,
+    pub brand_tone: String,
+    pub design_token_source: String,
+    pub component_source: String,
+    pub prompt_packet_gates: Vec<String>,
+    pub company_work_departments: Vec<String>,
+    pub tenant_policy_status: String,
+    pub memory_policy_status: String,
+    pub evidence_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2840,8 +2873,10 @@ pub fn build_interactive_event_runtime(
 
 pub fn build_interactive_architecture_compass(
     store: &ForgeStore,
+    project_root: Option<PathBuf>,
 ) -> Result<InteractiveArchitectureCompassPanel> {
-    let report = build_interactive_home(store)?;
+    let report =
+        build_interactive_home_with_options(store, InteractiveHomeOptions { project_root })?;
     Ok(report.dashboard.architecture_compass_panel)
 }
 
@@ -3372,6 +3407,7 @@ struct ArchitectureCompassInputs<'a> {
 fn build_architecture_compass_panel(
     inputs: ArchitectureCompassInputs<'_>,
 ) -> InteractiveArchitectureCompassPanel {
+    let operating_context = architecture_operating_context_summary(inputs.operating_context_panel);
     let tenant_prompt_sample_ready = inputs
         .operating_context_panel
         .prompt_packet_sample
@@ -3793,7 +3829,8 @@ fn build_architecture_compass_panel(
     } else {
         "architecture_compass_actionable"
     };
-    let execution_plan = architecture_execution_plan(&tracks);
+    let operating_context_project_root = operating_context.project_root.clone();
+    let execution_plan = architecture_execution_plan(&tracks, &operating_context_project_root);
 
     InteractiveArchitectureCompassPanel {
         schema_version: INTERACTIVE_ARCHITECTURE_COMPASS_SCHEMA_VERSION.to_string(),
@@ -3818,6 +3855,7 @@ fn build_architecture_compass_panel(
                 "f66292a967fcf8db55a19f26ec28da7c7d207f4f35940d7ff0410599521ace1f",
             ),
         ],
+        operating_context,
         tracks,
         benchmark_sources: architecture_benchmark_sources(inputs),
         execution_plan,
@@ -3860,8 +3898,14 @@ fn build_architecture_compass_panel(
             "Reuse harness headroom receipts for CLI wrappers and future brain output compression.".to_string(),
         ],
         next_commands: vec![
-            "forge interactive architecture --output json".to_string(),
-            "forge interactive home --output json".to_string(),
+            format!(
+                "forge interactive architecture --project-root {} --output json",
+                operating_context_project_root
+            ),
+            format!(
+                "forge interactive home --project-root {} --output json",
+                operating_context_project_root
+            ),
             "forge interactive operational-cockpit --output json".to_string(),
             "forge interactive addon-capabilities --output json".to_string(),
             "forge interactive improvement-loop --output json".to_string(),
@@ -3872,8 +3916,57 @@ fn build_architecture_compass_panel(
     }
 }
 
+fn architecture_operating_context_summary(
+    panel: &InteractiveOperatingContextPanel,
+) -> InteractiveArchitectureOperatingContextSummary {
+    InteractiveArchitectureOperatingContextSummary {
+        schema_version: "forge.interactive.architecture_operating_context.v1".to_string(),
+        project_root: panel.project_root.clone(),
+        status: panel.status.clone(),
+        context_status: panel.context_status.clone(),
+        tenant_path: panel.tenant_path.clone(),
+        organization_id: panel.organization_id.clone(),
+        organization_label: panel.organization_label.clone(),
+        brand_id: panel.brand_id.clone(),
+        brand_label: panel.brand_label.clone(),
+        product_id: panel.product_id.clone(),
+        product_label: panel.product_label.clone(),
+        user_id: panel.user_id.clone(),
+        channel_id: panel.channel_id.clone(),
+        memory_scope: panel.memory_scope.clone(),
+        memory_level: panel.memory_level.clone(),
+        memory_scopes: panel.memory_scopes.clone(),
+        memory_audience: panel.memory_audience.clone(),
+        personality_scope: panel.personality_scope.clone(),
+        personality_status: panel.personality_status.clone(),
+        brand_voice: panel.brand_voice.clone(),
+        brand_tone: panel.brand_tone.clone(),
+        design_token_source: panel.design_token_source.clone(),
+        component_source: panel.component_source.clone(),
+        prompt_packet_gates: panel.prompt_packet_contract.required_gates.clone(),
+        company_work_departments: panel.company_work_contract.departments.clone(),
+        tenant_policy_status: panel.tenant_policy_status.clone(),
+        memory_policy_status: panel.memory_policy_status.clone(),
+        evidence_commands: vec![
+            format!(
+                "forge interactive operating-context --project-root {} --output json",
+                panel.project_root
+            ),
+            format!(
+                "forge interactive identity --project-root {} --output json",
+                panel.project_root
+            ),
+            format!(
+                "forge interactive context-memory --project-root {} --output json",
+                panel.project_root
+            ),
+        ],
+    }
+}
+
 fn architecture_execution_plan(
     tracks: &[InteractiveArchitectureTrack],
+    project_root: &str,
 ) -> InteractiveArchitectureExecutionPlan {
     let increments = vec![
         architecture_increment(
@@ -4115,7 +4208,9 @@ fn architecture_execution_plan(
         selection_rule: "Ship the smallest increment that strengthens a universal Core primitive or an Addon escape hatch, preserves workflow/event/tenant boundaries, and has executable evidence gates.".to_string(),
         increments,
         acceptance_policy: "An increment is accepted only when its evidence commands prove the stated gates without adding domain-specific behavior to Core.".to_string(),
-        next_command: "forge interactive architecture --output json".to_string(),
+        next_command: format!(
+            "forge interactive architecture --project-root {project_root} --output json"
+        ),
     }
 }
 
@@ -16993,12 +17088,20 @@ pub fn render_interactive_architecture_compass(
     panel: &InteractiveArchitectureCompassPanel,
 ) -> String {
     format!(
-        "Architecture compass: {status}; docs {doc_count}; tracks {track_count}; dependencies {dependency_count}; conflicts {conflict_count}\nTracks: {tracks}\nExecution plan: {execution_plan}\nBenchmarks: {benchmarks}\nReuse: {reuse}\nNext commands: {commands}\n",
+        "Architecture compass: {status}; docs {doc_count}; tracks {track_count}; dependencies {dependency_count}; conflicts {conflict_count}\nOperating context: tenant {tenant}; organization {organization}; brand {brand}; product {product}; memory {memory_level}/{memory_scopes}; personality {personality}; gates {gates}\nTracks: {tracks}\nExecution plan: {execution_plan}\nBenchmarks: {benchmarks}\nReuse: {reuse}\nNext commands: {commands}\n",
         status = panel.status,
         doc_count = panel.source_documents.len(),
         track_count = panel.tracks.len(),
         dependency_count = panel.dependencies.len(),
         conflict_count = panel.conflicts.len(),
+        tenant = panel.operating_context.tenant_path,
+        organization = panel.operating_context.organization_id,
+        brand = panel.operating_context.brand_id,
+        product = panel.operating_context.product_id,
+        memory_level = panel.operating_context.memory_level,
+        memory_scopes = panel.operating_context.memory_scopes.join("+"),
+        personality = panel.operating_context.personality_status,
+        gates = panel.operating_context.prompt_packet_gates.join("+"),
         tracks = render_architecture_track_summary(panel),
         execution_plan = render_architecture_execution_plan_summary(panel),
         benchmarks = render_architecture_benchmark_summary(panel),
@@ -20487,7 +20590,7 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
             Ok(render_interactive_operational_cockpit(&panel))
         }
         "architecture_compass_panel" => {
-            let panel = build_interactive_architecture_compass(store)?;
+            let panel = build_interactive_architecture_compass(store, None)?;
             Ok(render_interactive_architecture_compass(&panel))
         }
         "core_boundary_panel" => {
@@ -20601,7 +20704,7 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
             Ok(true)
         }
         "/architecture" | "/compass" => {
-            let panel = build_interactive_architecture_compass(store)?;
+            let panel = build_interactive_architecture_compass(store, None)?;
             println!("{}", render_interactive_architecture_compass(&panel));
             Ok(true)
         }

@@ -3384,6 +3384,8 @@ enum InteractiveCommands {
         output: OutputFormat,
     },
     Architecture {
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -8430,9 +8432,12 @@ fn run() -> Result<i32> {
                 }
                 Ok(0)
             }
-            InteractiveCommands::Architecture { output } => {
+            InteractiveCommands::Architecture {
+                project_root,
+                output,
+            } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = build_interactive_architecture_compass(&store)?;
+                let report = build_interactive_architecture_compass(&store, project_root)?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => {
