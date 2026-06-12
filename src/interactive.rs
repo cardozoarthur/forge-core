@@ -28,7 +28,7 @@ use crate::identity::{
 use crate::interaction::{
     create_choice_interaction, list_human_interactions, CreateChoiceInteractionRequest,
 };
-use crate::memory::memory_policy_report;
+use crate::memory::{memory_policy_report_for_project, MemoryPolicyReport};
 use crate::milestone::{
     build_milestone_evidence_plan, build_milestone_manifest_with_store, build_milestone_status,
     milestone_required_attached_evidence_kinds, MilestoneAttachedEvidence,
@@ -40,8 +40,9 @@ use crate::ops::{
     OpsAddonViewRendererReport, OpsOperationalDigitalTwin,
 };
 use crate::registry::{
-    list_workflows_with_filters, RegistryContextActionRef, WorkflowLifecycleFilter,
-    WorkflowRegistryFilters, WorkflowRegistryRow,
+    list_workflows_with_filters, RegistryContextActionRef, RegistryContextActionSummary,
+    RegistryContextQualitySummary, WorkflowLifecycleFilter, WorkflowRegistryFilters,
+    WorkflowRegistryRow,
 };
 use crate::request::start_async_request;
 use crate::runtime::load_runtimes;
@@ -62,6 +63,7 @@ const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
 const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_board.v1";
 const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
 const INTERACTIVE_SCHEDULES_SCHEMA_VERSION: &str = "forge.interactive.schedules.v1";
+const INTERACTIVE_CONTEXT_MEMORY_SCHEMA_VERSION: &str = "forge.interactive.context_memory.v1";
 const INTERACTIVE_READINESS_SCHEMA_VERSION: &str = "forge.interactive.readiness.v1";
 const INTERACTIVE_RELEASE_GATES_SCHEMA_VERSION: &str = "forge.interactive.release_gates.v1";
 const INTERACTIVE_HARNESS_SCHEMA_VERSION: &str = "forge.interactive.harness.v1";
@@ -1383,13 +1385,21 @@ pub struct InteractiveCostPanel {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InteractiveContextMemoryPanel {
+    pub schema_version: String,
     pub status: String,
+    pub project_root: String,
     pub ready_for_handoff: usize,
     pub blocked_tasks: usize,
     pub context_budget_pressure: usize,
     pub memory_policy_status: String,
     pub memory_level_count: usize,
     pub temporary_memory_rule: String,
+    pub memory_policy: MemoryPolicyReport,
+    pub context_actions: RegistryContextActionSummary,
+    pub context_quality: RegistryContextQualitySummary,
+    pub memory_commands: BTreeMap<String, Vec<String>>,
+    pub context_commands: BTreeMap<String, Vec<String>>,
+    pub next_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1744,22 +1754,12 @@ pub fn build_interactive_home_with_options(
             estimated_task_cost_total_usd: 0.0,
             observed_event_cost_total_usd: 0.0,
         });
-    let memory_policy = memory_policy_report(store);
-    let temporary_memory_rule = memory_policy
-        .interface_policy
-        .iter()
-        .find(|policy| policy.default_scope == "processing")
-        .map(|policy| policy.retention.clone())
-        .unwrap_or_else(|| "processing memory is temporary until promoted".to_string());
-    let context_memory_panel = InteractiveContextMemoryPanel {
-        status: "context_memory_ready".to_string(),
-        ready_for_handoff: workflows.summary.context_actions.ready_for_handoff,
-        blocked_tasks: workflows.summary.context_actions.blocked_tasks,
-        context_budget_pressure: workflows.summary.context_quality.budget_pressure,
-        memory_policy_status: memory_policy.status,
-        memory_level_count: memory_policy.memory_levels.len(),
-        temporary_memory_rule,
-    };
+    let context_memory_panel = build_context_memory_panel_from_summary(
+        store,
+        &repository_context_path,
+        &workflows.summary.context_actions,
+        &workflows.summary.context_quality,
+    );
     let addon_catalog = load_addon_catalog_from_store(store, &default_addon_dirs()).ok();
     let addon_renderer_report = addon_catalog
         .as_ref()
@@ -1871,6 +1871,7 @@ pub fn build_interactive_home_with_options(
                 "forge interactive sessions --output json".to_string(),
                 "forge interactive action-registry --output json".to_string(),
                 "forge interactive addon-capabilities --output json".to_string(),
+                "forge interactive context-memory --output json".to_string(),
                 "forge addons observability --output json".to_string(),
                 "forge interactive release-gates --output json".to_string(),
                 "forge interactive patch-workbench --output json".to_string(),
@@ -1901,6 +1902,7 @@ pub fn build_interactive_home_with_options(
                 "/validate".to_string(),
                 "/logs".to_string(),
                 "/workers".to_string(),
+                "/context-memory".to_string(),
                 "/context".to_string(),
                 "/handoff".to_string(),
                 "/pm".to_string(),
@@ -5762,6 +5764,22 @@ pub fn build_interactive_workflow_dag(store: &ForgeStore) -> Result<InteractiveW
     build_workflow_dag_panel(store, &workflows.workflows)
 }
 
+pub fn build_interactive_context_memory(
+    store: &ForgeStore,
+    project_root: &Path,
+) -> Result<InteractiveContextMemoryPanel> {
+    let workflows = list_workflows_with_filters(
+        store,
+        WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
+    )?;
+    Ok(build_context_memory_panel_from_summary(
+        store,
+        project_root,
+        &workflows.summary.context_actions,
+        &workflows.summary.context_quality,
+    ))
+}
+
 pub fn build_interactive_schedules(store: &ForgeStore) -> InteractiveSchedulePanel {
     build_schedule_worker_status(store, "forge-scheduler", 1, 300)
         .map(interactive_schedule_panel_from_worker_status)
@@ -5773,6 +5791,121 @@ pub fn build_interactive_structured_logs(
 ) -> Result<InteractiveStructuredLogsPanel> {
     let timeline = build_global_event_timeline(store, None, None, None, None, Some(20), None)?;
     Ok(build_structured_logs_panel(&timeline))
+}
+
+fn build_context_memory_panel_from_summary(
+    store: &ForgeStore,
+    project_root: &Path,
+    context_actions: &RegistryContextActionSummary,
+    context_quality: &RegistryContextQualitySummary,
+) -> InteractiveContextMemoryPanel {
+    let memory_policy = memory_policy_report_for_project(store, Some(project_root));
+    let temporary_memory_rule = memory_policy
+        .interface_policy
+        .iter()
+        .find(|policy| policy.default_scope == "processing")
+        .map(|policy| policy.retention.clone())
+        .unwrap_or_else(|| "processing memory is temporary until promoted".to_string());
+    let memory_policy_status = memory_policy.status.clone();
+    let memory_level_count = memory_policy.memory_levels.len();
+    InteractiveContextMemoryPanel {
+        schema_version: INTERACTIVE_CONTEXT_MEMORY_SCHEMA_VERSION.to_string(),
+        status: "context_memory_ready".to_string(),
+        project_root: project_root.display().to_string(),
+        ready_for_handoff: context_actions.ready_for_handoff,
+        blocked_tasks: context_actions.blocked_tasks,
+        context_budget_pressure: context_quality.budget_pressure,
+        memory_policy_status,
+        memory_level_count,
+        temporary_memory_rule,
+        memory_policy,
+        context_actions: context_actions.clone(),
+        context_quality: context_quality.clone(),
+        memory_commands: context_memory_memory_commands(project_root),
+        context_commands: context_memory_context_commands(project_root),
+        next_actions: context_memory_next_actions(project_root),
+    }
+}
+
+fn context_memory_memory_commands(project_root: &Path) -> BTreeMap<String, Vec<String>> {
+    let project_root = project_root.display().to_string();
+    BTreeMap::from([
+        (
+            "policy".to_string(),
+            vec![
+                "memory".to_string(),
+                "policy".to_string(),
+                "--project-root".to_string(),
+                project_root.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        ),
+        (
+            "search".to_string(),
+            vec![
+                "memory".to_string(),
+                "search".to_string(),
+                "--workflow".to_string(),
+                "<workflow-id>".to_string(),
+                "--query".to_string(),
+                "<query>".to_string(),
+                "--project-root".to_string(),
+                project_root.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        ),
+        (
+            "retention".to_string(),
+            vec![
+                "memory".to_string(),
+                "retention".to_string(),
+                "--workflow".to_string(),
+                "<workflow-id>".to_string(),
+                "--scope".to_string(),
+                "processing".to_string(),
+                "--project-root".to_string(),
+                project_root,
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        ),
+    ])
+}
+
+fn context_memory_context_commands(project_root: &Path) -> BTreeMap<String, Vec<String>> {
+    BTreeMap::from([(
+        "request".to_string(),
+        vec![
+            "context".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--task".to_string(),
+            "<task-id>".to_string(),
+            "--project-root".to_string(),
+            project_root.display().to_string(),
+            "--budget".to_string(),
+            "1200".to_string(),
+            "--strict".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    )])
+}
+
+fn context_memory_next_actions(project_root: &Path) -> Vec<String> {
+    let project_root = project_root.display();
+    vec![
+        format!("forge memory policy --project-root {project_root} --output json"),
+        format!(
+            "forge context --workflow <workflow-id> --task <task-id> --project-root {project_root} --budget 1200 --strict --output json"
+        ),
+        format!(
+            "forge memory search --workflow <workflow-id> --query <query> --project-root {project_root} --output json"
+        ),
+        "forge interactive context-memory --output json".to_string(),
+    ]
 }
 
 fn interactive_schedule_panel_from_worker_status(
@@ -8044,6 +8177,51 @@ pub fn render_interactive_schedules(panel: &InteractiveSchedulePanel) -> String 
     )
 }
 
+pub fn render_interactive_context_memory(panel: &InteractiveContextMemoryPanel) -> String {
+    format!(
+        "Context/memory center: {status}; project {project_root}; ready handoffs {ready_for_handoff}, blocked {blocked_tasks}, budget pressure {context_budget_pressure}\nMemory policy: {memory_policy_status}; level {memory_level}, scopes {memory_scopes}, audience {memory_audience}, governance {governance_status}, levels {memory_level_count}; temporary {temporary_memory_rule}\nContext actions: workflows {action_workflows}, tasks {action_tasks}, ready {action_ready}, blocked {action_blocked}, increase budget {increase_budget}, resume checkpoints {resume_checkpoints}, partial retry {partial_retry}\nContext quality: passed {quality_passed}, warnings {quality_warnings}, blocked {quality_blocked}, required missing {required_missing}, compressed {compressed}, score avg {average_score_bps}bps\nCommands: {commands}\nNext actions: {next_actions}\n",
+        status = panel.status,
+        project_root = panel.project_root,
+        ready_for_handoff = panel.ready_for_handoff,
+        blocked_tasks = panel.blocked_tasks,
+        context_budget_pressure = panel.context_budget_pressure,
+        memory_policy_status = panel.memory_policy_status,
+        memory_level = panel.memory_policy.effective_defaults.memory_level.as_str(),
+        memory_scopes = panel
+            .memory_policy
+            .effective_defaults
+            .default_scopes
+            .join(","),
+        memory_audience = panel
+            .memory_policy
+            .effective_defaults
+            .default_audience
+            .as_str(),
+        governance_status = panel.memory_policy.project_governance.status.as_str(),
+        memory_level_count = panel.memory_level_count,
+        temporary_memory_rule = panel.temporary_memory_rule,
+        action_workflows = panel.context_actions.workflows,
+        action_tasks = panel.context_actions.total_tasks,
+        action_ready = panel.context_actions.ready_for_handoff,
+        action_blocked = panel.context_actions.blocked_tasks,
+        increase_budget = panel.context_actions.increase_context_budget,
+        resume_checkpoints = panel.context_actions.resume_from_checkpoint,
+        partial_retry = panel.context_actions.partial_retry_recommended,
+        quality_passed = panel.context_quality.passed,
+        quality_warnings = panel.context_quality.total_warnings,
+        quality_blocked = panel.context_quality.blocked,
+        required_missing = panel.context_quality.required_context_missing,
+        compressed = panel.context_quality.compressed_context,
+        average_score_bps = panel.context_quality.average_score_bps,
+        commands = render_context_memory_command_summary(panel),
+        next_actions = if panel.next_actions.is_empty() {
+            "none".to_string()
+        } else {
+            panel.next_actions.join(" | ")
+        },
+    )
+}
+
 pub fn render_interactive_structured_logs(panel: &InteractiveStructuredLogsPanel) -> String {
     let next_cursor = panel
         .next_cursor
@@ -8058,6 +8236,21 @@ pub fn render_interactive_structured_logs(panel: &InteractiveStructuredLogsPanel
         has_more = panel.has_more,
         logs = render_structured_log_summary(panel),
     )
+}
+
+fn render_context_memory_command_summary(panel: &InteractiveContextMemoryPanel) -> String {
+    let mut commands = Vec::new();
+    for (name, command) in &panel.memory_commands {
+        commands.push(format!("memory {name}: forge {}", command.join(" ")));
+    }
+    for (name, command) in &panel.context_commands {
+        commands.push(format!("context {name}: forge {}", command.join(" ")));
+    }
+    if commands.is_empty() {
+        "none".to_string()
+    } else {
+        commands.join(" | ")
+    }
 }
 
 pub fn render_interactive_addon_capabilities(panel: &InteractiveAddonCapabilityPanel) -> String {
@@ -8715,7 +8908,7 @@ fn build_ui_composition_panel(
                     "policy_renderer",
                     "standard",
                     "half",
-                    vec!["forge memory policy --output json".to_string()],
+                    vec!["forge interactive context-memory --output json".to_string()],
                 ),
                 core_ui_widget(
                     "permissions_panel",
@@ -10576,6 +10769,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/context-memory",
+            "Context/Memory",
+            "Show context readiness, routing quality and project memory governance without building a task packet.",
+            &["forge", "interactive", "context-memory"],
+            false,
+            "low",
+        ),
+        slash(
             "/context",
             "Context",
             "Build a bounded, versioned task context package before executor handoff. Use: /context --workflow <id> --task <id> --budget 1200 --strict",
@@ -10986,6 +11187,10 @@ fn repl_focus_panels() -> Vec<InteractiveReplFocusPanel> {
             title: "Schedules",
         },
         InteractiveReplFocusPanel {
+            panel_id: "context_memory_panel",
+            title: "Context/memory",
+        },
+        InteractiveReplFocusPanel {
             panel_id: "permissions_panel",
             title: "Permissions",
         },
@@ -11068,6 +11273,11 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
             let panel = build_interactive_schedules(store);
             Ok(render_interactive_schedules(&panel))
         }
+        "context_memory_panel" => {
+            let project_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let panel = build_interactive_context_memory(store, &project_root)?;
+            Ok(render_interactive_context_memory(&panel))
+        }
         "permissions_panel" => {
             let panel = build_interactive_permissions(store)?;
             Ok(render_interactive_permissions(&panel))
@@ -11131,6 +11341,12 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
         "/schedules" => {
             let panel = build_interactive_schedules(store);
             println!("{}", render_interactive_schedules(&panel));
+            Ok(true)
+        }
+        "/context-memory" => {
+            let project_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let panel = build_interactive_context_memory(store, &project_root)?;
+            println!("{}", render_interactive_context_memory(&panel));
             Ok(true)
         }
         "/permissions" => {

@@ -94,7 +94,7 @@ use crate::interaction::{
 use crate::interactive::{
     build_interactive_action_invocation, build_interactive_action_registry,
     build_interactive_addon_capabilities_default, build_interactive_autocomplete,
-    build_interactive_command_palette, build_interactive_harness,
+    build_interactive_command_palette, build_interactive_context_memory, build_interactive_harness,
     build_interactive_home_with_options, build_interactive_identity,
     build_interactive_operational_cockpit, build_interactive_patch_workbench,
     build_interactive_permissions, build_interactive_readiness, build_interactive_release_gates,
@@ -161,6 +161,7 @@ use crate::workflow::{
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::env;
 use std::fs;
 use std::path::PathBuf;
 
@@ -3296,6 +3297,25 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.schedules.v1",
                 &["forge", "interactive", "schedules", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.context_memory",
+                "Inspect Interactive Context Memory",
+                "Return Forge interactive context and memory governance with handoff readiness, context routing quality, project memory policy, governed memory/context commands and next actions without mutating state.",
+                object_schema(&[
+                    ("project_root", "string", "optional project root containing .forge/memory-governance.json"),
+                ], &[]),
+                "forge.interactive.context_memory.v1",
+                &[
+                    "forge",
+                    "interactive",
+                    "context-memory",
+                    "--project-root",
+                    "<project-root>",
+                    "--output",
+                    "json",
+                ],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7586,6 +7606,18 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(build_interactive_workflow_dag(store)?)?
         }
         "forge.interactive.schedules" => serde_json::to_value(build_interactive_schedules(store))?,
+        "forge.interactive.context_memory" => {
+            let input: MemoryPolicyInput = if input.is_null() {
+                MemoryPolicyInput { project_root: None }
+            } else {
+                parse_input(input)?
+            };
+            let project_root = input
+                .project_root
+                .map(PathBuf::from)
+                .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            serde_json::to_value(build_interactive_context_memory(store, &project_root)?)?
+        }
         "forge.interactive.structured_logs" => {
             serde_json::to_value(build_interactive_structured_logs(store)?)?
         }

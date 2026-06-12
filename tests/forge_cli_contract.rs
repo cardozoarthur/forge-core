@@ -39618,6 +39618,237 @@ fn interactive_schedules_command_and_mcp_surface_are_dedicated() {
 }
 
 #[test]
+fn interactive_context_memory_command_and_mcp_surface_are_dedicated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("context-memory-project");
+    fs::create_dir_all(project_root.join(".forge")).unwrap();
+    forge()
+        .args([
+            "memory",
+            "configure",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--memory-level",
+            "short_term",
+            "--default-scope",
+            "project",
+            "--default-scope",
+            "processing",
+            "--default-audience",
+            "manager",
+            "--privacy-mode",
+            "private_by_default",
+            "--retention-mode",
+            "processing_auto_archive",
+            "--approved-by",
+            "test-operator",
+            "--reason",
+            "interactive context memory contract",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let planned = forge()
+        .current_dir(&project_root)
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "plan",
+            "--goal",
+            "Operate context and memory governance dashboard",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    assert!(planned_json["workflow_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("wf_"));
+    assert!(planned_json["tasks"][0]["id"]
+        .as_str()
+        .unwrap()
+        .starts_with("task-"));
+
+    let output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "interactive",
+            "context-memory",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.interactive.context_memory.v1"
+    );
+    assert_eq!(json["status"], "context_memory_ready");
+    assert_eq!(json["project_root"], project_root.display().to_string());
+    assert_eq!(
+        json["memory_policy"]["schema_version"],
+        "forge.memory_policy.v1"
+    );
+    assert_eq!(
+        json["memory_policy"]["project_governance"]["status"],
+        "configured"
+    );
+    assert_eq!(
+        json["memory_policy"]["effective_defaults"]["memory_level"],
+        "MEMORY_SHORT_TERM"
+    );
+    assert!(json["ready_for_handoff"].as_u64().unwrap() >= 1);
+    assert!(json["memory_level_count"].as_u64().unwrap() >= 1);
+    assert!(
+        json["context_actions"]["ready_for_handoff"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(json["context_quality"]["budget_pressure"].is_number());
+    assert!(json["memory_commands"]["policy"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("policy")));
+    assert!(json["memory_commands"]["search"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("search")));
+    assert!(json["context_commands"]["request"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("context")));
+    assert!(json["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap_or("")
+            .contains("forge memory policy")));
+
+    let text_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "interactive",
+            "context-memory",
+            "--project-root",
+            project_root.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Context/memory center"));
+    assert!(text.contains("MEMORY_SHORT_TERM"));
+    assert!(text.contains("ready handoffs"));
+    assert!(text.contains("forge memory policy"));
+    assert!(text.contains("forge context --workflow"));
+
+    let home_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "interactive",
+            "home",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["context_memory_panel"]["schema_version"],
+        "forge.interactive.context_memory.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["context_memory_panel"]["memory_policy"]["effective_defaults"]
+            ["memory_level"],
+        "MEMORY_SHORT_TERM"
+    );
+    assert!(home["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/context-memory")));
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |region| region["widgets"].as_array().unwrap().iter().any(|widget| {
+                widget["widget_id"] == "context_memory_panel"
+                    && widget["commands"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!(
+                            "forge interactive context-memory --output json"
+                        ))
+            })
+        ));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.context_memory");
+    assert_eq!(tool["output_schema"], "forge.interactive.context_memory.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.context_memory"])
+        .arg("--input")
+        .arg(format!(
+            r#"{{"project_root":{}}}"#,
+            serde_json::to_string(project_root.to_str().unwrap()).unwrap()
+        ))
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.context_memory.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["memory_policy"]["effective_defaults"]["memory_level"],
+        "MEMORY_SHORT_TERM"
+    );
+}
+
+#[test]
 fn schedule_create_cli_models_daily_goal_research_with_multiple_goals() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -47042,6 +47273,7 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         "/logs",
         "/update",
         "/workers",
+        "/context-memory",
         "/context",
         "/handoff",
         "/pm",
@@ -47080,6 +47312,14 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         .as_array()
         .unwrap()
         .contains(&Value::String("context".to_string())));
+
+    let context_memory = find_slash_command(&json, "/context-memory");
+    assert_eq!(context_memory["risk_level"], "low");
+    assert_eq!(context_memory["mutates_workflow"], false);
+    assert!(context_memory["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("context-memory".to_string())));
 
     let handoff = find_slash_command(&json, "/handoff");
     assert_eq!(handoff["risk_level"], "medium");
