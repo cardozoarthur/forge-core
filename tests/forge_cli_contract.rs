@@ -5722,7 +5722,38 @@ fn milestone_prepare_evidence_inputs_writes_secret_free_manifest_templates_with_
     assert_eq!(manifest["providers"][0]["network_access"], false);
     assert_eq!(manifest["providers"][0]["allow_model_execution"], true);
 
-    let idempotent_output = forge()
+    let repair_plan_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "prepare-evidence-inputs",
+            "--version",
+            "0.5",
+            "--capability",
+            "replacement_grade_cli",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args(["--connected-brain", "project-provider", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let repair_plan_json: Value = serde_json::from_slice(&repair_plan_output).unwrap();
+    assert_eq!(repair_plan_json["status"], "manifest_templates_planned");
+    assert_eq!(repair_plan_json["template_count"], 1);
+    assert_eq!(
+        repair_plan_json["prepared_files"][0]["existed_before"],
+        true
+    );
+    assert_eq!(
+        repair_plan_json["prepared_files"][0]["write_status"],
+        "planned"
+    );
+
+    forge()
         .arg("--store")
         .arg(store.to_str().unwrap())
         .args([
@@ -5745,13 +5776,8 @@ fn milestone_prepare_evidence_inputs_writes_secret_free_manifest_templates_with_
             "json",
         ])
         .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let idempotent_json: Value = serde_json::from_slice(&idempotent_output).unwrap();
-    assert_eq!(idempotent_json["status"], "no_manifest_templates");
-    assert_eq!(idempotent_json["written_count"], 0);
+        .failure()
+        .stderr(predicates::str::contains("refusing to overwrite"));
 
     let overwrite_project = temp.path().join("overwrite-project");
     fs::create_dir_all(overwrite_project.join(".forge")).unwrap();
@@ -5818,6 +5844,49 @@ fn milestone_prepare_evidence_inputs_writes_secret_free_manifest_templates_with_
     assert_eq!(multimodal_json["written_count"], 2);
     assert!(project.join(".forge/multimodal.json").exists());
     assert!(project.join(".forge/multimodal-runtimes.json").exists());
+
+    let multimodal_repair_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "prepare-evidence-inputs",
+            "--version",
+            "0.5",
+            "--capability",
+            "experimental_multimodal_runtime",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args([
+            "--connected-runtime",
+            "production-vision-runtime",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let multimodal_repair_json: Value = serde_json::from_slice(&multimodal_repair_output).unwrap();
+    assert_eq!(
+        multimodal_repair_json["status"],
+        "manifest_templates_planned"
+    );
+    assert_eq!(multimodal_repair_json["template_count"], 2);
+    assert!(multimodal_repair_json["prepared_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|file| file["template_id"] == "multimodal_feature_flag"
+            && file["existed_before"] == true));
+    assert!(multimodal_repair_json["prepared_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|file| file["template_id"] == "multimodal_runtime_manifest"
+            && file["existed_before"] == true));
 }
 
 #[test]
@@ -5884,6 +5953,18 @@ fn milestone_connected_brain_template_placeholders_do_not_count_as_ready_evidenc
         .as_str()
         .unwrap()
         .contains("replace placeholders"));
+    assert!(plan_json["manifest_templates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |template| template["id"] == "connected_brain_runtime_manifest"
+                && template["target_path"]
+                    == project
+                        .join(".forge/connected-brain-runtimes.json")
+                        .display()
+                        .to_string()
+        ));
 
     forge()
         .arg("--store")

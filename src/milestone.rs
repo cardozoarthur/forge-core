@@ -1021,7 +1021,9 @@ pub fn prepare_milestone_evidence_inputs(
     next_commands.sort();
     next_commands.dedup();
 
-    let status = if !options.apply {
+    let status = if plan.manifest_templates.is_empty() {
+        "no_manifest_templates"
+    } else if !options.apply {
         "manifest_templates_planned"
     } else if written_count > 0 {
         "manifest_templates_written"
@@ -2086,6 +2088,12 @@ fn plan_replacement_grade_cli_evidence(
         selected_id: Some(provider.id.clone()),
         summary,
     });
+    if !provider_ready {
+        manifest_templates.push(connected_brain_manifest_template(
+            project_root,
+            Some(&provider.id),
+        ));
+    }
     configured_evidence_sources.push(format!("connected_brain_provider:{}", provider.id));
     configured_evidence_sources
         .push("replacement_cli_demo:real_project_coding_research".to_string());
@@ -2511,6 +2519,12 @@ fn plan_experimental_multimodal_evidence(
                 .to_string()
         },
     });
+    if !runtime_ready {
+        manifest_templates.push(multimodal_runtime_manifest_template(
+            project_root,
+            Some(&runtime_id),
+        ));
+    }
     configured_evidence_sources.push(format!("connected_multimodal_runtime:{runtime_id}"));
     evidence_collection_commands.push(format!(
         "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --project-root {} --connected-runtime {} --approved-by <operator> --output json",
