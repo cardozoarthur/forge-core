@@ -78,6 +78,8 @@ const INTERACTIVE_PATCH_FILE_ACTION_HINT_SCHEMA_VERSION: &str =
 const INTERACTIVE_PERMISSIONS_SCHEMA_VERSION: &str = "forge.interactive.permissions.v1";
 const INTERACTIVE_IDENTITY_SCHEMA_VERSION: &str = "forge.interactive.identity.v1";
 const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
+const INTERACTIVE_OPERATIONAL_COCKPIT_SCHEMA_VERSION: &str =
+    "forge.interactive.operational_cockpit.v1";
 const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
 const INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION: &str = "forge.interactive.structured_logs.v1";
 const SLASH_COMMANDS_SCHEMA_VERSION: &str = "forge.interactive.slash_commands.v1";
@@ -145,10 +147,45 @@ pub struct InteractiveDashboard {
     pub cost_panel: InteractiveCostPanel,
     pub context_memory_panel: InteractiveContextMemoryPanel,
     pub digital_twin_panel: OpsOperationalDigitalTwin,
+    pub operational_cockpit_panel: InteractiveOperationalCockpitPanel,
     pub addon_renderer_panel: InteractiveAddonRendererPanel,
     pub attention_actions: Vec<String>,
     pub useful_next_commands: Vec<String>,
     pub quick_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveOperationalCockpitPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub attention_level: String,
+    pub priority_summary: String,
+    pub active_work_count: usize,
+    pub needs_attention_count: usize,
+    pub ready_handoff_count: usize,
+    pub pending_human_wait_count: usize,
+    pub pending_approval_count: usize,
+    pub validation_failure_count: usize,
+    pub due_workflow_count: usize,
+    pub selected_brain: String,
+    pub ready_session_count: usize,
+    pub forge_first_ready: bool,
+    pub headroom_operational_status: String,
+    pub event_count: usize,
+    pub estimated_cost_total_usd: f64,
+    pub sections: Vec<InteractiveOperationalCockpitSection>,
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveOperationalCockpitSection {
+    pub section_id: String,
+    pub title: String,
+    pub status: String,
+    pub signal_count: usize,
+    pub summary: String,
+    pub primary_command: String,
+    pub secondary_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1634,6 +1671,22 @@ pub fn build_interactive_home_with_options(
     let patch_workbench_panel = build_interactive_patch_workbench(store)?;
     let permissions_panel = build_interactive_permissions(store)?;
     let identity_panel = build_interactive_identity(store, &repository_context_path)?;
+    let operational_cockpit_panel = build_operational_cockpit_panel(
+        active_runs,
+        runs_needing_attention,
+        scheduled_workflows,
+        looping_workflows,
+        workflows.summary.non_running,
+        pending_approvals,
+        validation_failures,
+        &task_board_panel,
+        &schedule_panel,
+        &sessions_panel,
+        &harness_panel,
+        &structured_logs_panel,
+        &cost_panel,
+        &context_memory_panel,
+    );
     let ui_composition_panel = build_ui_composition_panel(&addon_renderer_report);
 
     Ok(InteractiveHomeReport {
@@ -1685,6 +1738,7 @@ pub fn build_interactive_home_with_options(
             cost_panel,
             context_memory_panel,
             digital_twin_panel,
+            operational_cockpit_panel,
             addon_renderer_panel,
             attention_actions,
             useful_next_commands: vec![
@@ -2654,6 +2708,27 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             &["readiness", "executor", "brain", "shell", "harness"],
         ),
         command_palette_entry(
+            "operations.cockpit",
+            "operations",
+            "Open operational cockpit",
+            "Inspect the unified operator focus for workflows, handoffs, human waits, brain readiness and observability.",
+            "operational_cockpit_panel",
+            None,
+            &["interactive", "home", "--output", "json"],
+            false,
+            false,
+            "low",
+            &[
+                "operational",
+                "operations",
+                "cockpit",
+                "focus",
+                "dashboard",
+                "handoff",
+                "attention",
+            ],
+        ),
+        command_palette_entry(
             "harness.open",
             "harness",
             "Open harness center",
@@ -3186,6 +3261,7 @@ fn command_palette_groups(
     let preferred_order = [
         "navigation",
         "workflow",
+        "operations",
         "patch",
         "identity",
         "permissions",
@@ -3222,6 +3298,7 @@ fn command_palette_group_title(group_id: &str) -> &'static str {
     match group_id {
         "navigation" => "Navigation",
         "workflow" => "Workflows",
+        "operations" => "Operations",
         "patch" => "Patch Workbench",
         "identity" => "Identity",
         "permissions" => "Permissions",
@@ -6066,6 +6143,8 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         d.event_panel.latest_events.join(" | ")
     };
     let structured_logs = render_structured_log_summary(&d.structured_logs_panel);
+    let operational_cockpit_sections =
+        render_operational_cockpit_sections(&d.operational_cockpit_panel);
     let addon_renderer_families = if d.addon_renderer_panel.families.is_empty() {
         "none".to_string()
     } else {
@@ -6080,6 +6159,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         "{mark}\n{name}\n\n\
          Active runs: {active_runs}\n\
          {run_ids_line}\
+         Operational cockpit: {cockpit_attention}; {cockpit_priority}; active work {cockpit_active_work}, ready handoffs {cockpit_ready_handoffs}, human waits {cockpit_human_waits}, due workflows {cockpit_due_workflows}, brain {cockpit_selected_brain}; sections {cockpit_sections}\n\
          Runs needing attention: {runs_needing_attention}\n\
          Scheduled workflows: {scheduled_workflows}\n\
          Looping workflows: {looping_workflows}\n\
@@ -6124,6 +6204,14 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         name = report.banner.name,
         active_runs = d.active_runs,
         run_ids_line = run_ids_line,
+        cockpit_attention = d.operational_cockpit_panel.attention_level,
+        cockpit_priority = d.operational_cockpit_panel.priority_summary,
+        cockpit_active_work = d.operational_cockpit_panel.active_work_count,
+        cockpit_ready_handoffs = d.operational_cockpit_panel.ready_handoff_count,
+        cockpit_human_waits = d.operational_cockpit_panel.pending_human_wait_count,
+        cockpit_due_workflows = d.operational_cockpit_panel.due_workflow_count,
+        cockpit_selected_brain = d.operational_cockpit_panel.selected_brain,
+        cockpit_sections = operational_cockpit_sections,
         runs_needing_attention = d.runs_needing_attention,
         scheduled_workflows = d.scheduled_workflows,
         looping_workflows = d.looping_workflows,
@@ -7413,6 +7501,212 @@ fn build_interactive_addon_renderer_panel(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_operational_cockpit_panel(
+    active_runs: usize,
+    runs_needing_attention: usize,
+    scheduled_workflows: usize,
+    looping_workflows: usize,
+    paused_idle_workflows: usize,
+    pending_approvals: usize,
+    validation_failures: usize,
+    task_board: &InteractiveTaskBoardPanel,
+    schedule: &InteractiveSchedulePanel,
+    sessions: &InteractiveSessionsPanel,
+    harness: &InteractiveHarnessPanel,
+    structured_logs: &InteractiveStructuredLogsPanel,
+    cost: &InteractiveCostPanel,
+    context_memory: &InteractiveContextMemoryPanel,
+) -> InteractiveOperationalCockpitPanel {
+    let active_work_count =
+        active_runs + task_board.ready_handoffs + schedule.runnable_due_workflows;
+    let attention_level = if validation_failures > 0 || runs_needing_attention > 0 {
+        "critical"
+    } else if pending_approvals > 0
+        || task_board.pending_human_interactions > 0
+        || task_board.ready_handoffs > 0
+        || schedule.due_workflows > 0
+        || !harness.forge_first_ready
+    {
+        "attention"
+    } else {
+        "normal"
+    };
+    let selected_brain = sessions
+        .session_report
+        .selected_provider_id
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
+    let priority_summary = format!(
+        "{active_work_count} active signals, {runs_needing_attention} runs needing attention, {} ready handoffs, {} human waits, {pending_approvals} pending approvals",
+        task_board.ready_handoffs, task_board.pending_human_interactions
+    );
+    let sections = vec![
+        operational_cockpit_section(
+            "attention",
+            "Attention",
+            if attention_level == "critical" {
+                "critical"
+            } else {
+                "watch"
+            },
+            runs_needing_attention + validation_failures,
+            format!(
+                "{runs_needing_attention} runs need attention; {validation_failures} validation failures"
+            ),
+            "forge request list --status needs_attention",
+            vec![
+                "forge request list --status stale".to_string(),
+                "forge interactive structured-logs --output json".to_string(),
+            ],
+        ),
+        operational_cockpit_section(
+            "workflow",
+            "Workflow",
+            "operational",
+            active_runs + scheduled_workflows + looping_workflows + paused_idle_workflows,
+            format!(
+                "{active_runs} active, {scheduled_workflows} scheduled, {looping_workflows} looping, {paused_idle_workflows} paused or idle"
+            ),
+            "forge list",
+            vec![
+                "forge schedule list --output json".to_string(),
+                "forge interactive workflow-dag --output json".to_string(),
+            ],
+        ),
+        operational_cockpit_section(
+            "handoff",
+            "Handoff",
+            if task_board.ready_handoffs > 0 {
+                "ready"
+            } else {
+                "waiting"
+            },
+            task_board.ready_handoffs + context_memory.blocked_tasks,
+            format!(
+                "{} ready handoffs; {} context-blocked tasks; {} checkpoints",
+                task_board.ready_handoffs,
+                context_memory.blocked_tasks,
+                task_board.checkpoint_resume_candidates
+            ),
+            "forge interactive task-board --output json",
+            vec![
+                "forge interactive readiness --output json".to_string(),
+                "forge context --workflow <workflow-id> --task <task-id> --strict --output json"
+                    .to_string(),
+            ],
+        ),
+        operational_cockpit_section(
+            "human",
+            "Human",
+            if pending_approvals > 0 || task_board.pending_human_interactions > 0 {
+                "awaiting_human"
+            } else {
+                "clear"
+            },
+            pending_approvals + task_board.pending_human_interactions,
+            format!(
+                "{pending_approvals} pending approvals; {} human waits",
+                task_board.pending_human_interactions
+            ),
+            "forge interactive permissions --output json",
+            vec![
+                "forge interactive identity --output json".to_string(),
+                "forge interactions list --output json".to_string(),
+            ],
+        ),
+        operational_cockpit_section(
+            "brain",
+            "Brain",
+            if sessions.ready_session_count > 0 {
+                "ready"
+            } else {
+                "needs_sync"
+            },
+            sessions.ready_session_count + usize::from(harness.forge_first_ready),
+            format!(
+                "selected brain {selected_brain}; {} ready sessions; harness {}; headroom {}",
+                sessions.ready_session_count, harness.doctor.status, harness.headroom_operational_status
+            ),
+            "forge interactive sessions --output json",
+            vec![
+                "forge interactive readiness --output json".to_string(),
+                "forge interactive harness --output json".to_string(),
+            ],
+        ),
+        operational_cockpit_section(
+            "observability",
+            "Observability",
+            if structured_logs.has_more {
+                "has_more"
+            } else {
+                "current"
+            },
+            structured_logs.log_count + schedule.due_workflows,
+            format!(
+                "{} visible logs from {} events; {} due workflows; estimated cost ${:.4}",
+                structured_logs.log_count,
+                structured_logs.total_event_count,
+                schedule.due_workflows,
+                cost.estimated_task_cost_total_usd
+            ),
+            "forge interactive structured-logs --output json",
+            vec![
+                "forge schedule worker-status --output json".to_string(),
+                "forge cost ledger --output json".to_string(),
+            ],
+        ),
+    ];
+
+    InteractiveOperationalCockpitPanel {
+        schema_version: INTERACTIVE_OPERATIONAL_COCKPIT_SCHEMA_VERSION.to_string(),
+        status: "operational_cockpit_ready".to_string(),
+        attention_level: attention_level.to_string(),
+        priority_summary,
+        active_work_count,
+        needs_attention_count: runs_needing_attention,
+        ready_handoff_count: task_board.ready_handoffs,
+        pending_human_wait_count: task_board.pending_human_interactions,
+        pending_approval_count: pending_approvals,
+        validation_failure_count: validation_failures,
+        due_workflow_count: schedule.due_workflows,
+        selected_brain,
+        ready_session_count: sessions.ready_session_count,
+        forge_first_ready: harness.forge_first_ready,
+        headroom_operational_status: harness.headroom_operational_status.clone(),
+        event_count: structured_logs.total_event_count,
+        estimated_cost_total_usd: cost.estimated_task_cost_total_usd,
+        sections,
+        next_actions: vec![
+            "forge interactive task-board --output json".to_string(),
+            "forge interactive readiness --output json".to_string(),
+            "forge interactive action-registry --query operational --output json".to_string(),
+            "forge interactive structured-logs --output json".to_string(),
+            "forge interactive sessions --output json".to_string(),
+        ],
+    }
+}
+
+fn operational_cockpit_section(
+    section_id: &str,
+    title: &str,
+    status: &str,
+    signal_count: usize,
+    summary: String,
+    primary_command: &str,
+    secondary_commands: Vec<String>,
+) -> InteractiveOperationalCockpitSection {
+    InteractiveOperationalCockpitSection {
+        section_id: section_id.to_string(),
+        title: title.to_string(),
+        status: status.to_string(),
+        signal_count,
+        summary,
+        primary_command: primary_command.to_string(),
+        secondary_commands,
+    }
+}
+
 fn build_ui_composition_panel(
     addon_renderer_report: &OpsAddonViewRendererReport,
 ) -> InteractiveUiCompositionPanel {
@@ -7526,6 +7820,15 @@ fn build_ui_composition_panel(
             "primary_work_area",
             20,
             vec![
+                core_ui_widget(
+                    "operational_cockpit_panel",
+                    "Operational cockpit",
+                    "operational_cockpit_panel",
+                    "cockpit_renderer",
+                    "detailed",
+                    "full",
+                    vec!["forge interactive home --output json".to_string()],
+                ),
                 core_ui_widget(
                     "digital_twin_panel",
                     "Operational digital twin",
@@ -7919,6 +8222,24 @@ fn structured_log_json_summary(value: &serde_json::Value) -> String {
     serde_json::to_string(value)
         .map(|json| truncate_display(&json, 180))
         .unwrap_or_else(|_| "unavailable".to_string())
+}
+
+fn render_operational_cockpit_sections(panel: &InteractiveOperationalCockpitPanel) -> String {
+    if panel.sections.is_empty() {
+        return "none".to_string();
+    }
+
+    panel
+        .sections
+        .iter()
+        .map(|section| {
+            format!(
+                "{}:{} signals {} -> {}",
+                section.section_id, section.status, section.signal_count, section.primary_command
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 fn render_ui_composition_region_summary(panel: &InteractiveUiCompositionPanel) -> String {

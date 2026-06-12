@@ -43956,6 +43956,126 @@ views:
 }
 
 #[test]
+fn interactive_home_surfaces_operational_cockpit_for_operator_focus() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let home_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    let cockpit = &home["dashboard"]["operational_cockpit_panel"];
+    assert_eq!(
+        cockpit["schema_version"],
+        "forge.interactive.operational_cockpit.v1"
+    );
+    assert_eq!(cockpit["status"], "operational_cockpit_ready");
+    assert!(cockpit["attention_level"].is_string());
+    assert_eq!(
+        cockpit["ready_handoff_count"],
+        home["dashboard"]["task_board_panel"]["ready_handoffs"]
+    );
+    assert_eq!(
+        cockpit["pending_human_wait_count"],
+        home["dashboard"]["task_board_panel"]["pending_human_interactions"]
+    );
+    assert_eq!(
+        cockpit["due_workflow_count"],
+        home["dashboard"]["schedule_panel"]["due_workflows"]
+    );
+    let selected_provider = home["dashboard"]["sessions_panel"]["session_report"]
+        ["selected_provider_id"]
+        .as_str()
+        .unwrap_or("none");
+    assert_eq!(cockpit["selected_brain"], selected_provider);
+    for section_id in [
+        "attention",
+        "workflow",
+        "handoff",
+        "human",
+        "brain",
+        "observability",
+    ] {
+        assert!(cockpit["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|section| section["section_id"] == section_id));
+    }
+    assert!(cockpit["next_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge interactive task-board --output json"
+        )));
+    assert!(cockpit["next_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge interactive readiness --output json"
+        )));
+    assert!(cockpit["next_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge interactive action-registry --query operational --output json"
+        )));
+
+    let text_output = forge()
+        .args(["--store", store.to_str().unwrap(), "interactive", "home"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Operational cockpit:"));
+    assert!(text.contains("attention"));
+    assert!(text.contains("ready handoffs"));
+
+    let registry_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-registry",
+            "--query",
+            "operational",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let registry: Value = serde_json::from_slice(&registry_output).unwrap();
+    assert!(registry["groups"].as_array().unwrap().iter().any(|group| {
+        group["group_id"] == "operations"
+            && group["actions"].as_array().unwrap().iter().any(|action| {
+                action["action_id"] == "operations.cockpit"
+                    && action["source_panel"] == "operational_cockpit_panel"
+                    && action["commands"]
+                        == serde_json::json!(["interactive", "home", "--output", "json"])
+                    && action["mutates_workflow"] == false
+                    && action["requires_approval"] == false
+                    && action["risk_level"] == "low"
+            })
+    }));
+}
+
+#[test]
 fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
