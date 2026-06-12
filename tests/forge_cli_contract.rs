@@ -5673,6 +5673,14 @@ fn packaged_skill_mentions_export_demo_agent_surface() {
         forge_core::skill::SKILL_MD.contains("forge.milestone.export_demo"),
         "the packaged Forge skill should expose the MCP export-demo tool to agent callers"
     );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge milestone prepare-evidence-inputs"),
+        "the packaged Forge skill should teach agents how to materialize secret-free milestone evidence input manifests"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.milestone.prepare_evidence_inputs"),
+        "the packaged Forge skill should expose the MCP prepare-evidence-inputs tool to agent callers"
+    );
 }
 
 #[test]
