@@ -38,7 +38,7 @@ use chrono::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
@@ -4285,10 +4285,30 @@ pub fn run_event_runtime_reconcile(
         Uuid::new_v4().to_string().replace('-', "")
     );
 
+    let operating_context = load_project_operating_context(&project_root)?;
+    let (organization_id, brand_id, product_id) = event_inbox_tenant_filters_for_context(
+        store,
+        &operating_context,
+        "events runtime reconcile registry snapshot",
+    )?;
     let registry_report = list_workflows(store)?;
+    let allowed_workflow_ids = event_runtime_allowed_workflow_ids(
+        store,
+        organization_id.as_deref(),
+        brand_id.as_deref(),
+        product_id.as_deref(),
+    )?;
+    let registry_workflows = registry_report
+        .workflows
+        .into_iter()
+        .filter(|workflow| match &allowed_workflow_ids {
+            Some(ids) => ids.contains(&workflow.workflow_id),
+            None => true,
+        })
+        .collect::<Vec<_>>();
     let mut action_counts = BTreeMap::<String, usize>::new();
     let mut actionable_workflows = Vec::new();
-    for workflow in &registry_report.workflows {
+    for workflow in &registry_workflows {
         let action = workflow.runtime.operator_action.clone();
         *action_counts.entry(action.clone()).or_default() += 1;
         if matches!(
@@ -4316,20 +4336,23 @@ pub fn run_event_runtime_reconcile(
         .collect::<Vec<_>>();
     let registry = EventRuntimeRegistrySnapshot {
         schema_version: "forge.event_runtime_registry_snapshot.v1".to_string(),
-        workflow_count: registry_report.summary.total,
-        persistent_workflows: registry_report.summary.runtime.persistent_workflows,
-        idle_waiting_for_events: registry_report.summary.runtime.idle_waiting_for_events,
-        scaled_to_zero: registry_report.summary.runtime.currently_scaled_to_zero,
+        workflow_count: registry_workflows.len(),
+        persistent_workflows: registry_workflows
+            .iter()
+            .filter(|workflow| workflow.runtime.persistent)
+            .count(),
+        idle_waiting_for_events: registry_workflows
+            .iter()
+            .filter(|workflow| workflow.runtime.scale_to_zero_policy == "idle_waiting_for_events")
+            .count(),
+        scaled_to_zero: registry_workflows
+            .iter()
+            .filter(|workflow| workflow.runtime.operational_state == "scaled_to_zero")
+            .count(),
         operator_actions,
         actionable_workflows,
     };
 
-    let operating_context = load_project_operating_context(&project_root)?;
-    let (organization_id, brand_id, product_id) = event_inbox_tenant_filters_for_context(
-        store,
-        &operating_context,
-        "events runtime reconcile inbox scan",
-    )?;
     let pending_events = store.list_inbound_events(
         Some(&requested_status),
         limit,
@@ -6919,6 +6942,25 @@ fn event_service_tenant_filters_for_context(
         Some(operating_context.brand.id.clone()),
         Some(operating_context.product.id.clone()),
     ))
+}
+
+fn event_runtime_allowed_workflow_ids(
+    store: &ForgeStore,
+    organization_id: Option<&str>,
+    brand_id: Option<&str>,
+    product_id: Option<&str>,
+) -> Result<Option<BTreeSet<String>>> {
+    if organization_id.is_none() && brand_id.is_none() && product_id.is_none() {
+        return Ok(None);
+    }
+
+    let ids = store
+        .load_workflows()?
+        .into_iter()
+        .filter(|workflow| workflow_matches_tenant(workflow, organization_id, brand_id, product_id))
+        .map(|workflow| workflow.id)
+        .collect::<BTreeSet<_>>();
+    Ok(Some(ids))
 }
 
 fn enforce_timeline_tenant_filter(

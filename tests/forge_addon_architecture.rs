@@ -11306,6 +11306,173 @@ fn event_services_enforce_project_tenant_policy_for_list_recovery_and_reconcile(
 }
 
 #[test]
+fn event_runtime_reconcile_filters_workflow_registry_by_project_tenant() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let visible_root = temp.path().join("visible-runtime");
+    let hidden_root = temp.path().join("hidden-runtime");
+    write_event_service_tenant_context(
+        &visible_root,
+        "runtime-visible-org",
+        "runtime-visible-brand",
+        "runtime-visible-product",
+    );
+    write_event_service_tenant_context(
+        &hidden_root,
+        "runtime-hidden-org",
+        "runtime-hidden-brand",
+        "runtime-hidden-product",
+    );
+
+    for root in [&visible_root, &hidden_root] {
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "identity",
+                "sync",
+                "--project-root",
+                root.to_str().unwrap(),
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    let visible_start = forge()
+        .current_dir(&visible_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Operate recurring visible runtime intake with event wakeups",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let visible_json: Value = serde_json::from_slice(&visible_start).unwrap();
+    let visible_workflow_id = visible_json["workflow_id"].as_str().unwrap();
+
+    let hidden_start = forge()
+        .current_dir(&hidden_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Operate recurring hidden runtime intake with event wakeups",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let hidden_json: Value = serde_json::from_slice(&hidden_start).unwrap();
+    let hidden_workflow_id = hidden_json["workflow_id"].as_str().unwrap();
+
+    let reconcile_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "runtime-reconcile",
+            "--project-root",
+            visible_root.to_str().unwrap(),
+            "--limit",
+            "1",
+            "--service-limit",
+            "10",
+            "--max-cycles",
+            "1",
+            "--interval-seconds",
+            "0",
+            "--lease-owner",
+            "tenant-registry-reconciler",
+            "--lease-seconds",
+            "60",
+            "--heartbeat-seconds",
+            "10",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let reconcile_json: Value = serde_json::from_slice(&reconcile_output).unwrap();
+    assert_eq!(
+        reconcile_json["schema_version"],
+        "forge.event_runtime_reconcile.v1"
+    );
+    assert_eq!(reconcile_json["registry"]["workflow_count"], 1);
+    assert_eq!(reconcile_json["registry"]["persistent_workflows"], 1);
+    assert_eq!(
+        reconcile_json["registry"]["actionable_workflows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        reconcile_json["registry"]["actionable_workflows"][0]["workflow_id"],
+        visible_workflow_id
+    );
+    assert!(reconcile_json["registry"]["actionable_workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|workflow| workflow["workflow_id"] != hidden_workflow_id));
+
+    let mcp_input = serde_json::json!({
+        "project_root": visible_root.display().to_string(),
+        "limit": 1,
+        "service_limit": 10,
+        "execute": false,
+        "interval_seconds": 0,
+        "max_runs": 1
+    })
+    .to_string();
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.events.runtime_reconcile",
+            "--input",
+            mcp_input.as_str(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp_json["result"]["registry"]["workflow_count"], 1);
+    assert_eq!(
+        mcp_json["result"]["registry"]["actionable_workflows"][0]["workflow_id"],
+        visible_workflow_id
+    );
+}
+
+#[test]
 fn event_services_recover_marks_expired_running_leases_stale_for_cli_and_mcp() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
