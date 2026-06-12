@@ -6556,13 +6556,14 @@ pub fn render_interactive_autocomplete(panel: &InteractiveAutocompletePanel) -> 
 
 pub fn render_interactive_sessions(panel: &InteractiveSessionsPanel) -> String {
     let session_cards = render_session_card_summary(panel);
+    let operation_details = render_session_operation_summary(panel);
     let next_actions = if panel.next_actions.is_empty() {
         "none".to_string()
     } else {
         panel.next_actions.join(" | ")
     };
     format!(
-        "Session center: {status}; controller {controller}; sessions {session_count}, ready {ready_session_count}, planned events {planned_event_count}, lifecycle events {lifecycle_event_count}\nSessions: {session_cards}\nNext actions: {next_actions}\n",
+        "Session center: {status}; controller {controller}; sessions {session_count}, ready {ready_session_count}, planned events {planned_event_count}, lifecycle events {lifecycle_event_count}\nSessions: {session_cards}\nOperations: {operation_details}\nNext actions: {next_actions}\n",
         status = panel.status,
         controller = panel.controller,
         session_count = panel.session_count,
@@ -6570,6 +6571,7 @@ pub fn render_interactive_sessions(panel: &InteractiveSessionsPanel) -> String {
         planned_event_count = panel.planned_event_count,
         lifecycle_event_count = panel.lifecycle_event_count,
         session_cards = session_cards,
+        operation_details = operation_details,
         next_actions = next_actions,
     )
 }
@@ -6595,6 +6597,59 @@ fn render_session_card_summary(panel: &InteractiveSessionsPanel) -> String {
             .collect::<Vec<_>>()
             .join(" | ")
     }
+}
+
+fn render_session_operation_summary(panel: &InteractiveSessionsPanel) -> String {
+    if panel.session_cards.is_empty() {
+        "none".to_string()
+    } else {
+        panel
+            .session_cards
+            .iter()
+            .take(8)
+            .map(|session| {
+                let plan = &session.operation_plan;
+                format!(
+                    "{} action {}; lineage {}; requires context {}; requires handoff {}; requires heartbeat {}; commands history {}; lifecycle {}; launch_plan {}; record_plan {}; context {}; handoff {}; heartbeat {}",
+                    session.session_id,
+                    plan.recommended_action,
+                    plan.lineage_complete,
+                    plan.requires_context,
+                    plan.requires_handoff,
+                    plan.requires_heartbeat,
+                    plan.commands.history.join(" "),
+                    render_session_lifecycle_command_summary(plan),
+                    plan.commands.launch_plan.join(" "),
+                    plan.commands.record_plan.join(" "),
+                    render_optional_session_command(&plan.commands.context),
+                    render_optional_session_command(&plan.commands.handoff),
+                    render_optional_session_command(&plan.commands.heartbeat),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+}
+
+fn render_session_lifecycle_command_summary(plan: &BrainSessionOperationPlan) -> String {
+    [
+        plan.commands.open.as_ref(),
+        plan.commands.attach.as_ref(),
+        plan.commands.detach.as_ref(),
+        plan.commands.close.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|command| command.join(" "))
+    .collect::<Vec<_>>()
+    .join(" -> ")
+}
+
+fn render_optional_session_command(command: &Option<Vec<String>>) -> String {
+    command
+        .as_ref()
+        .map(|command| command.join(" "))
+        .unwrap_or_else(|| "none".to_string())
 }
 
 fn render_patch_workbench_file_summary(panel: &InteractivePatchWorkbenchPanel) -> String {

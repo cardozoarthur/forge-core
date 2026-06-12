@@ -43950,6 +43950,16 @@ fn interactive_sessions_command_and_mcp_surface_are_dedicated() {
     let text = String::from_utf8(text_output).unwrap();
     assert!(text.contains("Session center"));
     assert!(text.contains("codex-shell"));
+    assert!(text.contains("Operations:"));
+    assert!(text.contains("lineage true"));
+    assert!(text.contains("requires context true"));
+    assert!(text.contains("requires handoff true"));
+    assert!(text.contains("requires heartbeat true"));
+    assert!(text.contains("commands history forge sessions history --session codex-shell"));
+    assert!(text.contains("lifecycle forge sessions lifecycle --session codex-shell"));
+    assert!(text.contains("context forge context --workflow wf_interactive_sessions"));
+    assert!(text.contains("handoff forge task handoff --workflow wf_interactive_sessions"));
+    assert!(text.contains("heartbeat forge request heartbeat --run run-session"));
 
     let home_output = forge()
         .env("PATH", &path)
