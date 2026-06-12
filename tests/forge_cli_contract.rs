@@ -5002,6 +5002,11 @@ fn milestone_collect_evidence_selects_replacement_cli_demo_evidence_kinds() {
         assert_eq!(json["status"], "collected_and_attached");
         assert_eq!(json["collection_promotion_ready"], true);
         assert_eq!(json["attached_evidence"]["kind"], kind);
+        assert!(json["promotion_gates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|gate| gate["passed"] == true));
         assert_eq!(
             json["promotion_impact"],
             "collected_and_attached_not_auto_promoted"

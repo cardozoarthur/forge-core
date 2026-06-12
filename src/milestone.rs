@@ -249,6 +249,7 @@ pub struct MilestoneCollectEvidenceReport {
     pub project_root: String,
     pub configured_evidence_source: String,
     pub collection_promotion_ready: bool,
+    pub promotion_gates: Vec<MilestonePromotionGate>,
     pub collection_artifact_path: String,
     pub collection_artifact_sha256: String,
     pub collection_summary: String,
@@ -854,6 +855,7 @@ pub fn collect_milestone_evidence(
         project_root: project_root.display().to_string(),
         configured_evidence_source: collected.configured_evidence_source,
         collection_promotion_ready: collected.collection_promotion_ready,
+        promotion_gates: collected.promotion_gates,
         collection_artifact_path: collected.collection_artifact_path.display().to_string(),
         collection_artifact_sha256: collected.collection_artifact_sha256,
         collection_summary: collected.collection_summary,
@@ -869,16 +871,17 @@ struct CollectedMilestoneEvidence {
     kind: String,
     configured_evidence_source: String,
     collection_promotion_ready: bool,
+    promotion_gates: Vec<MilestonePromotionGate>,
     collection_artifact_path: PathBuf,
     collection_artifact_sha256: String,
     collection_summary: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct MilestonePromotionGate {
-    id: String,
-    passed: bool,
-    summary: String,
+pub struct MilestonePromotionGate {
+    pub id: String,
+    pub passed: bool,
+    pub summary: String,
 }
 
 fn milestone_promotion_gate(
@@ -1057,6 +1060,7 @@ fn collect_replacement_grade_cli_provider_evidence(
             provider_contract.provider_id
         ),
         collection_promotion_ready,
+        promotion_gates,
         collection_artifact_path,
         collection_artifact_sha256,
         collection_summary,
@@ -1150,6 +1154,7 @@ fn collect_replacement_grade_cli_real_project_evidence(
         kind: "broader_project_coding_research_workflow".to_string(),
         configured_evidence_source: "replacement_cli_demo:real_project_coding_research".to_string(),
         collection_promotion_ready,
+        promotion_gates,
         collection_artifact_path,
         collection_artifact_sha256,
         collection_summary,
@@ -1251,6 +1256,7 @@ fn collect_replacement_grade_cli_terminal_editing_evidence(
         kind: "terminal_file_editing_ux".to_string(),
         configured_evidence_source: "replacement_cli_demo:patch_lifecycle".to_string(),
         collection_promotion_ready,
+        promotion_gates,
         collection_artifact_path,
         collection_artifact_sha256,
         collection_summary,
@@ -1342,6 +1348,7 @@ fn collect_experimental_multimodal_runtime_evidence(
         kind: "production_runtime_benchmark".to_string(),
         configured_evidence_source: format!("connected_multimodal_runtime:{runtime_id}"),
         collection_promotion_ready,
+        promotion_gates,
         collection_artifact_path,
         collection_artifact_sha256,
         collection_summary,
