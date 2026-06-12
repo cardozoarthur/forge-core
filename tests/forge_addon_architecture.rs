@@ -1117,6 +1117,15 @@ fn mcp_manifest_exposes_addon_capability_tools() {
         "forge.addon_validator_execution.v1"
     );
     assert_eq!(execute_validator["mutates_workflow"], true);
+    let execute_executor = tools
+        .iter()
+        .find(|tool| tool["name"] == "forge.addons.execute_executor")
+        .expect("addon executor execution MCP tool should be listed");
+    assert_eq!(
+        execute_executor["output_schema"],
+        "forge.addon_executor_execution.v1"
+    );
+    assert_eq!(execute_executor["mutates_workflow"], true);
     let claim_dispatch = tools
         .iter()
         .find(|tool| tool["name"] == "forge.addons.claim_dispatch")
@@ -2627,6 +2636,214 @@ print(json.dumps({
     );
     assert_eq!(mcp_json["result"]["status"], "addon_validator_passed");
     assert_eq!(mcp_json["result"]["validation"]["decision"], "passed");
+    assert_eq!(
+        mcp_json["result"]["dispatch_report"]["dispatches"][0]["input"]["context"]
+            ["provided_context"]["tenant"],
+        "mcp"
+    );
+}
+
+#[test]
+fn addon_executor_executes_through_worker_with_result_audit_for_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let addon_dir = temp.path().join("addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        addon_dir.join("fulfillment-executor.yaml"),
+        r#"
+id: forge.addon.fulfillment_executor
+name: Fulfillment Executor Addon
+version: 0.1.0
+capabilities:
+  - id: fulfillment_execution
+    title: Fulfillment execution
+    domains: [operations]
+    keywords: [fulfillment-execution]
+runtime_contracts:
+  - id: fulfillment.task.executor
+    title: Fulfillment task executor
+    contract_type: executor
+    capability_id: fulfillment_execution
+    runtime: wasm
+    entrypoint: fulfillment_task.run
+    inputs: [task_ref, input, context]
+    outputs: [status, outputs, artifacts, events]
+"#,
+    )
+    .unwrap();
+
+    let worker_script = temp.path().join("fulfillment-executor-worker.py");
+    fs::write(
+        &worker_script,
+        r#"#!/usr/bin/env python3
+import json
+import sys
+
+request = json.load(sys.stdin)
+order_id = request["input"]["input"]["order_id"]
+print(json.dumps({
+    "status": "completed",
+    "result": {
+        "schema_version": "forge.addon_executor_result.v1",
+        "status": "completed",
+        "task_ref": request["input"]["task_ref"],
+        "summary": "fulfillment task completed",
+        "outputs": {
+            "order_id": order_id,
+            "confirmation": "ok"
+        },
+        "artifacts": [
+            {"kind": "receipt", "id": "receipt-" + order_id}
+        ],
+        "events": [
+            {"kind": "fulfilled", "order_id": order_id}
+        ],
+        "context_tenant": request["input"]["context"]["provided_context"].get("tenant")
+    },
+    "attestation": {
+        "schema_version": "forge.addon_runtime_worker_attestation.v1",
+        "execution_mode": "local_process",
+        "worker_id": request["worker_id"],
+        "dispatch_id": request["dispatch_id"],
+        "request_schema": request["schema_version"]
+    }
+}))
+"#,
+    )
+    .unwrap();
+    let mut worker_permissions = fs::metadata(&worker_script).unwrap().permissions();
+    worker_permissions.set_mode(0o755);
+    fs::set_permissions(&worker_script, worker_permissions).unwrap();
+
+    let worker_data = serde_json::json!({
+        "execution_mode": "local_process",
+        "command": worker_script.display().to_string(),
+        "allowed_entrypoints": ["fulfillment_task.run"],
+        "allowed_contracts": ["fulfillment.task.executor"],
+        "timeout_seconds": 5
+    })
+    .to_string();
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "register-worker",
+            "--worker",
+            "fulfillment-executor-worker",
+            "--runtime",
+            "wasm",
+            "--trust-level",
+            "local",
+            "--source",
+            "test",
+            "--data",
+            worker_data.as_str(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let cli_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "execute-executor",
+            "--addon-dir",
+            addon_dir.to_str().unwrap(),
+            "--addon",
+            "forge.addon.fulfillment_executor",
+            "--contract",
+            "fulfillment.task.executor",
+            "--worker",
+            "fulfillment-executor-worker",
+            "--task",
+            "fulfillment-cli-task",
+            "--input",
+            r#"{"order_id":"ord-cli-001"}"#,
+            "--context",
+            r#"{"tenant":"cli"}"#,
+            "--lease-seconds",
+            "120",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cli_json: Value = serde_json::from_slice(&cli_output).unwrap();
+    assert_eq!(
+        cli_json["schema_version"],
+        "forge.addon_executor_execution.v1"
+    );
+    assert_eq!(cli_json["status"], "addon_executor_completed");
+    assert_eq!(
+        cli_json["dispatch_report"]["status"],
+        "runtime_contract_dispatch_external_completed"
+    );
+    assert_eq!(
+        cli_json["dispatch_report"]["dispatches"][0]["input"]["schema_version"],
+        "forge.addon_executor_dispatch_input.v1"
+    );
+    assert_eq!(
+        cli_json["dispatch_report"]["dispatches"][0]["input"]["task_ref"],
+        "fulfillment-cli-task"
+    );
+    assert_eq!(cli_json["validation"]["status"], "valid");
+    assert_eq!(cli_json["validation"]["result_status"], "completed");
+    assert_eq!(cli_json["validation"]["completed"], true);
+    assert_eq!(cli_json["validation"]["artifact_count"], 1);
+    assert_eq!(cli_json["validation"]["event_count"], 1);
+    assert_eq!(
+        cli_json["executor_result"]["outputs"]["order_id"],
+        "ord-cli-001"
+    );
+    assert_eq!(cli_json["executor_result"]["context_tenant"], "cli");
+
+    let mcp_input = serde_json::json!({
+        "addon_dirs": [addon_dir.display().to_string()],
+        "addon_id": "forge.addon.fulfillment_executor",
+        "contract_id": "fulfillment.task.executor",
+        "worker_id": "fulfillment-executor-worker",
+        "task_ref": "fulfillment-mcp-task",
+        "input": {"order_id": "ord-mcp-001"},
+        "context": {"tenant": "mcp"},
+        "lease_seconds": 120
+    });
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.addons.execute_executor",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp_json["schema_version"], "forge.mcp.call.v1");
+    assert_eq!(mcp_json["status"], "ok");
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.addon_executor_execution.v1"
+    );
+    assert_eq!(mcp_json["result"]["status"], "addon_executor_completed");
+    assert_eq!(
+        mcp_json["result"]["executor_result"]["outputs"]["order_id"],
+        "ord-mcp-001"
+    );
     assert_eq!(
         mcp_json["result"]["dispatch_report"]["dispatches"][0]["input"]["context"]
             ["provided_context"]["tenant"],

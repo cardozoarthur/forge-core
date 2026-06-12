@@ -6,20 +6,21 @@ use forge_core::addon::{
     complete_addon_runtime_contract_dispatch, create_addon_migration_workflow,
     create_addon_package_lock, default_addon_dirs, disable_addon, downgrade_addon, enable_addon,
     enqueue_addon_planner_dispatch, enqueue_addon_runtime_contract_dispatch,
-    evaluate_addon_runtime_contract_policy, execute_addon_planning_strategy,
-    execute_addon_runtime_contract_dispatch, execute_addon_validator, fetch_addon_package,
-    install_addon, install_addon_package, list_addon_capability_index, list_addon_event_adapters,
-    list_addon_marketplace, list_addon_permission_authorizations, list_addon_planner_registry,
+    evaluate_addon_runtime_contract_policy, execute_addon_executor,
+    execute_addon_planning_strategy, execute_addon_runtime_contract_dispatch,
+    execute_addon_validator, fetch_addon_package, install_addon, install_addon_package,
+    list_addon_capability_index, list_addon_event_adapters, list_addon_marketplace,
+    list_addon_permission_authorizations, list_addon_planner_registry,
     list_addon_runtime_contract_dispatches, list_addon_runtime_contracts,
     list_addon_runtime_workers, list_addon_trust_store, list_addon_views, list_installed_addons,
     load_addon_catalog_from_store, package_addon, publish_addon_package,
     register_addon_runtime_worker, resolve_goal_capabilities_with_registry_sync,
     resolve_goal_capabilities_with_store, revoke_addon_permission,
     run_addon_runtime_contract_dispatch, sync_addon_package_registry, trust_addon_package_key,
-    uninstall_addon, upgrade_addon, validate_addon_catalog, AddonPackageInput,
-    AddonPlannerDispatchInput, AddonPlanningStrategyInput, AddonRuntimeContractCompletionInput,
-    AddonTrustKeyInput, AddonValidatorDispatchInput, AddonValidatorExecutionInput,
-    CapabilityRegistrySyncInput,
+    uninstall_addon, upgrade_addon, validate_addon_catalog, AddonExecutorDispatchInput,
+    AddonExecutorExecutionInput, AddonPackageInput, AddonPlannerDispatchInput,
+    AddonPlanningStrategyInput, AddonRuntimeContractCompletionInput, AddonTrustKeyInput,
+    AddonValidatorDispatchInput, AddonValidatorExecutionInput, CapabilityRegistrySyncInput,
 };
 use forge_core::artifact::list_workflow_artifacts;
 use forge_core::aws_ops::{
@@ -1084,6 +1085,30 @@ enum AddonCommands {
         worker: String,
         #[arg(long)]
         subject: String,
+        #[arg(long, default_value = "{}")]
+        input: String,
+        #[arg(long, default_value = "{}")]
+        context: String,
+        #[arg(long = "lease-seconds", default_value_t = 300)]
+        lease_seconds: u64,
+        #[arg(long, default_value = "cli")]
+        source: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ExecuteExecutor {
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        contract: String,
+        #[arg(long)]
+        worker: String,
+        #[arg(long = "task")]
+        task_ref: String,
         #[arg(long, default_value = "{}")]
         input: String,
         #[arg(long, default_value = "{}")]
@@ -5268,6 +5293,52 @@ fn run() -> Result<i32> {
                     "addon_validator_dispatch_blocked"
                         | "addon_validator_execution_failed"
                         | "addon_validator_result_invalid"
+                );
+                print_response(output, &report)?;
+                Ok(if should_fail { 1 } else { 0 })
+            }
+            AddonCommands::ExecuteExecutor {
+                addon,
+                contract,
+                worker,
+                task_ref,
+                input,
+                context,
+                lease_seconds,
+                source,
+                dry_run,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let input_value: serde_json::Value = serde_json::from_str(&input)?;
+                let context_value: serde_json::Value = serde_json::from_str(&context)?;
+                let report = execute_addon_executor(
+                    &store,
+                    &catalog,
+                    AddonExecutorExecutionInput {
+                        dispatch: AddonExecutorDispatchInput {
+                            addon_id: addon.as_deref(),
+                            contract_id: &contract,
+                            task_ref: &task_ref,
+                            input: input_value,
+                            context: context_value,
+                            source: &source,
+                            dry_run,
+                        },
+                        worker_id: &worker,
+                        lease_seconds,
+                    },
+                )?;
+                let should_fail = matches!(
+                    report.status.as_str(),
+                    "addon_executor_dispatch_blocked"
+                        | "addon_executor_execution_failed"
+                        | "addon_executor_result_invalid"
+                        | "addon_executor_failed"
+                        | "addon_executor_needs_retry"
                 );
                 print_response(output, &report)?;
                 Ok(if should_fail { 1 } else { 0 })
