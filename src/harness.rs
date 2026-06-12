@@ -270,6 +270,7 @@ pub struct HarnessAdoptionStep {
 #[derive(Debug, Clone, Serialize)]
 pub struct HarnessAdoptionCommands {
     pub write_project_harness_config: Vec<String>,
+    pub bootstrap_project_harness: Vec<String>,
     pub mode: Vec<String>,
     pub headroom_plan: Vec<String>,
     pub doctor: Vec<String>,
@@ -1367,23 +1368,25 @@ pub fn build_harness_adoption_plan(
         require_token_headroom_for_forge_first: true,
         require_lineage_for_exec: true,
     };
+    let bootstrap_project_harness = vec![
+        "forge".to_string(),
+        "harness".to_string(),
+        "bootstrap".to_string(),
+        "--executor".to_string(),
+        executor.clone(),
+        "--shim-dir".to_string(),
+        shim_dir_display.clone(),
+        "--project-root".to_string(),
+        project_root_display.clone(),
+        "--apply".to_string(),
+        "--approved-by".to_string(),
+        "<operator>".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ];
     let commands = HarnessAdoptionCommands {
-        write_project_harness_config: vec![
-            "forge".to_string(),
-            "harness".to_string(),
-            "bootstrap".to_string(),
-            "--executor".to_string(),
-            executor.clone(),
-            "--shim-dir".to_string(),
-            shim_dir_display.clone(),
-            "--project-root".to_string(),
-            project_root_display.clone(),
-            "--apply".to_string(),
-            "--approved-by".to_string(),
-            "<operator>".to_string(),
-            "--output".to_string(),
-            "json".to_string(),
-        ],
+        write_project_harness_config: bootstrap_project_harness.clone(),
+        bootstrap_project_harness,
         mode: vec![
             "forge".to_string(),
             "harness".to_string(),
@@ -1519,6 +1522,22 @@ pub fn build_harness_adoption_plan(
                 requires_approval: true,
                 approval_reason: "Project harness config changes Forge-first, token-headroom and lineage policy for future CLI execution.",
                 rationale: "Project policy makes Forge-first, headroom and lineage requirements explicit instead of relying on operator memory.",
+            }),
+            harness_adoption_step(HarnessAdoptionStepInput {
+                id: "bootstrap_project_harness",
+                title: "Bootstrap project harness",
+                status: if mode.project_config_status == "loaded" && doctor.shim_ready {
+                    "already_ready"
+                } else {
+                    "recommended"
+                },
+                command_key: "bootstrap_project_harness",
+                risk_level: "medium",
+                mutates_state: true,
+                executes_child: false,
+                requires_approval: true,
+                approval_reason: "Project harness bootstrap writes Forge-first policy and CLI shims for future CLI execution.",
+                rationale: "Bootstrap gives UI and agent surfaces one explicit setup action before using Forge-first child CLI execution.",
             }),
             harness_adoption_step(HarnessAdoptionStepInput {
                 id: "inspect_headroom_plan",

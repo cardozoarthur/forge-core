@@ -1681,6 +1681,14 @@ fn harness_adoption_plan_models_forge_first_headroom_for_cli_mcp_and_skill() {
         .unwrap()
         .iter()
         .any(|step| {
+            step["id"] == "bootstrap_project_harness"
+                && step["command_key"] == "bootstrap_project_harness"
+        }));
+    assert!(json["adoption_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|step| {
             step["id"] == "write_project_harness_config" && step["status"] == "already_configured"
         }));
     assert!(json["adoption_steps"]
@@ -1828,6 +1836,10 @@ fn harness_adoption_plan_models_forge_first_headroom_for_cli_mcp_and_skill() {
     let write_command = fresh_json["commands"]["write_project_harness_config"]
         .as_array()
         .unwrap();
+    let bootstrap_command = fresh_json["commands"]["bootstrap_project_harness"]
+        .as_array()
+        .unwrap();
+    assert_eq!(bootstrap_command, write_command);
     assert!(write_command.contains(&serde_json::json!("bootstrap")));
     assert!(write_command.contains(&serde_json::json!("--apply")));
     assert!(write_command.contains(&serde_json::json!("--approved-by")));
