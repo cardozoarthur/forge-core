@@ -106,10 +106,10 @@ use forge_core::interaction::{
 };
 use forge_core::interactive::{
     build_forge_first_harness_smoke, build_interactive_action_invocation,
-    build_interactive_action_registry, build_interactive_addon_capabilities_default,
+    build_interactive_action_registry, build_interactive_addon_capabilities_for_project,
     build_interactive_architecture_compass, build_interactive_artifacts,
     build_interactive_autocomplete, build_interactive_command_palette,
-    build_interactive_context_memory, build_interactive_core_boundary,
+    build_interactive_context_memory, build_interactive_core_boundary_for_project,
     build_interactive_event_runtime, build_interactive_guided_cockpit, build_interactive_harness,
     build_interactive_home_with_options, build_interactive_identity,
     build_interactive_improvement_loop, build_interactive_multimodal_runtime,
@@ -3378,10 +3378,14 @@ enum InteractiveCommands {
         output: OutputFormat,
     },
     AddonCapabilities {
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
     CoreBoundary {
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -8418,9 +8422,15 @@ fn run() -> Result<i32> {
                 }
                 Ok(0)
             }
-            InteractiveCommands::AddonCapabilities { output } => {
+            InteractiveCommands::AddonCapabilities {
+                project_root,
+                output,
+            } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = build_interactive_addon_capabilities_default(&store);
+                let report = build_interactive_addon_capabilities_for_project(
+                    &store,
+                    project_root.as_deref(),
+                );
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => {
@@ -8429,9 +8439,13 @@ fn run() -> Result<i32> {
                 }
                 Ok(0)
             }
-            InteractiveCommands::CoreBoundary { output } => {
+            InteractiveCommands::CoreBoundary {
+                project_root,
+                output,
+            } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = build_interactive_core_boundary(&store);
+                let report =
+                    build_interactive_core_boundary_for_project(&store, project_root.as_deref());
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => {

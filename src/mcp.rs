@@ -94,9 +94,9 @@ use crate::interaction::{
 };
 use crate::interactive::{
     build_interactive_action_invocation, build_interactive_action_registry,
-    build_interactive_addon_capabilities_default, build_interactive_architecture_compass,
+    build_interactive_addon_capabilities_for_project, build_interactive_architecture_compass,
     build_interactive_artifacts, build_interactive_autocomplete, build_interactive_command_palette,
-    build_interactive_context_memory, build_interactive_core_boundary,
+    build_interactive_context_memory, build_interactive_core_boundary_for_project,
     build_interactive_guided_cockpit, build_interactive_harness,
     build_interactive_home_with_options, build_interactive_identity,
     build_interactive_improvement_loop, build_interactive_multimodal_runtime,
@@ -651,6 +651,11 @@ struct InteractiveAutocompleteInput {
 
 #[derive(Debug, Deserialize, Default)]
 struct InteractiveIdentityInput {
+    project_root: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InteractiveProjectRootInput {
     project_root: Option<String>,
 }
 
@@ -3371,7 +3376,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.interactive.addon_capabilities",
                 "Inspect Interactive Addon Capabilities",
                 "Return the Forge interactive Addon capabilities surface with Addon lifecycle counts, capability registry totals, permission gates, runtime contracts, TUI views and dispatch state without mutating state.",
-                object_schema(&[], &[]),
+                object_schema(&[
+                    ("project_root", "string", "optional project root used to load project-scoped .forge/addons"),
+                ], &[]),
                 "forge.interactive.addon_capability.v1",
                 &["forge", "interactive", "addon-capabilities", "--output", "json"],
                 ToolFlags::new(true, false),
@@ -3380,7 +3387,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.interactive.core_boundary",
                 "Inspect Core Boundary",
                 "Return the Forge Core boundary audit proving universal Core responsibilities, Addon-owned domain capabilities, compatibility executors and goal3 acceptance gates without mutating state.",
-                object_schema(&[], &[]),
+                object_schema(&[
+                    ("project_root", "string", "optional project root used to load project-scoped .forge/addons"),
+                ], &[]),
                 "forge.interactive.core_boundary.v1",
                 &["forge", "interactive", "core-boundary", "--output", "json"],
                 ToolFlags::new(true, false),
@@ -7911,10 +7920,28 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             serde_json::to_value(build_interactive_permissions(store)?)?
         }
         "forge.interactive.addon_capabilities" => {
-            serde_json::to_value(build_interactive_addon_capabilities_default(store))?
+            let input: InteractiveProjectRootInput = if input.is_null() {
+                InteractiveProjectRootInput::default()
+            } else {
+                parse_input(input)?
+            };
+            let project_root = input.project_root.as_deref().map(PathBuf::from);
+            serde_json::to_value(build_interactive_addon_capabilities_for_project(
+                store,
+                project_root.as_deref(),
+            ))?
         }
         "forge.interactive.core_boundary" => {
-            serde_json::to_value(build_interactive_core_boundary(store))?
+            let input: InteractiveProjectRootInput = if input.is_null() {
+                InteractiveProjectRootInput::default()
+            } else {
+                parse_input(input)?
+            };
+            let project_root = input.project_root.as_deref().map(PathBuf::from);
+            serde_json::to_value(build_interactive_core_boundary_for_project(
+                store,
+                project_root.as_deref(),
+            ))?
         }
         "forge.interactive.identity" => {
             let input: InteractiveIdentityInput = if input.is_null() {

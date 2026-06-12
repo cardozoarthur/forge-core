@@ -49377,6 +49377,10 @@ fn interactive_addon_capabilities_command_and_mcp_surface_are_dedicated() {
         "forge.interactive.addon_capability.v1"
     );
     assert_eq!(json["status"], "addon_capabilities_ready");
+    assert!(json["project_root"]
+        .as_str()
+        .unwrap()
+        .contains("forge-core"));
     assert!(json["addon_count"].as_u64().unwrap() >= 1);
     assert!(json["enabled_addon_count"].as_u64().unwrap() >= 1);
     assert!(json["capability_count"].as_u64().unwrap() >= 1);
@@ -49415,6 +49419,7 @@ fn interactive_addon_capabilities_command_and_mcp_surface_are_dedicated() {
         .clone();
     let text = String::from_utf8(text_output).unwrap();
     assert!(text.contains("Addons/capabilities"));
+    assert!(text.contains("project "));
     assert!(text.contains("workflow_runtime"));
     assert!(text.contains("runtime contracts"));
     assert!(text.contains("forge addons capabilities --output json"));
@@ -49477,6 +49482,7 @@ fn interactive_addon_capabilities_command_and_mcp_surface_are_dedicated() {
         .contains("Addon capabilities"));
     assert_eq!(tool["async_safe"], true);
     assert_eq!(tool["mutates_workflow"], false);
+    assert!(tool["input_schema"]["properties"]["project_root"].is_object());
 
     let mcp_output = forge()
         .arg("--store")
@@ -49658,13 +49664,36 @@ fn interactive_ui_composition_command_and_mcp_surface_are_dedicated() {
 fn interactive_core_boundary_audit_proves_core_minimal_and_addon_owned_domains() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("core-boundary-project");
+    let addon_dir = project_root.join(".forge/addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        addon_dir.join("project-ops.yaml"),
+        r#"
+id: forge.addon.project_ops
+name: Project Ops Addon
+version: 0.1.0
+description: Project-scoped operations addon used to prove project-root catalog loading.
+lifecycle: enabled
+capabilities:
+  - id: project_ops_coordination
+    title: Project Ops Coordination
+    description: Coordinate project-specific operational work.
+    domains:
+      - operations
+"#,
+    )
+    .unwrap();
 
     let output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
             "interactive",
             "core-boundary",
+            "--project-root",
+            project_root.to_str().unwrap(),
             "--output",
             "json",
         ])
@@ -49676,6 +49705,7 @@ fn interactive_core_boundary_audit_proves_core_minimal_and_addon_owned_domains()
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["schema_version"], "forge.interactive.core_boundary.v1");
     assert_eq!(json["status"], "core_boundary_clean");
+    assert_eq!(json["project_root"], project_root.display().to_string());
     assert_eq!(json["core_addon_id"], "forge.core.kernel");
     assert_eq!(json["domain_specific_core_leak_count"], 0);
     assert!(json["core_capability_count"].as_u64().unwrap() >= 10);
@@ -49693,6 +49723,15 @@ fn interactive_core_boundary_audit_proves_core_minimal_and_addon_owned_domains()
         .unwrap()
         .iter()
         .all(|capability| capability["boundary_status"] == "core_universal"));
+    assert!(json["addon_boundaries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|addon| addon["addon_id"] == "forge.addon.project_ops"
+            && addon["sample_capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("project_ops_coordination"))));
     assert!(json["addon_boundaries"]
         .as_array()
         .unwrap()
@@ -49721,11 +49760,14 @@ fn interactive_core_boundary_audit_proves_core_minimal_and_addon_owned_domains()
             == "compatibility_executor_visible_but_addon_owned"));
 
     let text_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
             "interactive",
             "core-boundary",
+            "--project-root",
+            project_root.to_str().unwrap(),
         ])
         .assert()
         .success()
@@ -49734,16 +49776,20 @@ fn interactive_core_boundary_audit_proves_core_minimal_and_addon_owned_domains()
         .clone();
     let text = String::from_utf8(text_output).unwrap();
     assert!(text.contains("Core boundary: core_boundary_clean"));
+    assert!(text.contains(&format!("project {}", project_root.display())));
     assert!(text.contains("Core kernel: workflow_runtime:core_universal"));
     assert!(text.contains("Compatibility boundaries:"));
     assert!(text.contains("Acceptance gates:"));
 
     let home_output = forge()
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
             "interactive",
             "home",
+            "--project-root",
+            project_root.to_str().unwrap(),
             "--output",
             "json",
         ])
@@ -49811,11 +49857,20 @@ fn interactive_core_boundary_audit_proves_core_minimal_and_addon_owned_domains()
     assert_eq!(tool["output_schema"], "forge.interactive.core_boundary.v1");
     assert_eq!(tool["async_safe"], true);
     assert_eq!(tool["mutates_workflow"], false);
+    assert!(tool["input_schema"]["properties"]["project_root"].is_object());
 
     let mcp_output = forge()
+        .current_dir(temp.path())
         .arg("--store")
         .arg(store.to_str().unwrap())
         .args(["mcp", "call", "forge.interactive.core_boundary"])
+        .arg("--input")
+        .arg(
+            serde_json::json!({
+                "project_root": project_root
+            })
+            .to_string(),
+        )
         .args(["--output", "json"])
         .assert()
         .success()
@@ -49828,6 +49883,10 @@ fn interactive_core_boundary_audit_proves_core_minimal_and_addon_owned_domains()
         "forge.interactive.core_boundary.v1"
     );
     assert_eq!(mcp_json["result"]["status"], "core_boundary_clean");
+    assert_eq!(
+        mcp_json["result"]["project_root"],
+        project_root.display().to_string()
+    );
 
     let smoke_output = forge()
         .current_dir(temp.path())
@@ -49950,12 +50009,14 @@ event_adapters:
     .unwrap();
 
     let output = forge()
-        .current_dir(&project_root)
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
             "interactive",
             "addon-capabilities",
+            "--project-root",
+            project_root.to_str().unwrap(),
             "--output",
             "json",
         ])
@@ -49965,6 +50026,7 @@ event_adapters:
         .stdout
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["project_root"], project_root.display().to_string());
     assert!(json["event_type_count"].as_u64().unwrap() >= 1);
     assert!(json["event_channel_count"].as_u64().unwrap() >= 1);
     assert!(json["event_trigger_count"].as_u64().unwrap() >= 1);
@@ -49986,15 +50048,24 @@ event_adapters:
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("forge events adapters --output json")));
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(format!(
+            "forge interactive addon-capabilities --project-root {} --output json",
+            project_root.display()
+        ))));
 
     let text = String::from_utf8(
         forge()
-            .current_dir(&project_root)
+            .current_dir(temp.path())
             .args([
                 "--store",
                 store.to_str().unwrap(),
                 "interactive",
                 "addon-capabilities",
+                "--project-root",
+                project_root.to_str().unwrap(),
             ])
             .assert()
             .success()
@@ -50004,16 +50075,19 @@ event_adapters:
     )
     .unwrap();
     assert!(text.contains("event types"));
+    assert!(text.contains(&format!("project {}", project_root.display())));
     assert!(text.contains("triggers"));
     assert!(text.contains("demo.message.received"));
 
     let home_output = forge()
-        .current_dir(&project_root)
+        .current_dir(temp.path())
         .args([
             "--store",
             store.to_str().unwrap(),
             "interactive",
             "home",
+            "--project-root",
+            project_root.to_str().unwrap(),
             "--output",
             "json",
         ])
@@ -50041,10 +50115,17 @@ event_adapters:
     );
 
     let mcp_output = forge()
-        .current_dir(&project_root)
+        .current_dir(temp.path())
         .arg("--store")
         .arg(store.to_str().unwrap())
         .args(["mcp", "call", "forge.interactive.addon_capabilities"])
+        .arg("--input")
+        .arg(
+            serde_json::json!({
+                "project_root": project_root
+            })
+            .to_string(),
+        )
         .args(["--output", "json"])
         .assert()
         .success()

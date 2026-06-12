@@ -540,6 +540,7 @@ pub struct InteractiveEventWorkflowLifecycleAction {
 pub struct InteractiveAddonCapabilityPanel {
     pub schema_version: String,
     pub status: String,
+    pub project_root: String,
     pub addon_count: usize,
     pub enabled_addon_count: usize,
     pub unauthorized_addon_count: usize,
@@ -566,6 +567,7 @@ pub struct InteractiveAddonCapabilityPanel {
 pub struct InteractiveCoreBoundaryPanel {
     pub schema_version: String,
     pub status: String,
+    pub project_root: String,
     pub core_addon_id: String,
     pub core_capability_count: usize,
     pub addon_count: usize,
@@ -3152,7 +3154,8 @@ pub fn build_interactive_home_with_options(
         &workflows.summary.context_actions,
         &workflows.summary.context_quality,
     );
-    let addon_catalog = load_addon_catalog_from_store(store, &default_addon_dirs()).ok();
+    let addon_dirs = addon_dirs_for_project(Some(&repository_context_path));
+    let addon_catalog = load_addon_catalog_from_store(store, &addon_dirs).ok();
     let addon_renderer_report = addon_catalog
         .as_ref()
         .map(|catalog| {
@@ -3168,9 +3171,13 @@ pub fn build_interactive_home_with_options(
             families: Vec::new(),
             renderers: Vec::new(),
         });
-    let addon_capability_panel =
-        build_interactive_addon_capabilities(store, addon_catalog.as_ref());
-    let core_boundary_panel = build_interactive_core_boundary(store);
+    let addon_capability_panel = build_interactive_addon_capabilities_with_project(
+        store,
+        addon_catalog.as_ref(),
+        Some(&repository_context_path),
+    );
+    let core_boundary_panel =
+        build_interactive_core_boundary_for_project(store, Some(&repository_context_path));
     let addon_renderer_panel = build_interactive_addon_renderer_panel(&addon_renderer_report);
     let patch_workbench_panel = build_interactive_patch_workbench(store)?;
     let permissions_panel = build_interactive_permissions(store)?;
@@ -11592,14 +11599,71 @@ fn empty_interactive_schedule_panel() -> InteractiveSchedulePanel {
 pub fn build_interactive_addon_capabilities_default(
     store: &ForgeStore,
 ) -> InteractiveAddonCapabilityPanel {
-    let catalog = load_addon_catalog_from_store(store, &default_addon_dirs()).ok();
-    build_interactive_addon_capabilities(store, catalog.as_ref())
+    build_interactive_addon_capabilities_for_project(store, None)
+}
+
+fn addon_dirs_for_project(project_root: Option<&Path>) -> Vec<PathBuf> {
+    project_root
+        .map(|root| vec![root.join(".forge/addons")])
+        .unwrap_or_else(default_addon_dirs)
+}
+
+fn project_root_display(project_root: Option<&Path>) -> String {
+    project_root
+        .map(|root| root.display().to_string())
+        .unwrap_or_else(|| {
+            env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .display()
+                .to_string()
+        })
+}
+
+fn project_root_command_arg(project_root: Option<&Path>) -> String {
+    project_root
+        .map(|root| {
+            format!(
+                " --project-root {}",
+                shell_quote_command_value(&root.display().to_string())
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn shell_quote_command_value(value: &str) -> String {
+    if value
+        .chars()
+        .any(|ch| ch.is_whitespace() || matches!(ch, '\'' | '"' | '(' | ')' | '&' | ';' | '|'))
+    {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    } else {
+        value.to_string()
+    }
+}
+
+pub fn build_interactive_addon_capabilities_for_project(
+    store: &ForgeStore,
+    project_root: Option<&Path>,
+) -> InteractiveAddonCapabilityPanel {
+    let addon_dirs = addon_dirs_for_project(project_root);
+    let catalog = load_addon_catalog_from_store(store, &addon_dirs).ok();
+    build_interactive_addon_capabilities_with_project(store, catalog.as_ref(), project_root)
 }
 
 pub fn build_interactive_addon_capabilities(
     store: &ForgeStore,
     catalog: Option<&AddonCatalog>,
 ) -> InteractiveAddonCapabilityPanel {
+    build_interactive_addon_capabilities_with_project(store, catalog, None)
+}
+
+pub fn build_interactive_addon_capabilities_with_project(
+    store: &ForgeStore,
+    catalog: Option<&AddonCatalog>,
+    project_root: Option<&Path>,
+) -> InteractiveAddonCapabilityPanel {
+    let project_root_display = project_root_display(project_root);
+    let project_root_arg = project_root_command_arg(project_root);
     let capability_index = list_addon_capability_index(store, None, None, None).ok();
     let observability = catalog
         .and_then(|catalog| addon_observability_report(store, catalog, None, None, 1000).ok());
@@ -11718,6 +11782,7 @@ pub fn build_interactive_addon_capabilities(
     InteractiveAddonCapabilityPanel {
         schema_version: INTERACTIVE_ADDON_CAPABILITY_SCHEMA_VERSION.to_string(),
         status: status.to_string(),
+        project_root: project_root_display,
         addon_count: observability
             .as_ref()
             .map(|report| report.addon_count)
@@ -11766,15 +11831,25 @@ pub fn build_interactive_addon_capabilities(
             "forge addons observability --output json".to_string(),
             "forge events adapters --output json".to_string(),
             "forge addons views --surface tui --output json".to_string(),
-            "forge interactive addon-capabilities --output json".to_string(),
+            format!("forge interactive addon-capabilities{project_root_arg} --output json"),
             "forge interactive action-registry --query addon --output json".to_string(),
         ],
     }
 }
 
 pub fn build_interactive_core_boundary(store: &ForgeStore) -> InteractiveCoreBoundaryPanel {
-    let catalog = load_addon_catalog_from_store(store, &default_addon_dirs())
+    build_interactive_core_boundary_for_project(store, None)
+}
+
+pub fn build_interactive_core_boundary_for_project(
+    store: &ForgeStore,
+    project_root: Option<&Path>,
+) -> InteractiveCoreBoundaryPanel {
+    let addon_dirs = addon_dirs_for_project(project_root);
+    let catalog = load_addon_catalog_from_store(store, &addon_dirs)
         .unwrap_or_else(|_| builtin_addon_catalog());
+    let project_root_display = project_root_display(project_root);
+    let project_root_arg = project_root_command_arg(project_root);
     let capability_index = list_addon_capability_index(store, None, None, None).ok();
     let core_addon = catalog
         .addons
@@ -11956,6 +12031,7 @@ pub fn build_interactive_core_boundary(store: &ForgeStore) -> InteractiveCoreBou
     InteractiveCoreBoundaryPanel {
         schema_version: INTERACTIVE_CORE_BOUNDARY_SCHEMA_VERSION.to_string(),
         status: status.to_string(),
+        project_root: project_root_display,
         core_addon_id: core_addon
             .map(|addon| addon.id.clone())
             .unwrap_or_else(|| "missing".to_string()),
@@ -11976,8 +12052,8 @@ pub fn build_interactive_core_boundary(store: &ForgeStore) -> InteractiveCoreBou
             "A clean Core boundary is evidence for goal3, not proof that the whole Forge objective is complete.".to_string(),
         ],
         commands: vec![
-            "forge interactive core-boundary --output json".to_string(),
-            "forge interactive addon-capabilities --output json".to_string(),
+            format!("forge interactive core-boundary{project_root_arg} --output json"),
+            format!("forge interactive addon-capabilities{project_root_arg} --output json"),
             "forge addons catalog --output json".to_string(),
             "forge addons capabilities --output json".to_string(),
             "forge addons runtime-contracts --output json".to_string(),
@@ -15199,8 +15275,9 @@ fn render_context_memory_command_summary(panel: &InteractiveContextMemoryPanel) 
 
 pub fn render_interactive_addon_capabilities(panel: &InteractiveAddonCapabilityPanel) -> String {
     format!(
-        "Addons/capabilities: {status}; addons {addon_count}, enabled {enabled_addon_count}, unauthorized {unauthorized_addon_count}, capabilities {capability_count}, enabled capabilities {enabled_capability_count}, disabled capabilities {disabled_capability_count}, permissions {permission_count}, runtime contracts {runtime_contract_count}, views {view_count}, dispatches {dispatch_count}, queued {queued_dispatch_count}, event types {event_type_count}, channels {event_channel_count}, triggers {event_trigger_count}, listeners {event_listener_count}, adapters {event_adapter_count}\nCapabilities: {capabilities}\nEvent extensions: {event_extensions}\nCommands: {commands}\n",
+        "Addons/capabilities: {status}; project {project_root}; addons {addon_count}, enabled {enabled_addon_count}, unauthorized {unauthorized_addon_count}, capabilities {capability_count}, enabled capabilities {enabled_capability_count}, disabled capabilities {disabled_capability_count}, permissions {permission_count}, runtime contracts {runtime_contract_count}, views {view_count}, dispatches {dispatch_count}, queued {queued_dispatch_count}, event types {event_type_count}, channels {event_channel_count}, triggers {event_trigger_count}, listeners {event_listener_count}, adapters {event_adapter_count}\nCapabilities: {capabilities}\nEvent extensions: {event_extensions}\nCommands: {commands}\n",
         status = panel.status,
+        project_root = panel.project_root,
         addon_count = panel.addon_count,
         enabled_addon_count = panel.enabled_addon_count,
         unauthorized_addon_count = panel.unauthorized_addon_count,
@@ -17375,8 +17452,9 @@ pub fn render_interactive_core_boundary(panel: &InteractiveCoreBoundaryPanel) ->
             .join(" | ")
     };
     format!(
-        "Core boundary: {summary}\nCore responsibilities: {responsibilities}\nCore kernel: {core_capabilities}\nCompatibility boundaries: {compatibility}\nAcceptance gates: {gates}\nCommands: {commands}\n",
+        "Core boundary: {summary}; project {project_root}\nCore responsibilities: {responsibilities}\nCore kernel: {core_capabilities}\nCompatibility boundaries: {compatibility}\nAcceptance gates: {gates}\nCommands: {commands}\n",
         summary = render_core_boundary_summary(panel),
+        project_root = panel.project_root,
         responsibilities = panel.core_allowed_responsibilities.join(", "),
         core_capabilities = core_capabilities,
         compatibility = compatibility,
