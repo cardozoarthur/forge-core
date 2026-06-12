@@ -1,7 +1,8 @@
 use crate::addon::{
     addon_observability_report, default_addon_dirs, list_addon_capability_index,
-    list_addon_permission_authorizations, list_addon_views, load_addon_catalog_from_store,
-    AddonCatalog, AddonViewAction, AddonViewEntry, CAP_SOURCE_CODE_PATCH_LIFECYCLE,
+    list_addon_event_adapters, list_addon_permission_authorizations, list_addon_views,
+    load_addon_catalog_from_store, AddonCatalog, AddonEventExtensionRegistry, AddonViewAction,
+    AddonViewEntry, ADDON_EVENT_EXTENSIONS_SCHEMA_VERSION, CAP_SOURCE_CODE_PATCH_LIFECYCLE,
 };
 use crate::artifact::list_workflow_artifacts;
 use crate::checkpoint::TaskCheckpoint;
@@ -219,6 +220,13 @@ pub struct InteractiveAddonCapabilityPanel {
     pub view_count: usize,
     pub dispatch_count: usize,
     pub queued_dispatch_count: usize,
+    pub event_type_count: usize,
+    pub event_channel_count: usize,
+    pub event_trigger_count: usize,
+    pub event_listener_count: usize,
+    pub event_adapter_count: usize,
+    pub event_extensions: Vec<String>,
+    pub event_extension_registry: AddonEventExtensionRegistry,
     pub capabilities: Vec<String>,
     pub commands: Vec<String>,
 }
@@ -6193,6 +6201,18 @@ pub fn build_interactive_addon_capabilities(
     let capability_index = list_addon_capability_index(store, None, None, None).ok();
     let observability = catalog
         .and_then(|catalog| addon_observability_report(store, catalog, None, None, 1000).ok());
+    let event_adapters =
+        catalog.map(|catalog| list_addon_event_adapters(catalog, None, None, None));
+    let event_extension_registry = event_adapters
+        .as_ref()
+        .map(|report| report.event_extension_registry.clone())
+        .unwrap_or_else(empty_addon_event_extension_registry);
+    let event_adapter_count = event_adapters
+        .as_ref()
+        .map(|report| report.adapter_count)
+        .unwrap_or(0);
+    let event_extensions =
+        render_addon_event_extension_entries(&event_extension_registry, event_adapter_count);
     let indexed_capabilities = capability_index
         .as_ref()
         .map(|index| {
@@ -6318,15 +6338,81 @@ pub fn build_interactive_addon_capabilities(
             .as_ref()
             .map(|report| report.totals.queued_dispatch_count)
             .unwrap_or(0),
+        event_type_count: event_extension_registry.event_type_count,
+        event_channel_count: event_extension_registry.channel_count,
+        event_trigger_count: event_extension_registry.trigger_count,
+        event_listener_count: event_extension_registry.listener_count,
+        event_adapter_count,
+        event_extensions,
+        event_extension_registry,
         capabilities,
         commands: vec![
             "forge addons capabilities --output json".to_string(),
             "forge addons observability --output json".to_string(),
+            "forge events adapters --output json".to_string(),
             "forge addons views --surface tui --output json".to_string(),
             "forge interactive addon-capabilities --output json".to_string(),
             "forge interactive action-registry --query addon --output json".to_string(),
         ],
     }
+}
+
+fn empty_addon_event_extension_registry() -> AddonEventExtensionRegistry {
+    AddonEventExtensionRegistry {
+        schema_version: ADDON_EVENT_EXTENSIONS_SCHEMA_VERSION.to_string(),
+        status: "addon_event_extensions_unavailable".to_string(),
+        event_type_count: 0,
+        trigger_count: 0,
+        listener_count: 0,
+        channel_count: 0,
+        event_types: Vec::new(),
+        triggers: Vec::new(),
+        listeners: Vec::new(),
+        channels: Vec::new(),
+    }
+}
+
+fn render_addon_event_extension_entries(
+    registry: &AddonEventExtensionRegistry,
+    adapter_count: usize,
+) -> Vec<String> {
+    let mut entries = Vec::new();
+    entries.push(format!(
+        "event types {}, channels {}, triggers {}, listeners {}, adapters {}",
+        registry.event_type_count,
+        registry.channel_count,
+        registry.trigger_count,
+        registry.listener_count,
+        adapter_count
+    ));
+    entries.extend(registry.event_types.iter().take(4).map(|event_type| {
+        format!(
+            "type {} via {} [{}]",
+            event_type.event_type.id, event_type.addon_id, event_type.event_type.transport
+        )
+    }));
+    entries.extend(registry.channels.iter().take(4).map(|channel| {
+        format!(
+            "channel {} via {} [{}:{}]",
+            channel.channel.id,
+            channel.addon_id,
+            channel.channel.transport,
+            channel.channel.direction
+        )
+    }));
+    entries.extend(registry.triggers.iter().take(4).map(|trigger| {
+        format!(
+            "trigger {} -> {} via {}",
+            trigger.trigger.id, trigger.trigger.workflow_extension_id, trigger.addon_id
+        )
+    }));
+    entries.extend(registry.listeners.iter().take(4).map(|listener| {
+        format!(
+            "listener {} -> {} via {}",
+            listener.listener.id, listener.listener.handler, listener.addon_id
+        )
+    }));
+    entries
 }
 
 fn default_interactive_harness_shim_dir() -> PathBuf {
@@ -7068,6 +7154,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     let operational_cockpit_sections =
         render_operational_cockpit_sections(&d.operational_cockpit_panel);
     let addon_capabilities = render_addon_capability_summary(&d.addon_capability_panel);
+    let addon_event_extensions = render_addon_event_extension_summary(&d.addon_capability_panel);
     let addon_renderer_families = if d.addon_renderer_panel.families.is_empty() {
         "none".to_string()
     } else {
@@ -7083,7 +7170,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Forge operational TUI\n\
          Active workflows: {active_workflows}; active runs {active_runs}; focus {workflow_focus}\n\
          Events/schedules: events {event_total}, visible {event_visible}, scheduled {scheduled_workflows}, due {schedule_due}, next {schedule_next}\n\
-         Addons/capabilities: addons {addon_count}, enabled {addon_enabled}, capabilities {addon_capabilities_count}, permissions {addon_permissions}, contracts {addon_contracts}; {addon_capabilities}\n\
+         Addons/capabilities: addons {addon_count}, enabled {addon_enabled}, capabilities {addon_capabilities_count}, permissions {addon_permissions}, contracts {addon_contracts}, event types {addon_event_types}, triggers {addon_event_triggers}, listeners {addon_event_listeners}, adapters {addon_event_adapters}; {addon_capabilities}; events {addon_event_extensions}\n\
          Costs: estimated ${cost_estimated:.4}, observed ${cost_observed:.4}, nodes {cost_nodes}, AI {cost_ai_nodes}, deterministic {cost_deterministic_nodes}, avoided-model {cost_avoided_nodes}\n\
          Handoffs/approvals: ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, pending approvals {pending_approvals}, context blocked {context_blocked}\n\
          Smoke test: forge smoke operational-tui --output json\n\n\
@@ -7126,7 +7213,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Structured logs: {structured_logs_status}; logs {structured_logs_count}/{structured_logs_total}, next cursor {structured_logs_next_cursor}, has more {structured_logs_has_more}; {structured_logs}\n\
          Cost panel: {cost_status}; workflows {cost_workflows}, nodes {cost_nodes}, estimated ${cost_estimated:.4}, observed ${cost_observed:.4}\n\
          Context/memory panel: ready {context_ready}, blocked {context_blocked}, budget pressure {context_budget_pressure}, memory {memory_policy_status}\n\
-         Addons/capabilities: {addon_capability_status}; addons {addon_count}, enabled {addon_enabled}, capabilities {addon_capabilities_count}, enabled capabilities {addon_enabled_capabilities}, disabled capabilities {addon_disabled_capabilities}, permissions {addon_permissions}, runtime contracts {addon_contracts}, views {addon_views}, dispatches {addon_dispatches}, queued {addon_queued_dispatches}; {addon_capabilities}\n\
+         Addons/capabilities: {addon_capability_status}; addons {addon_count}, enabled {addon_enabled}, capabilities {addon_capabilities_count}, enabled capabilities {addon_enabled_capabilities}, disabled capabilities {addon_disabled_capabilities}, permissions {addon_permissions}, runtime contracts {addon_contracts}, views {addon_views}, dispatches {addon_dispatches}, queued {addon_queued_dispatches}, event types {addon_event_types}, channels {addon_event_channels}, triggers {addon_event_triggers}, listeners {addon_event_listeners}, adapters {addon_event_adapters}; {addon_capabilities}; events {addon_event_extensions}\n\
          Addon UI renderers: {addon_renderer_status}; safe {addon_safe_renderers}/{addon_renderers}, families {addon_renderer_family_count} ({addon_renderer_families})\n\
          Repository context: {repository_context}\n\
          Estimated costs: {estimated_costs}\n\
@@ -7327,7 +7414,13 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         addon_views = d.addon_capability_panel.view_count,
         addon_dispatches = d.addon_capability_panel.dispatch_count,
         addon_queued_dispatches = d.addon_capability_panel.queued_dispatch_count,
+        addon_event_types = d.addon_capability_panel.event_type_count,
+        addon_event_channels = d.addon_capability_panel.event_channel_count,
+        addon_event_triggers = d.addon_capability_panel.event_trigger_count,
+        addon_event_listeners = d.addon_capability_panel.event_listener_count,
+        addon_event_adapters = d.addon_capability_panel.event_adapter_count,
         addon_capabilities = addon_capabilities,
+        addon_event_extensions = addon_event_extensions,
         addon_renderer_status = d.addon_renderer_panel.status,
         addon_safe_renderers = d.addon_renderer_panel.safe_renderer_count,
         addon_renderers = d.addon_renderer_panel.renderer_count,
@@ -8428,7 +8521,7 @@ fn render_context_memory_command_summary(panel: &InteractiveContextMemoryPanel) 
 
 pub fn render_interactive_addon_capabilities(panel: &InteractiveAddonCapabilityPanel) -> String {
     format!(
-        "Addons/capabilities: {status}; addons {addon_count}, enabled {enabled_addon_count}, unauthorized {unauthorized_addon_count}, capabilities {capability_count}, enabled capabilities {enabled_capability_count}, disabled capabilities {disabled_capability_count}, permissions {permission_count}, runtime contracts {runtime_contract_count}, views {view_count}, dispatches {dispatch_count}, queued {queued_dispatch_count}\nCapabilities: {capabilities}\nCommands: {commands}\n",
+        "Addons/capabilities: {status}; addons {addon_count}, enabled {enabled_addon_count}, unauthorized {unauthorized_addon_count}, capabilities {capability_count}, enabled capabilities {enabled_capability_count}, disabled capabilities {disabled_capability_count}, permissions {permission_count}, runtime contracts {runtime_contract_count}, views {view_count}, dispatches {dispatch_count}, queued {queued_dispatch_count}, event types {event_type_count}, channels {event_channel_count}, triggers {event_trigger_count}, listeners {event_listener_count}, adapters {event_adapter_count}\nCapabilities: {capabilities}\nEvent extensions: {event_extensions}\nCommands: {commands}\n",
         status = panel.status,
         addon_count = panel.addon_count,
         enabled_addon_count = panel.enabled_addon_count,
@@ -8441,13 +8534,33 @@ pub fn render_interactive_addon_capabilities(panel: &InteractiveAddonCapabilityP
         view_count = panel.view_count,
         dispatch_count = panel.dispatch_count,
         queued_dispatch_count = panel.queued_dispatch_count,
+        event_type_count = panel.event_type_count,
+        event_channel_count = panel.event_channel_count,
+        event_trigger_count = panel.event_trigger_count,
+        event_listener_count = panel.event_listener_count,
+        event_adapter_count = panel.event_adapter_count,
         capabilities = render_addon_capability_summary(panel),
+        event_extensions = render_addon_event_extension_summary(panel),
         commands = if panel.commands.is_empty() {
             "none".to_string()
         } else {
             panel.commands.join(" | ")
         },
     )
+}
+
+fn render_addon_event_extension_summary(panel: &InteractiveAddonCapabilityPanel) -> String {
+    if panel.event_extensions.is_empty() {
+        "none".to_string()
+    } else {
+        panel
+            .event_extensions
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
 }
 
 fn build_interactive_event_panel(timeline: &GlobalEventTimelineReport) -> InteractiveEventPanel {

@@ -46512,6 +46512,209 @@ fn interactive_addon_capabilities_command_and_mcp_surface_are_dedicated() {
 }
 
 #[test]
+fn interactive_addon_capabilities_show_addon_event_extensions_for_operational_tui() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("event-extension-project");
+    let addon_dir = project_root.join(".forge/addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        addon_dir.join("interactive-event-extension.yaml"),
+        r#"
+id: forge.addon.interactive_event_extension
+name: Interactive Event Extension Addon
+version: 0.1.0
+description: Exposes event extensions to the operational TUI.
+lifecycle: enabled
+permissions:
+  - id: demo.event.consume
+    description: Consume demo events.
+    risk: medium
+    actions:
+      - start_workflow
+capabilities:
+  - id: demo_event_operations
+    title: Demo event operations
+    description: Operate workflows from generic demo events.
+workflows:
+  - id: demo_event_workflow
+    kind: dynamic_workflow_strategy
+    description: Plan work from demo events.
+event_types:
+  - id: demo.message
+    title: Demo message
+    transport: demo
+event_channels:
+  - id: demo.inbox
+    title: Demo inbox
+    transport: demo
+    direction: ingress
+    origins:
+      - demo
+    event_types:
+      - demo.message
+    actions:
+      - start_workflow
+    auth: forge_policy
+    permissions:
+      - demo.event.consume
+event_triggers:
+  - id: demo.message.received
+    title: Demo message received
+    event_type: demo.message
+    channel: demo.inbox
+    adapter_id: demo.start
+    workflow_extension_id: demo_event_workflow
+    capability_id: demo_event_operations
+    actions:
+      - start_workflow
+    conditions:
+      - payload.goal present
+    permissions:
+      - demo.event.consume
+event_listeners:
+  - id: demo.message.listener
+    title: Demo message listener
+    event_type: demo.message
+    channel: demo.inbox
+    adapter_id: demo.start
+    workflow_extension_id: demo_event_workflow
+    capability_id: demo_event_operations
+    handler: forge.event_inbox.route
+    actions:
+      - start_workflow
+    permissions:
+      - demo.event.consume
+event_adapters:
+  - id: demo.start
+    title: Demo start adapter
+    transport: demo
+    direction: ingress
+    origins:
+      - demo
+    actions:
+      - start_workflow
+    event_types:
+      - demo.message
+    schema: demo.message
+    auth: forge_policy
+    permissions:
+      - demo.event.consume
+"#,
+    )
+    .unwrap();
+
+    let output = forge()
+        .current_dir(&project_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "addon-capabilities",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert!(json["event_type_count"].as_u64().unwrap() >= 1);
+    assert!(json["event_channel_count"].as_u64().unwrap() >= 1);
+    assert!(json["event_trigger_count"].as_u64().unwrap() >= 1);
+    assert!(json["event_listener_count"].as_u64().unwrap() >= 1);
+    assert!(json["event_adapter_count"].as_u64().unwrap() >= 1);
+    assert_eq!(
+        json["event_extension_registry"]["schema_version"],
+        "forge.addon_event_extensions.v1"
+    );
+    assert!(json["event_extensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry
+            .as_str()
+            .unwrap()
+            .contains("trigger demo.message.received")));
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("forge events adapters --output json")));
+
+    let text = String::from_utf8(
+        forge()
+            .current_dir(&project_root)
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "interactive",
+                "addon-capabilities",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .unwrap();
+    assert!(text.contains("event types"));
+    assert!(text.contains("triggers"));
+    assert!(text.contains("demo.message.received"));
+
+    let home_output = forge()
+        .current_dir(&project_root)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert!(
+        home["dashboard"]["addon_capability_panel"]["event_trigger_count"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(
+        home["dashboard"]["addon_capability_panel"]["event_extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry
+                .as_str()
+                .unwrap()
+                .contains("listener demo.message.listener"))
+    );
+
+    let mcp_output = forge()
+        .current_dir(&project_root)
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.addon_capabilities"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert!(mcp_json["result"]["event_extension_registry"]["triggers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|trigger| trigger["trigger"]["id"] == "demo.message.received"));
+}
+
+#[test]
 fn interactive_identity_command_and_mcp_surface_unify_context_aliases_and_tenant_audit() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
