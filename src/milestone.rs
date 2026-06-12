@@ -414,6 +414,11 @@ pub fn build_milestone_manifest_with_store(
         Vec::new()
     };
     let attached_evidence_kind_map = attached_evidence_kind_map(&attached_evidence);
+    let validated_attached_evidence_kind_map = if let Some(store) = store {
+        validated_attached_evidence_kind_map(store, &attached_evidence)
+    } else {
+        BTreeMap::new()
+    };
     let requirements = status
         .capabilities
         .iter()
@@ -427,13 +432,17 @@ pub fn build_milestone_manifest_with_store(
     let completed_capabilities = status
         .capabilities
         .iter()
-        .filter(|capability| capability_promotion_ready(capability, &attached_evidence_kind_map))
+        .filter(|capability| {
+            capability_promotion_ready(capability, &validated_attached_evidence_kind_map)
+        })
         .map(|capability| manifest_capability(capability, true))
         .collect::<Vec<_>>();
     let missing_capabilities = status
         .capabilities
         .iter()
-        .filter(|capability| !capability_promotion_ready(capability, &attached_evidence_kind_map))
+        .filter(|capability| {
+            !capability_promotion_ready(capability, &validated_attached_evidence_kind_map)
+        })
         .map(|capability| manifest_capability(capability, false))
         .collect::<Vec<_>>();
     let validation_evidence = status
@@ -444,7 +453,11 @@ pub fn build_milestone_manifest_with_store(
             capability_id: capability.id.clone(),
             status: capability.status.clone(),
             summary: capability.evidence.clone(),
-            validation_state: manifest_validation_state(capability, &attached_evidence_kind_map),
+            validation_state: manifest_validation_state(
+                capability,
+                &attached_evidence_kind_map,
+                &validated_attached_evidence_kind_map,
+            ),
         })
         .collect::<Vec<_>>();
     let demos = status
@@ -461,7 +474,9 @@ pub fn build_milestone_manifest_with_store(
     let known_gaps = status
         .capabilities
         .iter()
-        .filter(|capability| !capability_promotion_ready(capability, &attached_evidence_kind_map))
+        .filter(|capability| {
+            !capability_promotion_ready(capability, &validated_attached_evidence_kind_map)
+        })
         .map(|capability| MilestoneManifestGap {
             capability_id: capability.id.clone(),
             status: capability.status.clone(),
@@ -472,7 +487,9 @@ pub fn build_milestone_manifest_with_store(
     let blocked_by = status
         .capabilities
         .iter()
-        .filter(|capability| !capability_promotion_ready(capability, &attached_evidence_kind_map))
+        .filter(|capability| {
+            !capability_promotion_ready(capability, &validated_attached_evidence_kind_map)
+        })
         .map(|capability| capability.id.clone())
         .collect::<Vec<_>>();
     let promotable = blocked_by.is_empty();
@@ -4363,6 +4380,67 @@ fn attached_evidence_kind_map(
     by_capability
 }
 
+fn validated_attached_evidence_kind_map(
+    store: &ForgeStore,
+    attached_evidence: &[MilestoneAttachedEvidence],
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut by_capability = BTreeMap::new();
+    for evidence in attached_evidence {
+        if milestone_attached_evidence_payload_is_promotion_ready(store, evidence) {
+            by_capability
+                .entry(evidence.capability_id.clone())
+                .or_insert_with(BTreeSet::new)
+                .insert(evidence.kind.clone());
+        }
+    }
+    by_capability
+}
+
+fn milestone_attached_evidence_payload_is_promotion_ready(
+    store: &ForgeStore,
+    evidence: &MilestoneAttachedEvidence,
+) -> bool {
+    let templates = milestone_promotion_gate_templates(&evidence.capability_id);
+    let Some(template) = templates
+        .iter()
+        .find(|template| template.evidence_kind == evidence.kind)
+    else {
+        return false;
+    };
+    let artifact_path = store.base_dir().join(&evidence.artifact_path);
+    let Ok(bytes) = fs::read(&artifact_path) else {
+        return false;
+    };
+    if hex_sha256(&bytes) != evidence.artifact_sha256 {
+        return false;
+    }
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    if payload
+        .get("collection_promotion_ready")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return false;
+    }
+    let Some(gates) = payload
+        .get("promotion_gates")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    let passed_gate_ids = gates
+        .iter()
+        .filter(|gate| gate.get("passed").and_then(serde_json::Value::as_bool) == Some(true))
+        .filter_map(|gate| gate.get("id").and_then(serde_json::Value::as_str))
+        .collect::<BTreeSet<_>>();
+    template
+        .gate_ids
+        .iter()
+        .all(|gate_id| passed_gate_ids.contains(gate_id.as_str()))
+}
+
 fn capability_promotion_ready(
     capability: &MilestoneCapability,
     attached_evidence_kind_map: &BTreeMap<String, BTreeSet<String>>,
@@ -4390,11 +4468,17 @@ fn capability_required_evidence_attached(
 fn manifest_validation_state(
     capability: &MilestoneCapability,
     attached_evidence_kind_map: &BTreeMap<String, BTreeSet<String>>,
+    validated_attached_evidence_kind_map: &BTreeMap<String, BTreeSet<String>>,
 ) -> String {
     if is_promotion_ready_status(&capability.status) {
         "promotion_ready".to_string()
-    } else if capability_required_evidence_attached(&capability.id, attached_evidence_kind_map) {
+    } else if capability_required_evidence_attached(
+        &capability.id,
+        validated_attached_evidence_kind_map,
+    ) {
         "attached_evidence_ready".to_string()
+    } else if capability_required_evidence_attached(&capability.id, attached_evidence_kind_map) {
+        "attached_evidence_invalid".to_string()
     } else if !milestone_required_attached_evidence_kinds(&capability.id).is_empty() {
         "attached_evidence_missing".to_string()
     } else {

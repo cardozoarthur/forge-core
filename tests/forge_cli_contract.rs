@@ -4182,14 +4182,22 @@ fn milestone_attach_evidence_persists_receipts_without_auto_promotion() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("replacement_grade_cli")));
-    assert!(!manifest_json["promotion_decision"]["blocked_by"]
+    assert!(manifest_json["promotion_decision"]["blocked_by"]
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("experimental_multimodal_runtime")));
+    assert!(manifest_json["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |evidence| evidence["capability_id"] == "experimental_multimodal_runtime"
+                && evidence["validation_state"] == "attached_evidence_invalid"
+        ));
 }
 
 #[test]
-fn milestone_manifest_promotes_when_all_required_attached_evidence_is_present() {
+fn milestone_manifest_does_not_promote_when_required_attached_evidence_payloads_are_weak() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
     let receipts = [
@@ -4265,6 +4273,156 @@ fn milestone_manifest_promotes_when_all_required_attached_evidence_is_present() 
         .clone();
 
     let manifest_json: Value = serde_json::from_slice(&manifest_output).unwrap();
+    assert_eq!(manifest_json["promotion_decision"]["decision"], "fail");
+    assert_eq!(manifest_json["promotion_decision"]["promotable"], false);
+    assert!(manifest_json["promotion_decision"]["blocked_by"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("replacement_grade_cli")));
+    assert!(manifest_json["promotion_decision"]["blocked_by"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("experimental_multimodal_runtime")));
+    assert!(manifest_json["missing_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability["id"] == "replacement_grade_cli"
+            && capability["promotion_ready"] == false));
+    assert!(manifest_json["missing_capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |capability| capability["id"] == "experimental_multimodal_runtime"
+                && capability["promotion_ready"] == false
+        ));
+    assert!(manifest_json["validation_evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |evidence| evidence["capability_id"] == "replacement_grade_cli"
+                && evidence["validation_state"] == "attached_evidence_invalid"
+        ));
+}
+
+#[test]
+fn milestone_manifest_promotes_when_all_required_attached_evidence_is_validated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let receipts = [
+        (
+            "replacement_grade_cli",
+            "external_brain_provider_execution",
+            serde_json::json!({
+                "collection_promotion_ready": true,
+                "promotion_gates": [
+                    {"id":"provider_contract_validated","passed":true,"summary":"ok"},
+                    {"id":"output_schema_valid","passed":true,"summary":"ok"},
+                    {"id":"real_provider_execution_performed","passed":true,"summary":"ok"},
+                    {"id":"model_execution_performed","passed":true,"summary":"ok"},
+                    {"id":"harness_exec_event_recorded","passed":true,"summary":"ok"},
+                    {"id":"external_resources_untouched","passed":true,"summary":"ok"}
+                ]
+            }),
+        ),
+        (
+            "replacement_grade_cli",
+            "broader_project_coding_research_workflow",
+            serde_json::json!({
+                "collection_promotion_ready": true,
+                "promotion_gates": [
+                    {"id":"completed_through_forge","passed":true,"summary":"ok"},
+                    {"id":"real_project_demo_completed","passed":true,"summary":"ok"},
+                    {"id":"handoff_ready","passed":true,"summary":"ok"},
+                    {"id":"exec_event_recorded","passed":true,"summary":"ok"},
+                    {"id":"validated_multi_file_artifacts","passed":true,"summary":"ok"},
+                    {"id":"external_resources_untouched","passed":true,"summary":"ok"}
+                ]
+            }),
+        ),
+        (
+            "replacement_grade_cli",
+            "terminal_file_editing_ux",
+            serde_json::json!({
+                "collection_promotion_ready": true,
+                "promotion_gates": [
+                    {"id":"completed_through_forge","passed":true,"summary":"ok"},
+                    {"id":"patch_lifecycle_ready","passed":true,"summary":"ok"},
+                    {"id":"review_before_apply","passed":true,"summary":"ok"},
+                    {"id":"restore_approval_recorded","passed":true,"summary":"ok"},
+                    {"id":"restored_to_clean_state","passed":true,"summary":"ok"},
+                    {"id":"artifact_lineage_complete","passed":true,"summary":"ok"},
+                    {"id":"external_resources_untouched","passed":true,"summary":"ok"}
+                ]
+            }),
+        ),
+        (
+            "experimental_multimodal_runtime",
+            "production_runtime_benchmark",
+            serde_json::json!({
+                "collection_promotion_ready": true,
+                "promotion_gates": [
+                    {"id":"runtime_benchmark_promotion_ready","passed":true,"summary":"ok"},
+                    {"id":"model_guard_approved","passed":true,"summary":"ok"},
+                    {"id":"network_access_blocked","passed":true,"summary":"ok"},
+                    {"id":"device_access_blocked","passed":true,"summary":"ok"}
+                ]
+            }),
+        ),
+    ];
+
+    for (capability, kind, payload) in receipts {
+        let receipt = temp.path().join(format!("{capability}-{kind}.json"));
+        fs::write(&receipt, serde_json::to_vec_pretty(&payload).unwrap()).unwrap();
+        forge()
+            .arg("--store")
+            .arg(store.to_str().unwrap())
+            .args([
+                "milestone",
+                "attach-evidence",
+                "--version",
+                "0.5",
+                "--capability",
+                capability,
+                "--kind",
+                kind,
+                "--summary",
+                "Operator-approved required milestone receipt.",
+                "--artifact",
+            ])
+            .arg(receipt.to_str().unwrap())
+            .args([
+                "--approved-by",
+                "arthur",
+                "--origin",
+                "codex",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    let manifest_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "manifest",
+            "--version",
+            "0.5",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let manifest_json: Value = serde_json::from_slice(&manifest_output).unwrap();
     assert_eq!(manifest_json["promotion_decision"]["decision"], "promote");
     assert_eq!(manifest_json["promotion_decision"]["promotable"], true);
     assert!(manifest_json["promotion_decision"]["blocked_by"]
@@ -4285,12 +4443,6 @@ fn milestone_manifest_promotes_when_all_required_attached_evidence_is_present() 
             |capability| capability["id"] == "experimental_multimodal_runtime"
                 && capability["promotion_ready"] == true
         ));
-    assert!(manifest_json["missing_capabilities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|capability| capability["id"] != "replacement_grade_cli"
-            && capability["id"] != "experimental_multimodal_runtime"));
     assert!(manifest_json["validation_evidence"]
         .as_array()
         .unwrap()
@@ -42991,7 +43143,7 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
         gate["capability_id"] == "experimental_multimodal_runtime"
             && gate["status"] == "groundwork"
             && gate["attached_evidence_count"] == 1
-            && gate["attached_evidence_state"] == "required_attached_evidence_present"
+            && gate["attached_evidence_state"] == "required_attached_evidence_invalid"
             && gate["required_attached_evidence_kinds"]
                 .as_array()
                 .unwrap()
@@ -43159,7 +43311,7 @@ fn interactive_release_gates_command_and_mcp_surface_are_dedicated() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("replacement_grade_cli")));
-    assert!(!mcp_json["result"]["blocked_by"]
+    assert!(mcp_json["result"]["blocked_by"]
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("experimental_multimodal_runtime")));

@@ -2027,6 +2027,7 @@ pub fn build_interactive_release_gates(
                 &required_attached_evidence_kinds,
                 &missing_attached_evidence_kinds,
                 attached_evidence_count,
+                promotion_ready,
             );
             let evidence_plan = interactive_release_gate_evidence_plan(
                 store,
@@ -5533,11 +5534,14 @@ fn release_gate_attached_evidence_state(
     required_kinds: &[String],
     missing_kinds: &[String],
     attached_count: usize,
+    promotion_ready: bool,
 ) -> String {
     if required_kinds.is_empty() {
         "no_required_attached_evidence".to_string()
-    } else if missing_kinds.is_empty() {
+    } else if missing_kinds.is_empty() && promotion_ready {
         "required_attached_evidence_present".to_string()
+    } else if missing_kinds.is_empty() {
+        "required_attached_evidence_invalid".to_string()
     } else if attached_count > 0 {
         "partial_required_attached_evidence".to_string()
     } else {
