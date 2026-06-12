@@ -46368,9 +46368,124 @@ fn no_args_tty_enters_repl_and_shows_dashboard_when_pseudo_terminal_is_available
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("forge"));
+    assert!(stdout.contains("Forge operational TUI"));
     assert!(stdout.contains("Active runs"));
+    assert!(stdout.contains("Active workflows:"));
+    assert!(stdout.contains("Events/schedules:"));
+    assert!(stdout.contains("Addons/capabilities:"));
+    assert!(stdout.contains("Costs:"));
+    assert!(stdout.contains("Handoffs/approvals:"));
+    assert!(stdout.contains("Smoke test: forge smoke operational-tui"));
     assert!(stdout.contains("Quick actions"));
     assert!(stdout.contains("/status"));
+}
+
+#[test]
+fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "smoke",
+            "operational-tui",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.smoke.operational_tui.v1");
+    assert_eq!(json["status"], "operational_tui_smoke_passed");
+    assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
+    assert!(json["run_id"].as_str().unwrap().starts_with("run_"));
+    assert!(json["dashboard"]["active_runs"].as_u64().unwrap() >= 1);
+    assert!(json["dashboard"]["workflow_count"].as_u64().unwrap() >= 1);
+    assert!(json["dashboard"]["event_count"].as_u64().unwrap() >= 1);
+    assert!(
+        json["dashboard"]["schedule_workflow_count"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(json["dashboard"]["capability_count"].as_u64().unwrap() >= 1);
+    assert!(json["dashboard"]["cost_estimated_usd"].as_f64().unwrap() >= 0.0);
+
+    for check_id in [
+        "opens_useful_tui",
+        "shows_active_workflows",
+        "shows_events_and_schedules",
+        "shows_addons_and_capabilities",
+        "shows_costs",
+        "shows_handoffs_and_approvals",
+        "runs_end_to_end_demo_flow",
+        "readme_five_minute_intro",
+    ] {
+        let check = json["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["check_id"] == check_id)
+            .unwrap_or_else(|| panic!("missing smoke check {check_id}"));
+        assert_eq!(check["passed"], true, "smoke check {check_id} failed");
+    }
+
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("forge")));
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("forge interactive home --output json")));
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge smoke operational-tui --output json"
+        )));
+
+    let text_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "smoke",
+            "operational-tui",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Operational TUI smoke: operational_tui_smoke_passed"));
+    assert!(text.contains("workflow"));
+    assert!(text.contains("checks"));
+    assert!(text.contains("forge smoke operational-tui --output json"));
+}
+
+#[test]
+fn readme_explains_forge_in_five_minutes_and_names_operational_smoke() {
+    let readme = fs::read_to_string("README.md").unwrap();
+
+    assert!(readme.contains("## Forge em 5 minutos"));
+    assert!(readme.contains("forge"));
+    assert!(readme.contains("forge smoke operational-tui"));
+    assert!(readme.contains("workflows ativos"));
+    assert!(readme.contains("eventos/schedules"));
+    assert!(readme.contains("Addons/capabilities"));
+    assert!(readme.contains("custos"));
+    assert!(readme.contains("handoffs/approvals"));
 }
 
 #[test]
@@ -46422,6 +46537,56 @@ fn interactive_repl_slash_commands_render_operational_panels_in_place() {
         !stdout.contains("Equivalent: forge interactive task-board"),
         "/task-board should render the task board inside the REPL"
     );
+    assert!(stdout.contains("goodbye"));
+}
+
+#[test]
+fn interactive_repl_keyboard_navigation_controls_focus_mode_theme_and_open() {
+    let script = if Path::new("/usr/bin/script").exists() {
+        "/usr/bin/script"
+    } else if Path::new("/bin/script").exists() {
+        "/bin/script"
+    } else {
+        return;
+    };
+    let timeout = if Path::new("/usr/bin/timeout").exists() {
+        "/usr/bin/timeout"
+    } else if Path::new("/bin/timeout").exists() {
+        "/bin/timeout"
+    } else {
+        return;
+    };
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let binary = assert_cmd::cargo::cargo_bin("forge");
+    let command = format!("{} --store {}", binary.display(), store.display());
+
+    let mut child = std::process::Command::new(timeout)
+        .args(["3", script, "-q", "-c", &command, "/dev/null"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin
+            .write_all(b"j\nenter\nm\nt\nk\nenter\n/exit\n")
+            .unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Focus: operational_cockpit_panel (Operational cockpit) [1/"));
+    assert!(stdout.contains("Focus: task_board_panel (Task board) [2/"));
+    assert!(stdout.contains("Opened focused panel: task_board_panel"));
+    assert!(stdout.contains("Task board:"));
+    assert!(stdout.contains("Display mode: focus"));
+    assert!(stdout.contains("Theme: forge_light"));
+    assert!(stdout.contains("Opened focused panel: operational_cockpit_panel"));
+    assert!(stdout.contains("Operational cockpit:"));
+    assert!(!stdout.contains("Routing: direct_answer"));
     assert!(stdout.contains("goodbye"));
 }
 

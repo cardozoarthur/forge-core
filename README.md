@@ -20,6 +20,20 @@ The intended architecture is hybrid:
 - addon and capability discovery;
 - controlled self-improvement.
 
+## Forge em 5 minutos
+
+Forge é o painel operacional e o runtime persistente que transforma um objetivo em workflows auditáveis. Ao abrir `forge` em um terminal interativo, o operador deve ver o cockpit principal com workflows ativos, eventos/schedules, Addons/capabilities, custos, handoffs/approvals, readiness de brains/shells e comandos próximos.
+
+O fluxo mental é simples:
+
+1. `forge` abre a TUI operacional.
+2. `forge plan --goal "<objetivo>"` cria o grafo de tarefas.
+3. `forge request start --goal "<objetivo>" --origin codex` cria um run assíncrono.
+4. `forge interactive task-board` mostra tarefas, handoffs, aprovações e checkpoints.
+5. `forge smoke operational-tui --output json` prova localmente que a TUI abre, cria um fluxo demonstrável e expõe workflows, eventos/schedules, Addons/capabilities, custos e handoffs/approvals.
+
+Use `j`/`k` para mover o foco no REPL, `enter` para abrir o painel focado, `m` para alternar modo de visualização e `t` para alternar tema. Os comandos slash como `/cockpit`, `/task-board`, `/readiness`, `/addons`, `/sessions`, `/logs`, `/permissions` e `/dag` renderizam painéis dentro do próprio REPL.
+
 ## Status
 
 Current version: `0.4.177`

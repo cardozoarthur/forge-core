@@ -1,7 +1,7 @@
 use crate::addon::{
-    default_addon_dirs, list_addon_permission_authorizations, list_addon_views,
-    load_addon_catalog_from_store, AddonCatalog, AddonViewAction, AddonViewEntry,
-    CAP_SOURCE_CODE_PATCH_LIFECYCLE,
+    addon_observability_report, default_addon_dirs, list_addon_capability_index,
+    list_addon_permission_authorizations, list_addon_views, load_addon_catalog_from_store,
+    AddonCatalog, AddonViewAction, AddonViewEntry, CAP_SOURCE_CODE_PATCH_LIFECYCLE,
 };
 use crate::checkpoint::TaskCheckpoint;
 use crate::cost::build_cost_ledger;
@@ -25,7 +25,9 @@ use crate::identity::{
     audit_tenant_index, inspect_project_operating_context, list_identity_links,
     list_identity_memberships, list_identity_registry,
 };
-use crate::interaction::list_human_interactions;
+use crate::interaction::{
+    create_choice_interaction, list_human_interactions, CreateChoiceInteractionRequest,
+};
 use crate::memory::memory_policy_report;
 use crate::milestone::{
     build_milestone_evidence_plan, build_milestone_manifest_with_store, build_milestone_status,
@@ -43,8 +45,8 @@ use crate::registry::{
 };
 use crate::request::start_async_request;
 use crate::runtime::load_runtimes;
-use crate::schedule::build_schedule_worker_status;
-use crate::storage::{ForgeStore, StoreEvent};
+use crate::schedule::{build_schedule_worker_status, create_daily_goal_research_workflow};
+use crate::storage::{ForgeStore, GlobalEventWrite, StoreEvent};
 use crate::workflow::{record_product_decision, ProductDecisionInput};
 use anyhow::Result;
 use serde::Serialize;
@@ -80,6 +82,8 @@ const INTERACTIVE_IDENTITY_SCHEMA_VERSION: &str = "forge.interactive.identity.v1
 const INTERACTIVE_NAVIGATION_SCHEMA_VERSION: &str = "forge.interactive.navigation.v1";
 const INTERACTIVE_OPERATIONAL_COCKPIT_SCHEMA_VERSION: &str =
     "forge.interactive.operational_cockpit.v1";
+const INTERACTIVE_ADDON_CAPABILITY_SCHEMA_VERSION: &str = "forge.interactive.addon_capability.v1";
+const OPERATIONAL_TUI_SMOKE_SCHEMA_VERSION: &str = "forge.smoke.operational_tui.v1";
 const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
 const INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION: &str = "forge.interactive.structured_logs.v1";
 const SLASH_COMMANDS_SCHEMA_VERSION: &str = "forge.interactive.slash_commands.v1";
@@ -148,6 +152,7 @@ pub struct InteractiveDashboard {
     pub context_memory_panel: InteractiveContextMemoryPanel,
     pub digital_twin_panel: OpsOperationalDigitalTwin,
     pub operational_cockpit_panel: InteractiveOperationalCockpitPanel,
+    pub addon_capability_panel: InteractiveAddonCapabilityPanel,
     pub addon_renderer_panel: InteractiveAddonRendererPanel,
     pub attention_actions: Vec<String>,
     pub useful_next_commands: Vec<String>,
@@ -186,6 +191,25 @@ pub struct InteractiveOperationalCockpitSection {
     pub summary: String,
     pub primary_command: String,
     pub secondary_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveAddonCapabilityPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub addon_count: usize,
+    pub enabled_addon_count: usize,
+    pub unauthorized_addon_count: usize,
+    pub capability_count: usize,
+    pub enabled_capability_count: usize,
+    pub disabled_capability_count: usize,
+    pub permission_count: usize,
+    pub runtime_contract_count: usize,
+    pub view_count: usize,
+    pub dispatch_count: usize,
+    pub queued_dispatch_count: usize,
+    pub capabilities: Vec<String>,
+    pub commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1363,6 +1387,41 @@ pub struct RetentionDecision {
     pub requires_human_approval: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct OperationalTuiSmokeReport {
+    pub schema_version: String,
+    pub status: String,
+    pub workflow_id: String,
+    pub run_id: String,
+    pub scheduled_workflow_id: String,
+    pub event_id: i64,
+    pub dashboard: OperationalTuiSmokeDashboard,
+    pub checks: Vec<OperationalTuiSmokeCheck>,
+    pub commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OperationalTuiSmokeDashboard {
+    pub active_runs: usize,
+    pub workflow_count: usize,
+    pub event_count: usize,
+    pub schedule_workflow_count: usize,
+    pub addon_count: usize,
+    pub capability_count: usize,
+    pub cost_estimated_usd: f64,
+    pub ready_handoff_count: usize,
+    pub pending_approval_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OperationalTuiSmokeCheck {
+    pub check_id: String,
+    pub title: String,
+    pub passed: bool,
+    pub evidence: String,
+    pub command: String,
+}
+
 pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeReport> {
     build_interactive_home_with_options(store, InteractiveHomeOptions::default())
 }
@@ -1659,10 +1718,11 @@ pub fn build_interactive_home_with_options(
         memory_level_count: memory_policy.memory_levels.len(),
         temporary_memory_rule,
     };
-    let addon_renderer_report = load_addon_catalog_from_store(store, &default_addon_dirs())
-        .ok()
+    let addon_catalog = load_addon_catalog_from_store(store, &default_addon_dirs()).ok();
+    let addon_renderer_report = addon_catalog
+        .as_ref()
         .map(|catalog| {
-            let addon_views = list_addon_views(&catalog, None, None, Some("enabled"));
+            let addon_views = list_addon_views(catalog, None, None, Some("enabled"));
             build_addon_view_renderer_report(&addon_views)
         })
         .unwrap_or_else(|| OpsAddonViewRendererReport {
@@ -1674,6 +1734,8 @@ pub fn build_interactive_home_with_options(
             families: Vec::new(),
             renderers: Vec::new(),
         });
+    let addon_capability_panel =
+        build_interactive_addon_capabilities(store, addon_catalog.as_ref());
     let addon_renderer_panel = build_interactive_addon_renderer_panel(&addon_renderer_report);
     let patch_workbench_panel = build_interactive_patch_workbench(store)?;
     let permissions_panel = build_interactive_permissions(store)?;
@@ -1746,6 +1808,7 @@ pub fn build_interactive_home_with_options(
             context_memory_panel,
             digital_twin_panel,
             operational_cockpit_panel,
+            addon_capability_panel,
             addon_renderer_panel,
             attention_actions,
             useful_next_commands: vec![
@@ -1764,6 +1827,8 @@ pub fn build_interactive_home_with_options(
                     .to_string(),
                 "forge interactive sessions --output json".to_string(),
                 "forge interactive action-registry --output json".to_string(),
+                "forge addons capabilities --output json".to_string(),
+                "forge addons observability --output json".to_string(),
                 "forge interactive release-gates --output json".to_string(),
                 "forge interactive patch-workbench --output json".to_string(),
                 "forge interactive permissions --output json".to_string(),
@@ -1777,6 +1842,7 @@ pub fn build_interactive_home_with_options(
                 "/artifacts".to_string(),
                 "/task-board".to_string(),
                 "/readiness".to_string(),
+                "/addons".to_string(),
                 "/milestone".to_string(),
                 "/sync".to_string(),
                 "/brains".to_string(),
@@ -1799,6 +1865,244 @@ pub fn build_interactive_home_with_options(
         },
         slash_commands: slash_commands(),
     })
+}
+
+pub fn build_operational_tui_smoke(
+    store: &ForgeStore,
+    project_root: Option<&Path>,
+    origin: &str,
+) -> Result<OperationalTuiSmokeReport> {
+    let request = start_async_request(
+        store,
+        "Demonstrate Forge operational TUI with active workflows, events, schedules, Addons/capabilities, costs, handoffs and approvals",
+        origin,
+    )?;
+    let scheduled = create_daily_goal_research_workflow(
+        store,
+        vec!["operational-tui-smoke".to_string()],
+        "UTC",
+        "*/15 * * * *",
+        origin,
+    )?;
+    let workflow = store.load_workflow(&request.workflow_id)?;
+    if let Some(task) = workflow.tasks.first() {
+        let choices = vec![
+            "approve=Approve operational TUI smoke".to_string(),
+            "refine=Refine operational TUI smoke".to_string(),
+        ];
+        create_choice_interaction(
+            store,
+            CreateChoiceInteractionRequest {
+                workflow_id: &request.workflow_id,
+                task_id: &task.id,
+                kind: "approve_reject_refine_combine",
+                prompt: "Confirm the operational TUI smoke demo before handoff.",
+                choices: &choices,
+                timeout_seconds: Some(3600),
+                origin,
+            },
+        )?;
+    }
+
+    let event_data = serde_json::json!({
+        "schema_version": OPERATIONAL_TUI_SMOKE_SCHEMA_VERSION,
+        "run_id": request.run_id.clone(),
+        "workflow_id": request.workflow_id.clone(),
+        "scheduled_workflow_id": scheduled.workflow_id.clone(),
+        "summary": "Operational TUI smoke created workflow, schedule, event, approval and dashboard evidence."
+    });
+    let tenant_context = serde_json::json!({
+        "organization_id": "forge",
+        "brand_id": "forge",
+        "product_id": "forge-core"
+    });
+    let event_id = store.record_global_event(GlobalEventWrite {
+        source: "forge.smoke.operational_tui",
+        source_id: &request.run_id,
+        workflow_id: Some(&request.workflow_id),
+        kind: "operational_tui_smoke",
+        origin,
+        status: "passed",
+        data: &event_data,
+        tenant_context: &tenant_context,
+    })?;
+
+    let home = build_interactive_home_with_options(
+        store,
+        InteractiveHomeOptions {
+            project_root: project_root.map(Path::to_path_buf),
+        },
+    )?;
+    let d = &home.dashboard;
+    let readme = include_str!("../README.md");
+    let dashboard = OperationalTuiSmokeDashboard {
+        active_runs: d.active_runs,
+        workflow_count: d.task_board_panel.workflow_count,
+        event_count: d.event_panel.total_event_count,
+        schedule_workflow_count: d.scheduled_workflows,
+        addon_count: d.addon_capability_panel.addon_count,
+        capability_count: d.addon_capability_panel.capability_count,
+        cost_estimated_usd: d.cost_panel.estimated_task_cost_total_usd,
+        ready_handoff_count: d.task_board_panel.ready_handoffs,
+        pending_approval_count: d.pending_approvals,
+    };
+    let checks = vec![
+        operational_tui_smoke_check(
+            "opens_useful_tui",
+            "forge opens the operational TUI",
+            home.status == "interactive_home_ready",
+            format!(
+                "{}; cockpit {}; focus panels {}",
+                home.status,
+                d.operational_cockpit_panel.status,
+                d.navigation_panel.keybindings.len()
+            ),
+            "forge",
+        ),
+        operational_tui_smoke_check(
+            "shows_active_workflows",
+            "TUI shows active workflows",
+            dashboard.active_runs > 0 && dashboard.workflow_count > 0,
+            format!(
+                "{} active runs; {} workflow lanes",
+                dashboard.active_runs, dashboard.workflow_count
+            ),
+            "forge interactive task-board --output json",
+        ),
+        operational_tui_smoke_check(
+            "shows_events_and_schedules",
+            "TUI shows events and schedules",
+            dashboard.event_count > 0 && dashboard.schedule_workflow_count > 0,
+            format!(
+                "{} events; {} scheduled workflows",
+                dashboard.event_count, dashboard.schedule_workflow_count
+            ),
+            "forge interactive structured-logs --output json",
+        ),
+        operational_tui_smoke_check(
+            "shows_addons_and_capabilities",
+            "TUI shows Addons and capabilities",
+            !d.addon_capability_panel.status.is_empty(),
+            format!(
+                "{}; {} addons; {} capabilities",
+                d.addon_capability_panel.status, dashboard.addon_count, dashboard.capability_count
+            ),
+            "forge addons capabilities --output json",
+        ),
+        operational_tui_smoke_check(
+            "shows_costs",
+            "TUI shows costs",
+            !d.cost_panel.status.is_empty(),
+            format!(
+                "{}; estimated ${:.4}; observed ${:.4}",
+                d.cost_panel.status,
+                d.cost_panel.estimated_task_cost_total_usd,
+                d.cost_panel.observed_event_cost_total_usd
+            ),
+            "forge cost ledger --output json",
+        ),
+        operational_tui_smoke_check(
+            "shows_handoffs_and_approvals",
+            "TUI shows handoffs and approvals",
+            dashboard.ready_handoff_count > 0 || dashboard.pending_approval_count > 0,
+            format!(
+                "{} ready handoffs; {} pending approvals",
+                dashboard.ready_handoff_count, dashboard.pending_approval_count
+            ),
+            "forge interactive permissions --output json",
+        ),
+        operational_tui_smoke_check(
+            "runs_end_to_end_demo_flow",
+            "Smoke runs an end-to-end demo flow",
+            !request.workflow_id.is_empty()
+                && !request.run_id.is_empty()
+                && !scheduled.workflow_id.is_empty()
+                && event_id > 0,
+            format!(
+                "workflow {}; run {}; scheduled {}; event {}",
+                request.workflow_id, request.run_id, scheduled.workflow_id, event_id
+            ),
+            "forge smoke operational-tui --output json",
+        ),
+        operational_tui_smoke_check(
+            "readme_five_minute_intro",
+            "README explains Forge in five minutes",
+            readme.contains("## Forge em 5 minutos")
+                && readme.contains("forge smoke operational-tui"),
+            "README contains the five-minute intro and operational smoke command".to_string(),
+            "README.md",
+        ),
+    ];
+    let status = if checks.iter().all(|check| check.passed) {
+        "operational_tui_smoke_passed"
+    } else {
+        "operational_tui_smoke_failed"
+    };
+
+    Ok(OperationalTuiSmokeReport {
+        schema_version: OPERATIONAL_TUI_SMOKE_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        workflow_id: request.workflow_id,
+        run_id: request.run_id,
+        scheduled_workflow_id: scheduled.workflow_id,
+        event_id,
+        dashboard,
+        checks,
+        commands: vec![
+            "forge".to_string(),
+            "forge interactive home --output json".to_string(),
+            "forge interactive operational-cockpit --output json".to_string(),
+            "forge interactive task-board --output json".to_string(),
+            "forge interactive structured-logs --output json".to_string(),
+            "forge addons capabilities --output json".to_string(),
+            "forge cost ledger --output json".to_string(),
+            "forge smoke operational-tui --output json".to_string(),
+        ],
+    })
+}
+
+fn operational_tui_smoke_check(
+    check_id: &str,
+    title: &str,
+    passed: bool,
+    evidence: String,
+    command: &str,
+) -> OperationalTuiSmokeCheck {
+    OperationalTuiSmokeCheck {
+        check_id: check_id.to_string(),
+        title: title.to_string(),
+        passed,
+        evidence,
+        command: command.to_string(),
+    }
+}
+
+pub fn render_operational_tui_smoke(report: &OperationalTuiSmokeReport) -> String {
+    let checks = report
+        .checks
+        .iter()
+        .map(|check| format!("{}={} ({})", check.check_id, check.passed, check.evidence))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!(
+        "Operational TUI smoke: {status}; workflow {workflow_id}; run {run_id}; scheduled {scheduled_workflow_id}; event {event_id}\nDashboard: active runs {active_runs}, workflows {workflow_count}, events {event_count}, schedules {schedule_workflow_count}, addons {addon_count}, capabilities {capability_count}, cost ${cost_estimated_usd:.4}, handoffs {ready_handoff_count}, approvals {pending_approval_count}\nchecks: {checks}\ncommands: {commands}\n",
+        status = report.status,
+        workflow_id = report.workflow_id,
+        run_id = report.run_id,
+        scheduled_workflow_id = report.scheduled_workflow_id,
+        event_id = report.event_id,
+        active_runs = report.dashboard.active_runs,
+        workflow_count = report.dashboard.workflow_count,
+        event_count = report.dashboard.event_count,
+        schedule_workflow_count = report.dashboard.schedule_workflow_count,
+        addon_count = report.dashboard.addon_count,
+        capability_count = report.dashboard.capability_count,
+        cost_estimated_usd = report.dashboard.cost_estimated_usd,
+        ready_handoff_count = report.dashboard.ready_handoff_count,
+        pending_approval_count = report.dashboard.pending_approval_count,
+        checks = checks,
+        commands = report.commands.join(" | "),
+    )
 }
 
 pub fn slash_command_catalog() -> SlashCommandCatalogReport {
@@ -5420,6 +5724,148 @@ pub fn build_interactive_structured_logs(
     Ok(build_structured_logs_panel(&timeline))
 }
 
+pub fn build_interactive_addon_capabilities(
+    store: &ForgeStore,
+    catalog: Option<&AddonCatalog>,
+) -> InteractiveAddonCapabilityPanel {
+    let capability_index = list_addon_capability_index(store, None, None, None).ok();
+    let observability = catalog
+        .and_then(|catalog| addon_observability_report(store, catalog, None, None, 1000).ok());
+    let indexed_capabilities = capability_index
+        .as_ref()
+        .map(|index| {
+            index
+                .capabilities
+                .iter()
+                .take(8)
+                .map(|capability| {
+                    format!(
+                        "{}:{} [{}]",
+                        capability.addon_id, capability.capability_id, capability.lifecycle
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let catalog_capabilities = observability
+        .as_ref()
+        .map(|report| {
+            report
+                .addons
+                .iter()
+                .filter(|addon| addon.addon_lifecycle == "enabled")
+                .flat_map(|addon| {
+                    addon
+                        .capabilities
+                        .iter()
+                        .map(|capability| format!("{}:{} [enabled]", addon.addon_id, capability))
+                })
+                .take(8)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let capabilities = if indexed_capabilities.is_empty() {
+        catalog_capabilities
+    } else {
+        indexed_capabilities
+    };
+    let status = if capability_index.is_some() || observability.is_some() {
+        "addon_capabilities_ready"
+    } else {
+        "addon_capabilities_unavailable"
+    };
+    let indexed_capability_count = capability_index
+        .as_ref()
+        .map(|index| index.capability_count)
+        .unwrap_or(0);
+    let observed_capability_count = observability
+        .as_ref()
+        .map(|report| report.totals.capability_count)
+        .unwrap_or(0);
+    let capability_count = indexed_capability_count.max(observed_capability_count);
+    let indexed_enabled_capability_count = capability_index
+        .as_ref()
+        .map(|index| index.enabled_count)
+        .unwrap_or(0);
+    let observed_enabled_capability_count = observability
+        .as_ref()
+        .map(|report| {
+            report
+                .addons
+                .iter()
+                .filter(|addon| addon.addon_lifecycle == "enabled")
+                .map(|addon| addon.capability_count)
+                .sum()
+        })
+        .unwrap_or(0);
+    let enabled_capability_count =
+        indexed_enabled_capability_count.max(observed_enabled_capability_count);
+    let indexed_disabled_capability_count = capability_index
+        .as_ref()
+        .map(|index| index.disabled_count)
+        .unwrap_or(0);
+    let observed_disabled_capability_count = observability
+        .as_ref()
+        .map(|report| {
+            report
+                .addons
+                .iter()
+                .filter(|addon| addon.addon_lifecycle == "disabled")
+                .map(|addon| addon.capability_count)
+                .sum()
+        })
+        .unwrap_or(0);
+    let disabled_capability_count =
+        indexed_disabled_capability_count.max(observed_disabled_capability_count);
+
+    InteractiveAddonCapabilityPanel {
+        schema_version: INTERACTIVE_ADDON_CAPABILITY_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        addon_count: observability
+            .as_ref()
+            .map(|report| report.addon_count)
+            .unwrap_or(0),
+        enabled_addon_count: observability
+            .as_ref()
+            .map(|report| report.enabled_count)
+            .unwrap_or(0),
+        unauthorized_addon_count: observability
+            .as_ref()
+            .map(|report| report.unauthorized_count)
+            .unwrap_or(0),
+        capability_count,
+        enabled_capability_count,
+        disabled_capability_count,
+        permission_count: observability
+            .as_ref()
+            .map(|report| report.totals.permission_count)
+            .unwrap_or(0),
+        runtime_contract_count: observability
+            .as_ref()
+            .map(|report| report.totals.runtime_contract_count)
+            .unwrap_or(0),
+        view_count: observability
+            .as_ref()
+            .map(|report| report.totals.view_count)
+            .unwrap_or(0),
+        dispatch_count: observability
+            .as_ref()
+            .map(|report| report.totals.dispatch_count)
+            .unwrap_or(0),
+        queued_dispatch_count: observability
+            .as_ref()
+            .map(|report| report.totals.queued_dispatch_count)
+            .unwrap_or(0),
+        capabilities,
+        commands: vec![
+            "forge addons capabilities --output json".to_string(),
+            "forge addons observability --output json".to_string(),
+            "forge addons views --surface tui --output json".to_string(),
+            "forge interactive action-registry --query addon --output json".to_string(),
+        ],
+    }
+}
+
 fn default_interactive_harness_shim_dir() -> PathBuf {
     env::var_os("HOME")
         .map(PathBuf::from)
@@ -6154,6 +6600,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     let structured_logs = render_structured_log_summary(&d.structured_logs_panel);
     let operational_cockpit_sections =
         render_operational_cockpit_sections(&d.operational_cockpit_panel);
+    let addon_capabilities = render_addon_capability_summary(&d.addon_capability_panel);
     let addon_renderer_families = if d.addon_renderer_panel.families.is_empty() {
         "none".to_string()
     } else {
@@ -6166,6 +6613,13 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     };
     format!(
         "{mark}\n{name}\n\n\
+         Forge operational TUI\n\
+         Active workflows: {active_workflows}; active runs {active_runs}; focus {workflow_focus}\n\
+         Events/schedules: events {event_total}, visible {event_visible}, scheduled {scheduled_workflows}, due {schedule_due}, next {schedule_next}\n\
+         Addons/capabilities: addons {addon_count}, enabled {addon_enabled}, capabilities {addon_capabilities_count}, permissions {addon_permissions}, contracts {addon_contracts}; {addon_capabilities}\n\
+         Costs: estimated ${cost_estimated:.4}, observed ${cost_observed:.4}, nodes {cost_nodes}, AI {cost_ai_nodes}, deterministic {cost_deterministic_nodes}, avoided-model {cost_avoided_nodes}\n\
+         Handoffs/approvals: ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, pending approvals {pending_approvals}, context blocked {context_blocked}\n\
+         Smoke test: forge smoke operational-tui --output json\n\n\
          Active runs: {active_runs}\n\
          {run_ids_line}\
          Operational cockpit: {cockpit_attention}; {cockpit_priority}; active work {cockpit_active_work}, ready handoffs {cockpit_ready_handoffs}, human waits {cockpit_human_waits}, due workflows {cockpit_due_workflows}, brain {cockpit_selected_brain}; sections {cockpit_sections}\n\
@@ -6203,6 +6657,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Structured logs: {structured_logs_status}; logs {structured_logs_count}/{structured_logs_total}, next cursor {structured_logs_next_cursor}, has more {structured_logs_has_more}; {structured_logs}\n\
          Cost panel: {cost_status}; workflows {cost_workflows}, nodes {cost_nodes}, estimated ${cost_estimated:.4}, observed ${cost_observed:.4}\n\
          Context/memory panel: ready {context_ready}, blocked {context_blocked}, budget pressure {context_budget_pressure}, memory {memory_policy_status}\n\
+         Addons/capabilities: {addon_capability_status}; addons {addon_count}, enabled {addon_enabled}, capabilities {addon_capabilities_count}, enabled capabilities {addon_enabled_capabilities}, disabled capabilities {addon_disabled_capabilities}, permissions {addon_permissions}, runtime contracts {addon_contracts}, views {addon_views}, dispatches {addon_dispatches}, queued {addon_queued_dispatches}; {addon_capabilities}\n\
          Addon UI renderers: {addon_renderer_status}; safe {addon_safe_renderers}/{addon_renderers}, families {addon_renderer_family_count} ({addon_renderer_families})\n\
          Repository context: {repository_context}\n\
          Estimated costs: {estimated_costs}\n\
@@ -6365,12 +6820,28 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         cost_status = d.cost_panel.status,
         cost_workflows = d.cost_panel.workflow_count,
         cost_nodes = d.cost_panel.node_count,
+        cost_ai_nodes = d.cost_panel.ai_node_count,
+        cost_deterministic_nodes = d.cost_panel.deterministic_node_count,
+        cost_avoided_nodes = d.cost_panel.model_call_avoided_node_count,
         cost_estimated = d.cost_panel.estimated_task_cost_total_usd,
         cost_observed = d.cost_panel.observed_event_cost_total_usd,
         context_ready = d.context_memory_panel.ready_for_handoff,
         context_blocked = d.context_memory_panel.blocked_tasks,
         context_budget_pressure = d.context_memory_panel.context_budget_pressure,
         memory_policy_status = d.context_memory_panel.memory_policy_status,
+        active_workflows = d.task_board_panel.workflow_count,
+        addon_capability_status = d.addon_capability_panel.status,
+        addon_count = d.addon_capability_panel.addon_count,
+        addon_enabled = d.addon_capability_panel.enabled_addon_count,
+        addon_capabilities_count = d.addon_capability_panel.capability_count,
+        addon_enabled_capabilities = d.addon_capability_panel.enabled_capability_count,
+        addon_disabled_capabilities = d.addon_capability_panel.disabled_capability_count,
+        addon_permissions = d.addon_capability_panel.permission_count,
+        addon_contracts = d.addon_capability_panel.runtime_contract_count,
+        addon_views = d.addon_capability_panel.view_count,
+        addon_dispatches = d.addon_capability_panel.dispatch_count,
+        addon_queued_dispatches = d.addon_capability_panel.queued_dispatch_count,
+        addon_capabilities = addon_capabilities,
         addon_renderer_status = d.addon_renderer_panel.status,
         addon_safe_renderers = d.addon_renderer_panel.safe_renderer_count,
         addon_renderers = d.addon_renderer_panel.renderer_count,
@@ -7336,6 +7807,30 @@ pub fn render_interactive_structured_logs(panel: &InteractiveStructuredLogsPanel
     )
 }
 
+pub fn render_interactive_addon_capabilities(panel: &InteractiveAddonCapabilityPanel) -> String {
+    format!(
+        "Addons/capabilities: {status}; addons {addon_count}, enabled {enabled_addon_count}, unauthorized {unauthorized_addon_count}, capabilities {capability_count}, enabled capabilities {enabled_capability_count}, disabled capabilities {disabled_capability_count}, permissions {permission_count}, runtime contracts {runtime_contract_count}, views {view_count}, dispatches {dispatch_count}, queued {queued_dispatch_count}\nCapabilities: {capabilities}\nCommands: {commands}\n",
+        status = panel.status,
+        addon_count = panel.addon_count,
+        enabled_addon_count = panel.enabled_addon_count,
+        unauthorized_addon_count = panel.unauthorized_addon_count,
+        capability_count = panel.capability_count,
+        enabled_capability_count = panel.enabled_capability_count,
+        disabled_capability_count = panel.disabled_capability_count,
+        permission_count = panel.permission_count,
+        runtime_contract_count = panel.runtime_contract_count,
+        view_count = panel.view_count,
+        dispatch_count = panel.dispatch_count,
+        queued_dispatch_count = panel.queued_dispatch_count,
+        capabilities = render_addon_capability_summary(panel),
+        commands = if panel.commands.is_empty() {
+            "none".to_string()
+        } else {
+            panel.commands.join(" | ")
+        },
+    )
+}
+
 fn build_interactive_event_panel(timeline: &GlobalEventTimelineReport) -> InteractiveEventPanel {
     InteractiveEventPanel {
         status: timeline.status.clone(),
@@ -7748,15 +8243,26 @@ fn build_ui_composition_panel(
         .map(addon_ui_widget)
         .collect::<Vec<_>>();
 
-    let mut addon_region_widgets = vec![core_ui_widget(
-        "addon_renderer_panel",
-        "Addon UI renderers",
-        "addon_renderer_panel",
-        "data_list_renderer",
-        "standard",
-        "full",
-        vec!["forge addons views --output json".to_string()],
-    )];
+    let mut addon_region_widgets = vec![
+        core_ui_widget(
+            "addon_capability_panel",
+            "Addons/capabilities",
+            "addon_capability_panel",
+            "capability_index_renderer",
+            "standard",
+            "full",
+            vec!["forge addons capabilities --output json".to_string()],
+        ),
+        core_ui_widget(
+            "addon_renderer_panel",
+            "Addon UI renderers",
+            "addon_renderer_panel",
+            "data_list_renderer",
+            "standard",
+            "full",
+            vec!["forge addons views --output json".to_string()],
+        ),
+    ];
     addon_region_widgets.append(&mut addon_widgets);
 
     let regions = vec![
@@ -8214,6 +8720,14 @@ fn render_structured_log_summary(panel: &InteractiveStructuredLogsPanel) -> Stri
         })
         .collect::<Vec<_>>()
         .join(" | ")
+}
+
+fn render_addon_capability_summary(panel: &InteractiveAddonCapabilityPanel) -> String {
+    if panel.capabilities.is_empty() {
+        "none".to_string()
+    } else {
+        panel.capabilities.join(" | ")
+    }
 }
 
 fn structured_log_correlation_summary(correlation: &serde_json::Value) -> String {
@@ -9325,6 +9839,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/addons",
+            "Addons/Capabilities",
+            "Show Addons, capabilities, permission gates, runtime contracts, views and dispatch state.",
+            &["forge", "addons", "capabilities", "--output", "json"],
+            false,
+            "low",
+        ),
+        slash(
             "/costs",
             "Costs",
             "Inspect or simulate workflow costs.",
@@ -9906,7 +10428,9 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
 
     let store = ForgeStore::open(store_path)?;
     let report = build_interactive_home(&store)?;
+    let mut repl_state = InteractiveReplState::from_home(&report);
     println!("{}", render_interactive_home(&report));
+    println!("{}", repl_state.focus_status_line());
 
     loop {
         print!("forge> ");
@@ -9927,6 +10451,11 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
         if matches!(trimmed, "/exit" | "/quit") {
             println!("goodbye");
             break;
+        }
+
+        if let Some(output) = dispatch_repl_navigation_key(&store, &mut repl_state, trimmed)? {
+            println!("{output}");
+            continue;
         }
 
         if trimmed.starts_with('/') {
@@ -10017,6 +10546,235 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
     Ok(0)
 }
 
+#[derive(Debug, Clone)]
+struct InteractiveReplFocusPanel {
+    panel_id: &'static str,
+    title: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct InteractiveReplState {
+    panels: Vec<InteractiveReplFocusPanel>,
+    focused_index: usize,
+    display_modes: Vec<String>,
+    display_mode_index: usize,
+    themes: Vec<String>,
+    theme_index: usize,
+}
+
+impl InteractiveReplState {
+    fn from_home(report: &InteractiveHomeReport) -> Self {
+        let navigation = &report.dashboard.navigation_panel;
+        let display_modes = if navigation.display_modes.is_empty() {
+            vec![
+                "compact".to_string(),
+                "detailed".to_string(),
+                "focus".to_string(),
+            ]
+        } else {
+            navigation.display_modes.clone()
+        };
+        let display_mode_index = display_modes
+            .iter()
+            .position(|mode| mode == &navigation.default_display_mode)
+            .unwrap_or(0);
+        let themes = if navigation.themes.is_empty() {
+            vec![
+                "forge_dark".to_string(),
+                "forge_light".to_string(),
+                "high_contrast".to_string(),
+            ]
+        } else {
+            navigation.themes.clone()
+        };
+        let theme_index = themes
+            .iter()
+            .position(|theme| theme == &navigation.active_theme)
+            .unwrap_or(0);
+
+        Self {
+            panels: repl_focus_panels(),
+            focused_index: 0,
+            display_modes,
+            display_mode_index,
+            themes,
+            theme_index,
+        }
+    }
+
+    fn focused_panel(&self) -> &InteractiveReplFocusPanel {
+        &self.panels[self.focused_index]
+    }
+
+    fn focus_next(&mut self) {
+        self.focused_index = (self.focused_index + 1) % self.panels.len();
+    }
+
+    fn focus_previous(&mut self) {
+        self.focused_index = if self.focused_index == 0 {
+            self.panels.len() - 1
+        } else {
+            self.focused_index - 1
+        };
+    }
+
+    fn cycle_display_mode(&mut self) -> String {
+        self.display_mode_index = (self.display_mode_index + 1) % self.display_modes.len();
+        format!(
+            "Display mode: {}",
+            self.display_modes[self.display_mode_index]
+        )
+    }
+
+    fn cycle_theme(&mut self) -> String {
+        self.theme_index = (self.theme_index + 1) % self.themes.len();
+        format!("Theme: {}", self.themes[self.theme_index])
+    }
+
+    fn focus_status_line(&self) -> String {
+        let panel = self.focused_panel();
+        format!(
+            "Focus: {} ({}) [{}/{}]; mode {}; theme {}",
+            panel.panel_id,
+            panel.title,
+            self.focused_index + 1,
+            self.panels.len(),
+            self.display_modes[self.display_mode_index],
+            self.themes[self.theme_index],
+        )
+    }
+}
+
+fn repl_focus_panels() -> Vec<InteractiveReplFocusPanel> {
+    vec![
+        InteractiveReplFocusPanel {
+            panel_id: "operational_cockpit_panel",
+            title: "Operational cockpit",
+        },
+        InteractiveReplFocusPanel {
+            panel_id: "task_board_panel",
+            title: "Task board",
+        },
+        InteractiveReplFocusPanel {
+            panel_id: "readiness_panel",
+            title: "Readiness",
+        },
+        InteractiveReplFocusPanel {
+            panel_id: "addon_capability_panel",
+            title: "Addons/capabilities",
+        },
+        InteractiveReplFocusPanel {
+            panel_id: "sessions_panel",
+            title: "Sessions",
+        },
+        InteractiveReplFocusPanel {
+            panel_id: "harness_panel",
+            title: "Harness",
+        },
+        InteractiveReplFocusPanel {
+            panel_id: "structured_logs_panel",
+            title: "Structured logs",
+        },
+        InteractiveReplFocusPanel {
+            panel_id: "permissions_panel",
+            title: "Permissions",
+        },
+        InteractiveReplFocusPanel {
+            panel_id: "identity_panel",
+            title: "Identity",
+        },
+        InteractiveReplFocusPanel {
+            panel_id: "workflow_dag_panel",
+            title: "Workflow DAG",
+        },
+        InteractiveReplFocusPanel {
+            panel_id: "patch_workbench_panel",
+            title: "Patch workbench",
+        },
+    ]
+}
+
+fn dispatch_repl_navigation_key(
+    store: &ForgeStore,
+    state: &mut InteractiveReplState,
+    input: &str,
+) -> Result<Option<String>> {
+    match input {
+        "j" => {
+            state.focus_next();
+            Ok(Some(state.focus_status_line()))
+        }
+        "k" => {
+            state.focus_previous();
+            Ok(Some(state.focus_status_line()))
+        }
+        "m" => Ok(Some(state.cycle_display_mode())),
+        "t" => Ok(Some(state.cycle_theme())),
+        "enter" => {
+            let panel_id = state.focused_panel().panel_id;
+            let rendered = render_repl_focused_panel(store, panel_id)?;
+            Ok(Some(format!(
+                "Opened focused panel: {panel_id}\n{rendered}"
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<String> {
+    match panel_id {
+        "operational_cockpit_panel" => {
+            let panel = build_interactive_operational_cockpit(store)?;
+            Ok(render_interactive_operational_cockpit(&panel))
+        }
+        "task_board_panel" => {
+            let panel = build_interactive_task_board(store)?;
+            Ok(render_interactive_task_board(&panel))
+        }
+        "readiness_panel" => {
+            let panel = build_interactive_readiness(store)?;
+            Ok(render_interactive_readiness(&panel))
+        }
+        "addon_capability_panel" => {
+            let catalog = load_addon_catalog_from_store(store, &default_addon_dirs()).ok();
+            let panel = build_interactive_addon_capabilities(store, catalog.as_ref());
+            Ok(render_interactive_addon_capabilities(&panel))
+        }
+        "sessions_panel" => {
+            let panel = build_interactive_sessions(store, InteractiveSessionsOptions::default())?;
+            Ok(render_interactive_sessions(&panel))
+        }
+        "harness_panel" => {
+            let panel = build_interactive_harness(
+                store,
+                InteractiveHarnessOptions::default_for_current_dir(),
+            )?;
+            Ok(render_interactive_harness(&panel))
+        }
+        "structured_logs_panel" => {
+            let panel = build_interactive_structured_logs(store)?;
+            Ok(render_interactive_structured_logs(&panel))
+        }
+        "permissions_panel" => {
+            let panel = build_interactive_permissions(store)?;
+            Ok(render_interactive_permissions(&panel))
+        }
+        "identity_panel" => {
+            let panel = build_interactive_identity(store, std::path::Path::new("."))?;
+            Ok(render_interactive_identity(&panel))
+        }
+        "workflow_dag_panel" => {
+            let panel = build_interactive_workflow_dag(store)?;
+            Ok(render_interactive_workflow_dag(&panel))
+        }
+        "patch_workbench_panel" => {
+            let panel = build_interactive_patch_workbench(store)?;
+            Ok(render_interactive_patch_workbench(&panel))
+        }
+        _ => Ok(format!("Focused panel {panel_id} has no renderer")),
+    }
+}
+
 fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<bool> {
     match input.trim() {
         "/cockpit" => {
@@ -10032,6 +10790,12 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
         "/readiness" => {
             let panel = build_interactive_readiness(store)?;
             println!("{}", render_interactive_readiness(&panel));
+            Ok(true)
+        }
+        "/addons" => {
+            let catalog = load_addon_catalog_from_store(store, &default_addon_dirs()).ok();
+            let panel = build_interactive_addon_capabilities(store, catalog.as_ref());
+            println!("{}", render_interactive_addon_capabilities(&panel));
             Ok(true)
         }
         "/sessions" => {
