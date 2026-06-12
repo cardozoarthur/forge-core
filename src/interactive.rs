@@ -7,7 +7,7 @@ use crate::addon::{
 };
 use crate::artifact::list_workflow_artifacts;
 use crate::checkpoint::TaskCheckpoint;
-use crate::cost::build_cost_ledger;
+use crate::cost::{build_cost_ledger, CostLedgerReport};
 use crate::event::{
     build_global_event_timeline, list_event_services, list_inbound_event_inbox_for_context,
     GlobalEventTimelineReport, WorkflowEventEnvelope,
@@ -34,6 +34,10 @@ use crate::harness::{
 use crate::identity::{
     audit_tenant_index, inspect_project_operating_context, list_identity_links,
     list_identity_memberships, list_identity_registry, load_project_operating_context,
+};
+use crate::improve::{
+    rank_improvement_candidates, OrchestratorImprovementCandidate,
+    OrchestratorImprovementCandidatesReport,
 };
 use crate::interaction::{
     create_choice_interaction, list_human_interactions, CreateChoiceInteractionRequest,
@@ -88,6 +92,7 @@ const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflo
 const INTERACTIVE_SCHEDULES_SCHEMA_VERSION: &str = "forge.interactive.schedules.v1";
 const INTERACTIVE_CONTEXT_MEMORY_SCHEMA_VERSION: &str = "forge.interactive.context_memory.v1";
 const INTERACTIVE_OPERATING_CONTEXT_SCHEMA_VERSION: &str = "forge.interactive.operating_context.v1";
+const INTERACTIVE_IMPROVEMENT_LOOP_SCHEMA_VERSION: &str = "forge.interactive.improvement_loop.v1";
 const INTERACTIVE_READINESS_SCHEMA_VERSION: &str = "forge.interactive.readiness.v1";
 const INTERACTIVE_RELEASE_GATES_SCHEMA_VERSION: &str = "forge.interactive.release_gates.v1";
 const INTERACTIVE_HARNESS_SCHEMA_VERSION: &str = "forge.interactive.harness.v1";
@@ -195,6 +200,7 @@ pub struct InteractiveDashboard {
     pub event_runtime_panel: InteractiveEventRuntimePanel,
     pub structured_logs_panel: InteractiveStructuredLogsPanel,
     pub cost_panel: InteractiveCostPanel,
+    pub improvement_loop_panel: InteractiveImprovementLoopPanel,
     pub context_memory_panel: InteractiveContextMemoryPanel,
     pub operating_context_panel: InteractiveOperatingContextPanel,
     pub digital_twin_panel: OpsOperationalDigitalTwin,
@@ -1906,6 +1912,401 @@ pub struct InteractiveCostPanel {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct InteractiveImprovementLoopPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub candidate_count: usize,
+    pub total_workflows: usize,
+    pub matched_workflows: usize,
+    pub critical_candidate_count: usize,
+    pub high_candidate_count: usize,
+    pub parallel_ready_candidate_count: usize,
+    pub avoidable_ai_candidate_count: usize,
+    pub final_outcome_candidate_count: usize,
+    pub stale_or_attention_candidate_count: usize,
+    pub event_count: usize,
+    pub structured_log_count: usize,
+    pub cost_status: String,
+    pub estimated_cost_total_usd: f64,
+    pub observed_cost_total_usd: f64,
+    pub ai_node_count: usize,
+    pub model_call_avoided_node_count: usize,
+    pub validation_failure_count: usize,
+    pub context_quality_status: String,
+    pub top_candidates: Vec<InteractiveImprovementCandidateCard>,
+    pub commands: InteractiveImprovementLoopCommands,
+    pub next_actions: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveImprovementCandidateCard {
+    pub workflow_id: String,
+    pub goal: String,
+    pub priority: String,
+    pub score: i64,
+    pub recommended_action: String,
+    pub reason_codes: Vec<String>,
+    pub ready_parallel_task_count: usize,
+    pub avoidable_estimated_cost_usd: f64,
+    pub avoidable_observed_cost_usd: Option<f64>,
+    pub outcome_status: String,
+    pub event_count: usize,
+    pub active_run_count: usize,
+    pub suggested_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveImprovementLoopCommands {
+    pub refresh: Vec<String>,
+    pub candidates: Vec<String>,
+    pub cost_ledger: Vec<String>,
+    pub structured_logs: Vec<String>,
+    pub task_board: Vec<String>,
+    pub validate: Vec<String>,
+    pub apply_event_policy: Vec<String>,
+    pub benchmark_event_policy: Vec<String>,
+    pub promote_event_policy: Vec<String>,
+}
+
+pub fn build_interactive_improvement_loop(
+    store: &ForgeStore,
+) -> Result<InteractiveImprovementLoopPanel> {
+    let workflows = list_workflows_with_filters(
+        store,
+        WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
+    )?;
+    let structured_logs_panel = build_interactive_structured_logs(store)?;
+    let cost_panel = build_cost_ledger(store, None, None, None, None)
+        .ok()
+        .map(interactive_cost_panel_from_ledger)
+        .unwrap_or_else(|| InteractiveCostPanel {
+            status: "cost_ledger_unavailable".to_string(),
+            workflow_count: 0,
+            node_count: 0,
+            ai_node_count: 0,
+            deterministic_node_count: 0,
+            model_call_avoided_node_count: 0,
+            estimated_task_cost_total_usd: 0.0,
+            observed_event_cost_total_usd: 0.0,
+        });
+    let validation_failure_count = workflows
+        .workflows
+        .iter()
+        .map(|workflow| workflow.task_summary.failed + workflow.task_summary.blocked)
+        .sum();
+    let candidates = rank_improvement_candidates(store, 10)?;
+
+    Ok(build_improvement_loop_panel(
+        &candidates,
+        &structured_logs_panel,
+        &cost_panel,
+        validation_failure_count,
+        &workflows.summary.context_quality,
+    ))
+}
+
+fn interactive_cost_panel_from_ledger(ledger: CostLedgerReport) -> InteractiveCostPanel {
+    let summary = ledger.summary;
+    InteractiveCostPanel {
+        status: ledger.status,
+        workflow_count: summary.workflow_count,
+        node_count: summary.node_count,
+        ai_node_count: summary.ai_node_count,
+        deterministic_node_count: summary.deterministic_node_count,
+        model_call_avoided_node_count: summary.model_call_avoided_node_count,
+        estimated_task_cost_total_usd: summary.estimated_task_cost_total_usd,
+        observed_event_cost_total_usd: summary.observed_event_cost_total_usd,
+    }
+}
+
+fn build_improvement_loop_panel(
+    candidates: &OrchestratorImprovementCandidatesReport,
+    structured_logs: &InteractiveStructuredLogsPanel,
+    cost: &InteractiveCostPanel,
+    validation_failure_count: usize,
+    context_quality: &RegistryContextQualitySummary,
+) -> InteractiveImprovementLoopPanel {
+    let top_candidates = candidates
+        .candidates
+        .iter()
+        .take(8)
+        .map(improvement_loop_candidate_card)
+        .collect::<Vec<_>>();
+    let critical_candidate_count = candidates
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.priority == "critical")
+        .count();
+    let high_candidate_count = candidates
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.priority == "high")
+        .count();
+    let parallel_ready_candidate_count = candidates
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.parallelization.ready_parallel_task_count > 0)
+        .count();
+    let avoidable_ai_candidate_count = candidates
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.cost_efficiency.avoidable_estimated_cost_usd > 0.0
+                || candidate
+                    .cost_efficiency
+                    .avoidable_observed_cost_total_usd
+                    .unwrap_or(0.0)
+                    > 0.0
+                || candidate
+                    .reasons
+                    .iter()
+                    .any(|reason| reason.code == "avoidable_ai_cost")
+        })
+        .count();
+    let final_outcome_candidate_count = candidates
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.recommended_action.contains("final")
+                || candidate.reasons.iter().any(|reason| {
+                    matches!(
+                        reason.code.as_str(),
+                        "missing_final_outcome_audit"
+                            | "missing_user_delivery_evidence"
+                            | "completed_without_final_package"
+                            | "verified_without_final_package"
+                    )
+                })
+        })
+        .count();
+    let stale_or_attention_candidate_count = candidates
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.reasons.iter().any(|reason| {
+                matches!(
+                    reason.code.as_str(),
+                    "stale_running_run" | "missing_runtime_heartbeat" | "run_needs_attention"
+                )
+            })
+        })
+        .count();
+    let context_quality_status = improvement_loop_context_quality_status(context_quality);
+    let status = improvement_loop_status(
+        candidates.candidate_count,
+        structured_logs.total_event_count,
+        structured_logs.log_count,
+        cost.node_count,
+        validation_failure_count,
+    );
+
+    InteractiveImprovementLoopPanel {
+        schema_version: INTERACTIVE_IMPROVEMENT_LOOP_SCHEMA_VERSION.to_string(),
+        status: status.clone(),
+        candidate_count: candidates.candidate_count,
+        total_workflows: candidates.total_workflows,
+        matched_workflows: candidates.matched_workflows,
+        critical_candidate_count,
+        high_candidate_count,
+        parallel_ready_candidate_count,
+        avoidable_ai_candidate_count,
+        final_outcome_candidate_count,
+        stale_or_attention_candidate_count,
+        event_count: structured_logs.total_event_count,
+        structured_log_count: structured_logs.log_count,
+        cost_status: cost.status.clone(),
+        estimated_cost_total_usd: cost.estimated_task_cost_total_usd,
+        observed_cost_total_usd: cost.observed_event_cost_total_usd,
+        ai_node_count: cost.ai_node_count,
+        model_call_avoided_node_count: cost.model_call_avoided_node_count,
+        validation_failure_count,
+        context_quality_status,
+        top_candidates,
+        commands: improvement_loop_commands(),
+        next_actions: improvement_loop_next_actions(&status, candidates.candidate_count),
+        notes: vec![
+            "This panel is read-only; mutations still go through explicit improve, request, workflow or event-policy commands.".to_string(),
+            "Use it before self-improvement so Forge ranks work from logs, cost, validation, context quality and outcome evidence.".to_string(),
+        ],
+    }
+}
+
+fn improvement_loop_candidate_card(
+    candidate: &OrchestratorImprovementCandidate,
+) -> InteractiveImprovementCandidateCard {
+    InteractiveImprovementCandidateCard {
+        workflow_id: candidate.workflow_id.clone(),
+        goal: truncate_display(&candidate.goal, 120),
+        priority: candidate.priority.clone(),
+        score: candidate.score,
+        recommended_action: candidate.recommended_action.clone(),
+        reason_codes: candidate
+            .reasons
+            .iter()
+            .map(|reason| reason.code.clone())
+            .collect(),
+        ready_parallel_task_count: candidate.parallelization.ready_parallel_task_count,
+        avoidable_estimated_cost_usd: candidate.cost_efficiency.avoidable_estimated_cost_usd,
+        avoidable_observed_cost_usd: candidate.cost_efficiency.avoidable_observed_cost_total_usd,
+        outcome_status: candidate.outcome_status.status.clone(),
+        event_count: candidate.evidence.event_count,
+        active_run_count: candidate.evidence.active_run_count,
+        suggested_commands: candidate
+            .suggested_commands
+            .iter()
+            .take(4)
+            .map(|command| command.join(" "))
+            .collect(),
+    }
+}
+
+fn improvement_loop_context_quality_status(summary: &RegistryContextQualitySummary) -> String {
+    if summary.blocked > 0 || summary.blocking_warnings > 0 || summary.required_context_missing > 0
+    {
+        "context_quality_blocked"
+    } else if summary.total_warnings > 0 || summary.budget_pressure > 0 || summary.warning > 0 {
+        "context_quality_warn"
+    } else if summary.total_tasks > 0 {
+        "context_quality_ready"
+    } else {
+        "context_quality_idle"
+    }
+    .to_string()
+}
+
+fn improvement_loop_status(
+    candidate_count: usize,
+    event_count: usize,
+    structured_log_count: usize,
+    cost_node_count: usize,
+    validation_failure_count: usize,
+) -> String {
+    if candidate_count > 0 {
+        "improvement_loop_actionable"
+    } else if event_count > 0
+        || structured_log_count > 0
+        || cost_node_count > 0
+        || validation_failure_count > 0
+    {
+        "improvement_loop_observing"
+    } else {
+        "improvement_loop_idle"
+    }
+    .to_string()
+}
+
+fn improvement_loop_commands() -> InteractiveImprovementLoopCommands {
+    InteractiveImprovementLoopCommands {
+        refresh: vec![
+            "forge".to_string(),
+            "interactive".to_string(),
+            "improvement-loop".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        candidates: vec![
+            "forge".to_string(),
+            "improve".to_string(),
+            "candidates".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        cost_ledger: vec![
+            "forge".to_string(),
+            "cost".to_string(),
+            "ledger".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        structured_logs: vec![
+            "forge".to_string(),
+            "interactive".to_string(),
+            "structured-logs".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        task_board: vec![
+            "forge".to_string(),
+            "interactive".to_string(),
+            "task-board".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        validate: vec![
+            "forge".to_string(),
+            "validate".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        apply_event_policy: vec![
+            "forge".to_string(),
+            "improve".to_string(),
+            "apply-event-policy".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--recommendation".to_string(),
+            "<recommendation-id>".to_string(),
+            "--apply".to_string(),
+            "--approved-by".to_string(),
+            "<operator>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        benchmark_event_policy: vec![
+            "forge".to_string(),
+            "improve".to_string(),
+            "benchmark-event-policy".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--policy".to_string(),
+            "<policy>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        promote_event_policy: vec![
+            "forge".to_string(),
+            "improve".to_string(),
+            "promote-event-policy".to_string(),
+            "--workflow".to_string(),
+            "<workflow-id>".to_string(),
+            "--policy".to_string(),
+            "<policy>".to_string(),
+            "--approved-by".to_string(),
+            "<operator>".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
+}
+
+fn improvement_loop_next_actions(status: &str, candidate_count: usize) -> Vec<String> {
+    let mut actions = vec![
+        "forge interactive improvement-loop --output json".to_string(),
+        "forge improve candidates --output json".to_string(),
+        "forge interactive structured-logs --output json".to_string(),
+        "forge cost ledger --output json".to_string(),
+    ];
+    if status == "improvement_loop_actionable" && candidate_count > 0 {
+        actions.push(
+            "inspect the top candidate and run only the suggested governed command for its evidence"
+                .to_string(),
+        );
+        actions.push(
+            "benchmark and explicitly approve event-policy changes before promotion".to_string(),
+        );
+    } else {
+        actions.push(
+            "start or route a workflow, then rerun the improvement loop to collect evidence"
+                .to_string(),
+        );
+    }
+    actions
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct InteractiveContextMemoryPanel {
     pub schema_version: String,
     pub status: String,
@@ -2099,6 +2500,8 @@ pub struct OperationalTuiSmokeDashboard {
     pub addon_count: usize,
     pub capability_count: usize,
     pub cost_estimated_usd: f64,
+    pub improvement_candidate_count: usize,
+    pub structured_log_count: usize,
     pub ready_handoff_count: usize,
     pub pending_approval_count: usize,
 }
@@ -2408,19 +2811,7 @@ pub fn build_interactive_home_with_options(
         });
     let cost_panel = build_cost_ledger(store, None, None, None, None)
         .ok()
-        .map(|ledger| {
-            let summary = ledger.summary;
-            InteractiveCostPanel {
-                status: ledger.status,
-                workflow_count: summary.workflow_count,
-                node_count: summary.node_count,
-                ai_node_count: summary.ai_node_count,
-                deterministic_node_count: summary.deterministic_node_count,
-                model_call_avoided_node_count: summary.model_call_avoided_node_count,
-                estimated_task_cost_total_usd: summary.estimated_task_cost_total_usd,
-                observed_event_cost_total_usd: summary.observed_event_cost_total_usd,
-            }
-        })
+        .map(interactive_cost_panel_from_ledger)
         .unwrap_or_else(|| InteractiveCostPanel {
             status: "cost_ledger_unavailable".to_string(),
             workflow_count: 0,
@@ -2431,6 +2822,14 @@ pub fn build_interactive_home_with_options(
             estimated_task_cost_total_usd: 0.0,
             observed_event_cost_total_usd: 0.0,
         });
+    let improvement_candidates = rank_improvement_candidates(store, 10)?;
+    let improvement_loop_panel = build_improvement_loop_panel(
+        &improvement_candidates,
+        &structured_logs_panel,
+        &cost_panel,
+        validation_failures,
+        &workflows.summary.context_quality,
+    );
     let context_memory_panel = build_context_memory_panel_from_summary(
         store,
         &repository_context_path,
@@ -2491,8 +2890,8 @@ pub fn build_interactive_home_with_options(
         schedule_panel: &schedule_panel,
         event_panel: &event_panel,
         event_runtime_panel: &event_runtime_panel,
-        structured_logs_panel: &structured_logs_panel,
         cost_panel: &cost_panel,
+        improvement_loop_panel: &improvement_loop_panel,
         context_memory_panel: &context_memory_panel,
         addon_capability_panel: &addon_capability_panel,
         ui_composition_panel: &ui_composition_panel,
@@ -2562,6 +2961,7 @@ pub fn build_interactive_home_with_options(
             event_runtime_panel,
             structured_logs_panel,
             cost_panel,
+            improvement_loop_panel,
             context_memory_panel,
             digital_twin_panel,
             operational_cockpit_panel,
@@ -2593,6 +2993,8 @@ pub fn build_interactive_home_with_options(
                 "forge interactive sessions --output json".to_string(),
                 "forge interactive action-registry --output json".to_string(),
                 "forge interactive artifacts --output json".to_string(),
+                "forge interactive improvement-loop --output json".to_string(),
+                "forge improve candidates --output json".to_string(),
                 "forge interactive addon-capabilities --output json".to_string(),
                 "forge interactive context-memory --output json".to_string(),
                 "forge addons observability --output json".to_string(),
@@ -2629,6 +3031,7 @@ pub fn build_interactive_home_with_options(
                 "/harness bootstrap".to_string(),
                 "/validate".to_string(),
                 "/logs".to_string(),
+                "/improvement-loop".to_string(),
                 "/workers".to_string(),
                 "/operating-context".to_string(),
                 "/context-memory".to_string(),
@@ -2647,8 +3050,8 @@ struct ArchitectureCompassInputs<'a> {
     schedule_panel: &'a InteractiveSchedulePanel,
     event_panel: &'a InteractiveEventPanel,
     event_runtime_panel: &'a InteractiveEventRuntimePanel,
-    structured_logs_panel: &'a InteractiveStructuredLogsPanel,
     cost_panel: &'a InteractiveCostPanel,
+    improvement_loop_panel: &'a InteractiveImprovementLoopPanel,
     context_memory_panel: &'a InteractiveContextMemoryPanel,
     addon_capability_panel: &'a InteractiveAddonCapabilityPanel,
     ui_composition_panel: &'a InteractiveUiCompositionPanel,
@@ -2950,38 +3353,45 @@ fn build_architecture_compass_panel(
             "Observabilidade, custos e validação",
             &["goal1:Fase 6", "goal1:Fase 4"],
             architecture_status(
-                inputs.structured_logs_panel.total_event_count > 0
-                    && inputs.cost_panel.node_count > 0
-                    && inputs.workflows.summary.context_quality.blocked == 0,
-                inputs.structured_logs_panel.total_event_count > 0
-                    || inputs.cost_panel.node_count > 0,
+                inputs.improvement_loop_panel.candidate_count > 0
+                    && inputs.improvement_loop_panel.structured_log_count > 0
+                    && inputs.improvement_loop_panel.ai_node_count
+                        + inputs.improvement_loop_panel.model_call_avoided_node_count
+                        > 0,
+                inputs.improvement_loop_panel.status != "improvement_loop_idle",
             ),
             vec![
                 format!(
-                    "logs={} events={}",
-                    inputs.structured_logs_panel.log_count,
-                    inputs.structured_logs_panel.total_event_count
+                    "improvement_loop:{} candidates={} critical={} high={}",
+                    inputs.improvement_loop_panel.status,
+                    inputs.improvement_loop_panel.candidate_count,
+                    inputs.improvement_loop_panel.critical_candidate_count,
+                    inputs.improvement_loop_panel.high_candidate_count
                 ),
                 format!(
-                    "cost:nodes={} ai={} deterministic={} avoided={}",
+                    "cost_observability:nodes={} ai={} deterministic={} avoided={} estimated=${:.4} observed=${:.4}",
                     inputs.cost_panel.node_count,
                     inputs.cost_panel.ai_node_count,
                     inputs.cost_panel.deterministic_node_count,
-                    inputs.cost_panel.model_call_avoided_node_count
+                    inputs.cost_panel.model_call_avoided_node_count,
+                    inputs.improvement_loop_panel.estimated_cost_total_usd,
+                    inputs.improvement_loop_panel.observed_cost_total_usd
                 ),
                 format!(
-                    "context_quality:passed={} warnings={} blocked={}",
-                    inputs.workflows.summary.context_quality.passed,
-                    inputs.workflows.summary.context_quality.warning,
-                    inputs.workflows.summary.context_quality.blocked
+                    "validation_quality:failures={} context={} logs={}/{}",
+                    inputs.improvement_loop_panel.validation_failure_count,
+                    inputs.improvement_loop_panel.context_quality_status,
+                    inputs.improvement_loop_panel.structured_log_count,
+                    inputs.improvement_loop_panel.event_count
                 ),
             ],
             vec![
-                "Materializar mais séries históricas de custo/latência para decisões de auto-melhoria."
+                "Materializar séries históricas de custo/latência com maintenance daemon como rotina de produção."
                     .to_string(),
-                "Expandir validação final por outcome, não só por evidência de tarefa.".to_string(),
+                "Ligar validação de outcome final a gates de promoção automatizados no painel."
+                    .to_string(),
             ],
-            "Ligar cost ledger, structured logs e improve candidates em recomendações acionáveis.",
+            "Usar forge interactive improvement-loop para decidir recover, parallelize, normalize AI cost ou event-policy experiment antes de mutações.",
             "Core mede e valida; políticas de otimização específicas devem ser configuráveis.",
         ),
     ];
@@ -3068,6 +3478,7 @@ fn build_architecture_compass_panel(
             "forge interactive home --output json".to_string(),
             "forge interactive operational-cockpit --output json".to_string(),
             "forge interactive addon-capabilities --output json".to_string(),
+            "forge interactive improvement-loop --output json".to_string(),
             "forge interactive harness --output json".to_string(),
             "forge smoke operational-tui --output json".to_string(),
             "forge smoke forge-first-harness --output json".to_string(),
@@ -3288,6 +3699,7 @@ fn architecture_execution_plan(
                 "Improve promote exige benchmark, validação e aprovação explícita.",
             ],
             &[
+                "forge interactive improvement-loop --output json",
                 "forge interactive structured-logs --output json",
                 "forge cost ledger --project-root . --output json",
                 "forge improve candidates --output json",
@@ -3615,6 +4027,8 @@ pub fn build_operational_tui_smoke(
         addon_count: d.addon_capability_panel.addon_count,
         capability_count: d.addon_capability_panel.capability_count,
         cost_estimated_usd: d.cost_panel.estimated_task_cost_total_usd,
+        improvement_candidate_count: d.improvement_loop_panel.candidate_count,
+        structured_log_count: d.improvement_loop_panel.structured_log_count,
         ready_handoff_count: d.task_board_panel.ready_handoffs,
         pending_approval_count: d.pending_approvals,
     };
@@ -3628,6 +4042,7 @@ pub fn build_operational_tui_smoke(
                 && default_tui_preview.contains("Events/schedules:")
                 && default_tui_preview.contains("Addons/capabilities:")
                 && default_tui_preview.contains("Costs:")
+                && default_tui_preview.contains("Improvement loop:")
                 && default_tui_preview.contains("Handoffs/approvals:"),
             format!(
                 "{}; cockpit {}; focus panels {}; default render {} bytes",
@@ -3705,6 +4120,22 @@ pub fn build_operational_tui_smoke(
                 d.cost_panel.observed_event_cost_total_usd
             ),
             "forge cost ledger --output json",
+        ),
+        operational_tui_smoke_check(
+            "shows_improvement_loop",
+            "TUI shows improvement loop candidates from logs, costs and validation",
+            d.improvement_loop_panel.schema_version == INTERACTIVE_IMPROVEMENT_LOOP_SCHEMA_VERSION
+                && !d.improvement_loop_panel.status.is_empty()
+                && dashboard.improvement_candidate_count > 0
+                && dashboard.structured_log_count > 0,
+            format!(
+                "{}; {} candidates; {} logs; {} validation failures",
+                d.improvement_loop_panel.status,
+                dashboard.improvement_candidate_count,
+                dashboard.structured_log_count,
+                d.improvement_loop_panel.validation_failure_count
+            ),
+            "forge interactive improvement-loop --output json",
         ),
         operational_tui_smoke_check(
             "shows_handoffs_and_approvals",
@@ -3793,6 +4224,7 @@ pub fn build_operational_tui_smoke(
             "forge interactive schedules --output json".to_string(),
             "forge interactive event-runtime --output json".to_string(),
             "forge interactive structured-logs --output json".to_string(),
+            "forge interactive improvement-loop --output json".to_string(),
             "forge interactive addon-capabilities --output json".to_string(),
             "forge interactive operating-context --output json".to_string(),
             "forge cost ledger --output json".to_string(),
@@ -5673,6 +6105,27 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
             false,
             "low",
             &["observability", "logs", "events", "timeline", "debug"],
+        ),
+        command_palette_entry(
+            "observability.improvement_loop",
+            "observability",
+            "Open improvement loop",
+            "Inspect self-improvement candidates with log, cost, validation and outcome evidence before governed mutations.",
+            "improvement_loop_panel",
+            None,
+            &["interactive", "improvement-loop", "--output", "json"],
+            false,
+            false,
+            "low",
+            &[
+                "improve",
+                "improvement",
+                "cost",
+                "validation",
+                "logs",
+                "self-improvement",
+                "candidate",
+            ],
         ),
     ]
 }
@@ -10674,6 +11127,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
     };
     let event_runtime_summary = render_event_runtime_panel(&d.event_runtime_panel);
     let structured_logs = render_structured_log_summary(&d.structured_logs_panel);
+    let improvement_candidates = render_improvement_candidate_summary(&d.improvement_loop_panel);
     let operational_cockpit_sections =
         render_operational_cockpit_sections(&d.operational_cockpit_panel);
     let architecture_tracks = render_architecture_track_summary(&d.architecture_compass_panel);
@@ -10700,6 +11154,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Events/schedules: events {event_total}, visible {event_visible}, scheduled {scheduled_workflows}, due {schedule_due}, next {schedule_next}\n\
          Addons/capabilities: addons {addon_count}, enabled {addon_enabled}, capabilities {addon_capabilities_count}, permissions {addon_permissions}, contracts {addon_contracts}, event types {addon_event_types}, triggers {addon_event_triggers}, listeners {addon_event_listeners}, adapters {addon_event_adapters}; {addon_capabilities}; events {addon_event_extensions}\n\
          Costs: estimated ${cost_estimated:.4}, observed ${cost_observed:.4}, nodes {cost_nodes}, AI {cost_ai_nodes}, deterministic {cost_deterministic_nodes}, avoided-model {cost_avoided_nodes}\n\
+         Improvement loop: {improvement_status}; candidates {improvement_candidates_count}, critical {improvement_critical}, high {improvement_high}, parallel {improvement_parallel}, avoidable AI {improvement_avoidable_ai}, final outcome {improvement_final_outcome}, stale/attention {improvement_stale}, validation failures {improvement_validation_failures}, context {improvement_context}; top {improvement_candidates}\n\
          Handoffs/approvals: ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, pending approvals {pending_approvals}, context blocked {context_blocked}\n\
          Architecture compass: {architecture_status}; tracks {architecture_track_count}, docs {architecture_doc_count}; {architecture_tracks}\n\
          Architecture execution plan: {architecture_execution_plan}\n\
@@ -10749,6 +11204,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Event runtime: {event_runtime_summary}\n\
          Structured logs: {structured_logs_status}; logs {structured_logs_count}/{structured_logs_total}, next cursor {structured_logs_next_cursor}, has more {structured_logs_has_more}; {structured_logs}\n\
          Cost panel: {cost_status}; workflows {cost_workflows}, nodes {cost_nodes}, estimated ${cost_estimated:.4}, observed ${cost_observed:.4}\n\
+         Improvement loop: {improvement_status}; workflows {improvement_total_workflows}, matched {improvement_matched_workflows}, candidates {improvement_candidates_count}, critical {improvement_critical}, high {improvement_high}, parallel {improvement_parallel}, avoidable AI {improvement_avoidable_ai}, final outcome {improvement_final_outcome}, stale/attention {improvement_stale}; top {improvement_candidates}\n\
          Context/memory panel: ready {context_ready}, blocked {context_blocked}, budget pressure {context_budget_pressure}, memory {memory_policy_status}\n\
          Addons/capabilities: {addon_capability_status}; addons {addon_count}, enabled {addon_enabled}, capabilities {addon_capabilities_count}, enabled capabilities {addon_enabled_capabilities}, disabled capabilities {addon_disabled_capabilities}, permissions {addon_permissions}, runtime contracts {addon_contracts}, views {addon_views}, dispatches {addon_dispatches}, queued {addon_queued_dispatches}, event types {addon_event_types}, channels {addon_event_channels}, triggers {addon_event_triggers}, listeners {addon_event_listeners}, adapters {addon_event_adapters}; {addon_capabilities}; events {addon_event_extensions}\n\
          Addon UI renderers: {addon_renderer_status}; safe {addon_safe_renderers}/{addon_renderers}, families {addon_renderer_family_count} ({addon_renderer_families})\n\
@@ -10967,6 +11423,21 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         cost_avoided_nodes = d.cost_panel.model_call_avoided_node_count,
         cost_estimated = d.cost_panel.estimated_task_cost_total_usd,
         cost_observed = d.cost_panel.observed_event_cost_total_usd,
+        improvement_status = d.improvement_loop_panel.status,
+        improvement_total_workflows = d.improvement_loop_panel.total_workflows,
+        improvement_matched_workflows = d.improvement_loop_panel.matched_workflows,
+        improvement_candidates_count = d.improvement_loop_panel.candidate_count,
+        improvement_critical = d.improvement_loop_panel.critical_candidate_count,
+        improvement_high = d.improvement_loop_panel.high_candidate_count,
+        improvement_parallel = d.improvement_loop_panel.parallel_ready_candidate_count,
+        improvement_avoidable_ai = d.improvement_loop_panel.avoidable_ai_candidate_count,
+        improvement_final_outcome = d.improvement_loop_panel.final_outcome_candidate_count,
+        improvement_stale = d
+            .improvement_loop_panel
+            .stale_or_attention_candidate_count,
+        improvement_validation_failures = d.improvement_loop_panel.validation_failure_count,
+        improvement_context = d.improvement_loop_panel.context_quality_status,
+        improvement_candidates = improvement_candidates,
         context_ready = d.context_memory_panel.ready_for_handoff,
         context_blocked = d.context_memory_panel.blocked_tasks,
         context_budget_pressure = d.context_memory_panel.context_budget_pressure,
@@ -11024,6 +11495,81 @@ pub fn render_interactive_operational_cockpit(
             panel.next_actions.join(" | ")
         },
     )
+}
+
+pub fn render_interactive_improvement_loop(panel: &InteractiveImprovementLoopPanel) -> String {
+    format!(
+        "Improvement loop: {status}; workflows {total_workflows}, matched {matched_workflows}, candidates {candidate_count}, critical {critical}, high {high}, parallel {parallel}, avoidable AI {avoidable_ai}, final outcome {final_outcome}, stale/attention {stale}; logs {logs}/{events}; cost estimated ${estimated:.4}, observed ${observed:.4}; validation failures {validation_failures}; context {context}\nTop candidates: {candidates}\nCommands: refresh {refresh}; candidates {candidate_command}; cost {cost_command}; logs {logs_command}; task board {task_board}; validate {validate}; apply {apply}; benchmark {benchmark}; promote {promote}\nNext: {next_actions}\nNotes: {notes}\n",
+        status = panel.status,
+        total_workflows = panel.total_workflows,
+        matched_workflows = panel.matched_workflows,
+        candidate_count = panel.candidate_count,
+        critical = panel.critical_candidate_count,
+        high = panel.high_candidate_count,
+        parallel = panel.parallel_ready_candidate_count,
+        avoidable_ai = panel.avoidable_ai_candidate_count,
+        final_outcome = panel.final_outcome_candidate_count,
+        stale = panel.stale_or_attention_candidate_count,
+        logs = panel.structured_log_count,
+        events = panel.event_count,
+        estimated = panel.estimated_cost_total_usd,
+        observed = panel.observed_cost_total_usd,
+        validation_failures = panel.validation_failure_count,
+        context = panel.context_quality_status,
+        candidates = render_improvement_candidate_summary(panel),
+        refresh = panel.commands.refresh.join(" "),
+        candidate_command = panel.commands.candidates.join(" "),
+        cost_command = panel.commands.cost_ledger.join(" "),
+        logs_command = panel.commands.structured_logs.join(" "),
+        task_board = panel.commands.task_board.join(" "),
+        validate = panel.commands.validate.join(" "),
+        apply = panel.commands.apply_event_policy.join(" "),
+        benchmark = panel.commands.benchmark_event_policy.join(" "),
+        promote = panel.commands.promote_event_policy.join(" "),
+        next_actions = if panel.next_actions.is_empty() {
+            "none".to_string()
+        } else {
+            panel.next_actions.join(" | ")
+        },
+        notes = if panel.notes.is_empty() {
+            "none".to_string()
+        } else {
+            panel.notes.join(" | ")
+        },
+    )
+}
+
+fn render_improvement_candidate_summary(panel: &InteractiveImprovementLoopPanel) -> String {
+    if panel.top_candidates.is_empty() {
+        return "none".to_string();
+    }
+    panel
+        .top_candidates
+        .iter()
+        .map(|candidate| {
+            format!(
+                "{}[{} score {}]:{} parallel {} avoidable ${:.4} outcome {} reasons {} cmds {}",
+                candidate.workflow_id,
+                candidate.priority,
+                candidate.score,
+                candidate.recommended_action,
+                candidate.ready_parallel_task_count,
+                candidate.avoidable_estimated_cost_usd,
+                candidate.outcome_status,
+                if candidate.reason_codes.is_empty() {
+                    "none".to_string()
+                } else {
+                    candidate.reason_codes.join("+")
+                },
+                if candidate.suggested_commands.is_empty() {
+                    "none".to_string()
+                } else {
+                    candidate.suggested_commands.join(" || ")
+                },
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 fn render_event_runtime_panel(panel: &InteractiveEventRuntimePanel) -> String {
@@ -13863,6 +14409,15 @@ fn build_ui_composition_panel(
                     vec!["forge cost ledger --output json".to_string()],
                 ),
                 core_ui_widget(
+                    "improvement_loop_panel",
+                    "Improvement loop",
+                    "improvement_loop_panel",
+                    "improvement_loop_renderer",
+                    "detailed",
+                    "full",
+                    vec!["forge interactive improvement-loop --output json".to_string()],
+                ),
+                core_ui_widget(
                     "context_memory_panel",
                     "Context/memory panel",
                     "context_memory_panel",
@@ -16032,6 +16587,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "medium",
         ),
         slash(
+            "/improvement-loop",
+            "Improvement Loop",
+            "Show self-improvement candidates with log, cost, validation and outcome evidence.",
+            &["forge", "interactive", "improvement-loop"],
+            false,
+            "low",
+        ),
+        slash(
             "/config",
             "Config",
             "Inspect Forge-owned config surfaces.",
@@ -16883,6 +17446,10 @@ fn repl_focus_panels() -> Vec<InteractiveReplFocusPanel> {
             title: "Structured logs",
         },
         InteractiveReplFocusPanel {
+            panel_id: "improvement_loop_panel",
+            title: "Improvement loop",
+        },
+        InteractiveReplFocusPanel {
             panel_id: "schedule_panel",
             title: "Schedules",
         },
@@ -16984,6 +17551,10 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
         "structured_logs_panel" => {
             let panel = build_interactive_structured_logs(store)?;
             Ok(render_interactive_structured_logs(&panel))
+        }
+        "improvement_loop_panel" => {
+            let panel = build_interactive_improvement_loop(store)?;
+            Ok(render_interactive_improvement_loop(&panel))
         }
         "schedule_panel" => {
             let panel = build_interactive_schedules(store);
@@ -17101,6 +17672,11 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
         "/logs" => {
             let panel = build_interactive_structured_logs(store)?;
             println!("{}", render_interactive_structured_logs(&panel));
+            Ok(true)
+        }
+        "/improvement-loop" | "/improve" => {
+            let panel = build_interactive_improvement_loop(store)?;
+            println!("{}", render_interactive_improvement_loop(&panel));
             Ok(true)
         }
         "/schedules" => {

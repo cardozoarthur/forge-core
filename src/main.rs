@@ -110,19 +110,20 @@ use forge_core::interactive::{
     build_interactive_autocomplete, build_interactive_command_palette,
     build_interactive_context_memory, build_interactive_event_runtime, build_interactive_harness,
     build_interactive_home_with_options, build_interactive_identity,
-    build_interactive_multimodal_runtime, build_interactive_operating_context,
-    build_interactive_operational_cockpit, build_interactive_patch_workbench,
-    build_interactive_permissions, build_interactive_readiness, build_interactive_release_gates,
-    build_interactive_replacement_cli, build_interactive_schedules, build_interactive_sessions,
-    build_interactive_structured_logs, build_interactive_task_board, build_interactive_token_usage,
-    build_interactive_workflow_dag, build_interactive_workflow_sidebar,
-    build_operational_tui_smoke, build_replacement_cli_evidence_smoke,
-    render_forge_first_harness_smoke, render_interactive_action_invocation,
-    render_interactive_action_registry, render_interactive_addon_capabilities,
-    render_interactive_architecture_compass, render_interactive_artifacts,
-    render_interactive_autocomplete, render_interactive_command_palette,
-    render_interactive_context_memory, render_interactive_event_runtime,
-    render_interactive_harness, render_interactive_home, render_interactive_identity,
+    build_interactive_improvement_loop, build_interactive_multimodal_runtime,
+    build_interactive_operating_context, build_interactive_operational_cockpit,
+    build_interactive_patch_workbench, build_interactive_permissions, build_interactive_readiness,
+    build_interactive_release_gates, build_interactive_replacement_cli,
+    build_interactive_schedules, build_interactive_sessions, build_interactive_structured_logs,
+    build_interactive_task_board, build_interactive_token_usage, build_interactive_workflow_dag,
+    build_interactive_workflow_sidebar, build_operational_tui_smoke,
+    build_replacement_cli_evidence_smoke, render_forge_first_harness_smoke,
+    render_interactive_action_invocation, render_interactive_action_registry,
+    render_interactive_addon_capabilities, render_interactive_architecture_compass,
+    render_interactive_artifacts, render_interactive_autocomplete,
+    render_interactive_command_palette, render_interactive_context_memory,
+    render_interactive_event_runtime, render_interactive_harness, render_interactive_home,
+    render_interactive_identity, render_interactive_improvement_loop,
     render_interactive_multimodal_runtime, render_interactive_operating_context,
     render_interactive_operational_cockpit, render_interactive_patch_workbench,
     render_interactive_permissions, render_interactive_readiness, render_interactive_release_gates,
@@ -3326,6 +3327,10 @@ enum InteractiveCommands {
         output: OutputFormat,
     },
     OperationalCockpit {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ImprovementLoop {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -8279,6 +8284,17 @@ fn run() -> Result<i32> {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => {
                         println!("{}", render_interactive_operational_cockpit(&report))
+                    }
+                }
+                Ok(0)
+            }
+            InteractiveCommands::ImprovementLoop { output } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = build_interactive_improvement_loop(&store)?;
+                match output {
+                    OutputFormat::Json => print_response(output, &report)?,
+                    OutputFormat::Human => {
+                        println!("{}", render_interactive_improvement_loop(&report))
                     }
                 }
                 Ok(0)

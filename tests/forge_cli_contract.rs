@@ -49042,6 +49042,235 @@ fn interactive_task_board_lanes_include_operable_task_cards() {
 }
 
 #[test]
+fn interactive_improvement_loop_command_home_slash_and_mcp_surface_are_dedicated() {
+    use chrono::{Duration, Utc};
+    use forge_core::graph::{self, ExecutorKind};
+    use forge_core::request::{create_run_record, save_run_record};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Operate a partner demo with repeated deterministic cost reports",
+    ));
+    workflow.status = "running".to_string();
+    workflow.tasks = vec![
+        graph::task(
+            "task-daily-cost",
+            "Calculate daily cost report",
+            &[],
+            &[],
+            vec![],
+            "deterministic cost JSON",
+            (ExecutorKind::Ai, 2.0),
+        ),
+        graph::task(
+            "task-weekly-cost",
+            "Calculate weekly cost report",
+            &[],
+            &[],
+            vec![],
+            "deterministic cost JSON",
+            (ExecutorKind::Ai, 2.0),
+        ),
+        graph::task(
+            "task-demo",
+            "Assemble partner demo package",
+            &["task-daily-cost", "task-weekly-cost"],
+            &[],
+            vec![],
+            "partner-ready demo package",
+            (ExecutorKind::Ai, 1.0),
+        ),
+    ];
+    store.save_workflow(&workflow).unwrap();
+
+    let mut run = create_run_record(&workflow, "codex", "running");
+    run.active_executor = Some("codex".to_string());
+    run.progress_summary = Some("stale executor should be visible in improvement loop".to_string());
+    run.last_heartbeat_at = Some(Utc::now() - Duration::seconds(120));
+    run.heartbeat_expires_at = Some(Utc::now() - Duration::seconds(60));
+    run.heartbeat_ttl_seconds = Some(30);
+    save_run_record(&store, &run).unwrap();
+    store
+        .record_event(
+            &workflow.id,
+            "executor_response_promoted",
+            &serde_json::json!({
+                "run_id": run.run_id,
+                "task_id": "task-daily-cost",
+                "response_status": "needs_retry",
+                "summary": "cost report output needs retry",
+                "cost": {
+                    "estimated_usd": 0.42,
+                    "tokens_in": 1400,
+                    "tokens_out": 220
+                }
+            }),
+        )
+        .unwrap();
+    drop(store);
+
+    let output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "interactive",
+            "improvement-loop",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let panel: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        panel["schema_version"],
+        "forge.interactive.improvement_loop.v1"
+    );
+    assert_eq!(panel["status"], "improvement_loop_actionable");
+    assert_eq!(panel["candidate_count"].as_u64().unwrap(), 1);
+    assert_eq!(
+        panel["top_candidates"][0]["workflow_id"],
+        serde_json::json!(workflow.id)
+    );
+    assert!(panel["top_candidates"][0]["reason_codes"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("avoidable_ai_cost")));
+    assert!(panel["commands"]["candidates"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("candidates")));
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "interactive",
+            "improvement-loop",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Improvement loop: improvement_loop_actionable"));
+    assert!(text.contains("Top candidates:"));
+    assert!(text.contains("avoidable"));
+
+    let home_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["improvement_loop_panel"]["schema_version"],
+        "forge.interactive.improvement_loop.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["improvement_loop_panel"]["candidate_count"]
+            .as_u64()
+            .unwrap(),
+        1
+    );
+    assert!(home["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/improvement-loop")));
+    assert!(home["dashboard"]["useful_next_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge interactive improvement-loop --output json"
+        )));
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|region| region["widgets"].as_array().unwrap().iter())
+        .any(|widget| widget["widget_id"] == "improvement_loop_panel"
+            && widget["renderer_family"] == "improvement_loop_renderer"));
+
+    let slash_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "interactive",
+            "slash-commands",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let slash_json: Value = serde_json::from_slice(&slash_output).unwrap();
+    let slash = find_slash_command(&slash_json, "/improvement-loop");
+    assert_eq!(slash["risk_level"], "low");
+    assert_eq!(slash["mutates_workflow"], false);
+    assert!(slash["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("improvement-loop")));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.improvement_loop");
+    assert_eq!(
+        tool["output_schema"],
+        "forge.interactive.improvement_loop.v1"
+    );
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.interactive.improvement_loop",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp_json["status"], "ok");
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.improvement_loop.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["top_candidates"][0]["workflow_id"],
+        serde_json::json!(workflow.id)
+    );
+}
+
+#[test]
 fn interactive_workflow_sidebar_groups_workflows_for_operator_navigation() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -49341,6 +49570,7 @@ fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
         "shows_event_workflow_lifecycle",
         "shows_addons_and_capabilities",
         "shows_costs",
+        "shows_improvement_loop",
         "shows_handoffs_and_approvals",
         "shows_operating_context",
         "runs_end_to_end_demo_flow",
@@ -49374,6 +49604,12 @@ fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
         .unwrap()
         .contains(&serde_json::json!(
             "forge interactive event-runtime --output json"
+        )));
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge interactive improvement-loop --output json"
         )));
     assert!(json["commands"]
         .as_array()
@@ -49872,6 +50108,7 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         "/artifacts",
         "/task-board",
         "/costs",
+        "/improvement-loop",
         "/config",
         "/sync",
         "/executors",
@@ -49942,6 +50179,14 @@ fn interactive_slash_command_catalog_is_discoverable_and_scriptable() {
         .as_array()
         .unwrap()
         .contains(&Value::String("context".to_string())));
+
+    let improvement_loop = find_slash_command(&json, "/improvement-loop");
+    assert_eq!(improvement_loop["risk_level"], "low");
+    assert_eq!(improvement_loop["mutates_workflow"], false);
+    assert!(improvement_loop["equivalent_command"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("improvement-loop".to_string())));
 
     let context_memory = find_slash_command(&json, "/context-memory");
     assert_eq!(context_memory["risk_level"], "low");
@@ -51019,6 +51264,11 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
             false,
         ),
         (
+            "forge.interactive.improvement_loop",
+            "forge.interactive.improvement_loop.v1",
+            false,
+        ),
+        (
             "forge.interactive.identity",
             "forge.interactive.identity.v1",
             false,
@@ -51100,6 +51350,10 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("/harness bootstrap")));
+    assert!(home_json["result"]["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/improvement-loop")));
     assert!(home_json["result"]["dashboard"]["useful_next_commands"]
         .as_array()
         .unwrap()
@@ -51177,6 +51431,17 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
     assert!(
         home_json["result"]["dashboard"]["cost_panel"]["status"].is_string(),
         "interactive home should expose cost ledger state for agent dashboards"
+    );
+    assert_eq!(
+        home_json["result"]["dashboard"]["improvement_loop_panel"]["schema_version"],
+        "forge.interactive.improvement_loop.v1"
+    );
+    assert!(
+        home_json["result"]["dashboard"]["improvement_loop_panel"]["commands"]["candidates"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("candidates")),
+        "interactive home should expose improvement-loop commands for agent dashboards"
     );
     assert!(
         home_json["result"]["dashboard"]["context_memory_panel"]["memory_policy_status"]
@@ -51407,6 +51672,12 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.structured_logs"),
         "the packaged Forge skill should expose the dedicated structured logs surface through MCP"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("forge.interactive.improvement_loop")
+            && forge_core::skill::SKILL_MD.contains("forge interactive improvement-loop")
+            && forge_core::skill::SKILL_MD.contains("dashboard.improvement_loop_panel"),
+        "the packaged Forge skill should expose the improvement loop through MCP, CLI and home"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.event_runtime.v1")
