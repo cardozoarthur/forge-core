@@ -261,6 +261,8 @@ pub struct InteractiveReadinessCommands {
     pub shells: Vec<String>,
     pub harness_mode: Vec<String>,
     pub harness_doctor: Vec<String>,
+    pub headroom_plan: Vec<String>,
+    pub headroom_stats: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5481,6 +5483,22 @@ fn readiness_commands() -> InteractiveReadinessCommands {
             "$HOME/.forge/bin".to_string(),
             "--project-root".to_string(),
             ".".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        headroom_plan: vec![
+            "harness".to_string(),
+            "headroom-plan".to_string(),
+            "--executor".to_string(),
+            "codex".to_string(),
+            "--project-root".to_string(),
+            ".".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        headroom_stats: vec![
+            "harness".to_string(),
+            "headroom-stats".to_string(),
             "--output".to_string(),
             "json".to_string(),
         ],

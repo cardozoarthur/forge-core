@@ -42097,6 +42097,14 @@ fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("harness")));
+    assert!(readiness["commands"]["headroom_stats"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("headroom-stats")));
+    assert!(readiness["commands"]["headroom_plan"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("headroom-plan")));
 
     let readiness_text = forge()
         .args([
@@ -42149,6 +42157,10 @@ fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
         mcp_json["result"]["headroom_operational_status"],
         mcp_json["result"]["headroom_stats"]["operational_status"]
     );
+    assert!(mcp_json["result"]["commands"]["headroom_stats"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("headroom-stats")));
 }
 
 #[test]
