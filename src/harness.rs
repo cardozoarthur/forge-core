@@ -337,6 +337,7 @@ pub struct HarnessAdoptionCommands {
     pub install_shims: Vec<String>,
     pub sync_executors: Vec<String>,
     pub wrap_plan: Vec<String>,
+    pub exec_with_lineage_dry_run: Vec<String>,
     pub exec_with_lineage: Vec<String>,
 }
 
@@ -1913,6 +1914,47 @@ pub fn build_harness_adoption_plan(
         "--output".to_string(),
         "json".to_string(),
     ];
+    let token_headroom_flag = if token_headroom {
+        "--token-headroom"
+    } else {
+        "--no-token-headroom"
+    };
+    let lineage_workflow_id = workflow_id.unwrap_or("<workflow-id>").to_string();
+    let lineage_task_id = task_id.unwrap_or("<task-id>").to_string();
+    let lineage_run_id = run_id.unwrap_or("<run-id>").to_string();
+    let exec_with_lineage_dry_run = vec![
+        "forge".to_string(),
+        "harness".to_string(),
+        "exec".to_string(),
+        "--executor".to_string(),
+        executor.clone(),
+        "--forge-first".to_string(),
+        "--project-root".to_string(),
+        project_root_display.clone(),
+        "--workflow".to_string(),
+        lineage_workflow_id.clone(),
+        "--task".to_string(),
+        lineage_task_id.clone(),
+        "--run".to_string(),
+        lineage_run_id.clone(),
+        "--context-budget".to_string(),
+        context_budget.to_string(),
+        token_headroom_flag.to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+        "--".to_string(),
+        executor.clone(),
+    ];
+    let exec_with_lineage = {
+        let mut command = exec_with_lineage_dry_run.clone();
+        let output_index = command
+            .iter()
+            .position(|part| part == "--output")
+            .unwrap_or(command.len());
+        command.insert(output_index, "--allow-exec".to_string());
+        command.insert(output_index, "--execute".to_string());
+        command
+    };
     let commands = HarnessAdoptionCommands {
         write_project_harness_config: bootstrap_project_harness.clone(),
         bootstrap_project_harness,
@@ -1995,25 +2037,8 @@ pub fn build_harness_adoption_plan(
             "--output".to_string(),
             "json".to_string(),
         ],
-        exec_with_lineage: vec![
-            "forge".to_string(),
-            "harness".to_string(),
-            "exec".to_string(),
-            "--executor".to_string(),
-            executor.clone(),
-            "--project-root".to_string(),
-            project_root_display.clone(),
-            "--workflow".to_string(),
-            workflow_id.unwrap_or("<workflow-id>").to_string(),
-            "--task".to_string(),
-            task_id.unwrap_or("<task-id>").to_string(),
-            "--run".to_string(),
-            run_id.unwrap_or("<run-id>").to_string(),
-            "--execute".to_string(),
-            "--allow-exec".to_string(),
-            "--".to_string(),
-            executor.clone(),
-        ],
+        exec_with_lineage_dry_run,
+        exec_with_lineage,
     };
     let shim_file_ready = doctor.shim_status.shim_exists
         && doctor.shim_status.forge_owned
@@ -2042,8 +2067,7 @@ pub fn build_harness_adoption_plan(
             shell_quote(&project_root_display)
         )
     } else if !doctor.lineage_context_ready {
-        "call harness exec with --workflow <workflow-id> --task <task-id> --run <run-id>"
-            .to_string()
+        shell_join(&commands.exec_with_lineage_dry_run)
     } else {
         format!(
             "forge sync executors --shim-dir {} --output json",
@@ -2170,10 +2194,26 @@ pub fn build_harness_adoption_plan(
                 rationale: "Doctor confirms Forge-first, shim, token-headroom and lineage readiness before real handoff.",
             }),
             harness_adoption_step(HarnessAdoptionStepInput {
+                id: "validate_harness_exec_dry_run_with_lineage",
+                title: "Validate harness exec dry-run with workflow lineage",
+                status: if doctor.lineage_context_ready {
+                    "ready"
+                } else {
+                    "blocked_until_lineage"
+                },
+                command_key: "exec_with_lineage_dry_run",
+                risk_level: "medium",
+                mutates_state: true,
+                executes_child: false,
+                requires_approval: false,
+                approval_reason: "",
+                rationale: "Dry-run receipts validate Forge-first env, context budget, token headroom and workflow/task/run lineage before any child CLI execution.",
+            }),
+            harness_adoption_step(HarnessAdoptionStepInput {
                 id: "use_harness_exec_with_lineage",
                 title: "Use harness exec with workflow lineage",
                 status: if doctor.lineage_context_ready {
-                    "ready"
+                    "ready_after_dry_run"
                 } else {
                     "blocked_until_lineage"
                 },
@@ -5226,6 +5266,22 @@ fn same_path(left: &Path, right: &Path) -> bool {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn shell_join(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|part| {
+            if part.chars().any(|ch| {
+                ch.is_whitespace() || matches!(ch, '\'' | '"' | '(' | ')' | '&' | ';' | '|')
+            }) {
+                shell_quote(part)
+            } else {
+                part.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(unix)]

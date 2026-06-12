@@ -1826,14 +1826,49 @@ fn harness_adoption_plan_models_forge_first_headroom_for_cli_mcp_and_skill() {
     assert_eq!(exec_step["mutates_state"], true);
     assert_eq!(exec_step["executes_child"], true);
     assert_eq!(exec_step["requires_approval"], true);
+    assert_eq!(exec_step["status"], "blocked_until_lineage");
+    let exec_dry_run_step = json["adoption_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "validate_harness_exec_dry_run_with_lineage")
+        .unwrap();
+    assert_eq!(
+        exec_dry_run_step["command_key"],
+        "exec_with_lineage_dry_run"
+    );
+    assert_eq!(exec_dry_run_step["risk_level"], "medium");
+    assert_eq!(exec_dry_run_step["mutates_state"], true);
+    assert_eq!(exec_dry_run_step["executes_child"], false);
+    assert_eq!(exec_dry_run_step["requires_approval"], false);
+    assert_eq!(exec_dry_run_step["status"], "blocked_until_lineage");
     assert!(json["commands"]["install_shims"]
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("install-shims")));
+    let exec_dry_run_command = json["commands"]["exec_with_lineage_dry_run"]
+        .as_array()
+        .unwrap();
+    assert!(exec_dry_run_command.contains(&serde_json::json!("exec")));
+    assert!(exec_dry_run_command.contains(&serde_json::json!("--forge-first")));
+    assert!(exec_dry_run_command.contains(&serde_json::json!("<workflow-id>")));
+    assert!(exec_dry_run_command.contains(&serde_json::json!("--context-budget")));
+    assert!(exec_dry_run_command.contains(&serde_json::json!("4096")));
+    assert!(exec_dry_run_command.contains(&serde_json::json!("--token-headroom")));
+    assert!(!exec_dry_run_command.contains(&serde_json::json!("--execute")));
+    assert!(!exec_dry_run_command.contains(&serde_json::json!("--allow-exec")));
     assert!(json["commands"]["exec_with_lineage"]
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("exec")));
+    assert!(json["commands"]["exec_with_lineage"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("--execute")));
+    assert!(json["commands"]["exec_with_lineage"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("--allow-exec")));
     assert!(json["next_action"]
         .as_str()
         .unwrap()
@@ -1900,6 +1935,16 @@ fn harness_adoption_plan_models_forge_first_headroom_for_cli_mcp_and_skill() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.harness.adoption_plan"),
         "the packaged Forge skill should expose the harness adoption plan MCP tool"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("commands.exec_with_lineage_dry_run"),
+        "the packaged Forge skill should tell operators to validate lineage exec as a dry-run first"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains(
+            "forge harness exec --executor codex --forge-first --project-root <project-root>"
+        ),
+        "the packaged Forge skill should include the Forge-first harness exec dry-run command"
     );
 
     let fresh_project = temp.path().join("fresh-project");
