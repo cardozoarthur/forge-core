@@ -19,6 +19,8 @@ pub const CLI_HARNESS_EXEC_EVENT_SCHEMA_VERSION: &str = "forge.harness.exec_even
 pub const CLI_HARNESS_MODE_SCHEMA_VERSION: &str = "forge.harness.mode.v1";
 pub const CLI_HARNESS_DOCTOR_SCHEMA_VERSION: &str = "forge.harness.doctor.v1";
 pub const CLI_HARNESS_HEADROOM_PLAN_SCHEMA_VERSION: &str = "forge.harness.headroom_plan.v1";
+pub const CLI_HARNESS_HEADROOM_RUNTIME_PLAN_SCHEMA_VERSION: &str =
+    "forge.harness.headroom_runtime_plan.v1";
 pub const CLI_HARNESS_ADOPTION_PLAN_SCHEMA_VERSION: &str = "forge.harness.adoption_plan.v1";
 pub const CLI_HARNESS_BOOTSTRAP_SCHEMA_VERSION: &str = "forge.harness.bootstrap.v1";
 pub const CLI_HARNESS_ORCHESTRATION_CONTRACT_SCHEMA_VERSION: &str =
@@ -77,9 +79,56 @@ pub struct CliWrapperPlanReport {
     pub env: Vec<CliWrapperEnvVar>,
     pub launch_command: Vec<String>,
     pub orchestration_contract: HarnessOrchestrationContract,
+    pub headroom_runtime_plan: HarnessHeadroomRuntimePlan,
     pub session_lifecycle_plan: HarnessSessionLifecyclePlan,
     pub harness_checks: Vec<String>,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessHeadroomRuntimePlan {
+    pub schema_version: String,
+    pub status: String,
+    pub enabled: bool,
+    pub executor: String,
+    pub mode: String,
+    pub context_budget: usize,
+    pub require_for_forge_first: bool,
+    pub interception_points: Vec<HarnessHeadroomInterceptionPoint>,
+    pub content_routes: Vec<HarnessHeadroomContentRoute>,
+    pub reversible_store: HarnessHeadroomReversibleStore,
+    pub mcp_tools: Vec<String>,
+    pub env: Vec<CliWrapperEnvVar>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessHeadroomInterceptionPoint {
+    pub point_id: String,
+    pub source: String,
+    pub target: String,
+    pub direction: String,
+    pub required: bool,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessHeadroomContentRoute {
+    pub content_kind: String,
+    pub detector: String,
+    pub strategy: String,
+    pub reversible: bool,
+    pub persistence: String,
+    pub retrieval_hint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessHeadroomReversibleStore {
+    pub backend: String,
+    pub uri_scheme: String,
+    pub persistence_mode: String,
+    pub retrieval_command: Vec<String>,
+    pub ttl_policy: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1995,6 +2044,12 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
     } else {
         command.to_vec()
     };
+    let headroom_runtime_plan = build_harness_headroom_runtime_plan(
+        &executor,
+        token_headroom,
+        context_budget,
+        require_token_headroom_for_forge_first,
+    );
     let mut env =
         vec![
         env_var(
@@ -2023,6 +2078,7 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
             "enables Forge's local token-headroom contract for tool output and context payloads",
         ),
     ];
+    env.extend(headroom_runtime_plan.env.clone());
     if let Some(workflow_id) = workflow_id.filter(|value| !value.trim().is_empty()) {
         env.push(env_var(
             "FORGE_WORKFLOW_ID",
@@ -2129,6 +2185,7 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         env,
         launch_command,
         orchestration_contract,
+        headroom_runtime_plan,
         session_lifecycle_plan,
         harness_checks,
         notes: vec![
@@ -2187,6 +2244,176 @@ fn harness_orchestration_env(token_headroom: bool) -> Vec<CliWrapperEnvVar> {
             "requires workflow/task/run lineage and receipt events for guarded child process execution",
         ),
     ]
+}
+
+fn build_harness_headroom_runtime_plan(
+    executor: &str,
+    enabled: bool,
+    context_budget: usize,
+    require_for_forge_first: bool,
+) -> HarnessHeadroomRuntimePlan {
+    let mode = if enabled {
+        "compress_reference_and_retrieve"
+    } else {
+        "observe_only"
+    };
+    HarnessHeadroomRuntimePlan {
+        schema_version: CLI_HARNESS_HEADROOM_RUNTIME_PLAN_SCHEMA_VERSION.to_string(),
+        status: if enabled {
+            "headroom_runtime_plan_ready".to_string()
+        } else {
+            "headroom_runtime_plan_disabled".to_string()
+        },
+        enabled,
+        executor: executor.to_string(),
+        mode: mode.to_string(),
+        context_budget,
+        require_for_forge_first,
+        interception_points: vec![
+            headroom_interception_point(
+                "prompt_packet",
+                "forge_context_packet",
+                "child_cli_prompt",
+                "ingress",
+                enabled,
+                "preserve_policy_fields_and_compress_large_context",
+            ),
+            headroom_interception_point(
+                "tool_output",
+                "child_cli_tool_output",
+                "brain_context",
+                "egress",
+                enabled,
+                "compress_then_return_retrieval_ref",
+            ),
+            headroom_interception_point(
+                "stdout_stderr",
+                "guarded_harness_exec",
+                "forge_event_receipt",
+                "egress",
+                enabled,
+                "compress_output_and_store_reversible_blob",
+            ),
+            headroom_interception_point(
+                "retrieval_request",
+                "brain_or_operator",
+                "forge_headroom_store",
+                "on_demand",
+                enabled,
+                "retrieve_original_by_forge_headroom_ref",
+            ),
+        ],
+        content_routes: vec![
+            headroom_content_route(
+                "log",
+                "error_warning_panic_detector",
+                "signal_log_compressor",
+                "local_sqlite_when_persisted",
+            ),
+            headroom_content_route(
+                "json",
+                "serde_json_shape_detector",
+                "smart_json_shape_summary",
+                "local_sqlite_when_persisted",
+            ),
+            headroom_content_route(
+                "search",
+                "colon_dense_search_result_detector",
+                "search_result_compressor",
+                "local_sqlite_when_persisted",
+            ),
+            headroom_content_route(
+                "code",
+                "signature_keyword_detector",
+                "code_signature_compressor",
+                "local_sqlite_when_persisted",
+            ),
+            headroom_content_route(
+                "text",
+                "fallback_text_detector",
+                "text_head_tail_summary",
+                "local_sqlite_when_persisted",
+            ),
+        ],
+        reversible_store: HarnessHeadroomReversibleStore {
+            backend: "forge_store_headroom_blobs".to_string(),
+            uri_scheme: "forge://harness/headroom/".to_string(),
+            persistence_mode: "explicit_persist_or_guarded_exec_receipt".to_string(),
+            retrieval_command: vec![
+                "forge".to_string(),
+                "harness".to_string(),
+                "retrieve-headroom".to_string(),
+                "--ref".to_string(),
+                "<retrieval-ref>".to_string(),
+                "--include-content".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            ttl_policy: "store_retention_policy_controls_lifetime".to_string(),
+        },
+        mcp_tools: vec![
+            "forge.harness.token_headroom".to_string(),
+            "forge.harness.retrieve_headroom".to_string(),
+            "forge.harness.headroom_stats".to_string(),
+        ],
+        env: vec![
+            env_var(
+                "FORGE_HEADROOM_RUNTIME_PLAN",
+                CLI_HARNESS_HEADROOM_RUNTIME_PLAN_SCHEMA_VERSION,
+                "declares the structured wrapper interception and retrieval contract",
+            ),
+            env_var(
+                "FORGE_HEADROOM_INTERCEPT",
+                if enabled { "enabled" } else { "disabled" },
+                "controls whether wrapper integrations must compress large payloads before returning them to the brain",
+            ),
+            env_var(
+                "FORGE_HEADROOM_RETRIEVAL_TOOL",
+                "forge.harness.retrieve_headroom",
+                "names the MCP/CLI retrieval surface for reversible headroom refs",
+            ),
+        ],
+        notes: vec![
+            "This plan is declarative: it does not proxy network traffic or start a child CLI by itself."
+                .to_string(),
+            "It adapts Headroom-style wrapper and reversible retrieval concepts to Forge-owned workflow lineage, memory policy and event receipts.".to_string(),
+        ],
+    }
+}
+
+fn headroom_interception_point(
+    point_id: &str,
+    source: &str,
+    target: &str,
+    direction: &str,
+    required: bool,
+    action: &str,
+) -> HarnessHeadroomInterceptionPoint {
+    HarnessHeadroomInterceptionPoint {
+        point_id: point_id.to_string(),
+        source: source.to_string(),
+        target: target.to_string(),
+        direction: direction.to_string(),
+        required,
+        action: action.to_string(),
+    }
+}
+
+fn headroom_content_route(
+    content_kind: &str,
+    detector: &str,
+    strategy: &str,
+    persistence: &str,
+) -> HarnessHeadroomContentRoute {
+    HarnessHeadroomContentRoute {
+        content_kind: content_kind.to_string(),
+        detector: detector.to_string(),
+        strategy: strategy.to_string(),
+        reversible: true,
+        persistence: persistence.to_string(),
+        retrieval_hint: "return forge://harness/headroom/<sha256> when original content is needed"
+            .to_string(),
+    }
 }
 
 fn build_harness_orchestration_contract(

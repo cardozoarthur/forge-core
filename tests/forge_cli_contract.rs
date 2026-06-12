@@ -235,6 +235,42 @@ fn harness_token_headroom_compresses_logs_and_mcp_wrap_plan_shapes_cli_environme
         mcp_json["result"]["orchestration_contract"]["schema_version"],
         "forge.harness.orchestration_contract.v1"
     );
+    assert_eq!(
+        mcp_json["result"]["headroom_runtime_plan"]["schema_version"],
+        "forge.harness.headroom_runtime_plan.v1"
+    );
+    assert_eq!(mcp_json["result"]["headroom_runtime_plan"]["enabled"], true);
+    assert!(
+        mcp_json["result"]["headroom_runtime_plan"]["interception_points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|point| point["point_id"] == "tool_output"
+                && point["action"] == "compress_then_return_retrieval_ref")
+    );
+    assert!(
+        mcp_json["result"]["headroom_runtime_plan"]["content_routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|route| route["content_kind"] == "log"
+                && route["strategy"] == "signal_log_compressor"
+                && route["reversible"] == true)
+    );
+    assert_eq!(
+        mcp_json["result"]["headroom_runtime_plan"]["reversible_store"]["uri_scheme"],
+        "forge://harness/headroom/"
+    );
+    assert!(mcp_json["result"]["headroom_runtime_plan"]["mcp_tools"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("forge.harness.retrieve_headroom")));
+    assert!(mcp_json["result"]["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["name"] == "FORGE_HEADROOM_RUNTIME_PLAN"
+            && item["value"] == "forge.harness.headroom_runtime_plan.v1"));
     assert!(
         mcp_json["result"]["orchestration_contract"]["routing_stages"]
             .as_array()
@@ -45034,6 +45070,14 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
         .any(|command| command.as_str().unwrap_or("").contains("token-headroom")));
     assert_eq!(json["wrapper_plan"]["forge_first"], true);
     assert_eq!(json["wrapper_plan"]["token_headroom_enabled"], true);
+    assert_eq!(
+        json["wrapper_plan"]["headroom_runtime_plan"]["schema_version"],
+        "forge.harness.headroom_runtime_plan.v1"
+    );
+    assert_eq!(
+        json["wrapper_plan"]["headroom_runtime_plan"]["enabled"],
+        true
+    );
     assert!(json["commands"]["doctor"]
         .as_array()
         .unwrap()
@@ -45093,8 +45137,11 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains(json["headroom_recommended_action"].as_str().unwrap()));
     assert!(text.contains("session lifecycle"));
     assert!(text.contains("Wrapper plan: forge_first true"));
+    assert!(text.contains("Headroom runtime: forge.harness.headroom_runtime_plan.v1"));
+    assert!(text.contains("tool_output:compress_then_return_retrieval_ref"));
     assert!(text.contains("launch forge harness exec --executor codex"));
     assert!(text.contains("env FORGE_HARNESS=enabled"));
+    assert!(text.contains("FORGE_HEADROOM_RUNTIME_PLAN=forge.harness.headroom_runtime_plan.v1"));
     assert!(text.contains("FORGE_PROMPT_PACKET_REQUIRED=true"));
     assert!(text.contains("FORGE_CONTEXT_ROUTING=forge_controlled"));
     assert!(text.contains("FORGE_TOKEN_HEADROOM_REQUIRED=true"));
@@ -45205,6 +45252,11 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
         "forge.interactive.harness.v1"
     );
     assert_eq!(mcp_json["result"]["wrapper_plan"]["forge_first"], true);
+    assert_eq!(
+        mcp_json["result"]["wrapper_plan"]["headroom_runtime_plan"]["reversible_store"]
+            ["uri_scheme"],
+        "forge://harness/headroom/"
+    );
     assert_eq!(
         mcp_json["result"]["headroom_plan"]["schema_version"],
         "forge.harness.headroom_plan.v1"

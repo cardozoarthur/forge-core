@@ -7968,7 +7968,7 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         panel.next_actions.join(" | ")
     };
     format!(
-        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; headroom-plan {headroom_plan}; adoption-plan {adoption_plan}; headroom-stats {headroom_stats} ({headroom_blob_count} blobs); headroom action {headroom_action}; adoption action {adoption_action}; session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | headroom-plan | adoption-plan | bootstrap | headroom-stats | install-shims | exec\nWrapper plan: {wrapper_plan}\nOrchestration: {orchestration}\nLifecycle gates: {lifecycle_gates}\nHeadroom stats: {headroom_details}\nNext actions: {next_actions}\n",
+        "Harness center: {status}; executor {executor}; mode {mode}; doctor {doctor}; shim {shim}; headroom {headroom}; headroom-plan {headroom_plan}; adoption-plan {adoption_plan}; headroom-stats {headroom_stats} ({headroom_blob_count} blobs); headroom action {headroom_action}; adoption action {adoption_action}; session lifecycle {session_lifecycle_status} for {session_id}\nProject: {project_root}; shim dir: {shim_dir}\nPrimary actions: doctor | shim-status | wrap-plan | headroom-plan | adoption-plan | bootstrap | headroom-stats | install-shims | exec\nWrapper plan: {wrapper_plan}\nHeadroom runtime: {headroom_runtime}\nOrchestration: {orchestration}\nLifecycle gates: {lifecycle_gates}\nHeadroom stats: {headroom_details}\nNext actions: {next_actions}\n",
         status = panel.status,
         executor = panel.executor,
         mode = panel.mode.effective_mode,
@@ -7986,6 +7986,7 @@ pub fn render_interactive_harness(panel: &InteractiveHarnessPanel) -> String {
         project_root = panel.project_root,
         shim_dir = panel.shim_dir,
         wrapper_plan = render_harness_wrapper_plan(&panel.wrapper_plan),
+        headroom_runtime = render_harness_headroom_runtime(&panel.wrapper_plan),
         orchestration = render_harness_orchestration(&panel.wrapper_plan),
         lifecycle_gates = render_harness_lifecycle_gates(&panel.session_lifecycle_plan),
         headroom_details = render_harness_headroom_stats(&panel.headroom_stats),
@@ -8006,6 +8007,8 @@ fn render_harness_wrapper_plan(plan: &CliWrapperPlanReport) -> String {
                     | "FORGE_MEMORY_ROUTING"
                     | "FORGE_SKILL_ROUTING"
                     | "FORGE_MCP_ROUTING"
+                    | "FORGE_HEADROOM_RUNTIME_PLAN"
+                    | "FORGE_HEADROOM_INTERCEPT"
                     | "FORGE_TOKEN_HEADROOM_REQUIRED"
                     | "FORGE_SESSION_LIFECYCLE"
                     | "FORGE_EVENT_RECEIPTS"
@@ -8023,6 +8026,41 @@ fn render_harness_wrapper_plan(plan: &CliWrapperPlanReport) -> String {
             "none".to_string()
         } else {
             env
+        }
+    )
+}
+
+fn render_harness_headroom_runtime(plan: &CliWrapperPlanReport) -> String {
+    let runtime = &plan.headroom_runtime_plan;
+    let points = runtime
+        .interception_points
+        .iter()
+        .take(4)
+        .map(|point| format!("{}:{}", point.point_id, point.action))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let routes = runtime
+        .content_routes
+        .iter()
+        .take(5)
+        .map(|route| format!("{}={}", route.content_kind, route.strategy))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{} enabled {}, mode {}, store {}, points {}, routes {}",
+        runtime.schema_version,
+        runtime.enabled,
+        runtime.mode,
+        runtime.reversible_store.uri_scheme,
+        if points.is_empty() {
+            "none".to_string()
+        } else {
+            points
+        },
+        if routes.is_empty() {
+            "none".to_string()
+        } else {
+            routes
         }
     )
 }
