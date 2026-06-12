@@ -3268,11 +3268,14 @@ impl ForgeStore {
                 created_at,
                 updated_at
             FROM runtime_contract_dispatches
+            WHERE (?1 IS NULL OR addon_id = ?1)
+              AND (?2 IS NULL OR contract_id = ?2)
+              AND (?3 IS NULL OR status = ?3)
             ORDER BY created_at DESC, id DESC
-            LIMIT ?1
+            LIMIT ?4
             "#,
         )?;
-        let rows = statement.query_map(params![limit], |row| {
+        let rows = statement.query_map(params![addon_id, contract_id, status, limit], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -3308,15 +3311,6 @@ impl ForgeStore {
                 created_at,
                 updated_at,
             ) = row?;
-            if addon_id.is_some_and(|filter| filter != addon_id_value.as_str()) {
-                continue;
-            }
-            if contract_id.is_some_and(|filter| filter != contract_id_value.as_str()) {
-                continue;
-            }
-            if status.is_some_and(|filter| filter != status_value.as_str()) {
-                continue;
-            }
             dispatches.push(StoredRuntimeContractDispatchRecord {
                 id,
                 addon_id: addon_id_value,

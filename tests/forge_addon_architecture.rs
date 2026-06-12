@@ -13997,6 +13997,172 @@ runtime_contracts:
 }
 
 #[test]
+fn addon_runtime_dispatch_worker_processes_queued_dispatches_for_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let addon_dir = temp.path().join("addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        addon_dir.join("builtin-worker.yaml"),
+        r#"
+id: forge.addon.builtin_worker
+name: Builtin Runtime Worker Addon
+version: 0.1.0
+capabilities:
+  - id: builtin_worker_receipt
+    title: Builtin worker receipt
+    domains:
+      - operations
+    keywords:
+      - receipt
+runtime_contracts:
+  - id: builtin_worker.echo_executor
+    title: Builtin Worker Echo Executor
+    contract_type: executor
+    capability_id: builtin_worker_receipt
+    runtime: forge_core_builtin
+    entrypoint: builtin:echo
+    inputs:
+      - payload
+    outputs:
+      - receipt
+"#,
+    )
+    .unwrap();
+
+    for payload in ["first", "second"] {
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "addons",
+                "dispatch-contract",
+                "--addon-dir",
+                addon_dir.to_str().unwrap(),
+                "--addon",
+                "forge.addon.builtin_worker",
+                "--contract",
+                "builtin_worker.echo_executor",
+                "--input",
+                &serde_json::json!({ "payload": payload }).to_string(),
+                "--source",
+                "dispatch-worker-test",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    let worker_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "dispatch-worker",
+            "--addon-dir",
+            addon_dir.to_str().unwrap(),
+            "--status",
+            "queued",
+            "--limit",
+            "2",
+            "--worker",
+            "cli-dispatch-worker",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let worker_json: Value = serde_json::from_slice(&worker_output).unwrap();
+    assert_eq!(
+        worker_json["status"],
+        "runtime_contract_dispatch_worker_completed"
+    );
+    assert_eq!(worker_json["dispatch_count"], 2);
+    assert_eq!(worker_json["completed_count"], 2);
+    assert_eq!(worker_json["queued_count"], 0);
+    assert!(worker_json["dispatches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|dispatch| dispatch["status"] == "completed"
+            && dispatch["data"]["runtime_processing"]["worker"] == "cli-dispatch-worker"));
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "dispatch-contract",
+            "--addon-dir",
+            addon_dir.to_str().unwrap(),
+            "--addon",
+            "forge.addon.builtin_worker",
+            "--contract",
+            "builtin_worker.echo_executor",
+            "--input",
+            r#"{"payload":"mcp"}"#,
+            "--source",
+            "dispatch-worker-mcp-test",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let mcp_input = serde_json::json!({
+        "addon_dirs": [addon_dir.to_str().unwrap()],
+        "status": "queued",
+        "limit": 1,
+        "worker": "mcp-dispatch-worker"
+    });
+    let mcp_output = forge()
+        .args(["--store", store.to_str().unwrap(), "mcp", "call"])
+        .arg("forge.addons.dispatch_worker")
+        .arg("--input")
+        .arg(mcp_input.to_string())
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["status"],
+        "runtime_contract_dispatch_worker_completed"
+    );
+    assert_eq!(mcp_json["result"]["completed_count"], 1);
+    assert_eq!(
+        mcp_json["result"]["dispatches"][0]["data"]["runtime_processing"]["worker"],
+        "mcp-dispatch-worker"
+    );
+
+    let completed_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "dispatches",
+            "--status",
+            "completed",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let completed_json: Value = serde_json::from_slice(&completed_output).unwrap();
+    assert_eq!(completed_json["dispatch_count"], 3);
+    assert_eq!(completed_json["completed_count"], 3);
+}
+
+#[test]
 fn multimodal_addon_runtime_dispatch_uses_guarded_builtin_benchmark() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

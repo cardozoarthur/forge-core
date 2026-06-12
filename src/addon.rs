@@ -4122,6 +4122,55 @@ pub fn list_addon_runtime_contract_dispatches(
     ))
 }
 
+pub fn run_addon_runtime_contract_dispatch_worker(
+    store: &ForgeStore,
+    catalog: &AddonCatalog,
+    status: Option<&str>,
+    limit: usize,
+    worker: &str,
+    dry_run: bool,
+) -> Result<AddonRuntimeContractDispatchReport> {
+    let status_filter = status
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("queued");
+    let dispatches = store
+        .list_runtime_contract_dispatches(None, None, Some(status_filter), limit.max(1))?
+        .into_iter()
+        .map(stored_runtime_dispatch_entry)
+        .collect::<Result<Vec<_>>>()?;
+    if dispatches.is_empty() {
+        return Ok(dispatch_report(
+            "runtime_contract_dispatch_worker_idle",
+            dry_run,
+            Vec::new(),
+        ));
+    }
+
+    let mut processed = Vec::new();
+    for dispatch in dispatches {
+        let report =
+            run_addon_runtime_contract_dispatch(store, catalog, &dispatch.id, worker, dry_run)?;
+        processed.extend(report.dispatches);
+    }
+    let report = dispatch_report(
+        "runtime_contract_dispatch_worker_completed",
+        dry_run,
+        processed,
+    );
+    let status = if report.blocked_count > 0 || report.failed_count > 0 {
+        "runtime_contract_dispatch_worker_completed_with_issues"
+    } else if report.needs_external_worker_count > 0 {
+        "runtime_contract_dispatch_worker_needs_external_workers"
+    } else {
+        "runtime_contract_dispatch_worker_completed"
+    };
+    Ok(AddonRuntimeContractDispatchReport {
+        status: status.to_string(),
+        ..report
+    })
+}
+
 pub fn register_addon_runtime_worker(
     store: &ForgeStore,
     input: AddonRuntimeWorkerRegistrationInput<'_>,

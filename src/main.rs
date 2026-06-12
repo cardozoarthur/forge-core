@@ -16,12 +16,13 @@ use forge_core::addon::{
     load_addon_catalog_from_store, package_addon, publish_addon_package,
     register_addon_runtime_worker, resolve_goal_capabilities_with_registry_sync,
     resolve_goal_capabilities_with_store, revoke_addon_permission,
-    run_addon_runtime_contract_dispatch, sync_addon_package_registry, trust_addon_package_key,
-    uninstall_addon, upgrade_addon, validate_addon_catalog, AddonExecutorDispatchInput,
-    AddonExecutorExecutionInput, AddonHandoffDispatchInput, AddonHandoffExecutionInput,
-    AddonPackageInput, AddonPlannerDispatchInput, AddonPlanningStrategyInput,
-    AddonRuntimeContractCompletionInput, AddonRuntimeWorkerRegistrationInput, AddonTrustKeyInput,
-    AddonValidatorDispatchInput, AddonValidatorExecutionInput, CapabilityRegistrySyncInput,
+    run_addon_runtime_contract_dispatch, run_addon_runtime_contract_dispatch_worker,
+    sync_addon_package_registry, trust_addon_package_key, uninstall_addon, upgrade_addon,
+    validate_addon_catalog, AddonExecutorDispatchInput, AddonExecutorExecutionInput,
+    AddonHandoffDispatchInput, AddonHandoffExecutionInput, AddonPackageInput,
+    AddonPlannerDispatchInput, AddonPlanningStrategyInput, AddonRuntimeContractCompletionInput,
+    AddonRuntimeWorkerRegistrationInput, AddonTrustKeyInput, AddonValidatorDispatchInput,
+    AddonValidatorExecutionInput, CapabilityRegistrySyncInput,
 };
 use forge_core::artifact::list_workflow_artifacts;
 use forge_core::aws_ops::{
@@ -1178,6 +1179,20 @@ enum AddonCommands {
     RunDispatch {
         #[arg(long)]
         dispatch: String,
+        #[arg(long, default_value = "cli")]
+        worker: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    DispatchWorker {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
         #[arg(long, default_value = "cli")]
         worker: String,
         #[arg(long)]
@@ -5531,6 +5546,29 @@ fn run() -> Result<i32> {
                     &store, &catalog, &dispatch, &worker, dry_run,
                 )?;
                 let should_fail = report.blocked_count > 0;
+                print_response(output, &report)?;
+                Ok(if should_fail { 1 } else { 0 })
+            }
+            AddonCommands::DispatchWorker {
+                status,
+                limit,
+                worker,
+                dry_run,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let report = run_addon_runtime_contract_dispatch_worker(
+                    &store,
+                    &catalog,
+                    status.as_deref(),
+                    limit,
+                    &worker,
+                    dry_run,
+                )?;
+                let should_fail = report.blocked_count > 0 || report.failed_count > 0;
                 print_response(output, &report)?;
                 Ok(if should_fail { 1 } else { 0 })
             }

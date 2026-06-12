@@ -13,9 +13,9 @@ use crate::addon::{
     load_addon_catalog_from_store, package_addon, publish_addon_package,
     register_addon_runtime_worker, resolve_goal_capabilities_with_registry_sync,
     resolve_goal_capabilities_with_store, revoke_addon_permission,
-    run_addon_runtime_contract_dispatch, sync_addon_package_registry, trust_addon_package_key,
-    uninstall_addon, upgrade_addon, validate_addon_catalog,
-    AddonExecutorDispatchInput as AddonExecutorDispatchRequest,
+    run_addon_runtime_contract_dispatch, run_addon_runtime_contract_dispatch_worker,
+    sync_addon_package_registry, trust_addon_package_key, uninstall_addon, upgrade_addon,
+    validate_addon_catalog, AddonExecutorDispatchInput as AddonExecutorDispatchRequest,
     AddonExecutorExecutionInput as AddonExecutorExecutionRequest,
     AddonHandoffDispatchInput as AddonHandoffDispatchRequest,
     AddonHandoffExecutionInput as AddonHandoffExecutionRequest,
@@ -757,6 +757,16 @@ struct AddonRuntimeDispatchRunInput {
     worker: Option<String>,
     worker_id: Option<String>,
     lease_seconds: Option<u64>,
+    dry_run: Option<bool>,
+    addon_dirs: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddonRuntimeDispatchWorkerInput {
+    status: Option<String>,
+    limit: Option<usize>,
+    worker: Option<String>,
+    worker_id: Option<String>,
     dry_run: Option<bool>,
     addon_dirs: Option<Vec<String>>,
 }
@@ -3919,6 +3929,35 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "run-dispatch",
                     "--dispatch",
                     "<dispatch-id>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(false, true),
+            ),
+            tool(
+                "forge.addons.dispatch_worker",
+                "Run Addon Dispatch Worker",
+                "Process a bounded batch of queued Addon runtime dispatches with the same policy recheck and runtime boundaries as run_dispatch.",
+                object_schema(
+                    &[
+                        ("status", "string", "dispatch status to process; defaults to queued"),
+                        ("limit", "integer", "maximum dispatch rows to process"),
+                        ("worker", "string", "worker identity writing the processing evidence"),
+                        ("worker_id", "string", "worker identity alias"),
+                        ("dry_run", "boolean", "inspect processing decisions without updating the ledger"),
+                        (
+                            "addon_dirs",
+                            "array",
+                            "optional addon manifest directories; defaults to .forge/addons",
+                        ),
+                    ],
+                    &[],
+                ),
+                "forge.addon_runtime_contract_dispatch.v1",
+                &[
+                    "forge",
+                    "addons",
+                    "dispatch-worker",
                     "--output",
                     "json",
                 ],
@@ -7824,6 +7863,19 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 store,
                 &catalog,
                 &dispatch_id,
+                input.worker_id.or(input.worker).as_deref().unwrap_or("mcp"),
+                input.dry_run.unwrap_or(false),
+            )?)?
+        }
+        "forge.addons.dispatch_worker" => {
+            let input: AddonRuntimeDispatchWorkerInput = parse_input(input)?;
+            let addon_dirs = addon_dirs_from_input(input.addon_dirs);
+            let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
+            serde_json::to_value(run_addon_runtime_contract_dispatch_worker(
+                store,
+                &catalog,
+                input.status.as_deref(),
+                input.limit.unwrap_or(20),
                 input.worker_id.or(input.worker).as_deref().unwrap_or("mcp"),
                 input.dry_run.unwrap_or(false),
             )?)?
