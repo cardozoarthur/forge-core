@@ -1302,9 +1302,12 @@ pub struct InteractiveRouteReport {
 pub struct SlashCommandRoute {
     pub name: String,
     pub recognized: bool,
+    pub input_arguments: Vec<String>,
+    pub input_argument_text: String,
     pub equivalent_command: Vec<String>,
     pub mutates_workflow: bool,
     pub risk_level: String,
+    pub execution_boundary: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5778,6 +5781,8 @@ fn route_pm_workflow(
         slash_command: Some(SlashCommandRoute {
             name: "/pm".to_string(),
             recognized: true,
+            input_arguments: vec![pm_goal.to_string()],
+            input_argument_text: pm_goal.to_string(),
             equivalent_command: vec![
                 "forge".to_string(),
                 "interactive".to_string(),
@@ -5787,6 +5792,7 @@ fn route_pm_workflow(
             ],
             mutates_workflow: true,
             risk_level: "medium".to_string(),
+            execution_boundary: "workflow_created_not_external_command".to_string(),
         }),
         product_decision_id: Some(decision.decision_id),
         product_decision_revision: Some(decision.revision),
@@ -7912,28 +7918,50 @@ fn build_attention_actions(attention_runs: &[&crate::request::RequestListRow]) -
 
 fn route_slash_command(trimmed: &str) -> InteractiveRouteReport {
     let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-    let two_token = tokens.get(0..2).map(|t| t.join(" ").to_ascii_lowercase());
     let one_token = tokens
         .first()
         .map(|t| t.to_ascii_lowercase())
         .unwrap_or_else(|| "/".to_string());
     let commands = slash_commands();
-    let command = two_token
-        .as_ref()
-        .and_then(|two| commands.iter().find(|cmd| cmd.name.as_str() == two))
-        .or_else(|| commands.iter().find(|cmd| cmd.name.as_str() == one_token));
-    let recognized = command.is_some();
-    let route = command
+    let matched = commands
+        .iter()
+        .filter_map(|command| {
+            let command_tokens = command.name.split_whitespace().collect::<Vec<_>>();
+            if command_tokens.len() > tokens.len() {
+                return None;
+            }
+            let matches = command_tokens
+                .iter()
+                .zip(tokens.iter())
+                .all(|(expected, actual)| expected.eq_ignore_ascii_case(actual));
+            matches.then_some((command, command_tokens.len()))
+        })
+        .max_by_key(|(_, consumed)| *consumed);
+    let recognized = matched.is_some();
+    let consumed_tokens = matched.map(|(_, consumed)| consumed).unwrap_or(1);
+    let input_arguments = tokens
+        .iter()
+        .skip(consumed_tokens)
+        .map(|token| (*token).to_string())
+        .collect::<Vec<_>>();
+    let input_argument_text = input_arguments.join(" ");
+    let route = matched
+        .map(|(command, _)| command)
         .map(|command| SlashCommandRoute {
             name: command.name.clone(),
             recognized: true,
+            input_arguments: input_arguments.clone(),
+            input_argument_text: input_argument_text.clone(),
             equivalent_command: command.equivalent_command.clone(),
             mutates_workflow: command.mutates_workflow,
             risk_level: command.risk_level.clone(),
+            execution_boundary: "slash_command_not_executed".to_string(),
         })
         .unwrap_or_else(|| SlashCommandRoute {
             name: one_token,
             recognized: false,
+            input_arguments,
+            input_argument_text,
             equivalent_command: vec![
                 "forge".to_string(),
                 "interactive".to_string(),
@@ -7941,6 +7969,7 @@ fn route_slash_command(trimmed: &str) -> InteractiveRouteReport {
             ],
             mutates_workflow: false,
             risk_level: "unknown".to_string(),
+            execution_boundary: "catalog_lookup_not_executed".to_string(),
         });
 
     InteractiveRouteReport {
@@ -8749,9 +8778,12 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
             let route = result.slash_command.unwrap_or(SlashCommandRoute {
                 name: trimmed.to_string(),
                 recognized: false,
+                input_arguments: Vec::new(),
+                input_argument_text: String::new(),
                 equivalent_command: Vec::new(),
                 mutates_workflow: false,
                 risk_level: "unknown".to_string(),
+                execution_boundary: "catalog_lookup_not_executed".to_string(),
             });
 
             if trimmed.starts_with("/patch ") {
@@ -9729,6 +9761,20 @@ mod tests {
         assert!(route.recognized);
         assert!(route.mutates_workflow);
         assert_eq!(route.risk_level, "high");
+        assert_eq!(
+            route.input_arguments,
+            vec![
+                "--workflow".to_string(),
+                "wf_demo".to_string(),
+                "--task".to_string(),
+                "task_1".to_string()
+            ]
+        );
+        assert_eq!(
+            route.input_argument_text,
+            "--workflow wf_demo --task task_1"
+        );
+        assert_eq!(route.execution_boundary, "slash_command_not_executed");
     }
 
     #[test]

@@ -45816,6 +45816,18 @@ fn interactive_route_slash_command_stays_command_mode_without_workflow() {
     assert_eq!(json["workflow_created"], false);
     assert_eq!(json["slash_command"]["name"], "/status");
     assert_eq!(json["slash_command"]["recognized"], true);
+    assert_eq!(
+        json["slash_command"]["input_arguments"],
+        serde_json::json!(["--workflow", "wf_demo"])
+    );
+    assert_eq!(
+        json["slash_command"]["input_argument_text"],
+        "--workflow wf_demo"
+    );
+    assert_eq!(
+        json["slash_command"]["execution_boundary"],
+        "slash_command_not_executed"
+    );
     assert!(json["slash_command"]["equivalent_command"]
         .as_array()
         .unwrap()
@@ -45849,6 +45861,14 @@ fn interactive_route_slash_command_stays_command_mode_without_workflow() {
         "/harness headroom-stats"
     );
     assert_eq!(headroom_json["slash_command"]["recognized"], true);
+    assert_eq!(
+        headroom_json["slash_command"]["input_arguments"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        headroom_json["slash_command"]["execution_boundary"],
+        "slash_command_not_executed"
+    );
     assert!(headroom_json["slash_command"]["equivalent_command"]
         .as_array()
         .unwrap()
