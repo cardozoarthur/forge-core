@@ -1108,6 +1108,15 @@ fn mcp_manifest_exposes_addon_capability_tools() {
         "forge.addon_runtime_contract_dispatch.v1"
     );
     assert_eq!(execute_dispatch["mutates_workflow"], true);
+    let execute_validator = tools
+        .iter()
+        .find(|tool| tool["name"] == "forge.addons.execute_validator")
+        .expect("addon validator execution MCP tool should be listed");
+    assert_eq!(
+        execute_validator["output_schema"],
+        "forge.addon_validator_execution.v1"
+    );
+    assert_eq!(execute_validator["mutates_workflow"], true);
     let claim_dispatch = tools
         .iter()
         .find(|tool| tool["name"] == "forge.addons.claim_dispatch")
@@ -2429,6 +2438,200 @@ runtime_contracts:
         "demo-mcp"
     );
     handle.join().unwrap();
+}
+
+#[test]
+fn addon_validator_executes_through_worker_with_result_audit_for_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let addon_dir = temp.path().join("addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        addon_dir.join("quality-validator.yaml"),
+        r#"
+id: forge.addon.quality_validator
+name: Quality Validator Addon
+version: 0.1.0
+capabilities:
+  - id: quality_validation
+    title: Quality validation
+    domains: [operations]
+    keywords: [quality-validation]
+runtime_contracts:
+  - id: quality.record.validator
+    title: Quality record validator
+    contract_type: validator
+    capability_id: quality_validation
+    runtime: wasm
+    entrypoint: quality_record.validate
+    inputs: [subject, input, context]
+    outputs: [decision, issues, checks]
+"#,
+    )
+    .unwrap();
+
+    let worker_script = temp.path().join("quality-validator-worker.py");
+    fs::write(
+        &worker_script,
+        r#"#!/usr/bin/env python3
+import json
+import sys
+
+request = json.load(sys.stdin)
+print(json.dumps({
+    "status": "completed",
+    "result": {
+        "schema_version": "forge.addon_validator_result.v1",
+        "decision": "passed",
+        "subject": request["input"]["subject"],
+        "summary": "record accepted",
+        "issues": [],
+        "checks": [
+            {"id": "required-fields", "status": "passed"}
+        ],
+        "context_tenant": request["input"]["context"]["provided_context"].get("tenant")
+    },
+    "attestation": {
+        "schema_version": "forge.addon_runtime_worker_attestation.v1",
+        "execution_mode": "local_process",
+        "worker_id": request["worker_id"],
+        "dispatch_id": request["dispatch_id"],
+        "request_schema": request["schema_version"]
+    }
+}))
+"#,
+    )
+    .unwrap();
+    let mut worker_permissions = fs::metadata(&worker_script).unwrap().permissions();
+    worker_permissions.set_mode(0o755);
+    fs::set_permissions(&worker_script, worker_permissions).unwrap();
+
+    let worker_data = serde_json::json!({
+        "execution_mode": "local_process",
+        "command": worker_script.display().to_string(),
+        "allowed_entrypoints": ["quality_record.validate"],
+        "allowed_contracts": ["quality.record.validator"],
+        "timeout_seconds": 5
+    })
+    .to_string();
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "register-worker",
+            "--worker",
+            "quality-validator-worker",
+            "--runtime",
+            "wasm",
+            "--trust-level",
+            "local",
+            "--source",
+            "test",
+            "--data",
+            worker_data.as_str(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let cli_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "execute-validator",
+            "--addon-dir",
+            addon_dir.to_str().unwrap(),
+            "--addon",
+            "forge.addon.quality_validator",
+            "--contract",
+            "quality.record.validator",
+            "--worker",
+            "quality-validator-worker",
+            "--subject",
+            "record-cli-001",
+            "--input",
+            r#"{"amount":42,"customer":"demo"}"#,
+            "--context",
+            r#"{"tenant":"cli"}"#,
+            "--lease-seconds",
+            "120",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cli_json: Value = serde_json::from_slice(&cli_output).unwrap();
+    assert_eq!(
+        cli_json["schema_version"],
+        "forge.addon_validator_execution.v1"
+    );
+    assert_eq!(cli_json["status"], "addon_validator_passed");
+    assert_eq!(
+        cli_json["dispatch_report"]["status"],
+        "runtime_contract_dispatch_external_completed"
+    );
+    assert_eq!(
+        cli_json["dispatch_report"]["dispatches"][0]["input"]["schema_version"],
+        "forge.addon_validator_dispatch_input.v1"
+    );
+    assert_eq!(
+        cli_json["dispatch_report"]["dispatches"][0]["input"]["subject"],
+        "record-cli-001"
+    );
+    assert_eq!(cli_json["validation"]["status"], "valid");
+    assert_eq!(cli_json["validation"]["decision"], "passed");
+    assert_eq!(cli_json["validation"]["passed"], true);
+    assert_eq!(cli_json["validation"]["check_count"], 1);
+    assert_eq!(cli_json["validator_result"]["subject"], "record-cli-001");
+    assert_eq!(cli_json["validator_result"]["context_tenant"], "cli");
+
+    let mcp_input = serde_json::json!({
+        "addon_dirs": [addon_dir.display().to_string()],
+        "addon_id": "forge.addon.quality_validator",
+        "contract_id": "quality.record.validator",
+        "worker_id": "quality-validator-worker",
+        "subject": "record-mcp-001",
+        "input": {"amount": 84, "customer": "demo-mcp"},
+        "context": {"tenant": "mcp"},
+        "lease_seconds": 120
+    });
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.addons.execute_validator",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp_json["schema_version"], "forge.mcp.call.v1");
+    assert_eq!(mcp_json["status"], "ok");
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.addon_validator_execution.v1"
+    );
+    assert_eq!(mcp_json["result"]["status"], "addon_validator_passed");
+    assert_eq!(mcp_json["result"]["validation"]["decision"], "passed");
+    assert_eq!(
+        mcp_json["result"]["dispatch_report"]["dispatches"][0]["input"]["context"]
+            ["provided_context"]["tenant"],
+        "mcp"
+    );
 }
 
 #[test]

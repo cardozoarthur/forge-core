@@ -4,8 +4,8 @@ use crate::addon::{
     create_addon_package_lock, default_addon_dirs, disable_addon, downgrade_addon, enable_addon,
     enqueue_addon_planner_dispatch, enqueue_addon_runtime_contract_dispatch,
     evaluate_addon_runtime_contract_policy, execute_addon_planning_strategy,
-    execute_addon_runtime_contract_dispatch, fetch_addon_package, install_addon,
-    install_addon_package, list_addon_capability_index, list_addon_event_adapters,
+    execute_addon_runtime_contract_dispatch, execute_addon_validator, fetch_addon_package,
+    install_addon, install_addon_package, list_addon_capability_index, list_addon_event_adapters,
     list_addon_marketplace, list_addon_permission_authorizations, list_addon_planner_registry,
     list_addon_runtime_contract_dispatches, list_addon_runtime_contracts,
     list_addon_runtime_workers, list_addon_trust_store, list_addon_views, list_installed_addons,
@@ -18,7 +18,9 @@ use crate::addon::{
     AddonPlannerDispatchInput as AddonPlannerDispatchRequest,
     AddonPlanningStrategyInput as AddonPlanningStrategyRequest,
     AddonRuntimeContractCompletionInput as AddonRuntimeContractCompletionRequest,
-    AddonTrustKeyInput as AddonTrustKeyRequest, CapabilityRegistrySyncInput,
+    AddonTrustKeyInput as AddonTrustKeyRequest,
+    AddonValidatorDispatchInput as AddonValidatorDispatchRequest,
+    AddonValidatorExecutionInput as AddonValidatorExecutionRequest, CapabilityRegistrySyncInput,
 };
 use crate::artifact::{hex_sha256, list_workflow_artifacts, ListedArtifact};
 use crate::aws_ops::{
@@ -426,6 +428,23 @@ struct AddonPlannerDispatchInput {
     workflow_id: Option<String>,
     task: Option<String>,
     task_id: Option<String>,
+    context: Option<serde_json::Value>,
+    lease_seconds: Option<u64>,
+    source: Option<String>,
+    dry_run: Option<bool>,
+    addon_dirs: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddonValidatorExecutionInput {
+    addon: Option<String>,
+    addon_id: Option<String>,
+    contract: Option<String>,
+    contract_id: Option<String>,
+    worker: Option<String>,
+    worker_id: Option<String>,
+    subject: String,
+    input: Option<serde_json::Value>,
     context: Option<serde_json::Value>,
     lease_seconds: Option<u64>,
     source: Option<String>,
@@ -3597,6 +3616,45 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "<worker-id>",
                     "--goal",
                     "<goal>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(false, true),
+            ),
+            tool(
+                "forge.addons.execute_validator",
+                "Execute Addon Validator With Result Audit",
+                "Dispatch a validator runtime contract to a registered worker, validate the returned decision envelope and record the normal dispatch/claim/completion audit.",
+                object_schema(
+                    &[
+                        ("addon_id", "string", "optional Addon id filter"),
+                        ("contract_id", "string", "validator runtime contract id"),
+                        ("worker_id", "string", "registered runtime worker id"),
+                        ("subject", "string", "entity or artifact being validated"),
+                        ("input", "object", "validator input payload"),
+                        ("context", "object", "optional validator context payload"),
+                        ("lease_seconds", "integer", "external worker claim lease"),
+                        ("source", "string", "dispatch source"),
+                        ("dry_run", "boolean", "evaluate without executing worker"),
+                        (
+                            "addon_dirs",
+                            "array",
+                            "optional addon manifest directories; defaults to .forge/addons",
+                        ),
+                    ],
+                    &["contract_id", "worker_id", "subject"],
+                ),
+                "forge.addon_validator_execution.v1",
+                &[
+                    "forge",
+                    "addons",
+                    "execute-validator",
+                    "--contract",
+                    "<contract-id>",
+                    "--worker",
+                    "<worker-id>",
+                    "--subject",
+                    "<subject>",
                     "--output",
                     "json",
                 ],
@@ -7356,6 +7414,35 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                         constraints: &constraints,
                         workflow_id: workflow_id.as_deref(),
                         task_id: task_id.as_deref(),
+                        context: input.context.unwrap_or_else(|| serde_json::json!({})),
+                        source: input.source.as_deref().unwrap_or("mcp"),
+                        dry_run: input.dry_run.unwrap_or(false),
+                    },
+                    worker_id: &worker_id,
+                    lease_seconds: input.lease_seconds.unwrap_or(300),
+                },
+            )?)?
+        }
+        "forge.addons.execute_validator" => {
+            let input: AddonValidatorExecutionInput = parse_input(input)?;
+            let addon_dirs = addon_dirs_from_input(input.addon_dirs);
+            let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
+            let addon_id = input.addon_id.or(input.addon);
+            let contract_id = input.contract_id.or(input.contract).ok_or_else(|| {
+                anyhow::anyhow!("forge.addons.execute_validator requires contract_id")
+            })?;
+            let worker_id = input.worker_id.or(input.worker).ok_or_else(|| {
+                anyhow::anyhow!("forge.addons.execute_validator requires worker_id")
+            })?;
+            serde_json::to_value(execute_addon_validator(
+                store,
+                &catalog,
+                AddonValidatorExecutionRequest {
+                    dispatch: AddonValidatorDispatchRequest {
+                        addon_id: addon_id.as_deref(),
+                        contract_id: &contract_id,
+                        subject: &input.subject,
+                        input: input.input.unwrap_or_else(|| serde_json::json!({})),
                         context: input.context.unwrap_or_else(|| serde_json::json!({})),
                         source: input.source.as_deref().unwrap_or("mcp"),
                         dry_run: input.dry_run.unwrap_or(false),

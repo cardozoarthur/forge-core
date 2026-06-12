@@ -7,8 +7,8 @@ use forge_core::addon::{
     create_addon_package_lock, default_addon_dirs, disable_addon, downgrade_addon, enable_addon,
     enqueue_addon_planner_dispatch, enqueue_addon_runtime_contract_dispatch,
     evaluate_addon_runtime_contract_policy, execute_addon_planning_strategy,
-    execute_addon_runtime_contract_dispatch, fetch_addon_package, install_addon,
-    install_addon_package, list_addon_capability_index, list_addon_event_adapters,
+    execute_addon_runtime_contract_dispatch, execute_addon_validator, fetch_addon_package,
+    install_addon, install_addon_package, list_addon_capability_index, list_addon_event_adapters,
     list_addon_marketplace, list_addon_permission_authorizations, list_addon_planner_registry,
     list_addon_runtime_contract_dispatches, list_addon_runtime_contracts,
     list_addon_runtime_workers, list_addon_trust_store, list_addon_views, list_installed_addons,
@@ -18,7 +18,8 @@ use forge_core::addon::{
     run_addon_runtime_contract_dispatch, sync_addon_package_registry, trust_addon_package_key,
     uninstall_addon, upgrade_addon, validate_addon_catalog, AddonPackageInput,
     AddonPlannerDispatchInput, AddonPlanningStrategyInput, AddonRuntimeContractCompletionInput,
-    AddonTrustKeyInput, CapabilityRegistrySyncInput,
+    AddonTrustKeyInput, AddonValidatorDispatchInput, AddonValidatorExecutionInput,
+    CapabilityRegistrySyncInput,
 };
 use forge_core::artifact::list_workflow_artifacts;
 use forge_core::aws_ops::{
@@ -1061,6 +1062,30 @@ enum AddonCommands {
         workflow_id: Option<String>,
         #[arg(long = "task")]
         task_id: Option<String>,
+        #[arg(long, default_value = "{}")]
+        context: String,
+        #[arg(long = "lease-seconds", default_value_t = 300)]
+        lease_seconds: u64,
+        #[arg(long, default_value = "cli")]
+        source: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long = "addon-dir")]
+        addon_dirs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ExecuteValidator {
+        #[arg(long)]
+        addon: Option<String>,
+        #[arg(long)]
+        contract: String,
+        #[arg(long)]
+        worker: String,
+        #[arg(long)]
+        subject: String,
+        #[arg(long, default_value = "{}")]
+        input: String,
         #[arg(long, default_value = "{}")]
         context: String,
         #[arg(long = "lease-seconds", default_value_t = 300)]
@@ -5199,6 +5224,50 @@ fn run() -> Result<i32> {
                     "planning_strategy_dispatch_blocked"
                         | "planning_strategy_execution_failed"
                         | "planning_strategy_result_invalid"
+                );
+                print_response(output, &report)?;
+                Ok(if should_fail { 1 } else { 0 })
+            }
+            AddonCommands::ExecuteValidator {
+                addon,
+                contract,
+                worker,
+                subject,
+                input,
+                context,
+                lease_seconds,
+                source,
+                dry_run,
+                addon_dirs,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let dirs = addon_dirs_or_default(addon_dirs);
+                let catalog = load_addon_catalog_from_store(&store, &dirs)?;
+                let input_value: serde_json::Value = serde_json::from_str(&input)?;
+                let context_value: serde_json::Value = serde_json::from_str(&context)?;
+                let report = execute_addon_validator(
+                    &store,
+                    &catalog,
+                    AddonValidatorExecutionInput {
+                        dispatch: AddonValidatorDispatchInput {
+                            addon_id: addon.as_deref(),
+                            contract_id: &contract,
+                            subject: &subject,
+                            input: input_value,
+                            context: context_value,
+                            source: &source,
+                            dry_run,
+                        },
+                        worker_id: &worker,
+                        lease_seconds,
+                    },
+                )?;
+                let should_fail = matches!(
+                    report.status.as_str(),
+                    "addon_validator_dispatch_blocked"
+                        | "addon_validator_execution_failed"
+                        | "addon_validator_result_invalid"
                 );
                 print_response(output, &report)?;
                 Ok(if should_fail { 1 } else { 0 })

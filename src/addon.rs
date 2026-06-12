@@ -64,8 +64,24 @@ pub struct AddonPlannerDispatchInput<'a> {
     pub dry_run: bool,
 }
 
+pub struct AddonValidatorDispatchInput<'a> {
+    pub addon_id: Option<&'a str>,
+    pub contract_id: &'a str,
+    pub subject: &'a str,
+    pub input: serde_json::Value,
+    pub context: serde_json::Value,
+    pub source: &'a str,
+    pub dry_run: bool,
+}
+
 pub struct AddonPlanningStrategyInput<'a> {
     pub dispatch: AddonPlannerDispatchInput<'a>,
+    pub worker_id: &'a str,
+    pub lease_seconds: u64,
+}
+
+pub struct AddonValidatorExecutionInput<'a> {
+    pub dispatch: AddonValidatorDispatchInput<'a>,
     pub worker_id: &'a str,
     pub lease_seconds: u64,
 }
@@ -81,6 +97,18 @@ struct AddonPlanningStrategyReportInput<'a> {
     strategy_result: Option<serde_json::Value>,
     validation: AddonPlanningStrategyResultValidation,
     equivalence: AddonPlanningStrategyEquivalence,
+}
+
+struct AddonValidatorReportInput<'a> {
+    status: &'a str,
+    subject: &'a str,
+    contract_id: &'a str,
+    worker_id: &'a str,
+    source: &'a str,
+    dry_run: bool,
+    dispatch_report: AddonRuntimeContractDispatchReport,
+    validator_result: Option<serde_json::Value>,
+    validation: AddonValidatorResultValidation,
 }
 
 pub struct AddonRuntimeContractCompletionInput<'a> {
@@ -159,6 +187,12 @@ pub const ADDON_PLANNING_STRATEGY_EXECUTION_SCHEMA_VERSION: &str =
     "forge.addon_planning_strategy_execution.v1";
 pub const ADDON_PLANNING_STRATEGY_RESULT_SCHEMA_VERSION: &str =
     "forge.addon_planning_strategy_result.v1";
+pub const ADDON_VALIDATOR_DISPATCH_INPUT_SCHEMA_VERSION: &str =
+    "forge.addon_validator_dispatch_input.v1";
+pub const ADDON_VALIDATOR_EXECUTION_SCHEMA_VERSION: &str = "forge.addon_validator_execution.v1";
+pub const ADDON_VALIDATOR_RESULT_SCHEMA_VERSION: &str = "forge.addon_validator_result.v1";
+pub const ADDON_VALIDATOR_RESULT_VALIDATION_SCHEMA_VERSION: &str =
+    "forge.addon_validator_result_validation.v1";
 pub const ADDON_RUNTIME_WORKERS_SCHEMA_VERSION: &str = "forge.addon_runtime_workers.v1";
 pub const ADDON_VIEWS_SCHEMA_VERSION: &str = "forge.addon_views.v1";
 pub const ADDON_PACKAGE_SCHEMA_VERSION: &str = "forge.addon_package.v1";
@@ -528,6 +562,21 @@ pub struct AddonPlanningStrategyExecutionReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct AddonValidatorExecutionReport {
+    pub schema_version: String,
+    pub status: String,
+    pub subject: String,
+    pub contract_id: String,
+    pub worker_id: String,
+    pub source: String,
+    pub dry_run: bool,
+    pub dispatch_report: AddonRuntimeContractDispatchReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validator_result: Option<serde_json::Value>,
+    pub validation: AddonValidatorResultValidation,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct AddonPlanningStrategyResultValidation {
     pub schema_version: String,
     pub status: String,
@@ -535,6 +584,20 @@ pub struct AddonPlanningStrategyResultValidation {
     pub issue_count: usize,
     pub issues: Vec<String>,
     pub tasks: Vec<AddonPlanningStrategyTaskShape>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddonValidatorResultValidation {
+    pub schema_version: String,
+    pub status: String,
+    pub decision: String,
+    pub passed: bool,
+    pub check_count: usize,
+    pub reported_issue_count: usize,
+    pub reported_issues: Vec<String>,
+    pub schema_issue_count: usize,
+    pub schema_issues: Vec<String>,
+    pub result_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2204,6 +2267,70 @@ pub fn enqueue_addon_planner_dispatch(
     )
 }
 
+pub fn enqueue_addon_validator_dispatch(
+    store: &ForgeStore,
+    catalog: &AddonCatalog,
+    input: AddonValidatorDispatchInput<'_>,
+) -> Result<AddonRuntimeContractDispatchReport> {
+    let policy = evaluate_addon_runtime_contract_policy(
+        catalog,
+        input.addon_id,
+        Some(input.contract_id),
+        None,
+        None,
+        None,
+    );
+    if policy.contracts.is_empty() {
+        bail!(
+            "validator runtime contract not found: {}",
+            input.contract_id
+        );
+    }
+    if policy.contracts.len() > 1 {
+        bail!(
+            "validator runtime contract id is ambiguous across Addons: {}",
+            input.contract_id
+        );
+    }
+    let policy_entry = policy.contracts.into_iter().next().unwrap();
+    if policy_entry.contract_type != "validator" {
+        bail!(
+            "runtime contract {} is not a validator: {}",
+            input.contract_id,
+            policy_entry.contract_type
+        );
+    }
+
+    let dispatch_payload = serde_json::json!({
+        "schema_version": ADDON_VALIDATOR_DISPATCH_INPUT_SCHEMA_VERSION,
+        "subject": input.subject,
+        "input": input.input,
+        "validator": {
+            "addon_id": policy_entry.addon_id,
+            "contract_id": policy_entry.contract_id,
+            "contract_type": policy_entry.contract_type,
+            "capability_id": policy_entry.capability_id,
+            "workflow_extension_id": policy_entry.contract.workflow_extension_id,
+            "runtime": policy_entry.runtime,
+            "entrypoint": policy_entry.entrypoint,
+        },
+        "context": {
+            "provided_context": input.context,
+            "validation_policy": "Addon validators are advisory until consumed by a Forge validation gate or operator-controlled workflow step",
+        },
+        "requested_at": Utc::now().to_rfc3339(),
+    });
+    enqueue_addon_runtime_contract_dispatch(
+        store,
+        catalog,
+        input.addon_id,
+        input.contract_id,
+        dispatch_payload,
+        input.source,
+        input.dry_run,
+    )
+}
+
 pub fn execute_addon_planning_strategy(
     store: &ForgeStore,
     catalog: &AddonCatalog,
@@ -2316,6 +2443,99 @@ pub fn execute_addon_planning_strategy(
     ))
 }
 
+pub fn execute_addon_validator(
+    store: &ForgeStore,
+    catalog: &AddonCatalog,
+    input: AddonValidatorExecutionInput<'_>,
+) -> Result<AddonValidatorExecutionReport> {
+    let enqueue_report = enqueue_addon_validator_dispatch(
+        store,
+        catalog,
+        AddonValidatorDispatchInput {
+            addon_id: input.dispatch.addon_id,
+            contract_id: input.dispatch.contract_id,
+            subject: input.dispatch.subject,
+            input: input.dispatch.input.clone(),
+            context: input.dispatch.context.clone(),
+            source: input.dispatch.source,
+            dry_run: input.dispatch.dry_run,
+        },
+    )?;
+
+    if input.dispatch.dry_run || enqueue_report.blocked_count > 0 {
+        let validation = addon_validator_result_validation_not_executed(
+            if input.dispatch.dry_run {
+                "dry_run"
+            } else {
+                "dispatch_blocked"
+            },
+            if input.dispatch.dry_run {
+                "dry-run does not execute the validator worker"
+            } else {
+                "validator dispatch is blocked by runtime contract policy"
+            },
+        );
+        return Ok(addon_validator_execution_report(
+            AddonValidatorReportInput {
+                status: if input.dispatch.dry_run {
+                    "addon_validator_execution_dry_run"
+                } else {
+                    "addon_validator_dispatch_blocked"
+                },
+                subject: input.dispatch.subject,
+                contract_id: input.dispatch.contract_id,
+                worker_id: input.worker_id,
+                source: input.dispatch.source,
+                dry_run: input.dispatch.dry_run,
+                dispatch_report: enqueue_report,
+                validator_result: None,
+                validation,
+            },
+        ));
+    }
+
+    let dispatch_id = enqueue_report
+        .dispatches
+        .first()
+        .map(|dispatch| dispatch.id.clone())
+        .with_context(|| "validator dispatch report did not include dispatch entry")?;
+    let execution_report = execute_addon_runtime_contract_dispatch(
+        store,
+        catalog,
+        &dispatch_id,
+        input.worker_id,
+        input.lease_seconds,
+        false,
+    )?;
+    let validator_result = addon_validator_result_from_dispatch(&execution_report);
+    let validation = validate_addon_validator_result(validator_result.as_ref())?;
+    let status = if execution_report.completed_count == 0 {
+        "addon_validator_execution_failed"
+    } else if validation.status != "valid" {
+        "addon_validator_result_invalid"
+    } else if validation.decision == "passed" {
+        "addon_validator_passed"
+    } else if validation.decision == "failed" {
+        "addon_validator_failed"
+    } else {
+        "addon_validator_review_required"
+    };
+
+    Ok(addon_validator_execution_report(
+        AddonValidatorReportInput {
+            status,
+            subject: input.dispatch.subject,
+            contract_id: input.dispatch.contract_id,
+            worker_id: input.worker_id,
+            source: input.dispatch.source,
+            dry_run: false,
+            dispatch_report: execution_report,
+            validator_result,
+            validation,
+        },
+    ))
+}
+
 fn addon_planner_task_shape_from_atomic_task(task: &AtomicTask) -> AddonPlanningStrategyTaskShape {
     AddonPlanningStrategyTaskShape {
         id: task.id.clone(),
@@ -2396,6 +2616,137 @@ fn addon_planning_strategy_result_from_dispatch(
         .first()
         .and_then(|dispatch| dispatch.data.pointer("/runtime_processing/outcome/result"))
         .cloned()
+}
+
+fn addon_validator_result_from_dispatch(
+    report: &AddonRuntimeContractDispatchReport,
+) -> Option<serde_json::Value> {
+    report
+        .dispatches
+        .first()
+        .and_then(|dispatch| dispatch.data.pointer("/runtime_processing/outcome/result"))
+        .cloned()
+}
+
+fn addon_validator_result_validation_not_executed(
+    status: &str,
+    issue: &str,
+) -> AddonValidatorResultValidation {
+    AddonValidatorResultValidation {
+        schema_version: ADDON_VALIDATOR_RESULT_VALIDATION_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        decision: "unknown".to_string(),
+        passed: false,
+        check_count: 0,
+        reported_issue_count: 0,
+        reported_issues: Vec::new(),
+        schema_issue_count: 1,
+        schema_issues: vec![issue.to_string()],
+        result_sha256: None,
+    }
+}
+
+fn validate_addon_validator_result(
+    result: Option<&serde_json::Value>,
+) -> Result<AddonValidatorResultValidation> {
+    let Some(result) = result else {
+        return Ok(addon_validator_result_validation_not_executed(
+            "missing_result",
+            "validator dispatch did not return a result payload",
+        ));
+    };
+
+    let mut schema_issues = Vec::new();
+    let schema_version = result
+        .get("schema_version")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if !schema_version.is_empty() && schema_version != ADDON_VALIDATOR_RESULT_SCHEMA_VERSION {
+        schema_issues.push(format!(
+            "validator result schema_version should be {}",
+            ADDON_VALIDATOR_RESULT_SCHEMA_VERSION
+        ));
+    }
+
+    let decision = result
+        .get("decision")
+        .and_then(|value| value.as_str())
+        .or_else(|| result.get("status").and_then(|value| value.as_str()))
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let decision = match decision.as_str() {
+        "pass" | "passed" | "valid" | "ok" | "accepted" => "passed",
+        "fail" | "failed" | "invalid" | "rejected" => "failed",
+        "review" | "review_required" | "needs_review" | "warning" | "warn" => "review_required",
+        "skip" | "skipped" => "skipped",
+        "" => {
+            schema_issues.push("validator result must include decision or status".to_string());
+            "unknown"
+        }
+        other => {
+            schema_issues.push(format!("unsupported validator decision: {other}"));
+            "unknown"
+        }
+    }
+    .to_string();
+
+    let reported_issues = result
+        .get("issues")
+        .and_then(|value| value.as_array())
+        .map(|issues| {
+            issues
+                .iter()
+                .map(addon_validator_issue_summary)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if result.get("issues").is_some() && !result["issues"].is_array() {
+        schema_issues.push("validator result issues must be an array when present".to_string());
+    }
+    if decision == "failed" && reported_issues.is_empty() {
+        schema_issues.push("failed validator result should include at least one issue".to_string());
+    }
+
+    let check_count = result
+        .get("checks")
+        .and_then(|value| value.as_array())
+        .map(Vec::len)
+        .unwrap_or(0);
+    if result.get("checks").is_some() && !result["checks"].is_array() {
+        schema_issues.push("validator result checks must be an array when present".to_string());
+    }
+
+    let status = if schema_issues.is_empty() {
+        "valid"
+    } else {
+        "invalid"
+    };
+    Ok(AddonValidatorResultValidation {
+        schema_version: ADDON_VALIDATOR_RESULT_VALIDATION_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        decision: decision.clone(),
+        passed: decision == "passed",
+        check_count,
+        reported_issue_count: reported_issues.len(),
+        reported_issues,
+        schema_issue_count: schema_issues.len(),
+        schema_issues,
+        result_sha256: Some(hex_sha256(&serde_json::to_vec(result)?)),
+    })
+}
+
+fn addon_validator_issue_summary(issue: &serde_json::Value) -> String {
+    if let Some(text) = issue.as_str() {
+        return text.to_string();
+    }
+    if let Some(message) = issue.get("message").and_then(|value| value.as_str()) {
+        if let Some(code) = issue.get("code").and_then(|value| value.as_str()) {
+            return format!("{code}: {message}");
+        }
+        return message.to_string();
+    }
+    issue.to_string()
 }
 
 fn validate_addon_planning_strategy_result(
@@ -2654,6 +3005,23 @@ fn addon_planning_strategy_execution_report(
         strategy_result: input.strategy_result,
         validation: input.validation,
         equivalence: input.equivalence,
+    }
+}
+
+fn addon_validator_execution_report(
+    input: AddonValidatorReportInput<'_>,
+) -> AddonValidatorExecutionReport {
+    AddonValidatorExecutionReport {
+        schema_version: ADDON_VALIDATOR_EXECUTION_SCHEMA_VERSION.to_string(),
+        status: input.status.to_string(),
+        subject: input.subject.to_string(),
+        contract_id: input.contract_id.to_string(),
+        worker_id: input.worker_id.to_string(),
+        source: input.source.to_string(),
+        dry_run: input.dry_run,
+        dispatch_report: input.dispatch_report,
+        validator_result: input.validator_result,
+        validation: input.validation,
     }
 }
 
