@@ -45,7 +45,9 @@ use crate::registry::{
 };
 use crate::request::start_async_request;
 use crate::runtime::load_runtimes;
-use crate::schedule::{build_schedule_worker_status, create_daily_goal_research_workflow};
+use crate::schedule::{
+    build_schedule_worker_status, create_daily_goal_research_workflow, ScheduleWorkerStatusReport,
+};
 use crate::storage::{ForgeStore, GlobalEventWrite, StoreEvent};
 use crate::workflow::{record_product_decision, ProductDecisionInput};
 use anyhow::Result;
@@ -59,6 +61,7 @@ use std::process::Command;
 const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
 const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_board.v1";
 const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
+const INTERACTIVE_SCHEDULES_SCHEMA_VERSION: &str = "forge.interactive.schedules.v1";
 const INTERACTIVE_READINESS_SCHEMA_VERSION: &str = "forge.interactive.readiness.v1";
 const INTERACTIVE_RELEASE_GATES_SCHEMA_VERSION: &str = "forge.interactive.release_gates.v1";
 const INTERACTIVE_HARNESS_SCHEMA_VERSION: &str = "forge.interactive.harness.v1";
@@ -1252,16 +1255,83 @@ pub struct InteractiveTaskHistoryEvent {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InteractiveSchedulePanel {
+    pub schema_version: String,
     pub status: String,
+    pub executor: String,
+    pub observed_at: String,
+    pub ttl_seconds: u64,
+    pub scanned_workflows: usize,
     pub due_workflows: usize,
     pub runnable_due_workflows: usize,
     pub blocked_due_workflows: usize,
+    pub idle_workflows: usize,
+    pub paused_or_stopped_loop_workflows: usize,
+    pub scheduled_nodes: usize,
     pub cron_nodes: usize,
     pub wait_until_nodes: usize,
     pub delay_nodes: usize,
     pub scale_to_zero_workflows: usize,
+    pub worker_pool: InteractiveScheduleWorkerPool,
+    pub assignment_plan: InteractiveScheduleAssignmentPlan,
+    pub assigned_workflows: Vec<InteractiveScheduleAssignment>,
+    pub queued_workflows: Vec<InteractiveScheduleAssignment>,
+    pub sleep_until_next_wakeup: bool,
     pub next_wakeup_at: Option<String>,
     pub sleep_seconds: u64,
+    pub sleep_mode: String,
+    pub sleep_reason: String,
+    pub backpressure_active: bool,
+    pub queued_due_workflows: usize,
+    pub backpressure_reason: String,
+    pub cancellation_supported: bool,
+    pub lease_ttl_seconds: u64,
+    pub cancellation_safe_points: Vec<String>,
+    pub workflows: Vec<InteractiveScheduleWorkflow>,
+    pub commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveScheduleWorkerPool {
+    pub max_workers: usize,
+    pub available_workers: usize,
+    pub assignable_due_workflows: usize,
+    pub worker_kind: String,
+    pub deterministic: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveScheduleAssignmentPlan {
+    pub schema_version: String,
+    pub max_workers: usize,
+    pub assigned_count: usize,
+    pub queued_count: usize,
+    pub deterministic_ordering: bool,
+    pub ordering_key: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveScheduleAssignment {
+    pub workflow_id: String,
+    pub goal: String,
+    pub schedule_task_id: String,
+    pub due_nodes: usize,
+    pub next_run_at: Option<String>,
+    pub lease_scope: String,
+    pub wave: usize,
+    pub queue_position: usize,
+    pub executor: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveScheduleWorkflow {
+    pub workflow_id: String,
+    pub goal: String,
+    pub status: String,
+    pub due_nodes: usize,
+    pub next_wakeup_at: Option<String>,
+    pub scale_to_zero_eligible: bool,
+    pub blocked_loop_task_id: Option<String>,
+    pub blocked_loop_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1568,55 +1638,27 @@ pub fn build_interactive_home_with_options(
         format!("usable runtimes: {}", runtimes.usable.join(", "))
     };
 
-    let scheduler_worker = build_schedule_worker_status(store, "forge-scheduler", 1, 300).ok();
-    let scheduler_worker_status = scheduler_worker
-        .as_ref()
-        .map(|ws| {
-            let s = &ws.summary;
-            let due = s.runnable_due_workflows;
-            let idle = s.idle_workflows;
-            let capacity = ws.worker_pool.available_workers;
-            let sleep = if ws.sleep.sleep_until_next_wakeup {
-                ws.sleep
-                    .next_wakeup_at
-                    .as_deref()
-                    .unwrap_or("now")
-                    .to_string()
-            } else {
-                "immediate".to_string()
-            };
-            format!("{due} due, {idle} idle, capacity {capacity}, next {sleep}")
-        })
-        .unwrap_or_else(|| "no scheduled workflows".to_string());
-    let schedule_panel = scheduler_worker
-        .as_ref()
-        .map(|ws| {
-            let summary = &ws.summary;
-            InteractiveSchedulePanel {
-                status: ws.status.clone(),
-                due_workflows: summary.due_workflows,
-                runnable_due_workflows: summary.runnable_due_workflows,
-                blocked_due_workflows: summary.blocked_due_workflows,
-                cron_nodes: summary.cron_nodes,
-                wait_until_nodes: summary.wait_until_nodes,
-                delay_nodes: summary.delay_nodes,
-                scale_to_zero_workflows: summary.scale_to_zero_workflows,
-                next_wakeup_at: ws.sleep.next_wakeup_at.clone(),
-                sleep_seconds: ws.sleep.sleep_seconds,
-            }
-        })
-        .unwrap_or_else(|| InteractiveSchedulePanel {
-            status: "no_scheduled_workflows".to_string(),
-            due_workflows: 0,
-            runnable_due_workflows: 0,
-            blocked_due_workflows: 0,
-            cron_nodes: 0,
-            wait_until_nodes: 0,
-            delay_nodes: 0,
-            scale_to_zero_workflows: 0,
-            next_wakeup_at: None,
-            sleep_seconds: 0,
-        });
+    let schedule_panel = build_interactive_schedules(store);
+    let scheduler_worker_status = if schedule_panel.scanned_workflows > 0
+        || schedule_panel.due_workflows > 0
+        || schedule_panel.next_wakeup_at.is_some()
+    {
+        let due = schedule_panel.runnable_due_workflows;
+        let idle = schedule_panel.idle_workflows;
+        let capacity = schedule_panel.worker_pool.available_workers;
+        let sleep = if schedule_panel.sleep_until_next_wakeup {
+            schedule_panel
+                .next_wakeup_at
+                .as_deref()
+                .unwrap_or("now")
+                .to_string()
+        } else {
+            "immediate".to_string()
+        };
+        format!("{due} due, {idle} idle, capacity {capacity}, next {sleep}")
+    } else {
+        "no scheduled workflows".to_string()
+    };
     let workflow_focus = workflows
         .workflows
         .iter()
@@ -1816,6 +1858,7 @@ pub fn build_interactive_home_with_options(
                 "forge inspect <workflow-id>".to_string(),
                 "forge request list".to_string(),
                 "forge schedule list".to_string(),
+                "forge interactive schedules --output json".to_string(),
                 "forge schedule worker-status".to_string(),
                 "forge interactive harness --output json".to_string(),
                 "forge harness headroom-plan --executor codex --project-root . --output json"
@@ -1842,6 +1885,7 @@ pub fn build_interactive_home_with_options(
                 "/artifacts".to_string(),
                 "/task-board".to_string(),
                 "/readiness".to_string(),
+                "/schedules".to_string(),
                 "/addons".to_string(),
                 "/milestone".to_string(),
                 "/sync".to_string(),
@@ -1977,7 +2021,7 @@ pub fn build_operational_tui_smoke(
                 "{} events; {} scheduled workflows",
                 dashboard.event_count, dashboard.schedule_workflow_count
             ),
-            "forge interactive structured-logs --output json",
+            "forge interactive schedules --output json",
         ),
         operational_tui_smoke_check(
             "shows_addons_and_capabilities",
@@ -2053,6 +2097,7 @@ pub fn build_operational_tui_smoke(
             "forge interactive home --output json".to_string(),
             "forge interactive operational-cockpit --output json".to_string(),
             "forge interactive task-board --output json".to_string(),
+            "forge interactive schedules --output json".to_string(),
             "forge interactive structured-logs --output json".to_string(),
             "forge interactive addon-capabilities --output json".to_string(),
             "forge cost ledger --output json".to_string(),
@@ -5717,11 +5762,178 @@ pub fn build_interactive_workflow_dag(store: &ForgeStore) -> Result<InteractiveW
     build_workflow_dag_panel(store, &workflows.workflows)
 }
 
+pub fn build_interactive_schedules(store: &ForgeStore) -> InteractiveSchedulePanel {
+    build_schedule_worker_status(store, "forge-scheduler", 1, 300)
+        .map(interactive_schedule_panel_from_worker_status)
+        .unwrap_or_else(|_| empty_interactive_schedule_panel())
+}
+
 pub fn build_interactive_structured_logs(
     store: &ForgeStore,
 ) -> Result<InteractiveStructuredLogsPanel> {
     let timeline = build_global_event_timeline(store, None, None, None, None, Some(20), None)?;
     Ok(build_structured_logs_panel(&timeline))
+}
+
+fn interactive_schedule_panel_from_worker_status(
+    report: ScheduleWorkerStatusReport,
+) -> InteractiveSchedulePanel {
+    let summary = &report.summary;
+    let assignment_plan = &report.worker_pool.assignment_plan;
+    let assigned_workflows = assignment_plan
+        .assigned
+        .iter()
+        .map(interactive_schedule_assignment)
+        .collect::<Vec<_>>();
+    let queued_workflows = assignment_plan
+        .queued
+        .iter()
+        .map(interactive_schedule_assignment)
+        .collect::<Vec<_>>();
+    InteractiveSchedulePanel {
+        schema_version: INTERACTIVE_SCHEDULES_SCHEMA_VERSION.to_string(),
+        status: report.status.clone(),
+        executor: report.executor.clone(),
+        observed_at: report.observed_at.clone(),
+        ttl_seconds: report.ttl_seconds,
+        scanned_workflows: summary.scanned_workflows,
+        due_workflows: summary.due_workflows,
+        runnable_due_workflows: summary.runnable_due_workflows,
+        blocked_due_workflows: summary.blocked_due_workflows,
+        idle_workflows: summary.idle_workflows,
+        paused_or_stopped_loop_workflows: summary.paused_or_stopped_loop_workflows,
+        scheduled_nodes: summary.scheduled_nodes,
+        cron_nodes: summary.cron_nodes,
+        wait_until_nodes: summary.wait_until_nodes,
+        delay_nodes: summary.delay_nodes,
+        scale_to_zero_workflows: summary.scale_to_zero_workflows,
+        worker_pool: InteractiveScheduleWorkerPool {
+            max_workers: report.worker_pool.max_workers,
+            available_workers: report.worker_pool.available_workers,
+            assignable_due_workflows: report.worker_pool.assignable_due_workflows,
+            worker_kind: report.worker_pool.worker_kind.clone(),
+            deterministic: report.worker_pool.deterministic,
+        },
+        assignment_plan: InteractiveScheduleAssignmentPlan {
+            schema_version: assignment_plan.schema_version.clone(),
+            max_workers: assignment_plan.max_workers,
+            assigned_count: assignment_plan.assigned.len(),
+            queued_count: assignment_plan.queued.len(),
+            deterministic_ordering: assignment_plan.deterministic_ordering,
+            ordering_key: assignment_plan.ordering_key.clone(),
+        },
+        assigned_workflows,
+        queued_workflows,
+        sleep_until_next_wakeup: report.sleep.sleep_until_next_wakeup,
+        next_wakeup_at: report.sleep.next_wakeup_at.clone(),
+        sleep_seconds: report.sleep.sleep_seconds,
+        sleep_mode: report.sleep.mode.clone(),
+        sleep_reason: report.sleep.reason.clone(),
+        backpressure_active: report.backpressure.active,
+        queued_due_workflows: report.backpressure.queued_due_workflows,
+        backpressure_reason: report.backpressure.reason.clone(),
+        cancellation_supported: report.cancellation.supported,
+        lease_ttl_seconds: report.cancellation.lease_ttl_seconds,
+        cancellation_safe_points: report.cancellation.safe_points.clone(),
+        workflows: report
+            .workflows
+            .iter()
+            .map(|workflow| InteractiveScheduleWorkflow {
+                workflow_id: workflow.workflow_id.clone(),
+                goal: workflow.goal.clone(),
+                status: workflow.status.clone(),
+                due_nodes: workflow.due_nodes,
+                next_wakeup_at: workflow.next_wakeup_at.clone(),
+                scale_to_zero_eligible: workflow.scale_to_zero_eligible,
+                blocked_loop_task_id: workflow.blocked_loop_task_id.clone(),
+                blocked_loop_state: workflow.blocked_loop_state.clone(),
+            })
+            .collect(),
+        commands: vec![
+            "forge interactive schedules --output json".to_string(),
+            "forge schedule worker-status --output json".to_string(),
+            "forge schedule scan-due --output json".to_string(),
+            "forge schedule list --output json".to_string(),
+            "forge interactive structured-logs --output json".to_string(),
+        ],
+    }
+}
+
+fn interactive_schedule_assignment(
+    assignment: &crate::schedule::ScheduleWorkerAssignment,
+) -> InteractiveScheduleAssignment {
+    InteractiveScheduleAssignment {
+        workflow_id: assignment.workflow_id.clone(),
+        goal: assignment.goal.clone(),
+        schedule_task_id: assignment.schedule_task_id.clone(),
+        due_nodes: assignment.due_nodes,
+        next_run_at: assignment.next_run_at.clone(),
+        lease_scope: assignment.lease_scope.clone(),
+        wave: assignment.wave,
+        queue_position: assignment.queue_position,
+        executor: assignment.executor.clone(),
+    }
+}
+
+fn empty_interactive_schedule_panel() -> InteractiveSchedulePanel {
+    InteractiveSchedulePanel {
+        schema_version: INTERACTIVE_SCHEDULES_SCHEMA_VERSION.to_string(),
+        status: "no_scheduled_workflows".to_string(),
+        executor: "forge-scheduler".to_string(),
+        observed_at: String::new(),
+        ttl_seconds: 300,
+        scanned_workflows: 0,
+        due_workflows: 0,
+        runnable_due_workflows: 0,
+        blocked_due_workflows: 0,
+        idle_workflows: 0,
+        paused_or_stopped_loop_workflows: 0,
+        scheduled_nodes: 0,
+        cron_nodes: 0,
+        wait_until_nodes: 0,
+        delay_nodes: 0,
+        scale_to_zero_workflows: 0,
+        worker_pool: InteractiveScheduleWorkerPool {
+            max_workers: 1,
+            available_workers: 1,
+            assignable_due_workflows: 0,
+            worker_kind: "local_scheduler_worker".to_string(),
+            deterministic: true,
+        },
+        assignment_plan: InteractiveScheduleAssignmentPlan {
+            schema_version: "forge.schedule.assignment_plan.v1".to_string(),
+            max_workers: 1,
+            assigned_count: 0,
+            queued_count: 0,
+            deterministic_ordering: true,
+            ordering_key: "workflow_id".to_string(),
+        },
+        assigned_workflows: Vec::new(),
+        queued_workflows: Vec::new(),
+        sleep_until_next_wakeup: false,
+        next_wakeup_at: None,
+        sleep_seconds: 0,
+        sleep_mode: "idle".to_string(),
+        sleep_reason: "no scheduled workflows".to_string(),
+        backpressure_active: false,
+        queued_due_workflows: 0,
+        backpressure_reason: "no due workflows".to_string(),
+        cancellation_supported: true,
+        lease_ttl_seconds: 300,
+        cancellation_safe_points: vec![
+            "before_scan".to_string(),
+            "before_lease".to_string(),
+            "before_run_due".to_string(),
+        ],
+        workflows: Vec::new(),
+        commands: vec![
+            "forge interactive schedules --output json".to_string(),
+            "forge schedule worker-status --output json".to_string(),
+            "forge schedule scan-due --output json".to_string(),
+            "forge schedule list --output json".to_string(),
+            "forge interactive structured-logs --output json".to_string(),
+        ],
+    }
 }
 
 pub fn build_interactive_addon_capabilities_default(
@@ -7799,6 +8011,39 @@ pub fn render_interactive_workflow_dag(panel: &InteractiveWorkflowDagPanel) -> S
     )
 }
 
+pub fn render_interactive_schedules(panel: &InteractiveSchedulePanel) -> String {
+    format!(
+        "Schedules: {status}; worker {executor}; scanned {scanned}, due {due}, runnable {runnable}, blocked {blocked}, idle {idle}, cron {cron}, wait_until {wait_until}, delay {delay}, scale_to_zero {scale_to_zero}, next {next}, sleep {sleep_seconds}s\nWorker pool: max {max_workers}, available {available_workers}, assignable {assignable}, queued {queued}, backpressure {backpressure}, deterministic {deterministic}\nAssignments: assigned {assigned}; queued {queued_workflows}\nWorkflows: {workflows}\nCommands: {commands}\n",
+        status = panel.status,
+        executor = panel.executor,
+        scanned = panel.scanned_workflows,
+        due = panel.due_workflows,
+        runnable = panel.runnable_due_workflows,
+        blocked = panel.blocked_due_workflows,
+        idle = panel.idle_workflows,
+        cron = panel.cron_nodes,
+        wait_until = panel.wait_until_nodes,
+        delay = panel.delay_nodes,
+        scale_to_zero = panel.scale_to_zero_workflows,
+        next = panel.next_wakeup_at.as_deref().unwrap_or("none"),
+        sleep_seconds = panel.sleep_seconds,
+        max_workers = panel.worker_pool.max_workers,
+        available_workers = panel.worker_pool.available_workers,
+        assignable = panel.worker_pool.assignable_due_workflows,
+        queued = panel.queued_due_workflows,
+        backpressure = panel.backpressure_active,
+        deterministic = panel.worker_pool.deterministic,
+        assigned = render_schedule_assignment_summary(&panel.assigned_workflows),
+        queued_workflows = render_schedule_assignment_summary(&panel.queued_workflows),
+        workflows = render_schedule_workflow_summary(panel),
+        commands = if panel.commands.is_empty() {
+            "none".to_string()
+        } else {
+            panel.commands.join(" | ")
+        },
+    )
+}
+
 pub fn render_interactive_structured_logs(panel: &InteractiveStructuredLogsPanel) -> String {
     let next_cursor = panel
         .next_cursor
@@ -8425,7 +8670,7 @@ fn build_ui_composition_panel(
                     "timeline_renderer",
                     "standard",
                     "half",
-                    vec!["forge schedule worker-status --output json".to_string()],
+                    vec!["forge interactive schedules --output json".to_string()],
                 ),
                 core_ui_widget(
                     "event_panel",
@@ -8728,6 +8973,51 @@ fn render_structured_log_summary(panel: &InteractiveStructuredLogsPanel) -> Stri
         })
         .collect::<Vec<_>>()
         .join(" | ")
+}
+
+fn render_schedule_assignment_summary(assignments: &[InteractiveScheduleAssignment]) -> String {
+    if assignments.is_empty() {
+        "none".to_string()
+    } else {
+        assignments
+            .iter()
+            .take(5)
+            .map(|assignment| {
+                format!(
+                    "{} task {} due {} wave {} pos {}",
+                    assignment.workflow_id,
+                    assignment.schedule_task_id,
+                    assignment.due_nodes,
+                    assignment.wave,
+                    assignment.queue_position
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+}
+
+fn render_schedule_workflow_summary(panel: &InteractiveSchedulePanel) -> String {
+    if panel.workflows.is_empty() {
+        "none".to_string()
+    } else {
+        panel
+            .workflows
+            .iter()
+            .take(8)
+            .map(|workflow| {
+                format!(
+                    "{} {} due {}, next {}, scale_to_zero {}",
+                    workflow.workflow_id,
+                    workflow.status,
+                    workflow.due_nodes,
+                    workflow.next_wakeup_at.as_deref().unwrap_or("none"),
+                    workflow.scale_to_zero_eligible
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
 }
 
 fn render_addon_capability_summary(panel: &InteractiveAddonCapabilityPanel) -> String {
@@ -9847,6 +10137,14 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
             "low",
         ),
         slash(
+            "/schedules",
+            "Schedules",
+            "Show scheduled workflows, due work, worker capacity, sleep plan and deterministic assignment queue.",
+            &["forge", "interactive", "schedules"],
+            false,
+            "low",
+        ),
+        slash(
             "/addons",
             "Addons/Capabilities",
             "Show Addons, capabilities, permission gates, runtime contracts, views and dispatch state.",
@@ -10684,6 +10982,10 @@ fn repl_focus_panels() -> Vec<InteractiveReplFocusPanel> {
             title: "Structured logs",
         },
         InteractiveReplFocusPanel {
+            panel_id: "schedule_panel",
+            title: "Schedules",
+        },
+        InteractiveReplFocusPanel {
             panel_id: "permissions_panel",
             title: "Permissions",
         },
@@ -10762,6 +11064,10 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
             let panel = build_interactive_structured_logs(store)?;
             Ok(render_interactive_structured_logs(&panel))
         }
+        "schedule_panel" => {
+            let panel = build_interactive_schedules(store);
+            Ok(render_interactive_schedules(&panel))
+        }
         "permissions_panel" => {
             let panel = build_interactive_permissions(store)?;
             Ok(render_interactive_permissions(&panel))
@@ -10820,6 +11126,11 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
         "/logs" => {
             let panel = build_interactive_structured_logs(store)?;
             println!("{}", render_interactive_structured_logs(&panel));
+            Ok(true)
+        }
+        "/schedules" => {
+            let panel = build_interactive_schedules(store);
+            println!("{}", render_interactive_schedules(&panel));
             Ok(true)
         }
         "/permissions" => {

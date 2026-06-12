@@ -39382,6 +39382,242 @@ fn mcp_schedule_worker_status_tool_exposes_native_scheduler_worker_surface() {
 }
 
 #[test]
+fn interactive_schedules_command_and_mcp_surface_are_dedicated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let idle = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "future schedule",
+            "--cron",
+            "0 8 * * *",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let idle_json: Value = serde_json::from_slice(&idle).unwrap();
+    let idle_workflow_id = idle_json["workflow_id"].as_str().unwrap();
+
+    let due = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "create-daily-goal-research",
+            "--goal",
+            "due schedule",
+            "--cron",
+            "0 8 * * *",
+            "--timezone",
+            "America/Sao_Paulo",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let due_json: Value = serde_json::from_slice(&due).unwrap();
+    let due_workflow_id = due_json["workflow_id"].as_str().unwrap();
+    let due_schedule_task_id = due_json["workflow"]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["schedule"].is_object())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "schedule",
+            "update",
+            "--workflow",
+            due_workflow_id,
+            "--task",
+            due_schedule_task_id,
+            "--next-run-at",
+            "2000-01-01T00:00:00Z",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "schedules",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.interactive.schedules.v1");
+    assert_eq!(json["status"], "ready_due_work");
+    assert_eq!(json["executor"], "forge-scheduler");
+    assert_eq!(json["due_workflows"], 1);
+    assert_eq!(json["runnable_due_workflows"], 1);
+    assert_eq!(json["idle_workflows"], 1);
+    assert_eq!(json["cron_nodes"], 2);
+    assert_eq!(json["worker_pool"]["max_workers"], 1);
+    assert_eq!(json["worker_pool"]["assignable_due_workflows"], 1);
+    assert_eq!(
+        json["assignment_plan"]["schema_version"],
+        "forge.schedule.assignment_plan.v1"
+    );
+    assert_eq!(json["assigned_workflows"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        json["assigned_workflows"][0]["workflow_id"],
+        due_workflow_id
+    );
+    assert_eq!(json["queued_workflows"].as_array().unwrap().len(), 0);
+    assert!(json["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|workflow| workflow["workflow_id"] == due_workflow_id
+            && workflow["status"] == "due"
+            && workflow["due_nodes"] == 1));
+    assert!(json["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|workflow| workflow["workflow_id"] == idle_workflow_id
+            && workflow["scale_to_zero_eligible"] == true));
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge schedule worker-status --output json"
+        )));
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("forge schedule scan-due --output json")));
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "schedules",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Schedules"));
+    assert!(text.contains("ready_due_work"));
+    assert!(text.contains("worker forge-scheduler"));
+    assert!(text.contains(due_workflow_id));
+    assert!(text.contains("assigned"));
+    assert!(text.contains("forge schedule scan-due --output json"));
+
+    let home_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["schedule_panel"]["schema_version"],
+        "forge.interactive.schedules.v1"
+    );
+    assert!(home["dashboard"]["quick_actions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/schedules")));
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |region| region["widgets"].as_array().unwrap().iter().any(|widget| {
+                widget["widget_id"] == "schedule_panel"
+                    && widget["commands"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!(
+                            "forge interactive schedules --output json"
+                        ))
+            })
+        ));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.schedules");
+    assert_eq!(tool["output_schema"], "forge.interactive.schedules.v1");
+    assert!(tool["description"].as_str().unwrap().contains("schedules"));
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.schedules"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.schedules.v1"
+    );
+    assert_eq!(mcp_json["result"]["due_workflows"], 1);
+    assert_eq!(
+        mcp_json["result"]["assigned_workflows"][0]["workflow_id"],
+        due_workflow_id
+    );
+}
+
+#[test]
 fn schedule_create_cli_models_daily_goal_research_with_multiple_goals() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -46591,6 +46827,12 @@ fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("forge interactive home --output json")));
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge interactive schedules --output json"
+        )));
     assert!(json["commands"]
         .as_array()
         .unwrap()

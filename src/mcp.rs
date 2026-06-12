@@ -98,9 +98,10 @@ use crate::interactive::{
     build_interactive_home_with_options, build_interactive_identity,
     build_interactive_operational_cockpit, build_interactive_patch_workbench,
     build_interactive_permissions, build_interactive_readiness, build_interactive_release_gates,
-    build_interactive_sessions, build_interactive_structured_logs, build_interactive_task_board,
-    build_interactive_workflow_dag, route_interactive_input, slash_command_catalog,
-    InteractiveHarnessOptions, InteractiveHomeOptions, InteractiveSessionsOptions,
+    build_interactive_schedules, build_interactive_sessions, build_interactive_structured_logs,
+    build_interactive_task_board, build_interactive_workflow_dag, route_interactive_input,
+    slash_command_catalog, InteractiveHarnessOptions, InteractiveHomeOptions,
+    InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -3286,6 +3287,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.workflow_dag.v1",
                 &["forge", "interactive", "workflow-dag", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.schedules",
+                "Inspect Interactive Schedules",
+                "Return Forge interactive schedules with due workflows, scheduler worker capacity, deterministic assignment queues, sleep/backpressure/cancellation state and observed scheduled workflow rows without mutating state.",
+                object_schema(&[], &[]),
+                "forge.interactive.schedules.v1",
+                &["forge", "interactive", "schedules", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7575,6 +7585,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         "forge.interactive.workflow_dag" => {
             serde_json::to_value(build_interactive_workflow_dag(store)?)?
         }
+        "forge.interactive.schedules" => serde_json::to_value(build_interactive_schedules(store))?,
         "forge.interactive.structured_logs" => {
             serde_json::to_value(build_interactive_structured_logs(store)?)?
         }
