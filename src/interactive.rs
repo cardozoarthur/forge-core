@@ -14627,6 +14627,12 @@ fn build_navigation_panel() -> InteractiveNavigationPanel {
                 "global",
                 "Cycle compact, detailed and focus display modes",
             ),
+            navigation_key(
+                "r",
+                "refresh",
+                "global",
+                "Refresh the advanced cockpit frame",
+            ),
         ],
     }
 }
@@ -19069,6 +19075,269 @@ fn anvil_mark() -> &'static str {
     "    ▄███████████████▄\n  ▄██▓▓▓▓▓▓▓▓▓▓▓▓▓▓██▄\n ▄█▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█▄\n ██▓▓▓▓▓▓▓   ████   ▓▓▓▓▓▓▓██\n ██▓▓▓▓▓▓▓▓████████▓▓▓▓▓▓▓▓██\n ▀█▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█▀\n  ▀██▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓██▀\n    ▀████████████████████▀\n      ██  ████████  ██\n      ██    ████    ██\n      ██    ████    ██"
 }
 
+fn render_interactive_tui_frame(
+    report: &InteractiveHomeReport,
+    state: &InteractiveReplState,
+) -> String {
+    let width = tui_terminal_width();
+    let dashboard = &report.dashboard;
+    let guided = &dashboard.guided_cockpit_panel;
+    let schedule = &dashboard.schedule_panel;
+    let cost = &dashboard.cost_panel;
+    let addon = &dashboard.addon_capability_panel;
+    let improvement = &dashboard.improvement_loop_panel;
+    let mutation = &dashboard.workflow_mutation_panel;
+    let sidebar = &dashboard.workflow_sidebar_panel;
+    let event_runtime = &dashboard.event_runtime_panel;
+    let title = format!(
+        "Forge advanced operational TUI | Forge operational TUI | {} | {}/{} steps | current {}",
+        guided.status, guided.completed_step_count, guided.total_step_count, guided.current_step_id
+    );
+    let focus_line = state.focus_status_line();
+    let key_line = "j/k focus | enter open | r refresh | m mode | t theme | /help | q quit";
+    let compatibility_lines = vec![
+        format!(
+            "Active workflows: {}; Active runs: {}; focus {}",
+            sidebar.workflow_count, dashboard.active_runs, dashboard.workflow_focus.len()
+        ),
+        format!(
+            "Events/schedules: events {}, scheduled {}, due {}; Addons/capabilities: addons {}, caps {}",
+            dashboard.event_panel.total_event_count,
+            dashboard.scheduled_workflows,
+            schedule.due_workflows,
+            addon.enabled_addon_count,
+            addon.capability_count
+        ),
+        format!(
+            "Costs: estimated ${:.4}, observed ${:.4}; Handoffs/approvals: ready {}, pending {}",
+            cost.estimated_task_cost_total_usd,
+            cost.observed_event_cost_total_usd,
+            dashboard.task_board_panel.ready_handoffs,
+            dashboard.pending_approvals
+        ),
+        format!(
+            "Operational cockpit: {}; {}; active work {}, ready handoffs {}, human waits {}",
+            dashboard.operational_cockpit_panel.attention_level,
+            dashboard.operational_cockpit_panel.priority_summary,
+            dashboard.operational_cockpit_panel.active_work_count,
+            dashboard.operational_cockpit_panel.ready_handoff_count,
+            dashboard.operational_cockpit_panel.pending_human_wait_count
+        ),
+        format!(
+            "Task board: workflows {}, tasks {}, ready handoffs {}, human waits {}",
+            dashboard.task_board_panel.workflow_count,
+            dashboard.task_board_panel.task_count,
+            dashboard.task_board_panel.ready_handoffs,
+            dashboard.task_board_panel.pending_human_interactions
+        ),
+        "Smoke test: forge smoke operational-tui --output json | Quick actions: /status /cockpit /task-board".to_string(),
+    ];
+
+    let workflows = vec![
+        format!(
+            "workflows {} | active {} | attention {}",
+            sidebar.workflow_count, sidebar.active_count, sidebar.attention_count
+        ),
+        format!(
+            "runs {} | selected {}",
+            dashboard.active_runs,
+            empty_as(sidebar.selected_workflow_id.as_str(), "none")
+        ),
+        format!(
+            "groups {} | event {} | scheduled {} | done {}",
+            sidebar.group_count,
+            sidebar.event_driven_count,
+            sidebar.scheduled_count,
+            sidebar.completed_count
+        ),
+        format!(
+            "release {} | replacement {}%",
+            dashboard.release_gates_panel.status, dashboard.replacement_cli_panel.readiness_percent
+        ),
+        format!("core boundary {}", dashboard.core_boundary_panel.status),
+        format!(
+            "shells {} | brain {}",
+            dashboard.shell_entrypoints.join(", "),
+            dashboard.brain_router
+        ),
+    ];
+    let execution = vec![
+        format!(
+            "guided {} | blocked {} | confirms {}",
+            guided.visual_mode, guided.blocked_step_count, guided.confirmation_step_count
+        ),
+        format!(
+            "tasks {} | ready handoffs {} | human waits {}",
+            dashboard.task_board_panel.task_count,
+            dashboard.task_board_panel.ready_handoffs,
+            dashboard.task_board_panel.pending_human_interactions
+        ),
+        format!(
+            "approvals {} | validation failures {}",
+            dashboard.pending_approvals, dashboard.validation_failures
+        ),
+        format!(
+            "mutation proposals {}/{} | mutable {}",
+            mutation.pending_modifier_proposal_count,
+            mutation.applied_modifier_proposal_count,
+            mutation.mutable_workflow_count
+        ),
+        format!("next {}", guided.next_command),
+        "open focused pane with enter".to_string(),
+    ];
+    let realtime = vec![
+        format!(
+            "events visible {}/{} | runtime pending {}",
+            dashboard.event_panel.visible_event_count,
+            dashboard.event_panel.total_event_count,
+            event_runtime.pending_event_count
+        ),
+        format!(
+            "schedules due {} | runnable {} | next {}",
+            schedule.due_workflows,
+            schedule.runnable_due_workflows,
+            schedule.next_wakeup_at.as_deref().unwrap_or("none")
+        ),
+        format!(
+            "cost est ${:.4} | observed ${:.4} | ai {} | deterministic {}",
+            cost.estimated_task_cost_total_usd,
+            cost.observed_event_cost_total_usd,
+            cost.ai_node_count,
+            cost.deterministic_node_count
+        ),
+        format!(
+            "addons {} enabled | caps {} | queued {}",
+            addon.enabled_addon_count, addon.capability_count, addon.queued_dispatch_count
+        ),
+        format!(
+            "improve {} candidates | high {} | parallel {}",
+            improvement.candidate_count,
+            improvement.high_candidate_count,
+            improvement.parallel_ready_candidate_count
+        ),
+        format!("logs {}", dashboard.structured_logs_panel.log_count),
+    ];
+    let actions = vec![
+        format!("focus {}", state.focused_panel().title),
+        "slash /cockpit /task-board /workflow-mutation /schedules /addons /costs".to_string(),
+        format!(
+            "quick {}",
+            tui_join_limited(&dashboard.quick_actions, 3, "none")
+        ),
+        format!(
+            "attention {}",
+            tui_join_limited(&dashboard.attention_actions, 2, "none")
+        ),
+        format!(
+            "commands {}",
+            tui_join_limited(&dashboard.useful_next_commands, 2, "none")
+        ),
+    ];
+
+    let mut lines = vec![
+        "\x1b[2J\x1b[H".to_string(),
+        tui_full_line(&title, width),
+        tui_full_line(&focus_line, width),
+        tui_full_line(key_line, width),
+        tui_full_line(
+            "Type an objective to route it, or use slash commands for exact panels.",
+            width,
+        ),
+    ];
+    for line in compatibility_lines {
+        lines.push(tui_full_line(&line, width));
+    }
+
+    if width >= 110 {
+        let gap = " ";
+        let column_width = ((width - 2) / 3).max(32);
+        let boxes = [
+            tui_box("Workflows", &workflows, column_width, 8),
+            tui_box("Execution", &execution, column_width, 8),
+            tui_box("Realtime", &realtime, column_width, 8),
+        ];
+        for ((left, center), right) in boxes[0].iter().zip(&boxes[1]).zip(&boxes[2]) {
+            lines.push(format!("{}{}{}{}{}", left, gap, center, gap, right));
+        }
+    } else {
+        lines.extend(tui_box("Workflows", &workflows, width, 8));
+        lines.extend(tui_box("Execution", &execution, width, 8));
+        lines.extend(tui_box("Realtime", &realtime, width, 8));
+    }
+
+    lines.extend(tui_box("Safe Actions", &actions, width, 7));
+    lines.join("\n")
+}
+
+fn tui_terminal_width() -> usize {
+    env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|width| width.clamp(80, 160))
+        .unwrap_or(120)
+}
+
+fn tui_full_line(text: &str, width: usize) -> String {
+    format!("| {} |", tui_pad(text, width.saturating_sub(4)))
+}
+
+fn tui_box(title: &str, lines: &[String], width: usize, height: usize) -> Vec<String> {
+    let width = width.max(24);
+    let inner = width.saturating_sub(4);
+    let mut rendered = Vec::with_capacity(height + 2);
+    rendered.push(tui_border(title, width));
+    for line in lines.iter().take(height) {
+        rendered.push(format!("| {} |", tui_pad(line, inner)));
+    }
+    for _ in lines.len()..height {
+        rendered.push(format!("| {} |", " ".repeat(inner)));
+    }
+    rendered.push(format!("+{}+", "-".repeat(width.saturating_sub(2))));
+    rendered
+}
+
+fn tui_border(title: &str, width: usize) -> String {
+    let label = format!(" {title} ");
+    let fill = width.saturating_sub(label.len() + 2);
+    format!("+{}{}+", label, "-".repeat(fill))
+}
+
+fn tui_pad(text: &str, width: usize) -> String {
+    let clipped = tui_clip(text, width);
+    format!("{clipped:<width$}")
+}
+
+fn tui_clip(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    if width <= 3 {
+        return text.chars().take(width).collect();
+    }
+    let mut clipped = text.chars().take(width - 3).collect::<String>();
+    clipped.push_str("...");
+    clipped
+}
+
+fn tui_join_limited(items: &[String], limit: usize, fallback: &str) -> String {
+    if items.is_empty() {
+        return fallback.to_string();
+    }
+    let mut selected = items.iter().take(limit).cloned().collect::<Vec<_>>();
+    if items.len() > limit {
+        selected.push(format!("+{} more", items.len() - limit));
+    }
+    selected.join(" | ")
+}
+
+fn empty_as<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    if value.trim().is_empty() {
+        fallback
+    } else {
+        value
+    }
+}
+
 pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
     if !std::io::stdin().is_terminal() {
         let store = ForgeStore::open(store_path)?;
@@ -19080,8 +19349,7 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
     let store = ForgeStore::open(store_path)?;
     let report = build_interactive_home(&store)?;
     let mut repl_state = InteractiveReplState::from_home(&report);
-    println!("{}", render_interactive_home(&report));
-    println!("{}", repl_state.focus_status_line());
+    println!("{}", render_interactive_tui_frame(&report, &repl_state));
 
     loop {
         print!("forge> ");
@@ -19393,14 +19661,32 @@ fn dispatch_repl_navigation_key(
     match input {
         "j" => {
             state.focus_next();
-            Ok(Some(state.focus_status_line()))
+            Ok(Some(render_interactive_tui_frame(
+                &build_interactive_home(store)?,
+                state,
+            )))
         }
         "k" => {
             state.focus_previous();
-            Ok(Some(state.focus_status_line()))
+            Ok(Some(render_interactive_tui_frame(
+                &build_interactive_home(store)?,
+                state,
+            )))
         }
-        "m" => Ok(Some(state.cycle_display_mode())),
-        "t" => Ok(Some(state.cycle_theme())),
+        "m" => {
+            let message = state.cycle_display_mode();
+            let frame = render_interactive_tui_frame(&build_interactive_home(store)?, state);
+            Ok(Some(format!("{message}\n{frame}")))
+        }
+        "t" => {
+            let message = state.cycle_theme();
+            let frame = render_interactive_tui_frame(&build_interactive_home(store)?, state);
+            Ok(Some(format!("{message}\n{frame}")))
+        }
+        "r" => Ok(Some(render_interactive_tui_frame(
+            &build_interactive_home(store)?,
+            state,
+        ))),
         "enter" => {
             let panel_id = state.focused_panel().panel_id;
             let rendered = render_repl_focused_panel(store, panel_id)?;
@@ -20279,6 +20565,25 @@ fn print_command_failure(label: &str, output: &std::process::Output) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_terminal_entrypoint_renders_advanced_cockpit_frame() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+        let report = build_interactive_home(&store).unwrap();
+        let state = InteractiveReplState::from_home(&report);
+        let frame = render_interactive_tui_frame(&report, &state);
+
+        assert!(frame.contains("Forge advanced operational TUI"));
+        assert!(frame.contains("Workflows"));
+        assert!(frame.contains("Execution"));
+        assert!(frame.contains("Realtime"));
+        assert!(frame.contains("Safe Actions"));
+        assert!(frame.contains("j/k focus"));
+        assert!(frame.contains("enter open"));
+        assert!(frame.contains("Type an objective"));
+        assert!(frame.contains("slash /cockpit /task-board"));
+    }
 
     #[test]
     fn can_answer_questions_about_current_state() {
