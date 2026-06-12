@@ -42487,6 +42487,187 @@ fn interactive_task_board_command_and_mcp_surface_are_dedicated() {
 }
 
 #[test]
+fn interactive_artifacts_command_and_mcp_surface_are_dedicated() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Operate artifact evidence from the Forge TUI",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+
+    let artifact_path = temp.path().join("operator-artifact-evidence.md");
+    let artifact_contents = "artifact evidence for the operational TUI";
+    fs::write(&artifact_path, artifact_contents).unwrap();
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "attach-artifact",
+            "--workflow",
+            workflow_id,
+            "--path",
+            artifact_path.to_str().unwrap(),
+            "--kind",
+            "operator-artifact-evidence",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "artifacts",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let panel: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(panel["schema_version"], "forge.interactive.artifacts.v1");
+    assert_eq!(panel["status"], "artifacts_ready");
+    assert_eq!(panel["workflow_count"], 1);
+    assert_eq!(panel["artifact_count"], 1);
+    assert_eq!(
+        panel["total_bytes"].as_u64().unwrap(),
+        artifact_contents.len() as u64
+    );
+    let workflow = panel["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["workflow_id"] == workflow_id)
+        .unwrap();
+    assert_eq!(workflow["artifact_count"], 1);
+    assert!(workflow["commands"]["list"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("artifacts")));
+    assert!(workflow["commands"]["inspect"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("inspect")));
+    let artifact = &workflow["artifacts"][0];
+    assert!(artifact["path"]
+        .as_str()
+        .unwrap()
+        .contains("attached-operator-artifact-evidence-operator-artifact-evidence.md"));
+    assert_eq!(artifact["kind"], "operator-artifact-evidence");
+    assert_eq!(
+        artifact["bytes"].as_u64().unwrap(),
+        artifact_contents.len() as u64
+    );
+    assert!(artifact["sha256"].as_str().unwrap().len() >= 64);
+    assert!(artifact["commands"]["open"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("artifacts")));
+
+    let home_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "home",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let home: Value = serde_json::from_slice(&home_output).unwrap();
+    assert_eq!(
+        home["dashboard"]["artifact_panel"]["schema_version"],
+        "forge.interactive.artifacts.v1"
+    );
+    assert_eq!(home["dashboard"]["artifact_panel"]["artifact_count"], 1);
+    assert!(home["dashboard"]["ui_composition_panel"]["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|region| region["region_id"] == "observability"
+            && region["widgets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|widget| widget["widget_id"] == "artifact_panel")));
+
+    let text = String::from_utf8(
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "interactive",
+                "artifacts",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .unwrap();
+    assert!(text.contains("Artifact panel"));
+    assert!(text.contains(workflow_id));
+    assert!(text.contains("operator-artifact-evidence"));
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.artifacts");
+    assert_eq!(tool["output_schema"], "forge.interactive.artifacts.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], false);
+
+    let mcp_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.artifacts"])
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.artifacts.v1"
+    );
+    assert_eq!(mcp_json["result"]["artifact_count"], 1);
+}
+
+#[test]
 fn interactive_workflow_dag_command_and_mcp_surface_are_dedicated() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

@@ -3,6 +3,7 @@ use crate::addon::{
     list_addon_permission_authorizations, list_addon_views, load_addon_catalog_from_store,
     AddonCatalog, AddonViewAction, AddonViewEntry, CAP_SOURCE_CODE_PATCH_LIFECYCLE,
 };
+use crate::artifact::list_workflow_artifacts;
 use crate::checkpoint::TaskCheckpoint;
 use crate::cost::build_cost_ledger;
 use crate::event::{build_global_event_timeline, GlobalEventTimelineReport, WorkflowEventEnvelope};
@@ -61,6 +62,7 @@ use std::process::Command;
 
 const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
 const INTERACTIVE_TASK_BOARD_SCHEMA_VERSION: &str = "forge.interactive.task_board.v1";
+const INTERACTIVE_ARTIFACTS_SCHEMA_VERSION: &str = "forge.interactive.artifacts.v1";
 const INTERACTIVE_WORKFLOW_DAG_SCHEMA_VERSION: &str = "forge.interactive.workflow_dag.v1";
 const INTERACTIVE_SCHEDULES_SCHEMA_VERSION: &str = "forge.interactive.schedules.v1";
 const INTERACTIVE_CONTEXT_MEMORY_SCHEMA_VERSION: &str = "forge.interactive.context_memory.v1";
@@ -150,6 +152,7 @@ pub struct InteractiveDashboard {
     pub identity_panel: InteractiveIdentityPanel,
     pub dag_panel: InteractiveWorkflowDagPanel,
     pub task_board_panel: InteractiveTaskBoardPanel,
+    pub artifact_panel: InteractiveArtifactPanel,
     pub schedule_panel: InteractiveSchedulePanel,
     pub event_panel: InteractiveEventPanel,
     pub structured_logs_panel: InteractiveStructuredLogsPanel,
@@ -1249,6 +1252,60 @@ pub struct InteractiveTaskBoardTaskCard {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct InteractiveArtifactPanel {
+    pub schema_version: String,
+    pub status: String,
+    pub workflow_count: usize,
+    pub artifact_count: usize,
+    pub total_bytes: u64,
+    pub workflows: Vec<InteractiveArtifactWorkflow>,
+    pub commands: InteractiveArtifactPanelCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveArtifactWorkflow {
+    pub workflow_id: String,
+    pub lifecycle_state: String,
+    pub goal: String,
+    pub artifact_count: usize,
+    pub total_bytes: u64,
+    pub artifacts: Vec<InteractiveArtifactEntry>,
+    pub commands: InteractiveArtifactWorkflowCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveArtifactEntry {
+    pub artifact_id: String,
+    pub kind: String,
+    pub path: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub created_at: String,
+    pub lineage_summary: String,
+    pub commands: InteractiveArtifactEntryCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveArtifactPanelCommands {
+    pub refresh: Vec<String>,
+    pub task_board: Vec<String>,
+    pub workflow_list: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveArtifactWorkflowCommands {
+    pub list: Vec<String>,
+    pub inspect: Vec<String>,
+    pub task_board: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveArtifactEntryCommands {
+    pub open: Vec<String>,
+    pub inspect_workflow: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct InteractiveTaskHistoryEvent {
     pub event_id: i64,
     pub kind: String,
@@ -1705,6 +1762,7 @@ pub fn build_interactive_home_with_options(
         .collect::<Vec<_>>();
     let dag_panel = build_workflow_dag_panel(store, &workflows.workflows)?;
     let task_board_panel = build_task_board_panel(store, &workflows.workflows)?;
+    let artifact_panel = build_artifact_panel(store, &workflows.workflows)?;
     let modifier_lane = load_modifier_lane(store)?;
     let digital_twin_panel = build_operational_digital_twin(store, &modifier_lane)?;
     let timeline = build_global_event_timeline(store, None, None, None, None, Some(20), None).ok();
@@ -1843,6 +1901,7 @@ pub fn build_interactive_home_with_options(
             identity_panel,
             dag_panel,
             task_board_panel,
+            artifact_panel,
             schedule_panel,
             event_panel,
             structured_logs_panel,
@@ -1870,6 +1929,7 @@ pub fn build_interactive_home_with_options(
                     .to_string(),
                 "forge interactive sessions --output json".to_string(),
                 "forge interactive action-registry --output json".to_string(),
+                "forge interactive artifacts --output json".to_string(),
                 "forge interactive addon-capabilities --output json".to_string(),
                 "forge interactive context-memory --output json".to_string(),
                 "forge addons observability --output json".to_string(),
@@ -5756,6 +5816,14 @@ pub fn build_interactive_task_board(store: &ForgeStore) -> Result<InteractiveTas
     build_task_board_panel(store, &workflows.workflows)
 }
 
+pub fn build_interactive_artifacts(store: &ForgeStore) -> Result<InteractiveArtifactPanel> {
+    let workflows = list_workflows_with_filters(
+        store,
+        WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
+    )?;
+    build_artifact_panel(store, &workflows.workflows)
+}
+
 pub fn build_interactive_workflow_dag(store: &ForgeStore) -> Result<InteractiveWorkflowDagPanel> {
     let workflows = list_workflows_with_filters(
         store,
@@ -6924,6 +6992,8 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         d.identity_panel.current_context.channel_id
     );
     let task_board_lanes = render_task_board_lane_summary(&d.task_board_panel);
+    let artifact_workflows = render_artifact_workflow_summary(&d.artifact_panel);
+    let artifact_entries = render_artifact_entry_summary(&d.artifact_panel);
     let dag_workflows = render_workflow_dag_summary(&d.dag_panel);
     let digital_twin_workflows = if d.digital_twin_panel.workflows.is_empty() {
         "none".to_string()
@@ -7005,6 +7075,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
          Operational digital twin: {digital_twin_status}; workflows {digital_twin_workflows_count}, happening {digital_twin_happening}, done {digital_twin_done}, remaining {digital_twin_remaining}, validated {digital_twin_validated}, rejected {digital_twin_rejected}, approvals {digital_twin_approvals}; {digital_twin_workflows}\n\
          DAG panel: {dag_status}; workflows {dag_workflows_count}, nodes {dag_nodes}, edges {dag_edges}, running {dag_running}, blocked {dag_blocked}, waits {dag_waits}, human waits {dag_human_waits}; {dag_workflows}\n\
          Task board: {task_board_status}; workflows {task_board_workflows}, tasks {task_board_tasks}, ready handoffs {task_board_ready_handoffs}, human waits {task_board_human_waits}, checkpoints {task_board_checkpoints}, artifacts {task_board_artifacts}; lanes {task_board_lanes}\n\
+         Artifact panel: {artifact_status}; workflows {artifact_workflows_count}, artifacts {artifact_count}, bytes {artifact_bytes}; workflows {artifact_workflows}; entries {artifact_entries}\n\
          Schedule panel: {schedule_status}; due {schedule_due}, runnable {schedule_runnable}, cron {schedule_cron}, wait_until {schedule_wait_until}, next {schedule_next}\n\
          Event timeline: {event_status}; visible {event_visible}/{event_total}; latest {latest_events}\n\
          Structured logs: {structured_logs_status}; logs {structured_logs_count}/{structured_logs_total}, next cursor {structured_logs_next_cursor}, has more {structured_logs_has_more}; {structured_logs}\n\
@@ -7146,6 +7217,12 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
         task_board_checkpoints = d.task_board_panel.checkpoint_resume_candidates,
         task_board_artifacts = d.task_board_panel.artifact_count,
         task_board_lanes = task_board_lanes,
+        artifact_status = d.artifact_panel.status,
+        artifact_workflows_count = d.artifact_panel.workflow_count,
+        artifact_count = d.artifact_panel.artifact_count,
+        artifact_bytes = d.artifact_panel.total_bytes,
+        artifact_workflows = artifact_workflows,
+        artifact_entries = artifact_entries,
         schedule_status = d.schedule_panel.status,
         schedule_due = d.schedule_panel.due_workflows,
         schedule_runnable = d.schedule_panel.runnable_due_workflows,
@@ -7241,6 +7318,21 @@ pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> Strin
         artifacts = panel.artifact_count,
         lanes = render_task_board_lane_summary(panel),
         cards = render_task_board_card_summary(panel),
+    )
+}
+
+pub fn render_interactive_artifacts(panel: &InteractiveArtifactPanel) -> String {
+    format!(
+        "Artifact panel: {status}; workflows {workflow_count}, artifacts {artifact_count}, bytes {total_bytes}\nWorkflows: {workflows}\nArtifacts: {artifacts}\nCommands: refresh {refresh}; task board {task_board}; workflows {workflow_list}\n",
+        status = panel.status,
+        workflow_count = panel.workflow_count,
+        artifact_count = panel.artifact_count,
+        total_bytes = panel.total_bytes,
+        workflows = render_artifact_workflow_summary(panel),
+        artifacts = render_artifact_entry_summary(panel),
+        refresh = panel.commands.refresh.join(" "),
+        task_board = panel.commands.task_board.join(" "),
+        workflow_list = panel.commands.workflow_list.join(" "),
     )
 }
 
@@ -8884,6 +8976,15 @@ fn build_ui_composition_panel(
                     vec!["forge interactive structured-logs --output json".to_string()],
                 ),
                 core_ui_widget(
+                    "artifact_panel",
+                    "Artifact panel",
+                    "artifact_panel",
+                    "artifact_evidence_renderer",
+                    "standard",
+                    "half",
+                    vec!["forge interactive artifacts --output json".to_string()],
+                ),
+                core_ui_widget(
                     "release_gates_panel",
                     "Release gates",
                     "release_gates_panel",
@@ -9397,6 +9498,55 @@ fn prioritized_task_board_card_commands(card: &InteractiveTaskBoardTaskCard) -> 
     commands.join(" -> ")
 }
 
+fn render_artifact_workflow_summary(panel: &InteractiveArtifactPanel) -> String {
+    if panel.workflows.is_empty() {
+        return "none".to_string();
+    }
+
+    panel
+        .workflows
+        .iter()
+        .take(8)
+        .map(|workflow| {
+            format!(
+                "{} [{}] artifacts {}, bytes {}, command {}",
+                workflow.workflow_id,
+                workflow.lifecycle_state,
+                workflow.artifact_count,
+                workflow.total_bytes,
+                workflow.commands.list.join(" ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn render_artifact_entry_summary(panel: &InteractiveArtifactPanel) -> String {
+    let entries = panel
+        .workflows
+        .iter()
+        .flat_map(|workflow| {
+            workflow
+                .artifacts
+                .iter()
+                .map(move |artifact| (workflow.workflow_id.as_str(), artifact))
+        })
+        .take(20)
+        .map(|(workflow_id, artifact)| {
+            format!(
+                "{}/{} {} bytes {} path {}",
+                workflow_id, artifact.kind, artifact.artifact_id, artifact.bytes, artifact.path
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if entries.is_empty() {
+        "none".to_string()
+    } else {
+        entries.join(" | ")
+    }
+}
+
 fn render_workflow_dag_summary(panel: &InteractiveWorkflowDagPanel) -> String {
     if panel.workflows.is_empty() {
         return "none".to_string();
@@ -9508,6 +9658,121 @@ fn render_workflow_dag_command_summary(panel: &InteractiveWorkflowDagPanel) -> S
     } else {
         commands.join(" | ")
     }
+}
+
+fn build_artifact_panel(
+    store: &ForgeStore,
+    rows: &[WorkflowRegistryRow],
+) -> Result<InteractiveArtifactPanel> {
+    let mut artifact_count = 0;
+    let mut total_bytes = 0;
+    let mut artifact_workflow_count = 0;
+    let mut workflows = Vec::new();
+
+    for row in rows {
+        let workflow = store.load_workflow(&row.workflow_id)?;
+        let listed_artifacts = list_workflow_artifacts(&store.base_dir(), &row.workflow_id)?;
+        let artifact_bytes_by_path = listed_artifacts
+            .into_iter()
+            .map(|artifact| (artifact.path, (artifact.sha256, artifact.bytes)))
+            .collect::<BTreeMap<_, _>>();
+        let mut workflow_artifacts = Vec::new();
+        let mut workflow_bytes = 0;
+
+        for artifact in &workflow.artifacts {
+            let (sha256, bytes) = artifact_bytes_by_path
+                .get(&artifact.path)
+                .cloned()
+                .unwrap_or_else(|| (artifact.sha256.clone(), 0));
+            workflow_bytes += bytes;
+            workflow_artifacts.push(InteractiveArtifactEntry {
+                artifact_id: artifact.id.clone(),
+                kind: artifact.kind.clone(),
+                path: artifact.path.clone(),
+                sha256,
+                bytes,
+                created_at: artifact.created_at.to_rfc3339(),
+                lineage_summary: artifact
+                    .lineage
+                    .as_ref()
+                    .map(|lineage| {
+                        format!(
+                            "run {} schedule {} loop {} triggered_by {}",
+                            lineage.run_id,
+                            lineage.schedule_task_id,
+                            lineage.loop_task_id,
+                            lineage.triggered_by
+                        )
+                    })
+                    .unwrap_or_else(|| "direct workflow attachment".to_string()),
+                commands: InteractiveArtifactEntryCommands {
+                    open: vec![
+                        "artifacts".to_string(),
+                        "--workflow".to_string(),
+                        row.workflow_id.clone(),
+                        "--output".to_string(),
+                        "json".to_string(),
+                    ],
+                    inspect_workflow: vec!["inspect".to_string(), row.workflow_id.clone()],
+                },
+            });
+        }
+
+        artifact_count += workflow_artifacts.len();
+        total_bytes += workflow_bytes;
+        if !workflow_artifacts.is_empty() {
+            artifact_workflow_count += 1;
+        }
+        if !workflow_artifacts.is_empty() && workflows.len() < 12 {
+            workflows.push(InteractiveArtifactWorkflow {
+                workflow_id: row.workflow_id.clone(),
+                lifecycle_state: row.lifecycle_state.clone(),
+                goal: truncate_display(&row.current_goal, 96),
+                artifact_count: workflow_artifacts.len(),
+                total_bytes: workflow_bytes,
+                artifacts: workflow_artifacts,
+                commands: InteractiveArtifactWorkflowCommands {
+                    list: vec![
+                        "artifacts".to_string(),
+                        "--workflow".to_string(),
+                        row.workflow_id.clone(),
+                        "--output".to_string(),
+                        "json".to_string(),
+                    ],
+                    inspect: vec!["inspect".to_string(), row.workflow_id.clone()],
+                    task_board: vec!["interactive".to_string(), "task-board".to_string()],
+                },
+            });
+        }
+    }
+
+    Ok(InteractiveArtifactPanel {
+        schema_version: INTERACTIVE_ARTIFACTS_SCHEMA_VERSION.to_string(),
+        status: "artifacts_ready".to_string(),
+        workflow_count: artifact_workflow_count,
+        artifact_count,
+        total_bytes,
+        workflows,
+        commands: InteractiveArtifactPanelCommands {
+            refresh: vec![
+                "interactive".to_string(),
+                "artifacts".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            task_board: vec![
+                "interactive".to_string(),
+                "task-board".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+            workflow_list: vec![
+                "list".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        },
+    })
 }
 
 fn build_workflow_dag_panel(
@@ -10300,8 +10565,8 @@ fn slash_commands() -> Vec<SlashCommandSpec> {
         slash(
             "/artifacts",
             "Artifacts",
-            "List workflow artifacts.",
-            &["forge", "artifacts", "--workflow", "<workflow-id>"],
+            "Show workflow artifacts and evidence from the interactive panel.",
+            &["forge", "interactive", "artifacts"],
             false,
             "low",
         ),
@@ -11163,6 +11428,10 @@ fn repl_focus_panels() -> Vec<InteractiveReplFocusPanel> {
             title: "Task board",
         },
         InteractiveReplFocusPanel {
+            panel_id: "artifact_panel",
+            title: "Artifacts",
+        },
+        InteractiveReplFocusPanel {
             panel_id: "readiness_panel",
             title: "Readiness",
         },
@@ -11246,6 +11515,10 @@ fn render_repl_focused_panel(store: &ForgeStore, panel_id: &str) -> Result<Strin
             let panel = build_interactive_task_board(store)?;
             Ok(render_interactive_task_board(&panel))
         }
+        "artifact_panel" => {
+            let panel = build_interactive_artifacts(store)?;
+            Ok(render_interactive_artifacts(&panel))
+        }
         "readiness_panel" => {
             let panel = build_interactive_readiness(store)?;
             Ok(render_interactive_readiness(&panel))
@@ -11308,6 +11581,11 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
         "/task-board" => {
             let panel = build_interactive_task_board(store)?;
             println!("{}", render_interactive_task_board(&panel));
+            Ok(true)
+        }
+        "/artifacts" => {
+            let panel = build_interactive_artifacts(store)?;
+            println!("{}", render_interactive_artifacts(&panel));
             Ok(true)
         }
         "/readiness" => {

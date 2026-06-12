@@ -93,8 +93,9 @@ use crate::interaction::{
 };
 use crate::interactive::{
     build_interactive_action_invocation, build_interactive_action_registry,
-    build_interactive_addon_capabilities_default, build_interactive_autocomplete,
-    build_interactive_command_palette, build_interactive_context_memory, build_interactive_harness,
+    build_interactive_addon_capabilities_default, build_interactive_artifacts,
+    build_interactive_autocomplete, build_interactive_command_palette,
+    build_interactive_context_memory, build_interactive_harness,
     build_interactive_home_with_options, build_interactive_identity,
     build_interactive_operational_cockpit, build_interactive_patch_workbench,
     build_interactive_permissions, build_interactive_readiness, build_interactive_release_gates,
@@ -3279,6 +3280,15 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[], &[]),
                 "forge.interactive.task_board.v1",
                 &["forge", "interactive", "task-board", "--output", "json"],
+                ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.artifacts",
+                "Inspect Interactive Artifacts",
+                "Return the Forge interactive artifact evidence panel with artifact-bearing workflows, persistent paths, checksums, byte counts, lineage summaries and drill-down commands without launching a TTY.",
+                object_schema(&[], &[]),
+                "forge.interactive.artifacts.v1",
+                &["forge", "interactive", "artifacts", "--output", "json"],
                 ToolFlags::new(true, false),
             ),
             tool(
@@ -7602,6 +7612,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         "forge.interactive.task_board" => {
             serde_json::to_value(build_interactive_task_board(store)?)?
         }
+        "forge.interactive.artifacts" => serde_json::to_value(build_interactive_artifacts(store)?)?,
         "forge.interactive.workflow_dag" => {
             serde_json::to_value(build_interactive_workflow_dag(store)?)?
         }
