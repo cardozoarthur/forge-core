@@ -246,6 +246,9 @@ pub struct InteractiveReadinessPanel {
     pub shell_entrypoints: Vec<String>,
     pub harness_mode: HarnessModeReport,
     pub harness_doctor: HarnessDoctorReport,
+    pub headroom_stats: HeadroomStatsReport,
+    pub headroom_operational_status: String,
+    pub headroom_recommended_action: String,
     pub next_actions: Vec<String>,
     pub commands: InteractiveReadinessCommands,
 }
@@ -1918,6 +1921,14 @@ pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveRead
         token_headroom_source: "interactive_default",
         require_token_headroom_for_forge_first: false,
     })?;
+    let headroom_stats = build_headroom_stats_report(
+        store,
+        HeadroomStatsOptions {
+            source: None,
+            content_kind: None,
+            limit: 5,
+        },
+    )?;
     let shell_entrypoints = executors
         .brain_router
         .shell_sessions
@@ -1940,12 +1951,18 @@ pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveRead
         .iter()
         .filter(|session| session.forge_first_ready)
         .count();
-    let next_actions = readiness_next_actions(
+    let mut next_actions = readiness_next_actions(
         executors.usable.is_empty(),
         executors.needs_human_approval,
         runtimes.needs_human_approval,
         &harness_doctor,
     );
+    next_actions.push(format!(
+        "headroom recommended action: {}",
+        headroom_stats.recommended_action
+    ));
+    let headroom_operational_status = headroom_stats.operational_status.clone();
+    let headroom_recommended_action = headroom_stats.recommended_action.clone();
 
     Ok(InteractiveReadinessPanel {
         schema_version: INTERACTIVE_READINESS_SCHEMA_VERSION.to_string(),
@@ -1971,6 +1988,9 @@ pub fn build_interactive_readiness(store: &ForgeStore) -> Result<InteractiveRead
         shell_entrypoints,
         harness_mode,
         harness_doctor,
+        headroom_stats,
+        headroom_operational_status,
+        headroom_recommended_action,
         next_actions,
         commands: readiness_commands(),
     })
@@ -6262,7 +6282,7 @@ pub fn render_interactive_readiness(panel: &InteractiveReadinessPanel) -> String
         panel.next_actions.join(" | ")
     };
     format!(
-        "Interactive readiness: {status}; executors {usable_executor_count}/{executor_count}, brains {brain_count}, shells {forge_first_shell_count}/{shell_count} Forge-first, selected brain {selected_brain}\nHarness mode: {harness_mode}; harness doctor: {harness_doctor}; usable executors: {usable_executors}\nNext actions: {next_actions}\n",
+        "Interactive readiness: {status}; executors {usable_executor_count}/{executor_count}, brains {brain_count}, shells {forge_first_shell_count}/{shell_count} Forge-first, selected brain {selected_brain}\nHarness mode: {harness_mode}; harness doctor: {harness_doctor}; headroom {headroom_status}; headroom action {headroom_action}; usable executors: {usable_executors}\nNext actions: {next_actions}\n",
         status = panel.status,
         usable_executor_count = panel.usable_executor_count,
         executor_count = panel.executor_count,
@@ -6272,6 +6292,8 @@ pub fn render_interactive_readiness(panel: &InteractiveReadinessPanel) -> String
         selected_brain = panel.selected_brain,
         harness_mode = panel.harness_mode.status,
         harness_doctor = panel.harness_doctor.status,
+        headroom_status = panel.headroom_operational_status,
+        headroom_action = panel.headroom_recommended_action,
         usable_executors = usable_executors,
         next_actions = next_actions,
     )

@@ -41996,6 +41996,30 @@ fn interactive_structured_logs_command_and_mcp_surface_are_dedicated() {
 fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
+    let headroom_content = (0..64)
+        .map(|index| format!("line {index}: warning: readiness output {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "token-headroom",
+            "--content",
+            &headroom_content,
+            "--kind",
+            "log",
+            "--budget-tokens",
+            "120",
+            "--source",
+            "interactive-readiness-test",
+            "--persist",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
 
     let readiness_output = forge()
         .args([
@@ -42036,6 +42060,19 @@ fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
         readiness["harness_doctor"]["schema_version"],
         "forge.harness.doctor.v1"
     );
+    assert_eq!(
+        readiness["headroom_stats"]["schema_version"],
+        "forge.harness.headroom_stats.v1"
+    );
+    assert_eq!(readiness["headroom_stats"]["total_blobs"], 1);
+    assert_eq!(
+        readiness["headroom_operational_status"],
+        readiness["headroom_stats"]["operational_status"]
+    );
+    assert_eq!(
+        readiness["headroom_recommended_action"],
+        readiness["headroom_stats"]["recommended_action"]
+    );
     assert!(readiness["next_actions"]
         .as_array()
         .unwrap()
@@ -42044,6 +42081,14 @@ fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
             .as_str()
             .unwrap_or_default()
             .contains("forge sync all")));
+    assert!(readiness["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action
+            .as_str()
+            .unwrap_or_default()
+            .contains(readiness["headroom_recommended_action"].as_str().unwrap())));
     assert!(readiness["commands"]["sync"]
         .as_array()
         .unwrap()
@@ -42069,6 +42114,7 @@ fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("Interactive readiness"));
     assert!(text.contains("harness doctor"));
     assert!(text.contains("selected brain"));
+    assert!(text.contains(readiness["headroom_recommended_action"].as_str().unwrap()));
 
     let manifest = forge()
         .args(["mcp", "tools", "--output", "json"])
@@ -42099,6 +42145,10 @@ fn interactive_readiness_command_and_mcp_surface_are_dedicated() {
         "forge.interactive.readiness.v1"
     );
     assert_eq!(mcp_json["result"]["status"], "interactive_readiness_ready");
+    assert_eq!(
+        mcp_json["result"]["headroom_operational_status"],
+        mcp_json["result"]["headroom_stats"]["operational_status"]
+    );
 }
 
 #[test]
