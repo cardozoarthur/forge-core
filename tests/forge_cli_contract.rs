@@ -42761,6 +42761,66 @@ fn interactive_command_palette_surfaces_contextual_actions_for_replacement_cli()
         haystack.contains("patch") || entry["group_id"] == "workflow"
     }));
 
+    let headroom_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "command-palette",
+            "--query",
+            "headroom",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let headroom_json: Value = serde_json::from_slice(&headroom_output).unwrap();
+    assert!(headroom_json["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|group| {
+            group["group_id"] == "harness"
+                && group["entries"].as_array().unwrap().iter().any(|entry| {
+                    entry["action_id"] == "harness.headroom_plan"
+                        && entry["title"] == "Inspect headroom plan"
+                        && entry["source_panel"] == "harness_panel"
+                        && entry["commands"]
+                            == serde_json::json!([
+                                "harness",
+                                "headroom-plan",
+                                "--executor",
+                                "codex",
+                                "--project-root",
+                                ".",
+                                "--output",
+                                "json"
+                            ])
+                        && entry["mutates_workflow"] == false
+                        && entry["requires_approval"] == false
+                        && entry["risk_level"] == "low"
+                        && entry["operation_plan"]["status"] == "ready"
+                        && entry["operation_plan"]["recommended_action"] == "execute_command"
+                        && entry["operation_plan"]["diagnostic_only"] == false
+                })
+                && group["entries"].as_array().unwrap().iter().any(|entry| {
+                    entry["action_id"] == "harness.headroom_stats"
+                        && entry["title"] == "Inspect headroom stats"
+                        && entry["source_panel"] == "harness_panel"
+                        && entry["commands"]
+                            == serde_json::json!(["harness", "headroom-stats", "--output", "json"])
+                        && entry["mutates_workflow"] == false
+                        && entry["requires_approval"] == false
+                        && entry["risk_level"] == "low"
+                        && entry["operation_plan"]["status"] == "ready"
+                        && entry["operation_plan"]["recommended_action"] == "execute_command"
+                        && entry["operation_plan"]["diagnostic_only"] == false
+                })
+        }));
+
     let text_output = forge()
         .args([
             "--store",
