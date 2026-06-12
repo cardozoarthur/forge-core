@@ -3242,6 +3242,156 @@ integrations:
 }
 
 #[test]
+fn addon_observability_reports_dispatch_worker_backlog_and_next_action() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let addon_dir = temp.path().join("addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        addon_dir.join("ops-worker.yaml"),
+        r#"
+id: forge.addon.ops_worker
+name: Ops Worker Addon
+version: 0.1.0
+capabilities:
+  - id: ops_receipt
+    title: Ops receipt
+    domains: [operations]
+    keywords: [worker]
+runtime_contracts:
+  - id: ops.echo
+    title: Builtin echo
+    contract_type: executor
+    capability_id: ops_receipt
+    runtime: forge_core_builtin
+    entrypoint: builtin:echo
+  - id: ops.external
+    title: External executor
+    contract_type: executor
+    capability_id: ops_receipt
+    runtime: wasm
+    entrypoint: ops.external
+"#,
+    )
+    .unwrap();
+
+    for contract in ["ops.echo", "ops.external"] {
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "addons",
+                "dispatch-contract",
+                "--addon-dir",
+                addon_dir.to_str().unwrap(),
+                "--addon",
+                "forge.addon.ops_worker",
+                "--contract",
+                contract,
+                "--input",
+                &serde_json::json!({ "contract": contract }).to_string(),
+                "--source",
+                "observability-worker-backlog-test",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    let queued_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "observability",
+            "--addon",
+            "forge.addon.ops_worker",
+            "--addon-dir",
+            addon_dir.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let queued_json: Value = serde_json::from_slice(&queued_output).unwrap();
+    let queued_dispatches = &queued_json["addons"][0]["dispatches"];
+    assert_eq!(queued_dispatches["queued_count"], 2);
+    assert_eq!(queued_dispatches["queued_builtin_count"], 1);
+    assert_eq!(queued_dispatches["queued_external_runtime_count"], 1);
+    assert_eq!(
+        queued_dispatches["worker_backlog_status"],
+        "queued_dispatches_ready"
+    );
+    assert_eq!(
+        queued_dispatches["next_operator_action"],
+        "run_addon_dispatch_worker"
+    );
+    assert!(queued_dispatches["oldest_queued_at"].as_str().is_some());
+    assert_eq!(queued_json["totals"]["queued_builtin_dispatch_count"], 1);
+    assert_eq!(
+        queued_json["totals"]["queued_external_runtime_dispatch_count"],
+        1
+    );
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "dispatch-worker",
+            "--addon-dir",
+            addon_dir.to_str().unwrap(),
+            "--status",
+            "queued",
+            "--limit",
+            "2",
+            "--worker",
+            "observability-worker",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let processed_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "observability",
+            "--addon",
+            "forge.addon.ops_worker",
+            "--addon-dir",
+            addon_dir.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let processed_json: Value = serde_json::from_slice(&processed_output).unwrap();
+    let processed_dispatches = &processed_json["addons"][0]["dispatches"];
+    assert_eq!(processed_dispatches["queued_count"], 0);
+    assert_eq!(processed_dispatches["completed_count"], 1);
+    assert_eq!(processed_dispatches["needs_external_worker_count"], 1);
+    assert_eq!(
+        processed_dispatches["worker_backlog_status"],
+        "external_worker_required"
+    );
+    assert_eq!(
+        processed_dispatches["next_operator_action"],
+        "register_or_run_external_worker"
+    );
+    assert!(processed_dispatches["oldest_queued_at"].is_null());
+}
+
+#[test]
 fn event_stream_projects_legacy_events_into_tenant_aware_envelopes() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

@@ -1195,6 +1195,8 @@ pub struct AddonObservabilityTotals {
     pub integration_count: usize,
     pub dispatch_count: usize,
     pub queued_dispatch_count: usize,
+    pub queued_builtin_dispatch_count: usize,
+    pub queued_external_runtime_dispatch_count: usize,
     pub completed_dispatch_count: usize,
     pub failed_dispatch_count: usize,
     pub blocked_dispatch_count: usize,
@@ -1255,12 +1257,17 @@ pub struct AddonEventFlowSummary {
 pub struct AddonDispatchObservability {
     pub dispatch_count: usize,
     pub queued_count: usize,
+    pub queued_builtin_count: usize,
+    pub queued_external_runtime_count: usize,
     pub claimed_count: usize,
     pub completed_count: usize,
     pub failed_count: usize,
     pub blocked_count: usize,
     pub dry_run_count: usize,
     pub needs_external_worker_count: usize,
+    pub worker_backlog_status: String,
+    pub next_operator_action: String,
+    pub oldest_queued_at: Option<String>,
     pub latest_dispatch_at: Option<String>,
 }
 
@@ -8628,6 +8635,9 @@ fn addon_observability_totals(addons: &[AddonObservabilityEntry]) -> AddonObserv
         totals.integration_count += addon.integration_count;
         totals.dispatch_count += addon.dispatches.dispatch_count;
         totals.queued_dispatch_count += addon.dispatches.queued_count;
+        totals.queued_builtin_dispatch_count += addon.dispatches.queued_builtin_count;
+        totals.queued_external_runtime_dispatch_count +=
+            addon.dispatches.queued_external_runtime_count;
         totals.completed_dispatch_count += addon.dispatches.completed_count;
         totals.failed_dispatch_count += addon.dispatches.failed_count;
         totals.blocked_dispatch_count += addon.dispatches.blocked_count;
@@ -8795,11 +8805,28 @@ fn addon_dispatch_observability(
 ) -> AddonDispatchObservability {
     let mut summary = AddonDispatchObservability {
         dispatch_count: dispatches.len(),
+        worker_backlog_status: "idle".to_string(),
+        next_operator_action: "none".to_string(),
         ..AddonDispatchObservability::default()
     };
     for dispatch in dispatches {
         match dispatch.status.as_str() {
-            "queued" => summary.queued_count += 1,
+            "queued" => {
+                summary.queued_count += 1;
+                if dispatch.runtime == "forge_core_builtin" {
+                    summary.queued_builtin_count += 1;
+                } else {
+                    summary.queued_external_runtime_count += 1;
+                }
+                if summary
+                    .oldest_queued_at
+                    .as_deref()
+                    .map(|oldest| dispatch.created_at.as_str() < oldest)
+                    .unwrap_or(true)
+                {
+                    summary.oldest_queued_at = Some(dispatch.created_at.clone());
+                }
+            }
             "claimed_external_worker" => summary.claimed_count += 1,
             "completed" => summary.completed_count += 1,
             "failed" => summary.failed_count += 1,
@@ -8819,7 +8846,31 @@ fn addon_dispatch_observability(
             summary.latest_dispatch_at = Some(dispatch.updated_at.clone());
         }
     }
+    let (backlog_status, next_action) = addon_dispatch_worker_operator_state(&summary);
+    summary.worker_backlog_status = backlog_status.to_string();
+    summary.next_operator_action = next_action.to_string();
     summary
+}
+
+fn addon_dispatch_worker_operator_state(
+    summary: &AddonDispatchObservability,
+) -> (&'static str, &'static str) {
+    if summary.failed_count > 0 || summary.blocked_count > 0 {
+        return ("dispatch_attention_required", "inspect_dispatch_failures");
+    }
+    if summary.queued_count > 0 {
+        return ("queued_dispatches_ready", "run_addon_dispatch_worker");
+    }
+    if summary.needs_external_worker_count > 0 {
+        return (
+            "external_worker_required",
+            "register_or_run_external_worker",
+        );
+    }
+    if summary.claimed_count > 0 {
+        return ("external_worker_claims_active", "monitor_external_worker");
+    }
+    ("idle", "none")
 }
 
 fn addon_permission_gate(
