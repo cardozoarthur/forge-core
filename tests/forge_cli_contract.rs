@@ -45394,6 +45394,41 @@ fn interactive_task_board_lanes_include_operable_task_cards() {
         .contains(&serde_json::json!(format!(
             "forge context --workflow {workflow_id} --task {checkpoint_task_id}"
         ))));
+    let handoff_card = task_cards
+        .iter()
+        .find(|card| card["ready_for_handoff"] == true)
+        .unwrap();
+    let handoff_task_id = handoff_card["task_id"].as_str().unwrap();
+    assert_eq!(handoff_card["next_action"], "start_executor_handoff");
+
+    let board_text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "task-board",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let board_text = String::from_utf8(board_text_output).unwrap();
+    assert!(board_text.contains("Cards:"));
+    assert!(board_text.contains(&format!(
+        "{blocked_task_id} [blocked] next answer_human_interaction"
+    )));
+    assert!(board_text.contains("commands forge interaction list"));
+    assert!(board_text.contains(&format!(
+        "{handoff_task_id} [pending] next start_executor_handoff"
+    )));
+    assert!(board_text.contains("commands forge task handoff"));
+    assert!(board_text.contains(&format!(
+        "{checkpoint_task_id} [pending] next resume_from_checkpoint"
+    )));
+    assert!(board_text.contains(&format!(
+        "forge context --workflow {workflow_id} --task {checkpoint_task_id}"
+    )));
 }
 
 #[test]

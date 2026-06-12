@@ -6117,7 +6117,7 @@ pub fn render_interactive_home(report: &InteractiveHomeReport) -> String {
 
 pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> String {
     format!(
-        "Task board: {status}; workflows {workflow_count}, tasks {task_count}, ready handoffs {ready_handoffs}, human waits {human_waits}, checkpoints {checkpoints}, artifacts {artifacts}\nLanes: {lanes}\n",
+        "Task board: {status}; workflows {workflow_count}, tasks {task_count}, ready handoffs {ready_handoffs}, human waits {human_waits}, checkpoints {checkpoints}, artifacts {artifacts}\nLanes: {lanes}\nCards: {cards}\n",
         status = panel.status,
         workflow_count = panel.workflow_count,
         task_count = panel.task_count,
@@ -6126,6 +6126,7 @@ pub fn render_interactive_task_board(panel: &InteractiveTaskBoardPanel) -> Strin
         checkpoints = panel.checkpoint_resume_candidates,
         artifacts = panel.artifact_count,
         lanes = render_task_board_lane_summary(panel),
+        cards = render_task_board_card_summary(panel),
     )
 }
 
@@ -7392,6 +7393,71 @@ fn render_task_board_lane_summary(panel: &InteractiveTaskBoardPanel) -> String {
         })
         .collect::<Vec<_>>()
         .join(" | ")
+}
+
+fn render_task_board_card_summary(panel: &InteractiveTaskBoardPanel) -> String {
+    let cards = panel
+        .lanes
+        .iter()
+        .flat_map(|lane| {
+            lane.task_cards
+                .iter()
+                .map(move |card| (lane.workflow_id.as_str(), card))
+        })
+        .take(16)
+        .map(|(workflow_id, card)| {
+            let checkpoint = card.checkpoint_id.as_deref().unwrap_or("none");
+            format!(
+                "{}/{} [{}] next {} human {}/{} handoff {} checkpoint {} commands {}",
+                workflow_id,
+                card.task_id,
+                card.status,
+                card.next_action,
+                card.human_required,
+                card.human_interaction_state,
+                card.ready_for_handoff,
+                checkpoint,
+                prioritized_task_board_card_commands(card)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if cards.is_empty() {
+        "none".to_string()
+    } else {
+        cards.join(" | ")
+    }
+}
+
+fn prioritized_task_board_card_commands(card: &InteractiveTaskBoardTaskCard) -> String {
+    if card.commands.is_empty() {
+        return "none".to_string();
+    }
+
+    let preferred = if card.next_action == "answer_human_interaction" {
+        Some("forge interaction list")
+    } else if card.next_action == "resume_from_checkpoint" {
+        Some("forge context ")
+    } else if card.ready_for_handoff || card.next_action.contains("handoff") {
+        Some("forge task handoff ")
+    } else {
+        None
+    };
+    let mut commands = Vec::new();
+    if let Some(preferred) = preferred {
+        commands.extend(
+            card.commands
+                .iter()
+                .filter(|command| command.starts_with(preferred))
+                .cloned(),
+        );
+    }
+    for command in &card.commands {
+        if !commands.contains(command) {
+            commands.push(command.clone());
+        }
+    }
+    commands.join(" -> ")
 }
 
 fn render_workflow_dag_summary(panel: &InteractiveWorkflowDagPanel) -> String {
