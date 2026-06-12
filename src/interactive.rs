@@ -1146,6 +1146,7 @@ pub struct InteractiveHarnessPanel {
     pub token_headroom_ready: bool,
     pub shim_ready: bool,
     pub lineage_policy_ready: bool,
+    pub lineage_context_ready: bool,
     pub mode: HarnessModeReport,
     pub doctor: HarnessDoctorReport,
     pub shim_status: CliShimStatusReport,
@@ -1175,6 +1176,8 @@ pub struct InteractiveHarnessForgeFirstAdoptionReadiness {
     pub token_headroom_required: bool,
     pub shim_ready: bool,
     pub lineage_policy_ready: bool,
+    pub lineage_context_ready: bool,
+    pub execution_guard_status: String,
     pub wrapper_strategy: String,
     pub wrapper_interception_points: Vec<String>,
     pub controlled_routes: Vec<String>,
@@ -5329,6 +5332,7 @@ pub fn build_interactive_harness(
         token_headroom_ready: doctor.token_headroom_ready,
         shim_ready: doctor.shim_ready,
         lineage_policy_ready: doctor.lineage_policy_ready,
+        lineage_context_ready: doctor.lineage_context_ready,
         mode,
         doctor,
         shim_status,
@@ -5378,9 +5382,15 @@ fn build_interactive_harness_forge_first_adoption_readiness(
     if !doctor.lineage_policy_ready {
         blocked_reasons.push("lineage_policy_not_ready".to_string());
     }
-    if mode.require_lineage_for_exec && !session_lifecycle_plan.lineage_complete {
-        blocked_reasons.push("required_session_lineage_missing".to_string());
-    }
+    let execution_guard_status =
+        if mode.require_lineage_for_exec && !session_lifecycle_plan.lineage_complete {
+            "guarded_until_workflow_task_run_lineage"
+        } else if mode.require_lineage_for_exec {
+            "lineage_satisfied_for_real_exec"
+        } else {
+            "lineage_not_required_for_real_exec"
+        }
+        .to_string();
 
     let mut next_commands = Vec::new();
     if !mode.forge_first {
@@ -5434,6 +5444,8 @@ fn build_interactive_harness_forge_first_adoption_readiness(
         token_headroom_required: mode.require_token_headroom_for_forge_first,
         shim_ready: doctor.shim_ready,
         lineage_policy_ready: doctor.lineage_policy_ready,
+        lineage_context_ready: doctor.lineage_context_ready,
+        execution_guard_status,
         wrapper_strategy: wrapper_plan.wrapper_strategy.clone(),
         wrapper_interception_points,
         controlled_routes,

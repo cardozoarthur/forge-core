@@ -241,6 +241,7 @@ pub struct HarnessDoctorReport {
     pub token_headroom_ready: bool,
     pub shim_ready: bool,
     pub lineage_policy_ready: bool,
+    pub lineage_context_ready: bool,
     pub mode: HarnessModeReport,
     pub shim_status: CliShimStatusReport,
     pub wrapper_plan: CliWrapperPlanReport,
@@ -1225,8 +1226,9 @@ pub fn build_harness_doctor_report(
     let forge_first_ready = mode.forge_first;
     let token_headroom_ready = token_headroom && wrapper_plan.token_headroom_enabled;
     let shim_ready = shim_status.status == "shim_status_ready";
-    let lineage_policy_ready = !mode.require_lineage_for_exec
+    let lineage_context_ready = !mode.require_lineage_for_exec
         || harness_exec_has_required_lineage(workflow_id, task_id, run_id);
+    let lineage_policy_ready = true;
     let mut readiness_checks = vec!["read_only_no_child_process".to_string()];
     readiness_checks.push(if forge_first_ready {
         "forge_first_enabled".to_string()
@@ -1245,7 +1247,7 @@ pub fn build_harness_doctor_report(
     } else {
         shim_status.status.clone()
     });
-    if mode.require_lineage_for_exec && !lineage_policy_ready {
+    if mode.require_lineage_for_exec && !lineage_context_ready {
         readiness_checks.push("lineage_required_for_real_exec".to_string());
     } else if mode.require_lineage_for_exec {
         readiness_checks.push("lineage_required_satisfied".to_string());
@@ -1265,7 +1267,7 @@ pub fn build_harness_doctor_report(
             shell_quote(&project_root_path.display().to_string())
         ));
     }
-    if mode.require_lineage_for_exec && !lineage_policy_ready {
+    if mode.require_lineage_for_exec && !lineage_context_ready {
         next_actions.push(
             "pass --workflow <workflow-id> --task <task-id> --run <run-id> before real harness exec"
                 .to_string(),
@@ -1276,8 +1278,7 @@ pub fn build_harness_doctor_report(
         shell_quote(&shim_dir.display().to_string())
     ));
 
-    let status = if forge_first_ready && token_headroom_ready && shim_ready && lineage_policy_ready
-    {
+    let status = if forge_first_ready && token_headroom_ready && shim_ready {
         "harness_doctor_ready"
     } else {
         "harness_doctor_degraded"
@@ -1292,6 +1293,7 @@ pub fn build_harness_doctor_report(
         token_headroom_ready,
         shim_ready,
         lineage_policy_ready,
+        lineage_context_ready,
         mode,
         shim_status,
         wrapper_plan,
@@ -1778,7 +1780,7 @@ pub fn build_harness_adoption_plan(
             shell_quote(&executor),
             shell_quote(&project_root_display)
         )
-    } else if !doctor.lineage_policy_ready {
+    } else if !doctor.lineage_context_ready {
         "call harness exec with --workflow <workflow-id> --task <task-id> --run <run-id>"
             .to_string()
     } else {
@@ -1909,7 +1911,7 @@ pub fn build_harness_adoption_plan(
             harness_adoption_step(HarnessAdoptionStepInput {
                 id: "use_harness_exec_with_lineage",
                 title: "Use harness exec with workflow lineage",
-                status: if doctor.lineage_policy_ready {
+                status: if doctor.lineage_context_ready {
                     "ready"
                 } else {
                     "blocked_until_lineage"
@@ -2138,12 +2140,12 @@ fn selected_harness_executor_readiness(
         ),
         executor_surface_readiness(
             "harness_exec",
-            if doctor.lineage_policy_ready {
+            if doctor.lineage_context_ready {
                 "ready"
             } else {
                 "blocked"
             },
-            "harness_doctor.lineage_policy_ready",
+            "harness_doctor.lineage_context_ready",
             "Real harness exec requires workflow, task and run lineage when project policy requires it.",
             vec![
                 "forge".to_string(),

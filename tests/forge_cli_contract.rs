@@ -1349,7 +1349,8 @@ fn harness_doctor_audits_forge_first_headroom_and_shim_readiness_for_cli_and_mcp
     assert_eq!(doctor["forge_first_ready"], true);
     assert_eq!(doctor["token_headroom_ready"], true);
     assert_eq!(doctor["shim_ready"], false);
-    assert_eq!(doctor["lineage_policy_ready"], false);
+    assert_eq!(doctor["lineage_policy_ready"], true);
+    assert_eq!(doctor["lineage_context_ready"], false);
     assert_eq!(doctor["mode"]["forge_first"], true);
     assert_eq!(doctor["mode"]["forge_first_source"], "project_config");
     assert_eq!(doctor["shim_status"]["status"], "shim_status_missing");
@@ -1371,6 +1372,69 @@ fn harness_doctor_audits_forge_first_headroom_and_shim_readiness_for_cli_and_mcp
             .as_str()
             .unwrap()
             .contains("forge harness install-shims")));
+
+    let real_bin = temp.path().join("real-bin");
+    write_fake_cli(&real_bin, "codex");
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "install-shims",
+            "--executor",
+            "codex",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--real-cmd",
+            real_bin.join("codex").to_str().unwrap(),
+            "--forge-first",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+    let shim_first_path = format!(
+        "{}:{}:{}",
+        shim_dir.display(),
+        real_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let guarded_output = forge()
+        .env("PATH", &shim_first_path)
+        .env_remove("FORGE_HARNESS_DEFAULT_MODE")
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "doctor",
+            "--executor",
+            "codex",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--project-root",
+            project.to_str().unwrap(),
+            "--context-budget",
+            "1600",
+            "--token-headroom",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let guarded: Value = serde_json::from_slice(&guarded_output).unwrap();
+    assert_eq!(guarded["status"], "harness_doctor_ready");
+    assert_eq!(guarded["shim_ready"], true);
+    assert_eq!(guarded["lineage_policy_ready"], true);
+    assert_eq!(guarded["lineage_context_ready"], false);
+    assert!(guarded["readiness_checks"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("lineage_required_for_real_exec")));
 
     let tools_output = forge()
         .args([
@@ -1705,7 +1769,8 @@ fn harness_adoption_plan_models_forge_first_headroom_for_cli_mcp_and_skill() {
         json["headroom_plan"]["token_headroom_source"],
         "project_policy_required_for_forge_first"
     );
-    assert_eq!(json["doctor"]["lineage_policy_ready"], false);
+    assert_eq!(json["doctor"]["lineage_policy_ready"], true);
+    assert_eq!(json["doctor"]["lineage_context_ready"], false);
     assert_eq!(json["doctor"]["shim_ready"], false);
     assert!(json["adoption_steps"]
         .as_array()
@@ -2297,6 +2362,7 @@ printf 'bootstrap:%s\n' "$FORGE_HARNESS"
     assert_eq!(doctor_ready["token_headroom_ready"], true);
     assert_eq!(doctor_ready["shim_ready"], true);
     assert_eq!(doctor_ready["lineage_policy_ready"], true);
+    assert_eq!(doctor_ready["lineage_context_ready"], true);
     assert_eq!(doctor_ready["mode"]["forge_first_source"], "project_config");
     assert_eq!(doctor_ready["shim_status"]["status"], "shim_status_ready");
     assert_eq!(doctor_ready["shim_status"]["path_precedence"], "shim_first");
@@ -2340,6 +2406,8 @@ printf 'bootstrap:%s\n' "$FORGE_HARNESS"
     );
     assert_eq!(interactive_ready["forge_first_ready"], true);
     assert_eq!(interactive_ready["shim_ready"], true);
+    assert_eq!(interactive_ready["lineage_policy_ready"], true);
+    assert_eq!(interactive_ready["lineage_context_ready"], true);
     assert_eq!(
         interactive_ready["forge_first_adoption_readiness"]["status"],
         "forge_first_default_ready"
@@ -2351,6 +2419,10 @@ printf 'bootstrap:%s\n' "$FORGE_HARNESS"
     assert_eq!(
         interactive_ready["forge_first_adoption_readiness"]["blocked_reasons"],
         serde_json::json!([])
+    );
+    assert_eq!(
+        interactive_ready["forge_first_adoption_readiness"]["execution_guard_status"],
+        "lineage_satisfied_for_real_exec"
     );
 
     let tools_output = forge()
@@ -46626,6 +46698,14 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert_eq!(
         json["forge_first_adoption_readiness"]["lineage_policy_ready"],
         true
+    );
+    assert_eq!(
+        json["forge_first_adoption_readiness"]["lineage_context_ready"],
+        true
+    );
+    assert_eq!(
+        json["forge_first_adoption_readiness"]["execution_guard_status"],
+        "lineage_not_required_for_real_exec"
     );
     assert!(json["forge_first_adoption_readiness"]["blocked_reasons"]
         .as_array()
