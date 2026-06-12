@@ -658,8 +658,8 @@ enum CostCommands {
 #[derive(Debug, Subcommand)]
 enum SkillCommands {
     Install {
-        #[arg(long, default_value = ".")]
-        home: PathBuf,
+        #[arg(long)]
+        home: Option<PathBuf>,
         #[arg(long)]
         target: Vec<String>,
         #[arg(long = "executor-path")]
@@ -2267,8 +2267,8 @@ enum OpsCommands {
 #[derive(Debug, Subcommand)]
 enum SyncCommands {
     Executors {
-        #[arg(long, default_value = ".")]
-        home: PathBuf,
+        #[arg(long)]
+        home: Option<PathBuf>,
         #[arg(long = "executor-path")]
         executor_paths: Vec<PathBuf>,
         #[arg(long = "shim-dir")]
@@ -2283,8 +2283,8 @@ enum SyncCommands {
         output: OutputFormat,
     },
     Runtimes {
-        #[arg(long, default_value = ".")]
-        home: PathBuf,
+        #[arg(long)]
+        home: Option<PathBuf>,
         #[arg(long = "runtime-path")]
         runtime_paths: Vec<PathBuf>,
         #[arg(long)]
@@ -2297,8 +2297,8 @@ enum SyncCommands {
         output: OutputFormat,
     },
     All {
-        #[arg(long, default_value = ".")]
-        home: PathBuf,
+        #[arg(long)]
+        home: Option<PathBuf>,
         #[arg(long = "executor-path")]
         executor_paths: Vec<PathBuf>,
         #[arg(long = "shim-dir")]
@@ -2314,6 +2314,12 @@ enum SyncCommands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
+}
+
+fn default_home_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[derive(Debug, Subcommand)]
@@ -6900,6 +6906,7 @@ fn run() -> Result<i32> {
                 no_prompt,
                 output,
             } => {
+                let home = home.unwrap_or_else(default_home_path);
                 let store = ForgeStore::open(cli.store)?;
                 let report = install_skill(&home, &target)?;
                 let executor_sync = sync_executors(
@@ -6943,6 +6950,7 @@ fn run() -> Result<i32> {
                 no_prompt,
                 output,
             } => {
+                let home = home.unwrap_or_else(default_home_path);
                 let store = ForgeStore::open(cli.store)?;
                 let report = sync_executors(
                     &store,
@@ -6966,6 +6974,7 @@ fn run() -> Result<i32> {
                 no_prompt,
                 output,
             } => {
+                let home = home.unwrap_or_else(default_home_path);
                 let store = ForgeStore::open(cli.store)?;
                 let report = sync_runtimes(
                     &store,
@@ -6990,6 +6999,7 @@ fn run() -> Result<i32> {
                 no_prompt,
                 output,
             } => {
+                let home = home.unwrap_or_else(default_home_path);
                 let store = ForgeStore::open(cli.store)?;
                 let executor_sync = sync_executors(
                     &store,

@@ -2262,6 +2262,97 @@ printf 'bootstrap:%s\n' "$FORGE_HARNESS"
     assert_eq!(mode["default_token_headroom"], true);
     assert_eq!(mode["require_lineage_for_exec"], true);
 
+    let path_with_shim = format!("{}:{}", shim_dir.display(), path);
+    let doctor_ready_output = forge()
+        .env("PATH", &path_with_shim)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "doctor",
+            "--executor",
+            "codex",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--project-root",
+            project.to_str().unwrap(),
+            "--workflow",
+            "wf_bootstrap",
+            "--task",
+            "task_bootstrap",
+            "--run",
+            "run_bootstrap",
+            "--token-headroom",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let doctor_ready: Value = serde_json::from_slice(&doctor_ready_output).unwrap();
+    assert_eq!(doctor_ready["status"], "harness_doctor_ready");
+    assert_eq!(doctor_ready["forge_first_ready"], true);
+    assert_eq!(doctor_ready["token_headroom_ready"], true);
+    assert_eq!(doctor_ready["shim_ready"], true);
+    assert_eq!(doctor_ready["lineage_policy_ready"], true);
+    assert_eq!(doctor_ready["mode"]["forge_first_source"], "project_config");
+    assert_eq!(doctor_ready["shim_status"]["status"], "shim_status_ready");
+    assert_eq!(doctor_ready["shim_status"]["path_precedence"], "shim_first");
+    assert!(doctor_ready["readiness_checks"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("lineage_required_satisfied")));
+
+    let interactive_ready_output = forge()
+        .env("PATH", &path_with_shim)
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "harness",
+            "--executor",
+            "codex",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--project-root",
+            project.to_str().unwrap(),
+            "--workflow",
+            "wf_bootstrap",
+            "--task",
+            "task_bootstrap",
+            "--run",
+            "run_bootstrap",
+            "--token-headroom",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let interactive_ready: Value = serde_json::from_slice(&interactive_ready_output).unwrap();
+    assert_eq!(
+        interactive_ready["doctor"]["status"],
+        "harness_doctor_ready"
+    );
+    assert_eq!(interactive_ready["forge_first_ready"], true);
+    assert_eq!(interactive_ready["shim_ready"], true);
+    assert_eq!(
+        interactive_ready["forge_first_adoption_readiness"]["status"],
+        "forge_first_default_ready"
+    );
+    assert_eq!(
+        interactive_ready["forge_first_adoption_readiness"]["ready_to_use_as_default"],
+        true
+    );
+    assert_eq!(
+        interactive_ready["forge_first_adoption_readiness"]["blocked_reasons"],
+        serde_json::json!([])
+    );
+
     let tools_output = forge()
         .args([
             "--store",
@@ -3378,6 +3469,7 @@ printf 'native:%s env:%s args:%s\n' "$0" "$FORGE_HARNESS" "$*"
     assert!(script.contains(store.to_str().unwrap()));
 
     let shim_output = std::process::Command::new(&stale_forge_shim)
+        .current_dir(temp.path())
         .args(["one", "two"])
         .output()
         .unwrap();
@@ -21127,13 +21219,12 @@ fn sync_projects_forge_first_shims_into_executor_and_brain_readiness() {
 
     let synced = forge()
         .env("PATH", &path)
+        .env("HOME", &home)
         .args([
             "--store",
             store.to_str().unwrap(),
             "sync",
             "executors",
-            "--home",
-            home.to_str().unwrap(),
             "--shim-dir",
             shim_dir.to_str().unwrap(),
             "--allow",
@@ -21148,6 +21239,7 @@ fn sync_projects_forge_first_shims_into_executor_and_brain_readiness() {
         .stdout
         .clone();
     let synced_json: Value = serde_json::from_slice(&synced).unwrap();
+    assert_eq!(synced_json["home"], home.display().to_string());
     let codex = find_executor(&synced_json, "codex");
     assert_eq!(codex["allowed"], true);
     assert_eq!(codex["non_interactive_ready"], true);
