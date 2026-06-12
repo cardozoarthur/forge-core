@@ -23,6 +23,7 @@ use crate::addon::{
     AddonPlannerDispatchInput as AddonPlannerDispatchRequest,
     AddonPlanningStrategyInput as AddonPlanningStrategyRequest,
     AddonRuntimeContractCompletionInput as AddonRuntimeContractCompletionRequest,
+    AddonRuntimeWorkerRegistrationInput as AddonRuntimeWorkerRegistrationRequest,
     AddonTrustKeyInput as AddonTrustKeyRequest,
     AddonValidatorDispatchInput as AddonValidatorDispatchRequest,
     AddonValidatorExecutionInput as AddonValidatorExecutionRequest, CapabilityRegistrySyncInput,
@@ -778,6 +779,8 @@ struct AddonRuntimeWorkerRegisterInput {
     trust_level: Option<String>,
     source: Option<String>,
     data: Option<serde_json::Value>,
+    rotation_approved_by: Option<String>,
+    rotation_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3942,6 +3945,16 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         ("trust_level", "string", "local|signed|trusted"),
                         ("source", "string", "registration source"),
                         ("data", "object", "worker endpoint, signer or metadata"),
+                        (
+                            "rotation_approved_by",
+                            "string",
+                            "operator approving signed/trusted worker identity rotation",
+                        ),
+                        (
+                            "rotation_reason",
+                            "string",
+                            "reason recorded when rotating signed/trusted worker identity",
+                        ),
                     ],
                     &["worker_id", "runtime"],
                 ),
@@ -7733,12 +7746,16 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             })?;
             serde_json::to_value(register_addon_runtime_worker(
                 store,
-                &worker_id,
-                &input.runtime,
-                input.status.as_deref().unwrap_or("available"),
-                input.trust_level.as_deref().unwrap_or("local"),
-                input.source.as_deref().unwrap_or("mcp"),
-                input.data.unwrap_or_else(|| serde_json::json!({})),
+                AddonRuntimeWorkerRegistrationRequest {
+                    worker_id: &worker_id,
+                    runtime: &input.runtime,
+                    status: input.status.as_deref().unwrap_or("available"),
+                    trust_level: input.trust_level.as_deref().unwrap_or("local"),
+                    source: input.source.as_deref().unwrap_or("mcp"),
+                    data: input.data.unwrap_or_else(|| serde_json::json!({})),
+                    rotation_approved_by: input.rotation_approved_by.as_deref(),
+                    rotation_reason: input.rotation_reason.as_deref(),
+                },
             )?)?
         }
         "forge.addons.workers" => {

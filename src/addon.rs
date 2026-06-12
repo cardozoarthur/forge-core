@@ -177,6 +177,17 @@ pub struct AddonRuntimeContractCompletionInput<'a> {
     pub dry_run: bool,
 }
 
+pub struct AddonRuntimeWorkerRegistrationInput<'a> {
+    pub worker_id: &'a str,
+    pub runtime: &'a str,
+    pub status: &'a str,
+    pub trust_level: &'a str,
+    pub source: &'a str,
+    pub data: serde_json::Value,
+    pub rotation_approved_by: Option<&'a str>,
+    pub rotation_reason: Option<&'a str>,
+}
+
 pub struct AddonPackageInput<'a> {
     pub manifest_path: &'a Path,
     pub addon_dirs: &'a [PathBuf],
@@ -3820,35 +3831,59 @@ pub fn list_addon_runtime_contract_dispatches(
 
 pub fn register_addon_runtime_worker(
     store: &ForgeStore,
-    worker_id: &str,
-    runtime: &str,
-    status: &str,
-    trust_level: &str,
-    source: &str,
-    data: serde_json::Value,
+    input: AddonRuntimeWorkerRegistrationInput<'_>,
 ) -> Result<AddonRuntimeWorkerReport> {
+    let worker_id = input.worker_id;
+    let runtime = input.runtime;
+    let mut data = input.data;
     if worker_id.trim().is_empty() {
         bail!("runtime worker id is required");
     }
     if runtime.trim().is_empty() {
         bail!("runtime worker runtime is required");
     }
-    let status = if status.trim().is_empty() {
+    let status = if input.status.trim().is_empty() {
         "available"
     } else {
-        status
+        input.status
     };
-    let trust_level = if trust_level.trim().is_empty() {
+    let trust_level = if input.trust_level.trim().is_empty() {
         "local"
     } else {
-        trust_level
+        input.trust_level
     };
+    if let Some(existing_record) = store.load_runtime_worker(worker_id)? {
+        let existing = runtime_worker_entry(existing_record);
+        if runtime_worker_rotation_requires_approval(&existing, runtime, trust_level, &data) {
+            let approved_by = input
+                .rotation_approved_by
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            if approved_by.is_none() {
+                return Ok(runtime_worker_registration_blocked_by_rotation_policy(
+                    existing,
+                    runtime,
+                    trust_level,
+                    &data,
+                ));
+            }
+            annotate_runtime_worker_rotation(
+                &mut data,
+                &existing,
+                runtime,
+                trust_level,
+                approved_by.unwrap(),
+                input.rotation_reason,
+                "approved",
+            )?;
+        }
+    }
     store.save_runtime_worker(RuntimeWorkerWrite {
         id: worker_id,
         runtime,
         status,
         trust_level,
-        source,
+        source: input.source,
         data: &data,
     })?;
     let mut report =
@@ -3876,6 +3911,128 @@ pub fn list_addon_runtime_workers(
         trust_level,
         workers,
     ))
+}
+
+fn runtime_worker_registration_blocked_by_rotation_policy(
+    mut existing: AddonRuntimeWorkerEntry,
+    requested_runtime: &str,
+    requested_trust_level: &str,
+    requested_data: &serde_json::Value,
+) -> AddonRuntimeWorkerReport {
+    annotate_runtime_worker_entry_rotation_block(
+        &mut existing,
+        requested_runtime,
+        requested_trust_level,
+        requested_data,
+    );
+    let existing_status = existing.status.clone();
+    runtime_worker_report(
+        "runtime_worker_registration_blocked",
+        Some(requested_runtime),
+        Some(&existing_status),
+        Some(requested_trust_level),
+        vec![existing],
+    )
+}
+
+fn runtime_worker_rotation_requires_approval(
+    existing: &AddonRuntimeWorkerEntry,
+    requested_runtime: &str,
+    requested_trust_level: &str,
+    requested_data: &serde_json::Value,
+) -> bool {
+    let governed_existing = matches!(existing.trust_level.as_str(), "signed" | "trusted");
+    let governed_requested = matches!(requested_trust_level, "signed" | "trusted");
+    if !governed_existing && !governed_requested {
+        return false;
+    }
+    existing.runtime != requested_runtime
+        || existing.trust_level != requested_trust_level
+        || runtime_worker_identity_value(&existing.data, "signature_scheme")
+            != runtime_worker_identity_value(requested_data, "signature_scheme")
+        || runtime_worker_identity_value(&existing.data, "public_key_hex")
+            != runtime_worker_identity_value(requested_data, "public_key_hex")
+}
+
+fn annotate_runtime_worker_entry_rotation_block(
+    worker: &mut AddonRuntimeWorkerEntry,
+    requested_runtime: &str,
+    requested_trust_level: &str,
+    requested_data: &serde_json::Value,
+) {
+    let policy = serde_json::json!({
+        "schema_version": "forge.addon_runtime_worker_rotation_policy.v1",
+        "status": "blocked_missing_approval",
+        "reason": "signed or trusted runtime worker identity changed without explicit rotation approval",
+        "current": {
+            "runtime": worker.runtime,
+            "trust_level": worker.trust_level,
+            "signature_scheme": runtime_worker_identity_value(&worker.data, "signature_scheme"),
+            "public_key_hex": runtime_worker_identity_value(&worker.data, "public_key_hex"),
+            "data_sha256": hex_sha256(&serde_json::to_vec(&worker.data).unwrap_or_default()),
+        },
+        "requested": {
+            "runtime": requested_runtime,
+            "trust_level": requested_trust_level,
+            "signature_scheme": runtime_worker_identity_value(requested_data, "signature_scheme"),
+            "public_key_hex": runtime_worker_identity_value(requested_data, "public_key_hex"),
+            "data_sha256": hex_sha256(&serde_json::to_vec(requested_data).unwrap_or_default()),
+        }
+    });
+    set_runtime_worker_rotation_policy(&mut worker.data, policy);
+}
+
+fn annotate_runtime_worker_rotation(
+    data: &mut serde_json::Value,
+    existing: &AddonRuntimeWorkerEntry,
+    requested_runtime: &str,
+    requested_trust_level: &str,
+    approved_by: &str,
+    reason: Option<&str>,
+    status: &str,
+) -> Result<()> {
+    let policy = serde_json::json!({
+        "schema_version": "forge.addon_runtime_worker_rotation_policy.v1",
+        "status": status,
+        "approved_by": approved_by,
+        "reason": reason.unwrap_or("").trim(),
+        "rotated_at": Utc::now().to_rfc3339(),
+        "previous": {
+            "runtime": existing.runtime,
+            "trust_level": existing.trust_level,
+            "signature_scheme": runtime_worker_identity_value(&existing.data, "signature_scheme"),
+            "public_key_hex": runtime_worker_identity_value(&existing.data, "public_key_hex"),
+            "data_sha256": hex_sha256(&serde_json::to_vec(&existing.data)?),
+        },
+        "requested": {
+            "runtime": requested_runtime,
+            "trust_level": requested_trust_level,
+            "signature_scheme": runtime_worker_identity_value(data, "signature_scheme"),
+            "public_key_hex": runtime_worker_identity_value(data, "public_key_hex"),
+            "data_sha256": hex_sha256(&serde_json::to_vec(data)?),
+        }
+    });
+    set_runtime_worker_rotation_policy(data, policy);
+    Ok(())
+}
+
+fn runtime_worker_identity_value(data: &serde_json::Value, field: &str) -> Option<String> {
+    data.get(field)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn set_runtime_worker_rotation_policy(data: &mut serde_json::Value, policy: serde_json::Value) {
+    if !data.is_object() {
+        *data = serde_json::json!({
+            "value": data.clone(),
+        });
+    }
+    if let Some(object) = data.as_object_mut() {
+        object.insert("rotation_policy".to_string(), policy);
+    }
 }
 
 pub fn run_addon_runtime_contract_dispatch(

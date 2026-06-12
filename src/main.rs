@@ -20,8 +20,8 @@ use forge_core::addon::{
     uninstall_addon, upgrade_addon, validate_addon_catalog, AddonExecutorDispatchInput,
     AddonExecutorExecutionInput, AddonHandoffDispatchInput, AddonHandoffExecutionInput,
     AddonPackageInput, AddonPlannerDispatchInput, AddonPlanningStrategyInput,
-    AddonRuntimeContractCompletionInput, AddonTrustKeyInput, AddonValidatorDispatchInput,
-    AddonValidatorExecutionInput, CapabilityRegistrySyncInput,
+    AddonRuntimeContractCompletionInput, AddonRuntimeWorkerRegistrationInput, AddonTrustKeyInput,
+    AddonValidatorDispatchInput, AddonValidatorExecutionInput, CapabilityRegistrySyncInput,
 };
 use forge_core::artifact::list_workflow_artifacts;
 use forge_core::aws_ops::{
@@ -1234,6 +1234,10 @@ enum AddonCommands {
         source: String,
         #[arg(long, default_value = "{}")]
         data: String,
+        #[arg(long = "rotation-approved-by")]
+        rotation_approved_by: Option<String>,
+        #[arg(long = "rotation-reason")]
+        rotation_reason: Option<String>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -5549,21 +5553,28 @@ fn run() -> Result<i32> {
                 trust_level,
                 source,
                 data,
+                rotation_approved_by,
+                rotation_reason,
                 output,
             } => {
                 let store = ForgeStore::open(cli.store)?;
                 let data_value: serde_json::Value = serde_json::from_str(&data)?;
                 let report = register_addon_runtime_worker(
                     &store,
-                    &worker,
-                    &runtime,
-                    &status,
-                    &trust_level,
-                    &source,
-                    data_value,
+                    AddonRuntimeWorkerRegistrationInput {
+                        worker_id: &worker,
+                        runtime: &runtime,
+                        status: &status,
+                        trust_level: &trust_level,
+                        source: &source,
+                        data: data_value,
+                        rotation_approved_by: rotation_approved_by.as_deref(),
+                        rotation_reason: rotation_reason.as_deref(),
+                    },
                 )?;
+                let should_fail = report.status == "runtime_worker_registration_blocked";
                 print_response(output, &report)?;
-                Ok(0)
+                Ok(if should_fail { 1 } else { 0 })
             }
             AddonCommands::Workers {
                 runtime,

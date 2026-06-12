@@ -8470,6 +8470,10 @@ runtime_contracts:
             "key-rotation-test",
             "--data",
             rotated_worker_data.as_str(),
+            "--rotation-approved-by",
+            "test-operator",
+            "--rotation-reason",
+            "verify claim snapshot survives approved key rotation",
             "--output",
             "json",
         ])
@@ -9034,6 +9038,188 @@ print(json.dumps({
             .contains(&Value::String(
                 "runtime contract logistics.route_validator (validator) via wasm".to_string()
             ))));
+}
+
+#[test]
+fn signed_runtime_worker_key_rotation_requires_explicit_approval_for_cli_and_mcp() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let signing_key = SigningKey::from_bytes(&[11u8; 32]);
+    let rotated_signing_key = SigningKey::from_bytes(&[12u8; 32]);
+    let worker_data = serde_json::json!({
+        "endpoint": "local://signed-worker-v1",
+        "signature_scheme": "ed25519",
+        "public_key_hex": test_hex_encode(signing_key.verifying_key().as_bytes()),
+    })
+    .to_string();
+
+    let first_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "register-worker",
+            "--worker",
+            "signed-rotation-worker",
+            "--runtime",
+            "wasm",
+            "--trust-level",
+            "signed",
+            "--source",
+            "test",
+            "--data",
+            worker_data.as_str(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first_json: Value = serde_json::from_slice(&first_output).unwrap();
+    assert_eq!(first_json["status"], "runtime_worker_registered");
+
+    let rotated_worker_data = serde_json::json!({
+        "endpoint": "local://signed-worker-v2",
+        "signature_scheme": "ed25519",
+        "public_key_hex": test_hex_encode(rotated_signing_key.verifying_key().as_bytes()),
+    })
+    .to_string();
+    let blocked_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "register-worker",
+            "--worker",
+            "signed-rotation-worker",
+            "--runtime",
+            "wasm",
+            "--trust-level",
+            "signed",
+            "--source",
+            "implicit-rotation",
+            "--data",
+            rotated_worker_data.as_str(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let blocked_json: Value = serde_json::from_slice(&blocked_output).unwrap();
+    assert_eq!(
+        blocked_json["status"],
+        "runtime_worker_registration_blocked"
+    );
+    assert_eq!(
+        blocked_json["workers"][0]["data"]["rotation_policy"]["status"],
+        "blocked_missing_approval"
+    );
+    assert_eq!(
+        blocked_json["workers"][0]["data"]["public_key_hex"],
+        test_hex_encode(signing_key.verifying_key().as_bytes())
+    );
+
+    let approved_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "addons",
+            "register-worker",
+            "--worker",
+            "signed-rotation-worker",
+            "--runtime",
+            "wasm",
+            "--trust-level",
+            "signed",
+            "--source",
+            "approved-rotation",
+            "--rotation-approved-by",
+            "arthur",
+            "--rotation-reason",
+            "scheduled key rotation",
+            "--data",
+            rotated_worker_data.as_str(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let approved_json: Value = serde_json::from_slice(&approved_output).unwrap();
+    assert_eq!(approved_json["status"], "runtime_worker_registered");
+    let approved_worker = approved_json["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["id"] == "signed-rotation-worker")
+        .unwrap();
+    assert_eq!(
+        approved_worker["data"]["public_key_hex"],
+        test_hex_encode(rotated_signing_key.verifying_key().as_bytes())
+    );
+    assert_eq!(
+        approved_worker["data"]["rotation_policy"]["status"],
+        "approved"
+    );
+    assert_eq!(
+        approved_worker["data"]["rotation_policy"]["approved_by"],
+        "arthur"
+    );
+
+    let mcp_rotated_key = SigningKey::from_bytes(&[13u8; 32]);
+    let mcp_input = serde_json::json!({
+        "worker_id": "signed-rotation-worker",
+        "runtime": "wasm",
+        "trust_level": "signed",
+        "source": "mcp-approved-rotation",
+        "rotation_approved_by": "operator",
+        "rotation_reason": "mcp key rotation",
+        "data": {
+            "endpoint": "local://signed-worker-v3",
+            "signature_scheme": "ed25519",
+            "public_key_hex": test_hex_encode(mcp_rotated_key.verifying_key().as_bytes())
+        }
+    });
+    let mcp_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.addons.register_worker",
+            "--input",
+            &mcp_input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(mcp_json["result"]["status"], "runtime_worker_registered");
+    let mcp_worker = mcp_json["result"]["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["id"] == "signed-rotation-worker")
+        .unwrap();
+    assert_eq!(
+        mcp_worker["data"]["rotation_policy"]["approved_by"],
+        "operator"
+    );
+    assert_eq!(
+        mcp_worker["data"]["public_key_hex"],
+        test_hex_encode(mcp_rotated_key.verifying_key().as_bytes())
+    );
 }
 
 #[test]
