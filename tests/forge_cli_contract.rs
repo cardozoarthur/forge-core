@@ -53403,6 +53403,52 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
         .windows(2)
         .any(|pair| pair[0] == serde_json::json!("--connected-brain")
             && pair[1] == serde_json::json!("codex")));
+    assert!(
+        panel["provider_wrapper_plan_count"].as_u64().unwrap() >= 1,
+        "replacement CLI panel should expose plan-only provider wrapper preparation"
+    );
+    let wrapper_plans = panel["provider_wrapper_plans"].as_array().unwrap();
+    let codex_wrapper_plan = wrapper_plans
+        .iter()
+        .find(|plan| plan["provider_id"] == "codex")
+        .expect("codex provider wrapper plan should be visible");
+    assert_eq!(codex_wrapper_plan["brain_id"], "codex");
+    assert_eq!(codex_wrapper_plan["installed"], true);
+    assert_eq!(codex_wrapper_plan["wrapper_required"], true);
+    assert_eq!(codex_wrapper_plan["counts_as_release_evidence"], false);
+    assert_eq!(codex_wrapper_plan["model_execution_allowed"], false);
+    assert_eq!(codex_wrapper_plan["mutates_project"], false);
+    assert!(codex_wrapper_plan["wrapper_manifest_path"]
+        .as_str()
+        .unwrap()
+        .ends_with(".forge/connected-brain-runtimes.json"));
+    assert_eq!(
+        codex_wrapper_plan["required_output_schema"],
+        "forge.connected_external_brain.provider_output.v1"
+    );
+    assert!(codex_wrapper_plan["manifest_provider_template"]["command"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge.connected_external_brain.provider_output.v1"
+        )));
+    assert!(codex_wrapper_plan["prepare_evidence_inputs_command"]
+        .as_array()
+        .unwrap()
+        .windows(2)
+        .any(|pair| pair[0] == serde_json::json!("--connected-brain")
+            && pair[1] == serde_json::json!("codex")));
+    assert!(codex_wrapper_plan["collect_evidence_command"]
+        .as_array()
+        .unwrap()
+        .windows(2)
+        .any(|pair| pair[0] == serde_json::json!("--connected-brain")
+            && pair[1] == serde_json::json!("codex")));
+    assert!(codex_wrapper_plan["safety_requirements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item.as_str().unwrap().contains("does not execute a model")));
     assert!(panel["commands"]["evidence_plan"]
         .as_array()
         .unwrap()
@@ -53523,6 +53569,7 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
     assert!(text.contains("Replacement CLI:"));
     assert!(text.contains("External brain evidence:"));
     assert!(text.contains("Provider readiness:"));
+    assert!(text.contains("Provider wrapper plans:"));
     assert!(text.contains("codex:cli_detected_wrapper_required"));
     assert!(text.contains("file_editing_ux[ready]"));
     assert!(text.contains("forge milestone cli-demo"));

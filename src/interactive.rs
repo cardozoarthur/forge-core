@@ -782,6 +782,8 @@ pub struct InteractiveReplacementCliPanel {
     pub installed_provider_count: usize,
     pub wrapper_required_provider_count: usize,
     pub provider_readiness: Vec<InteractiveReplacementCliProviderReadiness>,
+    pub provider_wrapper_plan_count: usize,
+    pub provider_wrapper_plans: Vec<InteractiveReplacementCliProviderWrapperPlan>,
     pub blockers: Vec<String>,
     pub next_actions: Vec<String>,
     pub commands: InteractiveReplacementCliCommands,
@@ -815,6 +817,31 @@ pub struct InteractiveReplacementCliProviderReadiness {
     pub evidence_blocker: String,
     pub next_action: String,
     pub collect_evidence_command: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveReplacementCliProviderWrapperPlan {
+    pub schema_version: String,
+    pub provider_id: String,
+    pub brain_id: String,
+    pub binary: String,
+    pub installed: bool,
+    pub detected_path: Option<String>,
+    pub readiness: String,
+    pub wrapper_required: bool,
+    pub wrapper_manifest_path: String,
+    pub required_output_schema: String,
+    pub manifest_provider_template: serde_json::Value,
+    pub recommended_wrapper_command: Vec<String>,
+    pub evidence_plan_command: Vec<String>,
+    pub prepare_evidence_inputs_command: Vec<String>,
+    pub collect_evidence_command: Vec<String>,
+    pub counts_as_release_evidence: bool,
+    pub model_execution_allowed: bool,
+    pub mutates_project: bool,
+    pub safety_requirements: Vec<String>,
+    pub next_action: String,
+    pub promotion_impact: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -9683,6 +9710,12 @@ pub fn build_interactive_replacement_cli_with_options(
         &external_brain_evidence_plan.provider_candidates,
         &replacement_commands.collect_external_brain_evidence,
     );
+    let provider_wrapper_plans = replacement_cli_provider_wrapper_plans(
+        &external_brain_evidence_plan.provider_candidates,
+        &replacement_commands,
+        &project_root,
+    );
+    let provider_wrapper_plan_count = provider_wrapper_plans.len();
     let provider_readiness_count = provider_readiness.len();
     let installed_provider_count = provider_readiness
         .iter()
@@ -9923,11 +9956,14 @@ pub fn build_interactive_replacement_cli_with_options(
         installed_provider_count,
         wrapper_required_provider_count,
         provider_readiness,
+        provider_wrapper_plan_count,
+        provider_wrapper_plans,
         blockers,
         next_actions,
         commands: replacement_commands,
         notes: vec![
             "This panel is read-only; it aggregates replacement-grade CLI readiness without launching child CLIs or collecting evidence.".to_string(),
+            "Provider wrapper plans are preparation guidance only; rendering them does not execute a model, mutate project files or count as release evidence.".to_string(),
             "Promotion remains false until required milestone evidence is attached and validated.".to_string(),
         ],
     })
@@ -10023,6 +10059,102 @@ fn replacement_cli_provider_readiness(
             }
         })
         .collect()
+}
+
+fn replacement_cli_provider_wrapper_plans(
+    candidates: &[MilestoneEvidenceProviderCandidate],
+    commands: &InteractiveReplacementCliCommands,
+    project_root: &Path,
+) -> Vec<InteractiveReplacementCliProviderWrapperPlan> {
+    let wrapper_manifest_path = project_root
+        .join(".forge")
+        .join("connected-brain-runtimes.json")
+        .display()
+        .to_string();
+    candidates
+        .iter()
+        .map(|candidate| {
+            let required_output_schema = "forge.connected_external_brain.provider_output.v1";
+            let evidence_plan_command =
+                replacement_cli_provider_command(&commands.evidence_plan, &candidate.provider_id);
+            let prepare_evidence_inputs_command = replacement_cli_provider_command(
+                &commands.prepare_evidence_inputs,
+                &candidate.provider_id,
+            );
+            let collect_evidence_command = replacement_cli_provider_command(
+                &commands.collect_external_brain_evidence,
+                &candidate.provider_id,
+            );
+            InteractiveReplacementCliProviderWrapperPlan {
+                schema_version:
+                    "forge.interactive.replacement_cli.provider_wrapper_plan.v1".to_string(),
+                provider_id: candidate.provider_id.clone(),
+                brain_id: candidate.brain_id.clone(),
+                binary: candidate.binary.clone(),
+                installed: candidate.installed,
+                detected_path: candidate.detected_path.clone(),
+                readiness: candidate.readiness.clone(),
+                wrapper_required: candidate.readiness == "cli_detected_wrapper_required",
+                wrapper_manifest_path: wrapper_manifest_path.clone(),
+                required_output_schema: required_output_schema.to_string(),
+                manifest_provider_template: candidate.manifest_provider_template.clone(),
+                recommended_wrapper_command: replacement_cli_manifest_command(
+                    &candidate.manifest_provider_template,
+                ),
+                evidence_plan_command,
+                prepare_evidence_inputs_command,
+                collect_evidence_command,
+                counts_as_release_evidence: false,
+                model_execution_allowed: false,
+                mutates_project: false,
+                safety_requirements: vec![
+                    "This read-only plan does not execute a model or call the provider CLI."
+                        .to_string(),
+                    "Only prepare-evidence-inputs --apply may materialize secret-free templates, and it still does not count as release evidence.".to_string(),
+                    "External brain evidence requires an operator-approved wrapper that emits forge.connected_external_brain.provider_output.v1.".to_string(),
+                    "Credential values must stay in credential-vault or environment injection and must not be printed in the manifest.".to_string(),
+                ],
+                next_action: if candidate.installed {
+                    format!(
+                        "Review the provider template for `{}`, materialize secret-free inputs with prepare-evidence-inputs, then approve a wrapper before collecting evidence.",
+                        candidate.provider_id
+                    )
+                } else {
+                    format!(
+                        "Install or configure `{}` before preparing a connected-brain wrapper.",
+                        candidate.binary
+                    )
+                },
+                promotion_impact: "Plan-only preparation keeps promotion blocked until collect-evidence records an approved real provider execution receipt.".to_string(),
+            }
+        })
+        .collect()
+}
+
+fn replacement_cli_provider_command(command: &[String], provider_id: &str) -> Vec<String> {
+    command
+        .iter()
+        .map(|part| {
+            if part == "<provider-id>" {
+                provider_id.to_string()
+            } else {
+                part.clone()
+            }
+        })
+        .collect()
+}
+
+fn replacement_cli_manifest_command(template: &serde_json::Value) -> Vec<String> {
+    template
+        .get("command")
+        .and_then(|command| command.as_array())
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| part.as_str().map(ToString::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn replacement_cli_milestone_evidence_items(
@@ -14033,7 +14165,7 @@ pub fn render_interactive_workflow_sidebar(panel: &InteractiveWorkflowSidebarPan
 
 pub fn render_interactive_replacement_cli(panel: &InteractiveReplacementCliPanel) -> String {
     format!(
-        "Replacement CLI: {status}; milestone {milestone}; capability {capability_id}; readiness {readiness_percent}% ({ready_surface_count}/{surface_count}); promotion_ready {promotion_ready}\nExternal brain evidence: {external_plan_status}; ready {external_ready}; providers {external_providers}; templates {external_templates}\nProvider readiness: {provider_readiness}\nSurfaces: {surfaces}\nBlockers: {blockers}\nCommands: {commands}\n",
+        "Replacement CLI: {status}; milestone {milestone}; capability {capability_id}; readiness {readiness_percent}% ({ready_surface_count}/{surface_count}); promotion_ready {promotion_ready}\nExternal brain evidence: {external_plan_status}; ready {external_ready}; providers {external_providers}; templates {external_templates}\nProvider readiness: {provider_readiness}\nProvider wrapper plans: {provider_wrapper_plans}\nSurfaces: {surfaces}\nBlockers: {blockers}\nCommands: {commands}\n",
         status = panel.status,
         milestone = panel.milestone,
         capability_id = panel.capability_id,
@@ -14057,6 +14189,7 @@ pub fn render_interactive_replacement_cli(panel: &InteractiveReplacementCliPanel
                 .join(",")
         },
         provider_readiness = render_replacement_cli_provider_readiness_summary(panel),
+        provider_wrapper_plans = render_replacement_cli_provider_wrapper_plan_summary(panel),
         surfaces = render_replacement_cli_surface_summary(panel),
         blockers = if panel.blockers.is_empty() {
             "none".to_string()
@@ -14092,6 +14225,31 @@ fn render_replacement_cli_provider_readiness_summary(
             format!(
                 "{}:{}:{}",
                 provider.provider_id, provider.readiness, provider.version_status
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_replacement_cli_provider_wrapper_plan_summary(
+    panel: &InteractiveReplacementCliPanel,
+) -> String {
+    if panel.provider_wrapper_plans.is_empty() {
+        return "none".to_string();
+    }
+    panel
+        .provider_wrapper_plans
+        .iter()
+        .take(5)
+        .map(|plan| {
+            let state = if plan.installed {
+                "wrapper_plan_ready"
+            } else {
+                "provider_missing"
+            };
+            format!(
+                "{}:{}:evidence={}",
+                plan.provider_id, state, plan.counts_as_release_evidence
             )
         })
         .collect::<Vec<_>>()
