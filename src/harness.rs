@@ -1,4 +1,5 @@
 use crate::artifact::hex_sha256;
+use crate::identity::inspect_project_operating_context;
 use crate::intent::OperatingContextSpec;
 use crate::storage::{ForgeStore, GlobalEventWrite, HeadroomBlobWrite, StoredHeadroomBlobRecord};
 use anyhow::{bail, Context, Result};
@@ -1627,7 +1628,7 @@ pub fn build_harness_activation_profile(
     } else {
         "disabled"
     };
-    let env = vec![
+    let mut env = vec![
         env_var(
             "FORGE_HARNESS",
             "enabled",
@@ -1659,6 +1660,7 @@ pub fn build_harness_activation_profile(
             "records which brain CLI this activation profile is meant to inspect first",
         ),
     ];
+    env.extend(harness_operating_context_env(Some(&project_root)));
     let activation_commands = vec![
         r#"export FORGE_HARNESS_PREV_PATH="${PATH}""#.to_string(),
         format!("export PATH={}:$PATH", shell_quote(&shim_dir_display)),
@@ -2575,6 +2577,27 @@ fn selected_harness_executor_readiness(
         .env
         .iter()
         .any(|item| item.name == "FORGE_HARNESS" && item.value == "enabled");
+    let organization_context_ready = [
+        "FORGE_ORGANIZATION_ID",
+        "FORGE_ORGANIZATION_LABEL",
+        "FORGE_BRAND_ID",
+        "FORGE_BRAND_LABEL",
+        "FORGE_PRODUCT_ID",
+        "FORGE_PRODUCT_LABEL",
+        "FORGE_USER_ID",
+        "FORGE_CHANNEL_ID",
+        "FORGE_MEMORY_SCOPE",
+        "FORGE_PERSONALITY_SCOPE",
+        "FORGE_BRAND_VOICE",
+        "FORGE_BRAND_TONE",
+        "FORGE_DESIGN_TOKEN_SOURCE",
+        "FORGE_COMPONENT_SOURCE",
+        "FORGE_OPERATIONAL_MEMORY_VISIBILITY",
+        "FORGE_OPERATIONAL_SHARING_POLICY",
+        "FORGE_OPERATIONAL_APPROVAL_POLICY",
+    ]
+    .iter()
+    .all(|name| wrapper_plan.env.iter().any(|item| item.name == *name));
     let routing_env_ready = |name: &str| {
         wrapper_plan
             .env
@@ -2598,13 +2621,32 @@ fn selected_harness_executor_readiness(
             "env_overlay",
             if env_overlay_ready { "ready" } else { "blocked" },
             "wrapper_plan.env",
-            "Forge harness env overlay marks child CLI execution as Forge-controlled.",
+            "Forge harness env overlay marks child CLI execution as Forge-controlled and bound to the active operating context.",
             vec![
                 "forge".to_string(),
                 "harness".to_string(),
                 "wrap-plan".to_string(),
                 "--executor".to_string(),
                 executor.clone(),
+                "--project-root".to_string(),
+                project_root_display.clone(),
+                "--output".to_string(),
+                "json".to_string(),
+            ],
+        ),
+        executor_surface_readiness(
+            "organization_context",
+            if organization_context_ready {
+                "ready"
+            } else {
+                "recommended"
+            },
+            "wrapper_plan.env.FORGE_ORGANIZATION_ID",
+            "Forge harness env overlay should bind organization, brand, product, user and channel context before a brain CLI runs.",
+            vec![
+                "forge".to_string(),
+                "interactive".to_string(),
+                "operating-context".to_string(),
                 "--project-root".to_string(),
                 project_root_display.clone(),
                 "--output".to_string(),
@@ -3042,6 +3084,7 @@ fn harness_executor_native_entrypoint(executor: &str) -> &str {
 fn harness_executor_supported_surfaces() -> Vec<String> {
     [
         "env_overlay",
+        "organization_context",
         "path_shim",
         "harness_exec",
         "token_headroom",
@@ -3458,6 +3501,7 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         ),
     ];
     env.extend(headroom_runtime_plan.env.clone());
+    env.extend(harness_operating_context_env(project_root));
     if let Some(workflow_id) = workflow_id.filter(|value| !value.trim().is_empty()) {
         env.push(env_var(
             "FORGE_WORKFLOW_ID",
@@ -6241,6 +6285,100 @@ fn normalize_executor(executor: &str) -> String {
         value if !value.is_empty() => value.to_string(),
         _ => "codex".to_string(),
     }
+}
+
+fn harness_operating_context_env(project_root: Option<&Path>) -> Vec<CliWrapperEnvVar> {
+    let project_root = project_root.unwrap_or_else(|| Path::new("."));
+    let context = inspect_project_operating_context(project_root)
+        .map(|report| report.context)
+        .unwrap_or_else(|_| OperatingContextSpec::default());
+    vec![
+        env_var(
+            "FORGE_ORGANIZATION_ID",
+            &context.organization.id,
+            "binds the wrapper to the active organization identity",
+        ),
+        env_var(
+            "FORGE_ORGANIZATION_LABEL",
+            &context.organization.label,
+            "binds the wrapper to the active organization label",
+        ),
+        env_var(
+            "FORGE_BRAND_ID",
+            &context.brand.id,
+            "binds the wrapper to the active brand identity",
+        ),
+        env_var(
+            "FORGE_BRAND_LABEL",
+            &context.brand.label,
+            "binds the wrapper to the active brand label",
+        ),
+        env_var(
+            "FORGE_PRODUCT_ID",
+            &context.product.id,
+            "binds the wrapper to the active product identity",
+        ),
+        env_var(
+            "FORGE_PRODUCT_LABEL",
+            &context.product.label,
+            "binds the wrapper to the active product label",
+        ),
+        env_var(
+            "FORGE_USER_ID",
+            &context.user.id,
+            "binds the wrapper to the active user identity",
+        ),
+        env_var(
+            "FORGE_CHANNEL_ID",
+            &context.channel.id,
+            "binds the wrapper to the active channel identity",
+        ),
+        env_var(
+            "FORGE_MEMORY_SCOPE",
+            &context.memory_scope,
+            "binds the wrapper to the active memory scope",
+        ),
+        env_var(
+            "FORGE_PERSONALITY_SCOPE",
+            &context.personality_scope,
+            "binds the wrapper to the active personality scope",
+        ),
+        env_var(
+            "FORGE_BRAND_VOICE",
+            &context.brand_identity.voice,
+            "binds the wrapper to the active brand voice",
+        ),
+        env_var(
+            "FORGE_BRAND_TONE",
+            &context.brand_identity.tone,
+            "binds the wrapper to the active brand tone",
+        ),
+        env_var(
+            "FORGE_DESIGN_TOKEN_SOURCE",
+            &context.design_system.token_source,
+            "binds the wrapper to the active design token source",
+        ),
+        env_var(
+            "FORGE_COMPONENT_SOURCE",
+            &context.design_system.component_source,
+            "binds the wrapper to the active component source",
+        ),
+        env_var(
+            "FORGE_OPERATIONAL_MEMORY_VISIBILITY",
+            &context.operating_policy.memory_visibility,
+            "binds the wrapper to the active memory visibility policy",
+        ),
+        env_var(
+            "FORGE_OPERATIONAL_SHARING_POLICY",
+            &context.operating_policy.sharing_policy,
+            "binds the wrapper to the active sharing policy",
+        ),
+        env_var(
+            "FORGE_OPERATIONAL_APPROVAL_POLICY",
+            &context.operating_policy.approval_policy,
+            "binds the wrapper to the active approval policy",
+        ),
+    ]
 }
 
 fn env_var(name: &str, value: &str, reason: &str) -> CliWrapperEnvVar {

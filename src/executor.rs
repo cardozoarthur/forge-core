@@ -1088,32 +1088,80 @@ fn config_candidates(id: &str, home: &Path) -> Vec<PathBuf> {
 fn build_integrations(executors: &[ExecutorState]) -> Vec<ExecutorIntegration> {
     let codex_allowed = executor_is_allowed(executors, "codex");
     let opencode_allowed = executor_is_allowed(executors, "opencode");
-    let enabled = codex_allowed && opencode_allowed;
-    vec![ExecutorIntegration {
+    let gemini_allowed = executor_is_allowed(executors, "gemini");
+    let ollama_allowed = executor_is_allowed(executors, "ollama");
+
+    let mut integrations = Vec::new();
+    integrations.push(ExecutorIntegration {
+        id: "codex_primary_brain".to_string(),
+        from: "forge".to_string(),
+        to: "codex".to_string(),
+        kind: "primary_brain_motor".to_string(),
+        enabled: codex_allowed,
+        reason: if codex_allowed {
+            "Codex is installed, configured and authorized; Forge routes primary brain work through Codex first."
+                .to_string()
+        } else {
+            "Codex is not yet ready, so Forge cannot use it as the primary brain." .to_string()
+        },
+    });
+
+    integrations.push(ExecutorIntegration {
+        id: "gemini_codex_bridge".to_string(),
+        from: "gemini".to_string(),
+        to: "codex".to_string(),
+        kind: "delegated_cli_executor".to_string(),
+        enabled: gemini_allowed && codex_allowed,
+        reason: if gemini_allowed && codex_allowed {
+            "Gemini and Codex are both available; Forge may route bounded tasks through either executor and keep Codex as the primary motor."
+                .to_string()
+        } else {
+            "requires Gemini and Codex to be installed, configured and human-authorized".to_string()
+        },
+    });
+
+    integrations.push(ExecutorIntegration {
         id: "opencode_codex_bridge".to_string(),
         from: "opencode".to_string(),
         to: "codex".to_string(),
         kind: "delegated_cli_executor".to_string(),
-        enabled,
-        reason: if enabled {
-            "opencode and codex are both authorized; Forge may route bounded tasks through either executor and record the bridge in workflow policy"
+        enabled: opencode_allowed && codex_allowed,
+        reason: if opencode_allowed && codex_allowed {
+            "OpenCode and Codex are both authorized; Forge may route bounded tasks through OpenCode while Codex remains the primary brain."
                 .to_string()
         } else {
-            "requires both opencode and codex to be installed, configured and human-authorized"
-                .to_string()
+            "requires OpenCode and Codex to be installed, configured and human-authorized".to_string()
         },
-    }]
+    });
+
+    integrations.push(ExecutorIntegration {
+        id: "ollama_codex_bridge".to_string(),
+        from: "ollama".to_string(),
+        to: "codex".to_string(),
+        kind: "local_model_integrator".to_string(),
+        enabled: ollama_allowed && codex_allowed,
+        reason: if ollama_allowed && codex_allowed {
+            "Ollama is available as a local integrator while Codex stays the primary motor."
+                .to_string()
+        } else {
+            "requires Ollama and Codex to be installed, configured and human-authorized".to_string()
+        },
+    });
+
+    integrations
 }
 
 fn build_brain_router(
     executors: &[ExecutorState],
     quota_policy: &ExecutorQuotaPolicyReport,
 ) -> BrainRouterReport {
-    let selected_brain = quota_policy
-        .selection_trace
-        .iter()
-        .find(|candidate| candidate.decision == "select")
-        .map(|candidate| candidate.executor.clone());
+    let selected_brain = preferred_brain_id(executors).or_else(|| {
+        quota_policy
+            .selection_trace
+            .iter()
+            .find(|candidate| candidate.decision == "select")
+            .map(|candidate| candidate.executor.clone())
+    });
     let mut brains = executors
         .iter()
         .map(brain_candidate)
@@ -1173,6 +1221,34 @@ fn build_brain_router(
         safety_gates,
         brains,
     }
+}
+
+fn preferred_brain_id(executors: &[ExecutorState]) -> Option<String> {
+    let codex_ready = executors.iter().any(|executor| {
+        executor.id == "codex" && executor.allowed && executor.installed && executor.configured
+    });
+    if codex_ready {
+        return Some("codex".to_string());
+    }
+    let gemini_ready = executors.iter().any(|executor| {
+        executor.id == "gemini" && executor.allowed && executor.installed && executor.configured
+    });
+    if gemini_ready {
+        return Some("gemini".to_string());
+    }
+    let opencode_ready = executors.iter().any(|executor| {
+        executor.id == "opencode" && executor.allowed && executor.installed && executor.configured
+    });
+    if opencode_ready {
+        return Some("opencode".to_string());
+    }
+    let ollama_ready = executors.iter().any(|executor| {
+        executor.id == "ollama" && executor.allowed && executor.installed && executor.configured
+    });
+    if ollama_ready {
+        return Some("ollama".to_string());
+    }
+    None
 }
 
 fn brain_candidate(executor: &ExecutorState) -> BrainCandidate {

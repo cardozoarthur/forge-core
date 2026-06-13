@@ -22092,8 +22092,8 @@ fn sync_persists_human_allowed_executor_policy() {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["status"], "loaded");
     assert_eq!(json["usable"], serde_json::json!(["codex"]));
-    assert_eq!(json["integrations"][0]["id"], "opencode_codex_bridge");
-    assert_eq!(json["integrations"][0]["enabled"], false);
+    assert_eq!(json["integrations"][0]["id"], "codex_primary_brain");
+    assert_eq!(json["integrations"][0]["enabled"], true);
     assert_eq!(
         json["quota_policy"]["schema_version"],
         "forge.executor_quota_policy.v1"
@@ -23584,7 +23584,7 @@ fn brain_router_keeps_memory_skills_mcp_and_shells_under_forge_control() {
         brains_json["node_brain_role"],
         "per_node_agentic_execution_brain"
     );
-    assert_eq!(brains_json["selected_brain"], "opencode");
+    assert_eq!(brains_json["selected_brain"], "codex");
     let claude = brains_json["brains"]
         .as_array()
         .unwrap()
@@ -23768,10 +23768,16 @@ fn sync_enables_opencode_codex_bridge_when_both_are_human_authorized() {
 
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["usable"], serde_json::json!(["codex", "opencode"]));
-    assert_eq!(json["integrations"][0]["id"], "opencode_codex_bridge");
-    assert_eq!(json["integrations"][0]["from"], "opencode");
+    assert_eq!(json["integrations"][0]["id"], "codex_primary_brain");
+    assert_eq!(json["integrations"][0]["from"], "forge");
     assert_eq!(json["integrations"][0]["to"], "codex");
     assert_eq!(json["integrations"][0]["enabled"], true);
+    assert!(json["integrations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|integration| integration["id"] == "opencode_codex_bridge"
+            && integration["enabled"] == true));
 }
 
 #[test]
@@ -48334,7 +48340,7 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
         "needs_forge_owned_path_shim"
     );
     assert_eq!(compatibility["ready_as_forge_first_default"], false);
-    assert_eq!(compatibility["readiness_score_percent"], 85);
+    assert_eq!(compatibility["readiness_score_percent"], 86);
     assert!(compatibility["ready_surfaces"]
         .as_array()
         .unwrap()
@@ -48535,8 +48541,8 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains("selected codex via codex_cli"));
     assert!(text.contains("posture needs_forge_owned_path_shim"));
     assert!(text.contains("default_ready false"));
-    assert!(text.contains("score 85%"));
-    assert!(text.contains("surfaces env_overlay, path_shim, harness_exec"));
+    assert!(text.contains("score 86%"));
+    assert!(text.contains("surfaces env_overlay, organization_context, path_shim, harness_exec"));
     assert!(text.contains("blocked path_shim, session_lifecycle"));
     assert!(text.contains("path_shim:blocked"));
     assert!(text.contains("token_headroom:ready"));
@@ -52172,21 +52178,9 @@ fn no_args_non_tty_renders_operational_dashboard_and_exits_for_scripts() {
 
     let stdout = String::from_utf8_lossy(&output);
     assert!(stdout.contains("forge"));
-    assert!(stdout.contains("Forge TUI"));
-    assert!(stdout.contains("orchestrator-first"));
+    assert!(stdout.contains("Forge chat TUI"));
     assert!(stdout.contains("Prompt"));
-    assert!(stdout.contains("!<cmd>"));
-    assert!(stdout.contains("/orchestrator"));
-    assert!(stdout.contains("/workflows"));
-    assert!(stdout.contains("/agents"));
-    assert!(stdout.contains("/subagents"));
-    assert!(stdout.contains("/events"));
-    assert!(stdout.contains("/addons"));
-    assert!(stdout.contains("/costs"));
-    assert!(stdout.contains("/approvals"));
-    assert!(stdout.contains("workflows"));
-    assert!(stdout.contains("events"));
-    assert!(stdout.contains("cost"));
+    assert!(stdout.contains("History and input stay on the live terminal surface."));
     assert!(
         stdout
             .lines()
@@ -52242,19 +52236,184 @@ fn no_args_tty_enters_repl_and_shows_dashboard_when_pseudo_terminal_is_available
         stdout.contains("\u{1b}[?1049h"),
         "TTY Forge must enter alternate screen like opencode:\n{stdout}"
     );
-    assert!(stdout.contains("FORGE"));
-    assert!(stdout.contains("ORCHESTRATOR"));
-    assert!(stdout.contains("WORKFLOWS"));
-    assert!(stdout.contains("AGENTS"));
-    assert!(stdout.contains("SUBAGENTS"));
-    assert!(stdout.contains("NODE AGENTS"));
-    assert!(stdout.contains("orchestrator decides direct answer or workflow"));
-    assert!(stdout.contains("!<cmd>"));
+    assert!(stdout.contains("HISTORY"));
+    assert!(stdout.contains("CHAT INPUT"));
+    assert!(stdout.contains("Orchestrator: default conversation"));
+    assert!(stdout.contains("Agents:"));
+    assert!(stdout.contains("Subagents:"));
+    assert!(stdout.contains("Node agents:"));
+    assert!(stdout.contains("goodbye"));
+}
+
+#[test]
+fn forge_tui_status_command_surfaces_running_workflows_and_info() {
+    let script = if Path::new("/usr/bin/script").exists() {
+        "/usr/bin/script"
+    } else if Path::new("/bin/script").exists() {
+        "/bin/script"
+    } else {
+        return;
+    };
+    let timeout = if Path::new("/usr/bin/timeout").exists() {
+        "/usr/bin/timeout"
+    } else if Path::new("/bin/timeout").exists() {
+        "/bin/timeout"
+    } else {
+        return;
+    };
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let binary = assert_cmd::cargo::cargo_bin("forge");
+    let command = format!("{} --store {}", binary.display(), store.display());
+
+    let mut child = std::process::Command::new(timeout)
+        .args(["30", script, "-q", "-c", &command, "/dev/null"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"/status\nq\n").unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Status:"));
+    assert!(stdout.contains("Running workflows:"));
+    assert!(stdout.contains("Active runs:"));
+    assert!(stdout.contains("Selected workflow:"));
+    assert!(stdout.contains("/cockpit"));
+    assert!(stdout.contains("goodbye"));
+}
+
+#[test]
+fn forge_tui_simple_chat_questions_answer_directly_without_workflow() {
+    let script = if Path::new("/usr/bin/script").exists() {
+        "/usr/bin/script"
+    } else if Path::new("/bin/script").exists() {
+        "/bin/script"
+    } else {
+        return;
+    };
+    let timeout = if Path::new("/usr/bin/timeout").exists() {
+        "/usr/bin/timeout"
+    } else if Path::new("/bin/timeout").exists() {
+        "/bin/timeout"
+    } else {
+        return;
+    };
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let binary = assert_cmd::cargo::cargo_bin("forge");
+    let command = format!("{} --store {}", binary.display(), store.display());
+
+    let mut child = std::process::Command::new(timeout)
+        .args(["30", script, "-q", "-c", &command, "/dev/null"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all("Olá!\nq\n".as_bytes()).unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("Workflow ID:"));
+    assert!(!stdout.contains("Run ID:"));
+    assert!(
+        stdout.contains("Olá")
+            || stdout.contains("Forge")
+            || stdout.contains("Oi")
+            || stdout.contains("oi")
+    );
+
+    let mut child = std::process::Command::new(timeout)
+        .args(["30", script, "-q", "-c", &command, "/dev/null"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all("Que dia é hoje?\nq\n".as_bytes()).unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Hoje é"));
+    assert!(!stdout.contains("Workflow ID:"));
+    assert!(!stdout.contains("Run ID:"));
+
+    let mut child = std::process::Command::new(timeout)
+        .args(["30", script, "-q", "-c", &command, "/dev/null"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin
+            .write_all("Meu nome é Arthur.\nVocê sabe meu nome?\nq\n".as_bytes())
+            .unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Arthur"));
+    assert!(!stdout.contains("Workflow ID:"));
+    assert!(!stdout.contains("Run ID:"));
+}
+
+#[test]
+fn forge_tui_tab_enters_shell_mode_and_can_return_cleanly() {
+    let script = if Path::new("/usr/bin/script").exists() {
+        "/usr/bin/script"
+    } else if Path::new("/bin/script").exists() {
+        "/bin/script"
+    } else {
+        return;
+    };
+    let timeout = if Path::new("/usr/bin/timeout").exists() {
+        "/usr/bin/timeout"
+    } else if Path::new("/bin/timeout").exists() {
+        "/bin/timeout"
+    } else {
+        return;
+    };
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let binary = assert_cmd::cargo::cargo_bin("forge");
+    let command = format!("{} --store {}", binary.display(), store.display());
+
+    let mut child = std::process::Command::new(timeout)
+        .args(["30", script, "-q", "-c", &command, "/dev/null"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"/wo\t\nq\n").unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("/workflows"));
-    assert!(stdout.contains("/events"));
-    assert!(stdout.contains("/addons"));
-    assert!(stdout.contains("/approvals"));
-    assert!(stdout.contains("Talk to the Forge orchestrator"));
+    assert!(!stdout.contains("Shell mode enabled"));
+    assert!(stdout.contains("goodbye"));
 }
 
 #[test]
@@ -52352,7 +52511,7 @@ fn forge_tui_command_exposes_opencode_style_forge_capabilities() {
     assert_eq!(json["shell"]["toggle"], "!");
     assert_eq!(
         json["prompt"]["placeholder"],
-        "Talk to the Forge orchestrator; use /commands for configuration"
+        "Talk to Forge; use /, @, ~, & for autocomplete"
     );
     for capability in [
         "orchestrator",
@@ -52467,7 +52626,7 @@ fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
 
     for check_id in [
         "opens_useful_tui",
-        "opens_opencode_style_orchestrator_first_tui_by_default",
+        "opens_opencode_style_chat_first_tui_by_default",
         "shows_active_workflows",
         "shows_events_and_schedules",
         "shows_event_workflow_lifecycle",
@@ -52652,11 +52811,9 @@ fn interactive_guided_cockpit_is_default_forge_tui_cli_and_mcp_surface() {
         .stdout
         .clone();
     let default_text = String::from_utf8(default_output).unwrap();
-    assert!(default_text.contains("Forge TUI"));
-    assert!(default_text.contains("orchestrator-first"));
+    assert!(default_text.contains("Forge chat TUI"));
     assert!(default_text.contains("Prompt"));
-    assert!(default_text.contains("!<cmd>"));
-    assert!(default_text.contains("/workflows"));
+    assert!(default_text.contains("History and input stay on the live terminal surface."));
 
     let home_output = forge()
         .current_dir(temp.path())
@@ -53775,7 +53932,6 @@ fn interactive_repl_slash_commands_render_operational_panels_in_place() {
     let output = child.wait_with_output().unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Forge TUI"));
     assert!(stdout.contains("Workflows:"));
     assert!(stdout.contains("Events:"));
     assert!(stdout.contains("Addons:"));
@@ -53783,6 +53939,46 @@ fn interactive_repl_slash_commands_render_operational_panels_in_place() {
     assert!(stdout.contains("Approvals:"));
     assert!(stdout.contains("Core boundary:"));
     assert!(!stdout.contains("Unknown command"));
+    assert!(stdout.contains("goodbye"));
+}
+
+#[test]
+fn forge_tui_shows_autocomplete_suggestions_for_trigger_prefix() {
+    let script = if Path::new("/usr/bin/script").exists() {
+        "/usr/bin/script"
+    } else if Path::new("/bin/script").exists() {
+        "/bin/script"
+    } else {
+        return;
+    };
+    let timeout = if Path::new("/usr/bin/timeout").exists() {
+        "/usr/bin/timeout"
+    } else if Path::new("/bin/timeout").exists() {
+        "/bin/timeout"
+    } else {
+        return;
+    };
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let binary = assert_cmd::cargo::cargo_bin("forge");
+    let command = format!("{} --store {}", binary.display(), store.display());
+
+    let mut child = std::process::Command::new(timeout)
+        .args(["30", script, "-q", "-c", &command, "/dev/null"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"/wo\nq\n").unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("/workflows"));
     assert!(stdout.contains("goodbye"));
 }
 
@@ -53822,15 +54018,54 @@ fn forge_tui_prompt_commands_keep_the_default_surface_simple() {
     let output = child.wait_with_output().unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Forge TUI"));
-    assert!(stdout.contains("Orchestrator-first"));
-    assert!(stdout.contains("Commands: /orchestrator /workflows /agents /subagents /nodes /events"));
-    assert!(stdout.contains("Commands: /addons /costs /approvals /config /boundary"));
-    assert!(stdout.contains("Commands: /shells /commands /help"));
-    assert!(stdout.contains("Shell: !<cmd> or ! to toggle shell mode"));
+    assert!(stdout.contains("Commands:"));
     assert!(stdout.contains("Workflows:"));
     assert!(!stdout.contains("Focus: guided_cockpit_panel"));
     assert!(!stdout.contains("Orchestrator: new_workflow"));
+    assert!(stdout.contains("goodbye"));
+}
+
+#[test]
+fn forge_tui_benchmark_command_surfaces_local_cli_comparison() {
+    let script = if Path::new("/usr/bin/script").exists() {
+        "/usr/bin/script"
+    } else if Path::new("/bin/script").exists() {
+        "/bin/script"
+    } else {
+        return;
+    };
+    let timeout = if Path::new("/usr/bin/timeout").exists() {
+        "/usr/bin/timeout"
+    } else if Path::new("/bin/timeout").exists() {
+        "/bin/timeout"
+    } else {
+        return;
+    };
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let binary = assert_cmd::cargo::cargo_bin("forge");
+    let command = format!("{} --store {}", binary.display(), store.display());
+
+    let mut child = std::process::Command::new(timeout)
+        .args(["30", script, "-q", "-c", &command, "/dev/null"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"/benchmark\nq\n").unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("OpenClaw benchmark: async, multi-channel operator surface"));
+    assert!(stdout.contains("Hermes benchmark: file-first memory"));
+    assert!(stdout.contains("Placement: Core = Codex, Gemini, OpenCode."));
+    assert!(stdout.contains("Placement: Addon-first = OpenClaw, Hermes, Open Design, Penpot, n8n."));
+    assert!(stdout.contains("Forge: workflows="));
     assert!(stdout.contains("goodbye"));
 }
 
@@ -53920,8 +54155,6 @@ fn interactive_repl_q_exits_without_routing_a_workflow() {
     let output = child.wait_with_output().unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Forge TUI"));
-    assert!(stdout.contains("Orchestrator-first"));
     assert!(stdout.contains("goodbye"));
     assert!(!stdout.contains("Orchestrator: new_workflow"));
     assert!(!stdout.contains("Workflow ID:"));
@@ -54294,10 +54527,9 @@ fn interactive_route_answers_simple_question_without_creating_workflow_state() {
     assert_eq!(json["workflow_created"], false);
     assert_eq!(json["run_id"], Value::Null);
     assert_eq!(json["workflow_id"], Value::Null);
-    assert!(json["answer"]
-        .as_str()
-        .unwrap()
-        .contains("Forge can answer this from current runtime state"));
+    let answer = json["answer"].as_str().unwrap();
+    assert_ne!(answer, "não sei");
+    assert!(answer.to_ascii_lowercase().contains("forge"));
     assert_eq!(json["retention_decision"]["action"], "none");
 
     let listed = forge()
@@ -54351,10 +54583,7 @@ fn interactive_route_complex_request_creates_async_workflow_and_retains_it() {
     assert!(json["workflow_id"].as_str().unwrap().starts_with("wf_"));
     assert_eq!(json["retention_decision"]["action"], "retain");
     assert_eq!(json["retention_decision"]["requires_human_approval"], false);
-    assert!(json["routing_explanation"]
-        .as_str()
-        .unwrap()
-        .contains("scheduled work"));
+    assert!(!json["routing_explanation"].as_str().unwrap().is_empty());
 
     let status = forge()
         .args([

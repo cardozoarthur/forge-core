@@ -1,0 +1,13 @@
+{
+  "name": "@forge/core-sdk",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Forge TypeScript SDK scaffold for workflow composition and subworkflow orchestration.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "build": "echo 'forge typescript sdk scaffold'",
+    "test": "echo 'no tests yet'"
+  }
+}
+

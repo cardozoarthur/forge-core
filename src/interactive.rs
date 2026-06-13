@@ -84,13 +84,14 @@ use crate::storage::{ForgeStore, GlobalEventWrite, StoreEvent};
 use crate::workflow::{record_product_decision, ProductDecisionInput};
 use anyhow::Result;
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const INTERACTIVE_HOME_SCHEMA_VERSION: &str = "forge.interactive.home.v1";
@@ -4770,12 +4771,8 @@ pub fn build_operational_tui_smoke(
             "opens_useful_tui",
             "forge opens the operational TUI",
             default_tui_report.status == "forge_tui_ready"
-                && default_tui_preview.contains("Forge TUI")
-                && default_tui_preview.contains("workflows")
-                && default_tui_preview.contains("/events")
-                && default_tui_preview.contains("/addons")
-                && default_tui_preview.contains("/costs")
-                && default_tui_preview.contains("/approvals"),
+                && default_tui_preview.contains("Forge chat TUI - OpenCode-style")
+                && default_tui_preview.contains("History and input stay on the live terminal surface."),
             format!(
                 "{}; cockpit {}; capabilities {}; default render {} bytes",
                 default_tui_report.status,
@@ -4786,20 +4783,23 @@ pub fn build_operational_tui_smoke(
             "forge",
         ),
         operational_tui_smoke_check(
-            "opens_opencode_style_orchestrator_first_tui_by_default",
-            "forge opens the OpenCode-style orchestrator-first TUI by default",
+            "opens_opencode_style_chat_first_tui_by_default",
+            "forge opens the OpenCode-style chat-first TUI by default",
             default_tui_report.schema_version == "forge.tui.opencode_orchestrator.v1"
                 && default_tui_report.layout == "opencode_style_orchestrator_first_tui"
                 && default_tui_report.orchestrator.default_interaction
                     == "conversation_with_forge_orchestrator"
                 && default_tui_report.orchestrator.decision_policy
                     == "direct_answer_or_create_workflow"
+                && default_tui_report.orchestrator.plan_mode == "forge_workflow"
+                && default_tui_report.orchestrator.build_mode == "forge_workflow"
                 && default_tui_report.shell.prefix == "!"
-                && default_tui_preview.contains("orchestrator-first OpenCode-style")
+                && default_tui_preview.contains("Forge chat TUI - OpenCode-style")
                 && default_tui_preview.contains("Prompt:")
-                && default_tui_preview.contains("!<cmd>")
-                && default_tui_preview.contains("plan/build are Forge workflows")
-                && default_tui_preview.contains("Legacy panels: forge interactive home"),
+                && !default_tui_preview.contains("Workflows:")
+                && !default_tui_preview.contains("Agents:")
+                && !default_tui_preview.contains("Subagents:")
+                && !default_tui_preview.contains("Node agents:"),
             format!(
                 "{}; layout {}; shell prefix {}; legacy guided steps {}/{}; default render {} bytes",
                 default_tui_report.status,
@@ -14021,6 +14021,15 @@ pub fn route_interactive_input(
     input: &str,
     origin: &str,
 ) -> Result<InteractiveRouteReport> {
+    route_interactive_input_with_context(store, input, origin, &[])
+}
+
+pub fn route_interactive_input_with_context(
+    store: &ForgeStore,
+    input: &str,
+    origin: &str,
+    conversation_context: &[String],
+) -> Result<InteractiveRouteReport> {
     let trimmed = input.trim();
     if is_repl_exit_command(trimmed) {
         return Ok(local_exit_route(trimmed));
@@ -14032,22 +14041,49 @@ pub fn route_interactive_input(
         return Ok(route_slash_command(trimmed));
     }
 
-    if can_answer_directly(trimmed) {
+    if let Some(route) = brain_route_interactive_input(store, trimmed, conversation_context) {
+        if route.decision == "new_workflow" {
+            let request = start_async_request(store, trimmed, origin)?;
+            let retention_decision = decide_retention(trimmed, true);
+            return Ok(InteractiveRouteReport {
+                status: "routed".to_string(),
+                schema_version: INTERACTIVE_ROUTE_SCHEMA_VERSION.to_string(),
+                input_kind: "chat".to_string(),
+                routing_decision: "new_workflow".to_string(),
+                routing_explanation: route
+                    .reason
+                    .unwrap_or_else(|| classify_workflow_reason(trimmed)),
+                workflow_created: true,
+                run_id: Some(request.run_id),
+                workflow_id: Some(request.workflow_id),
+                answer: None,
+                slash_command: None,
+                product_decision_id: None,
+                product_decision_revision: None,
+                retention_decision,
+            });
+        }
+
+        let answer = route
+            .answer
+            .and_then(|answer| {
+                let answer = answer.trim().to_string();
+                (!answer.is_empty()).then_some(answer)
+            })
+            .unwrap_or_else(|| direct_chat_response_with_context(trimmed, conversation_context));
+
         return Ok(InteractiveRouteReport {
             status: "routed".to_string(),
             schema_version: INTERACTIVE_ROUTE_SCHEMA_VERSION.to_string(),
             input_kind: "chat".to_string(),
             routing_decision: "direct_answer".to_string(),
-            routing_explanation:
-                "Simple low-risk request answered from current state without durable execution."
-                    .to_string(),
+            routing_explanation: route.reason.unwrap_or_else(|| {
+                "Brain selected direct_answer for conversational response.".to_string()
+            }),
             workflow_created: false,
             run_id: None,
             workflow_id: None,
-            answer: Some(
-                "Forge can answer this from current runtime state; no workflow was created."
-                    .to_string(),
-            ),
+            answer: Some(answer),
             slash_command: None,
             product_decision_id: None,
             product_decision_revision: None,
@@ -20772,94 +20808,387 @@ fn route_slash_command(trimmed: &str) -> InteractiveRouteReport {
     }
 }
 
-fn can_answer_directly(input: &str) -> bool {
-    let lower = input.to_ascii_lowercase();
-    let asks_state = lower.contains("status")
-        || lower.contains("what is")
-        || lower.contains("current")
-        || lower.contains("help");
-    asks_state && !requires_workflow(&lower)
+fn direct_chat_response_with_context(input: &str, conversation_context: &[String]) -> String {
+    let mut prompt = String::from(
+        "Você é o Forge, o orquestrador desta interface. Responda em português, curto e direto, sem mencionar políticas internas. Use o contexto recente da conversa quando ele existir. Se a resposta exigir ação durável, explique brevemente o próximo passo que o Forge pode executar, em vez de inventar um procedimento local.\n\n",
+    );
+    let recent_context = conversation_context
+        .iter()
+        .rev()
+        .take(6)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !recent_context.is_empty() {
+        prompt.push_str("Contexto recente:\n");
+        for line in recent_context.into_iter().rev() {
+            prompt.push_str("- ");
+            prompt.push_str(&line);
+            prompt.push('\n');
+        }
+        prompt.push('\n');
+    }
+    prompt.push_str("Pergunta do usuário: ");
+    prompt.push_str(input);
+
+    if let Some(answer) = answer_with_codex_brain(&prompt) {
+        let answer = answer.trim();
+        if !answer.is_empty() {
+            return answer.to_string();
+        }
+    }
+    "Não sei.".to_string()
 }
 
-fn executor_or_runtime_required(lower: &str) -> bool {
-    lower.contains("codex")
-        || lower.contains("opencode")
-        || lower.contains("gemini")
-        || lower.contains("claude")
-        || lower.contains("brain")
-        || lower.contains("cerebro")
-        || lower.contains("cérebro")
-        || lower.contains("memory")
-        || lower.contains("memoria")
-        || lower.contains("memória")
-        || lower.contains("skill")
-        || lower.contains("mcp")
-        || lower.contains("docker")
-        || lower.contains("k8s")
-        || lower.contains("kubernetes")
-        || lower.contains("knative")
+#[derive(Debug, Deserialize)]
+struct BrainInteractiveRouteDecision {
+    decision: String,
+    answer: Option<String>,
+    reason: Option<String>,
 }
 
-fn cost_sensitive(lower: &str) -> bool {
-    let has_cost_keyword =
-        lower.contains("cost") || lower.contains("expensive") || lower.contains("budget");
-    let has_expensive_action = lower.contains("deploy")
-        || lower.contains("external")
-        || lower.contains("telegram")
-        || lower.contains("send")
-        || lower.contains("notification")
-        || lower.contains("artifact");
-    has_cost_keyword && has_expensive_action
+fn brain_route_interactive_input(
+    store: &ForgeStore,
+    input: &str,
+    conversation_context: &[String],
+) -> Option<BrainInteractiveRouteDecision> {
+    let brain_context = build_brain_route_context(store);
+    let mut prompt = String::from(
+        "Você é o brain/router do Forge, operando como um grafo de decisão estilo LangGraph com nós e caminhos dinâmicos. Decida se a entrada deve ser respondida diretamente ou virar workflow durável. Responda SOMENTE com JSON válido no formato {\"decision\":\"direct_answer|new_workflow\",\"answer\":string|null,\"reason\":string}. Decida semanticamente, sem usar regras fixas por palavra-chave. Use direct_answer para conversa, explicações e dúvidas curtas que podem ser resolvidas em uma resposta. Use new_workflow quando a solicitação pedir execução, alteração, automação, agendamento, validação, integração, artefato, publicação, entrega externa, reutilização de subworkflow, ou qualquer trabalho que se beneficie de um workflow, skill, plugin, addon, tool ou agente dedicado. Se o usuário estiver pedindo algo que as skills/plugins/addons conseguem fazer melhor como processo, prefira new_workflow. Os CLIs de brain como Codex, Gemini, Claude e OpenCode devem agir com capacidade nativa de workflow embutida na fonte, não apenas como consumidores de skills externas. Antes de criar um workflow novo, verifique os workflows existentes e prefira reutilizar, copiar ou compor um subworkflow quando isso diminuir custo, risco ou duplicação. O Forge controla memória, skills, plugins, MCPs, shells e workflows; os brains são executores substituíveis. Se o contexto recente indicar continuidade de conversa, leve isso em conta.\n\n",
+    );
+    if !brain_context.is_empty() {
+        prompt.push_str("Capacidades ativas do Forge:\n");
+        prompt.push_str(&brain_context);
+        prompt.push('\n');
+    }
+    let recent_context = conversation_context
+        .iter()
+        .rev()
+        .take(6)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !recent_context.is_empty() {
+        prompt.push_str("Contexto recente:\n");
+        for line in recent_context.into_iter().rev() {
+            prompt.push_str("- ");
+            prompt.push_str(&line);
+            prompt.push('\n');
+        }
+        prompt.push('\n');
+    }
+    prompt.push_str("Entrada:\n");
+    prompt.push_str(input);
+
+    let output = answer_with_codex_brain(&prompt)?;
+    parse_brain_route_decision(&output)
 }
 
-fn requires_workflow(lower: &str) -> bool {
-    let base_terms = [
-        "research",
-        "pesquise",
-        "implement",
-        "code",
-        "artifact",
-        "pdf",
-        "telegram",
-        "schedule",
-        "cron",
-        "every day",
-        "daily",
-        "validate",
-        "run",
-        "workflow",
-        "external",
-        "deploy",
-        "delete",
-    ];
-    base_terms.iter().any(|needle| lower.contains(needle))
-        || executor_or_runtime_required(lower)
-        || cost_sensitive(lower)
+fn build_brain_route_context(store: &ForgeStore) -> String {
+    let mut lines = Vec::new();
+    if let Ok(report) = load_executors(store) {
+        let selected_brain = report
+            .brain_router
+            .selected_brain
+            .as_ref()
+            .map(|brain| brain.as_str())
+            .unwrap_or("none");
+        lines.push(format!("selected_brain: {selected_brain}"));
+        lines.push(format!("orchestrator: {}", report.brain_router.orchestrator_brain));
+        lines.push(format!("routing_principle: {}", report.brain_router.routing_principle));
+        let brain_summaries = report
+            .brain_router
+            .brains
+            .iter()
+            .take(4)
+            .map(|brain| {
+                format!(
+                    "{} [{}] exec={} skills={} mcp={} memory={}",
+                    brain.id,
+                    brain.status,
+                    brain.execution_mode,
+                    brain.skills_source,
+                    brain.mcp_source,
+                    brain.memory_source
+                )
+            })
+            .collect::<Vec<_>>();
+        if !brain_summaries.is_empty() {
+            lines.push("brains:".to_string());
+            lines.extend(brain_summaries.into_iter().map(|line| format!("- {line}")));
+        }
+    }
+
+    if let Ok(workflow_report) = list_workflows_with_filters(
+        store,
+        WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
+    ) {
+        let workflow_summaries = workflow_report
+            .workflows
+            .iter()
+            .take(4)
+            .map(|workflow| {
+                let reusable_subflows = workflow.reusable_subflows.len();
+                let active_runs = workflow.active_run_count;
+                format!(
+                    "{} [{}] active_runs={} reusable_subflows={} goal={}",
+                    workflow.workflow_id,
+                    workflow.workflow_status,
+                    active_runs,
+                    reusable_subflows,
+                    workflow.current_goal
+                )
+            })
+            .collect::<Vec<_>>();
+        if !workflow_summaries.is_empty() {
+            lines.push("existing_workflows:".to_string());
+            lines.extend(workflow_summaries.into_iter().map(|line| format!("- {line}")));
+            lines.push(
+                "reuse_policy: inspect existing workflows first; prefer reuse, copy, or subworkflow composition before creating a new one.".to_string(),
+            );
+        }
+    }
+
+    let addon_panel = build_interactive_addon_capabilities_default(store);
+    if addon_panel.capability_count > 0 {
+        lines.push(format!(
+            "plugins_addons: {} capabilities, {} enabled addons, {} enabled capabilities",
+            addon_panel.capability_count,
+            addon_panel.enabled_addon_count,
+            addon_panel.enabled_capability_count
+        ));
+        let capabilities = addon_panel
+            .capabilities
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !capabilities.is_empty() {
+            lines.push("capability_samples:".to_string());
+            lines.extend(capabilities.into_iter().map(|capability| format!("- {capability}")));
+        }
+    }
+
+    lines.push(
+        "inspection_hints: use workflow registry, addon capabilities, sessions and task-board commands on demand instead of expanding the prompt up front.".to_string(),
+    );
+
+    lines.join("\n")
+}
+
+fn parse_brain_route_decision(output: &str) -> Option<BrainInteractiveRouteDecision> {
+    let json = extract_json_object(output)?;
+    serde_json::from_str(json).ok()
+}
+
+fn extract_json_object(output: &str) -> Option<&str> {
+    let start = output.find('{')?;
+    let end = output.rfind('}')?;
+    (end > start).then_some(&output[start..=end])
+}
+
+fn answer_with_codex_brain(prompt: &str) -> Option<String> {
+    answer_with_codex_cli(prompt)
+        .or_else(|| answer_with_gemini_cli(prompt))
+        .or_else(|| answer_with_ollama_cli(prompt))
+}
+
+fn answer_with_codex_cli(prompt: &str) -> Option<String> {
+    if !command_available("codex") {
+        return None;
+    }
+
+    let output_path = unique_brain_output_path("codex");
+    let output = run_brain_command(
+        "codex",
+        &[
+            "exec",
+            "-m",
+            "gpt-5.5",
+            "--sandbox",
+            "read-only",
+            "--skip-git-repo-check",
+            "--ignore-user-config",
+            "--ephemeral",
+            "--output-last-message",
+            output_path.to_str()?,
+            prompt,
+        ],
+        Duration::from_secs(30),
+    )
+    .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let mut answer = fs::read_to_string(&output_path).ok()?;
+    if answer.trim().is_empty() {
+        answer =
+            first_nonempty_line(&output.stdout).or_else(|| first_nonempty_line(&output.stderr))?;
+    }
+    let answer = answer.trim().to_string();
+    if answer.is_empty() {
+        None
+    } else {
+        Some(answer)
+    }
+}
+
+fn answer_with_gemini_cli(prompt: &str) -> Option<String> {
+    if !command_available("gemini") {
+        return None;
+    }
+
+    let output = run_brain_command(
+        "gemini",
+        &[
+            "-p",
+            prompt,
+            "--output-format",
+            "text",
+            "--raw-output",
+            "--accept-raw-output-risk",
+        ],
+        Duration::from_secs(45),
+    )
+    .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let answer = first_nonempty_line(&output.stdout)
+        .or_else(|| first_nonempty_line(&output.stderr))?
+        .trim()
+        .to_string();
+    if answer.is_empty() {
+        None
+    } else {
+        Some(answer)
+    }
+}
+
+fn answer_with_ollama_cli(prompt: &str) -> Option<String> {
+    if !command_available("curl") {
+        return None;
+    }
+
+    let payload = serde_json::json!({
+        "model": "qwen3:14b",
+        "prompt": prompt,
+        "stream": false,
+        "think": false
+    })
+    .to_string();
+    let output = run_brain_command(
+        "curl",
+        &[
+            "-s",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            payload.as_str(),
+            "http://127.0.0.1:11434/api/generate",
+        ],
+        Duration::from_secs(60),
+    )
+    .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let response: serde_json::Value = serde_json::from_str(&output.stdout).ok()?;
+    let answer = response.get("response")?.as_str()?.trim().to_string();
+    if answer.is_empty() {
+        None
+    } else {
+        Some(answer)
+    }
+}
+
+fn command_available(command: &str) -> bool {
+    if command.is_empty() {
+        return false;
+    }
+
+    if command.contains('/') {
+        return fs::metadata(command).is_ok_and(|meta| meta.is_file());
+    }
+
+    if let Some(path) = std::env::var_os("PATH") {
+        return std::env::split_paths(&path).any(|dir| {
+            let candidate = dir.join(command);
+            candidate.exists()
+        });
+    }
+    false
+}
+
+fn first_nonempty_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.to_string())
+}
+
+fn unique_brain_output_path(label: &str) -> PathBuf {
+    let pid = std::process::id();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!("forge-{label}-{pid}-{nanos}.md"))
+}
+
+struct BrainCommandOutput {
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_brain_command(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<BrainCommandOutput> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let start = Instant::now();
+
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            break child.wait()?;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_string(&mut stdout);
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+
+    Ok(BrainCommandOutput {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn classify_workflow_reason(input: &str) -> String {
-    let lower = input.to_ascii_lowercase();
-    if lower.contains("every day")
-        || lower.contains("daily")
-        || lower.contains("schedule")
-        || lower.contains("cron")
-    {
-        return "Request needs scheduled work, durable state and asynchronous continuation; Forge created a workflow/run.".to_string();
-    }
-    if lower.contains("artifact") || lower.contains("pdf") || lower.contains("telegram") {
-        return "Request needs artifacts or external delivery records; Forge created a workflow/run for lineage and validation.".to_string();
-    }
-    if lower.contains("research") || lower.contains("validate") || lower.contains("implement") {
-        return "Request needs multi-step execution and validation; Forge created a workflow/run."
-            .to_string();
-    }
-    if executor_or_runtime_required(&lower) {
-        return "Request references an executor or async runtime; Forge created a workflow/run for durable orchestration.".to_string();
-    }
-    if cost_sensitive(&lower) {
-        return "Request has cost or budget implications; Forge created a workflow/run for tracking and simulation.".to_string();
-    }
-    "Request is not a simple low-risk answer; Forge created a workflow/run.".to_string()
+    let _ = input;
+    "The brain selected a workflow so Forge can keep this request in a durable orchestration path.".to_string()
 }
 
 fn decide_retention(input: &str, workflow_created: bool) -> RetentionDecision {
@@ -22503,6 +22832,11 @@ pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
         }
 
         if trimmed.starts_with('/') {
+            if trimmed == "/status" {
+                let snapshot = build_interactive_entrypoint_snapshot(&store)?;
+                println!("{}", render_interactive_status_snapshot(&snapshot));
+                continue;
+            }
             let result = route_slash_command(trimmed);
             let route = result.slash_command.unwrap_or(SlashCommandRoute {
                 name: trimmed.to_string(),
@@ -22960,6 +23294,11 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
             println!("{}", render_interactive_guided_cockpit(&panel));
             Ok(true)
         }
+        "/status" => {
+            let snapshot = build_interactive_entrypoint_snapshot(store)?;
+            println!("{}", render_interactive_status_snapshot(&snapshot));
+            Ok(true)
+        }
         "/cockpit" => {
             let panel = build_interactive_operational_cockpit(store)?;
             println!("{}", render_interactive_operational_cockpit(&panel));
@@ -23083,6 +23422,45 @@ fn dispatch_read_only_panel_command(store: &ForgeStore, input: &str) -> Result<b
         }
         _ => Ok(false),
     }
+}
+
+fn render_interactive_status_snapshot(snapshot: &InteractiveEntrypointSnapshot) -> String {
+    let active_runs = if snapshot.active_run_ids.is_empty() {
+        "none".to_string()
+    } else {
+        snapshot.active_run_ids.join(" | ")
+    };
+    let workflows = if snapshot.workflow_samples.is_empty() {
+        "none".to_string()
+    } else {
+        snapshot
+            .workflow_samples
+            .iter()
+            .take(6)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    format!(
+        "Status: {status}; workflows {workflow_count}, active {active_workflows}, attention {attention_workflows}, running runs {active_runs_count}, due {due_schedules}, ready handoffs {ready_handoffs}, approvals {pending_approvals}, costs ${estimated_cost_total_usd:.4}\nRunning workflows: {workflows}\nActive runs: {active_runs}\nSelected workflow: {selected_workflow_id}\nNext: /cockpit /task-board /workflow-sidebar /schedules\n",
+        status = snapshot.status,
+        workflow_count = snapshot.workflow_count,
+        active_workflows = snapshot.active_workflows,
+        attention_workflows = snapshot.attention_workflows,
+        active_runs_count = snapshot.active_runs,
+        due_schedules = snapshot.due_schedules,
+        ready_handoffs = snapshot.ready_handoffs,
+        pending_approvals = snapshot.pending_approvals,
+        estimated_cost_total_usd = snapshot.estimated_cost_total_usd,
+        workflows = workflows,
+        active_runs = active_runs,
+        selected_workflow_id = snapshot.selected_workflow_id,
+    )
+}
+
+pub(crate) fn render_interactive_status_for_store(store: &ForgeStore) -> Result<String> {
+    let snapshot = build_interactive_entrypoint_snapshot(store)?;
+    Ok(render_interactive_status_snapshot(&snapshot))
 }
 
 fn dispatch_actions_command(store: &ForgeStore, input: &str) -> Result<()> {
@@ -23738,34 +24116,6 @@ mod tests {
     }
 
     #[test]
-    fn can_answer_questions_about_current_state() {
-        assert!(can_answer_directly("What is the current Forge status?"));
-        assert!(can_answer_directly("Show me the current help"));
-        assert!(can_answer_directly("what is happening right now"));
-        assert!(can_answer_directly("status please"));
-        assert!(!can_answer_directly("Research upcoming events"));
-        assert!(!can_answer_directly("implement a scheduler"));
-        assert!(!can_answer_directly("deploy to production"));
-        assert!(!can_answer_directly("validate the workflow"));
-    }
-
-    #[test]
-    fn requires_workflow_detects_execution_keywords() {
-        assert!(requires_workflow("research this topic"));
-        assert!(requires_workflow("implement a feature"));
-        assert!(requires_workflow("code a solution"));
-        assert!(requires_workflow("create artifact"));
-        assert!(requires_workflow("run the analysis"));
-        assert!(requires_workflow("deploy to server"));
-        assert!(requires_workflow("delete workflow"));
-        assert!(requires_workflow("schedule daily report"));
-        assert!(requires_workflow("cron every hour"));
-        assert!(!requires_workflow("what is the weather"));
-        assert!(!requires_workflow("current status"));
-        assert!(!requires_workflow("help me understand"));
-    }
-
-    #[test]
     fn decide_retention_keeps_recurring_workflows() {
         let decision = decide_retention("Research hackathons every day", true);
         assert_eq!(decision.action, "retain");
@@ -24024,73 +24374,32 @@ mod tests {
     }
 
     #[test]
-    fn can_answer_supports_help_questions() {
-        assert!(can_answer_directly("help"));
-        assert!(can_answer_directly("Help me understand Forge"));
-        assert!(!can_answer_directly("help me implement a workflow"));
+    fn greeting_and_date_questions_answer_directly_without_workflow() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
+
+        let hello = route_interactive_input(&store, "Olá!", "test").unwrap();
+        assert!(!hello.workflow_created);
+        assert_eq!(hello.routing_decision, "direct_answer");
+        assert!(!hello.answer.unwrap().trim().is_empty());
+
+        let date = route_interactive_input(&store, "Que dia é hoje?", "test").unwrap();
+        assert!(!date.workflow_created);
+        assert_eq!(date.routing_decision, "direct_answer");
+        assert!(!date.answer.unwrap().trim().is_empty());
     }
 
     #[test]
-    fn routing_classification_pure_simple_question() {
-        assert!(can_answer_directly("What is the current status?"));
-        assert!(!can_answer_directly(
-            "What is the best way to implement a cron job?"
-        ));
-    }
+    fn identity_questions_answer_directly_without_workflow() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ForgeStore::open(temp.path().join("forge.sqlite")).unwrap();
 
-    #[test]
-    fn executor_aware_routing_detects_codex_and_opencode() {
-        assert!(executor_or_runtime_required("run this with codex"));
-        assert!(executor_or_runtime_required("opencode can handle this"));
-        assert!(executor_or_runtime_required("deploy via docker"));
-        assert!(executor_or_runtime_required("run on kubernetes"));
-        assert!(executor_or_runtime_required("k8s deployment"));
-        assert!(executor_or_runtime_required("knative service"));
-        assert!(requires_workflow("codex implement feature"));
-        assert!(requires_workflow("opencode research topic"));
-        assert!(requires_workflow("docker run analysis"));
-        assert!(!executor_or_runtime_required("what is the status"));
-        assert!(!executor_or_runtime_required("help me understand"));
-    }
-
-    #[test]
-    fn cost_sensitive_routing_detects_expensive_actions() {
-        assert!(cost_sensitive("what is the cost of deploy"));
-        assert!(cost_sensitive("expensive external delivery"));
-        assert!(cost_sensitive("budget for external notification"));
-        assert!(cost_sensitive("cost of external delivery"));
-        assert!(requires_workflow("cost of deploy"));
-        assert!(!cost_sensitive("what is the cost"));
-        assert!(!cost_sensitive("help"));
-        assert!(!cost_sensitive("current status"));
-    }
-
-    #[test]
-    fn classify_workflow_reason_includes_executor_and_cost_reasons() {
-        let reason = classify_workflow_reason("codex analysis");
-        assert!(
-            reason.contains("executor"),
-            "expected executor reason, got: {reason}"
-        );
-
-        let reason = classify_workflow_reason("expensive deploy");
-        assert!(
-            reason.contains("cost"),
-            "expected cost reason, got: {reason}"
-        );
-
-        let reason = classify_workflow_reason("docker run analysis");
-        assert!(
-            reason.contains("executor"),
-            "expected executor reason, got: {reason}"
-        );
-    }
-
-    #[test]
-    fn executor_and_cost_terms_prevent_direct_answer() {
-        assert!(!can_answer_directly("What is the cost of deploying?"));
-        assert!(!can_answer_directly("What is the status of my codex run?"));
-        assert!(!can_answer_directly("Help me use opencode for research"));
+        let name = route_interactive_input(&store, "Você sabe meu nome?", "test").unwrap();
+        assert!(!name.workflow_created);
+        assert_eq!(name.routing_decision, "direct_answer");
+        let answer = name.answer.unwrap();
+        assert_ne!(answer, "não sei");
+        assert!(!answer.trim().is_empty());
     }
 
     #[test]
