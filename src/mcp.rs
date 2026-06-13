@@ -67,13 +67,13 @@ use crate::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, build_harness_activation_profile,
     build_harness_adoption_plan, build_harness_bootstrap_report, build_harness_doctor_report,
     build_harness_headroom_plan, build_harness_mode_report, build_headroom_stats_report,
-    inspect_cli_harness_shim_status, install_cli_harness_shim, persist_token_headroom_report,
-    resolve_harness_forge_first_source_for_project, resolve_harness_runtime_policy,
-    retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
-    CliShimStatusOptions, CliWrapperPlanOptions, HarnessActivationProfileOptions,
-    HarnessAdoptionPlanOptions, HarnessBootstrapOptions, HarnessDoctorOptions,
-    HarnessHeadroomPlanOptions, HarnessModeOptions, HarnessRuntimePolicyOptions,
-    HeadroomStatsOptions,
+    inspect_cli_harness_shim_status, install_cli_harness_shim, install_cli_provider_adapter,
+    persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
+    resolve_harness_runtime_policy, retrieve_headroom_blob, run_cli_harness_exec,
+    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
+    HarnessActivationProfileOptions, HarnessAdoptionPlanOptions, HarnessBootstrapOptions,
+    HarnessDoctorOptions, HarnessHeadroomPlanOptions, HarnessModeOptions,
+    HarnessRuntimePolicyOptions, HeadroomStatsOptions, ProviderAdapterInstallOptions,
 };
 use crate::identity::{
     audit_tenant_index, ensure_workflow_policy, evaluate_tenant_policy_for_action,
@@ -709,6 +709,17 @@ struct HarnessInstallShimsInput {
     run: Option<String>,
     run_id: Option<String>,
     context_budget: Option<usize>,
+    token_headroom: Option<bool>,
+    force: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HarnessInstallProviderAdapterInput {
+    shim_dir: String,
+    executor: String,
+    real_cmd: Option<String>,
+    real_command: Option<String>,
+    project_root: Option<String>,
     token_headroom: Option<bool>,
     force: Option<bool>,
 }
@@ -6197,6 +6208,22 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(true, true),
             ),
             tool(
+                "forge.harness.install_provider_adapter",
+                "Install Connected-Brain Provider Adapter",
+                "Install a Forge-owned provider adapter command that is separate from daily PATH shims and emits forge.connected_external_brain.provider_output.v1 only when later executed by milestone collection.",
+                object_schema(&[
+                    ("shim_dir", "string", "directory where Forge-owned provider adapters will be written"),
+                    ("executor", "string", "codex|claude|gemini|opencode"),
+                    ("real_cmd", "string", "optional approved provider CLI command/path; omitted values are discovered from PATH outside shim_dir"),
+                    ("project_root", "string", "optional project root containing .forge/harness.json"),
+                    ("token_headroom", "boolean", "record token-headroom intent in adapter output"),
+                    ("force", "boolean", "allow replacing an existing Forge-owned adapter file"),
+                ], &["shim_dir", "executor"]),
+                "forge.harness.provider_adapter_install.v1",
+                &["forge", "harness", "install-provider-adapter", "--shim-dir", "<dir>", "--executor", "<executor>", "--real-cmd", "<provider-cli>", "--project-root", "<project-root>", "--output", "json"],
+                ToolFlags::new(true, true),
+            ),
+            tool(
                 "forge.harness.shim_status",
                 "Inspect Forge-First CLI Shim Status",
                 "Audit whether a brain CLI shim exists, is Forge-owned, has PATH precedence and avoids recursion before using Forge-first shells.",
@@ -6459,7 +6486,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("project_root", "string", "project root where .forge manifests are prepared"),
                     ("connected_brain", "string", "optional connected brain provider id"),
                     ("connected_runtime", "string", "optional connected multimodal runtime id"),
-                    ("provider_command", "string", "optional approved absolute connected-brain wrapper command for replacement_grade_cli"),
+                    ("provider_command", "string", "optional approved absolute connected-brain provider adapter command for replacement_grade_cli"),
                     ("model_id", "string", "approved model or provider profile id for connected-brain manifests"),
                     ("approval_ref", "string", "approval/change reference for connected-brain manifests"),
                     ("apply", "boolean", "write files when true; dry-run when false or omitted"),
@@ -9806,6 +9833,33 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 token_headroom: runtime_policy.token_headroom,
                 force: input.force.unwrap_or(false),
             })?)?
+        }
+        "forge.harness.install_provider_adapter" => {
+            let input: HarnessInstallProviderAdapterInput = parse_input(input)?;
+            let real_cmd = input
+                .real_cmd
+                .or(input.real_command)
+                .filter(|value| !value.trim().is_empty());
+            let project_root = input.project_root.as_deref().map(std::path::Path::new);
+            let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+                project_root,
+                context_budget: None,
+                context_budget_source: "mcp_input",
+                token_headroom: input.token_headroom,
+                token_headroom_source: "mcp_input",
+                forge_first: true,
+                default_context_budget: DEFAULT_CONTEXT_BUDGET,
+            });
+            serde_json::to_value(install_cli_provider_adapter(
+                ProviderAdapterInstallOptions {
+                    shim_dir: std::path::Path::new(&input.shim_dir),
+                    executor: &input.executor,
+                    real_cmd: real_cmd.as_deref(),
+                    project_root,
+                    token_headroom: runtime_policy.token_headroom,
+                    force: input.force.unwrap_or(false),
+                },
+            )?)?
         }
         "forge.harness.shim_status" => {
             let input: HarnessShimStatusInput = parse_input(input)?;

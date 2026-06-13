@@ -9,7 +9,7 @@
         "replacement_grade_cli"
       ],
       "command": [
-        "/home/arthur/projects/forge-core/.forge/bin/codex"
+        "/home/arthur/projects/forge-core/.forge/bin/codex-provider"
       ],
       "device_access": false,
       "external_resources_mutated": false,

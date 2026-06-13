@@ -2280,7 +2280,7 @@ fn milestone_connected_brain_command_path_status(command_path: Option<&str>) -> 
     }
     (
         "ready".to_string(),
-        "Connected brain provider wrapper command exists and is executable; evidence collection still requires explicit approval and will run through Forge harness lineage.".to_string(),
+        "Connected brain provider adapter command exists and is executable; evidence collection still requires explicit approval and will run through Forge harness lineage.".to_string(),
     )
 }
 
@@ -2365,15 +2365,15 @@ fn replacement_cli_provider_candidate(
         readiness: readiness.to_string(),
         manifest_provider_template,
         evidence_blocker:
-            "A detected CLI path or version command is not release evidence. Promotion requires an approved provider wrapper that runs the model and emits forge.connected_external_brain.provider_output.v1 with real_provider_execution_performed=true and model_execution_performed=true."
+            "A detected CLI path or version command is not release evidence. Promotion requires an approved provider adapter that runs the model and emits forge.connected_external_brain.provider_output.v1 with real_provider_execution_performed=true and model_execution_performed=true."
                 .to_string(),
         next_action: if installed {
             format!(
-                "Run the version command only through an approved/synced Forge wrapper, then create an approved provider wrapper for `{provider_id}` in .forge/connected-brain-runtimes.json before collecting external_brain_provider_execution."
+                "Run the version command only through an approved/synced Forge adapter, then create an approved provider adapter for `{provider_id}` in .forge/connected-brain-runtimes.json before collecting external_brain_provider_execution."
             )
         } else {
             format!(
-                "Install or configure `{binary}` before preparing an approved connected-brain provider wrapper."
+                "Install or configure `{binary}` before preparing an approved connected-brain provider adapter."
             )
         },
     }

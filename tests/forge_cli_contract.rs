@@ -7158,10 +7158,10 @@ fn packaged_skill_mentions_export_demo_agent_surface() {
         "the packaged Forge skill should teach agents how to materialize secret-free milestone evidence input manifests"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("--provider-command <absolute-wrapper-path>")
+        forge_core::skill::SKILL_MD.contains("--provider-command <absolute-provider-adapter-path>")
             && forge_core::skill::SKILL_MD.contains("--model-id <approved-model-id>")
             && forge_core::skill::SKILL_MD.contains("--approval-ref <approval-ref>"),
-        "the packaged Forge skill should teach agents how to prepare an approved connected-brain wrapper manifest without collecting evidence"
+        "the packaged Forge skill should teach agents how to prepare an approved connected-brain provider adapter manifest without collecting evidence"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.milestone.prepare_evidence_inputs"),
@@ -52370,6 +52370,7 @@ fn harness_wrap_plan_bridges_shim_to_connected_brain_provider_manifest() {
     let shim_dir = project.join(".forge/bin");
     fs::create_dir_all(project.join(".forge")).unwrap();
     let wrapper_path = shim_dir.join("codex");
+    let provider_adapter_path = shim_dir.join("codex-provider");
     let manifest_path = project.join(".forge/connected-brain-runtimes.json");
 
     let output = forge()
@@ -52405,8 +52406,13 @@ fn harness_wrap_plan_bridges_shim_to_connected_brain_provider_manifest() {
         provider_wrapper["wrapper_path"],
         wrapper_path.display().to_string()
     );
+    assert_eq!(
+        provider_wrapper["provider_adapter_path"],
+        provider_adapter_path.display().to_string()
+    );
     assert_eq!(provider_wrapper["wrapper_path_absolute"], true);
     assert_eq!(provider_wrapper["wrapper_executable"], false);
+    assert_eq!(provider_wrapper["provider_adapter_executable"], false);
     assert_eq!(provider_wrapper["counts_as_release_evidence"], false);
     assert_eq!(
         provider_wrapper["target_manifest_path"],
@@ -52414,7 +52420,7 @@ fn harness_wrap_plan_bridges_shim_to_connected_brain_provider_manifest() {
     );
     assert_eq!(
         provider_wrapper["manifest_provider_template"]["command"],
-        serde_json::json!([wrapper_path.display().to_string()])
+        serde_json::json!([provider_adapter_path.display().to_string()])
     );
     assert_eq!(
         provider_wrapper["manifest_provider_template"]["capabilities"],
@@ -52425,11 +52431,13 @@ fn harness_wrap_plan_bridges_shim_to_connected_brain_provider_manifest() {
         serde_json::json!([
             "forge",
             "harness",
-            "install-shims",
+            "install-provider-adapter",
             "--shim-dir",
             shim_dir.display().to_string(),
             "--executor",
             "codex",
+            "--real-cmd",
+            "<absolute-provider-cli-command>",
             "--project-root",
             project.display().to_string(),
             "--token-headroom",
@@ -52468,6 +52476,105 @@ fn harness_wrap_plan_bridges_shim_to_connected_brain_provider_manifest() {
         .assert()
         .success();
 
+    let adapter_install_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "install-provider-adapter",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--real-cmd",
+            "/bin/echo",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--token-headroom",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let adapter_install: Value = serde_json::from_slice(&adapter_install_output).unwrap();
+    assert_eq!(
+        adapter_install["schema_version"],
+        "forge.harness.provider_adapter_install.v1"
+    );
+    assert_eq!(adapter_install["status"], "provider_adapter_install_ready");
+    assert_eq!(
+        adapter_install["adapters"][0]["adapter_path"],
+        provider_adapter_path.display().to_string()
+    );
+    assert_eq!(adapter_install["adapters"][0]["status"], "installed");
+    assert_eq!(
+        adapter_install["adapters"][0]["counts_as_release_evidence"],
+        false
+    );
+    assert!(provider_adapter_path.is_file());
+    let adapter_script = fs::read_to_string(&provider_adapter_path).unwrap();
+    assert!(adapter_script.contains("# forge-provider-adapter:v1"));
+    assert!(adapter_script.contains("brain-output/provider-output.json"));
+    assert!(adapter_script.contains("forge.connected_external_brain.provider_output.v1"));
+    assert!(adapter_script.contains("FORGE_WORKFLOW_ID"));
+
+    let mcp_manifest_output = forge()
+        .current_dir(temp.path())
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_manifest: Value = serde_json::from_slice(&mcp_manifest_output).unwrap();
+    let mcp_tool = find_mcp_tool(&mcp_manifest, "forge.harness.install_provider_adapter");
+    assert_eq!(
+        mcp_tool["output_schema"],
+        "forge.harness.provider_adapter_install.v1"
+    );
+    assert_eq!(mcp_tool["mutates_workflow"], true);
+
+    let mcp_adapter_dir = project.join(".forge/mcp-bin");
+    let mcp_output = forge()
+        .current_dir(temp.path())
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.harness.install_provider_adapter"])
+        .arg("--input")
+        .arg(
+            serde_json::json!({
+                "shim_dir": mcp_adapter_dir.display().to_string(),
+                "executor": "codex",
+                "real_cmd": "/bin/echo",
+                "project_root": project.display().to_string(),
+                "token_headroom": true
+            })
+            .to_string(),
+        )
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.harness.provider_adapter_install.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["status"],
+        "provider_adapter_install_ready"
+    );
+    assert_eq!(
+        mcp_json["result"]["adapters"][0]["counts_as_release_evidence"],
+        false
+    );
+
     let installed_output = forge()
         .current_dir(temp.path())
         .args([
@@ -52490,15 +52597,19 @@ fn harness_wrap_plan_bridges_shim_to_connected_brain_provider_manifest() {
         .clone();
     let installed_json: Value = serde_json::from_slice(&installed_output).unwrap();
     let installed_wrapper = &installed_json["connected_brain_provider_wrapper"];
-    assert_eq!(installed_wrapper["status"], "provider_wrapper_ready");
+    assert_eq!(installed_wrapper["status"], "provider_adapter_ready");
     assert_eq!(installed_wrapper["wrapper_executable"], true);
+    assert_eq!(installed_wrapper["provider_adapter_executable"], true);
     assert_eq!(
         installed_wrapper["readiness_checks"],
         serde_json::json!([
             "wrapper_path_absolute",
             "wrapper_file_exists",
             "wrapper_file_executable",
-            "manifest_template_command_points_to_wrapper",
+            "provider_adapter_path_absolute",
+            "provider_adapter_file_exists",
+            "provider_adapter_file_executable",
+            "manifest_template_command_points_to_provider_adapter",
             "release_evidence_still_requires_operator_approval"
         ])
     );

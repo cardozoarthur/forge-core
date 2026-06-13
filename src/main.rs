@@ -76,13 +76,13 @@ use forge_core::harness::{
     analyze_token_headroom, build_cli_wrapper_plan, build_harness_activation_profile,
     build_harness_adoption_plan, build_harness_bootstrap_report, build_harness_doctor_report,
     build_harness_headroom_plan, build_harness_mode_report, build_headroom_stats_report,
-    inspect_cli_harness_shim_status, install_cli_harness_shim, persist_token_headroom_report,
-    resolve_harness_forge_first_source_for_project, resolve_harness_runtime_policy,
-    retrieve_headroom_blob, run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions,
-    CliShimStatusOptions, CliWrapperPlanOptions, HarnessActivationProfileOptions,
-    HarnessAdoptionPlanOptions, HarnessBootstrapOptions, HarnessDoctorOptions,
-    HarnessHeadroomPlanOptions, HarnessModeOptions, HarnessRuntimePolicyOptions,
-    HeadroomStatsOptions,
+    inspect_cli_harness_shim_status, install_cli_harness_shim, install_cli_provider_adapter,
+    persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
+    resolve_harness_runtime_policy, retrieve_headroom_blob, run_cli_harness_exec,
+    CliHarnessExecOptions, CliShimInstallOptions, CliShimStatusOptions, CliWrapperPlanOptions,
+    HarnessActivationProfileOptions, HarnessAdoptionPlanOptions, HarnessBootstrapOptions,
+    HarnessDoctorOptions, HarnessHeadroomPlanOptions, HarnessModeOptions,
+    HarnessRuntimePolicyOptions, HeadroomStatsOptions, ProviderAdapterInstallOptions,
 };
 use forge_core::identity::{
     audit_tenant_index, ensure_operating_context_policy, ensure_workflow_policy,
@@ -899,6 +899,24 @@ enum HarnessCommands {
         no_token_headroom: bool,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    InstallProviderAdapter {
+        #[arg(long = "shim-dir")]
+        shim_dir: PathBuf,
+        #[arg(long)]
+        executor: String,
+        #[arg(long = "real-cmd")]
+        real_cmd: Option<String>,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
+        #[arg(long = "token-headroom")]
+        token_headroom: bool,
+        #[arg(long = "no-token-headroom", conflicts_with = "token_headroom")]
+        no_token_headroom: bool,
         #[arg(long, default_value_t = false)]
         force: bool,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -6665,6 +6683,38 @@ fn run() -> Result<i32> {
                     task_id: task_id.as_deref(),
                     run_id: run_id.as_deref(),
                     context_budget: runtime_policy.context_budget,
+                    token_headroom: runtime_policy.token_headroom,
+                    force,
+                })?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            HarnessCommands::InstallProviderAdapter {
+                shim_dir,
+                executor,
+                real_cmd,
+                project_root,
+                token_headroom,
+                no_token_headroom,
+                force,
+                output,
+            } => {
+                let (token_headroom_input, token_headroom_source) =
+                    harness_cli_token_headroom_input(token_headroom, no_token_headroom);
+                let runtime_policy = resolve_harness_runtime_policy(HarnessRuntimePolicyOptions {
+                    project_root: project_root.as_deref(),
+                    context_budget: None,
+                    context_budget_source: "explicit_flag",
+                    token_headroom: token_headroom_input,
+                    token_headroom_source,
+                    forge_first: true,
+                    default_context_budget: DEFAULT_CONTEXT_BUDGET,
+                });
+                let report = install_cli_provider_adapter(ProviderAdapterInstallOptions {
+                    shim_dir: &shim_dir,
+                    executor: &executor,
+                    real_cmd: real_cmd.as_deref(),
+                    project_root: project_root.as_deref(),
                     token_headroom: runtime_policy.token_headroom,
                     force,
                 })?;

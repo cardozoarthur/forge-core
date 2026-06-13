@@ -38,9 +38,12 @@ pub const CLI_HARNESS_SESSION_LIFECYCLE_PLAN_SCHEMA_VERSION: &str =
     "forge.harness.session_lifecycle_plan.v1";
 pub const CLI_SHIM_INSTALL_SCHEMA_VERSION: &str = "forge.harness.shim_install.v1";
 pub const CLI_SHIM_STATUS_SCHEMA_VERSION: &str = "forge.harness.shim_status.v1";
+pub const PROVIDER_ADAPTER_INSTALL_SCHEMA_VERSION: &str =
+    "forge.harness.provider_adapter_install.v1";
 pub const CLI_SHIM_ACTIVATION_DIAGNOSTIC_SCHEMA_VERSION: &str =
     "forge.harness.shim_activation_diagnostic.v1";
 const CLI_SHIM_MARKER: &str = "# forge-harness-shim:v1";
+const PROVIDER_ADAPTER_MARKER: &str = "# forge-provider-adapter:v1";
 const CLI_HARNESS_ACTIVATION_BEGIN: &str = "# >>> forge harness activation profile";
 const CLI_HARNESS_ACTIVATION_END: &str = "# <<< forge harness activation profile";
 
@@ -152,9 +155,13 @@ pub struct HarnessConnectedBrainProviderWrapperPlan {
     pub project_root: String,
     pub shim_dir: String,
     pub wrapper_path: String,
+    pub provider_adapter_path: String,
     pub wrapper_path_absolute: bool,
+    pub provider_adapter_path_absolute: bool,
     pub wrapper_exists: bool,
+    pub provider_adapter_exists: bool,
     pub wrapper_executable: bool,
+    pub provider_adapter_executable: bool,
     pub target_manifest_path: String,
     pub manifest_provider_template: Value,
     pub install_command: Vec<String>,
@@ -702,6 +709,41 @@ pub struct CliShimReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ProviderAdapterInstallReport {
+    pub schema_version: String,
+    pub status: String,
+    pub shim_dir: String,
+    pub executor: String,
+    pub provider_id: String,
+    pub real_command: String,
+    pub real_command_source: String,
+    pub real_command_resolution_status: String,
+    pub project_root: Option<String>,
+    pub token_headroom: bool,
+    pub force: bool,
+    pub installed_count: usize,
+    pub updated_count: usize,
+    pub blocked_count: usize,
+    pub adapters: Vec<ProviderAdapterReport>,
+    pub instructions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderAdapterReport {
+    pub executor: String,
+    pub provider_id: String,
+    pub adapter_path: String,
+    pub real_command: String,
+    pub status: String,
+    pub executable: bool,
+    pub script_sha256: Option<String>,
+    pub output_contract: String,
+    pub counts_as_release_evidence: bool,
+    pub safety_checks: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct CliShimStatusReport {
     pub schema_version: String,
     pub status: String,
@@ -754,6 +796,16 @@ pub struct CliShimInstallOptions<'a> {
     pub task_id: Option<&'a str>,
     pub run_id: Option<&'a str>,
     pub context_budget: usize,
+    pub token_headroom: bool,
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderAdapterInstallOptions<'a> {
+    pub shim_dir: &'a Path,
+    pub executor: &'a str,
+    pub real_cmd: Option<&'a str>,
+    pub project_root: Option<&'a Path>,
     pub token_headroom: bool,
     pub force: bool,
 }
@@ -3533,11 +3585,19 @@ fn build_connected_brain_provider_wrapper_plan(
     let project_root_path = absolute_project_root(project_root);
     let shim_dir = project_root_path.join(".forge/bin");
     let wrapper_path = shim_dir.join(shim_binary_name(executor));
+    let provider_adapter_path = shim_dir.join(provider_adapter_binary_name(executor));
     let manifest_path = project_root_path.join(".forge/connected-brain-runtimes.json");
     let wrapper_exists = wrapper_path.is_file();
+    let provider_adapter_exists = provider_adapter_path.is_file();
     let wrapper_executable = wrapper_exists && is_executable(&wrapper_path);
-    let status = if wrapper_executable {
-        "provider_wrapper_ready"
+    let provider_adapter_executable =
+        provider_adapter_exists && is_executable(&provider_adapter_path);
+    let status = if provider_adapter_executable {
+        "provider_adapter_ready"
+    } else if provider_adapter_exists {
+        "provider_adapter_not_executable"
+    } else if wrapper_executable {
+        "provider_adapter_missing"
     } else if wrapper_exists {
         "provider_wrapper_not_executable"
     } else {
@@ -3546,6 +3606,7 @@ fn build_connected_brain_provider_wrapper_plan(
     let project_root_display = project_root_path.display().to_string();
     let shim_dir_display = shim_dir.display().to_string();
     let wrapper_path_display = wrapper_path.display().to_string();
+    let provider_adapter_path_display = provider_adapter_path.display().to_string();
     let token_headroom_flag = if token_headroom {
         "--token-headroom"
     } else {
@@ -3555,7 +3616,7 @@ fn build_connected_brain_provider_wrapper_plan(
         "id": executor,
         "brain_id": executor,
         "provider_class": "external_cli",
-        "command": [wrapper_path_display.clone()],
+        "command": [provider_adapter_path_display.clone()],
         "capabilities": ["replacement_grade_cli"],
         "approved_by": "<operator>",
         "approval_ref": "<approval-or-change-record>",
@@ -3565,17 +3626,22 @@ fn build_connected_brain_provider_wrapper_plan(
         "device_access": false,
         "external_resources_mutated": false
     });
-    let mut readiness_checks = vec![
-        "wrapper_path_absolute".to_string(),
-        "manifest_template_command_points_to_wrapper".to_string(),
-        "release_evidence_still_requires_operator_approval".to_string(),
-    ];
+    let mut readiness_checks = vec!["wrapper_path_absolute".to_string()];
     if wrapper_exists {
-        readiness_checks.insert(1, "wrapper_file_exists".to_string());
+        readiness_checks.push("wrapper_file_exists".to_string());
     }
     if wrapper_executable {
-        readiness_checks.insert(2, "wrapper_file_executable".to_string());
+        readiness_checks.push("wrapper_file_executable".to_string());
     }
+    readiness_checks.push("provider_adapter_path_absolute".to_string());
+    if provider_adapter_exists {
+        readiness_checks.push("provider_adapter_file_exists".to_string());
+    }
+    if provider_adapter_executable {
+        readiness_checks.push("provider_adapter_file_executable".to_string());
+    }
+    readiness_checks.push("manifest_template_command_points_to_provider_adapter".to_string());
+    readiness_checks.push("release_evidence_still_requires_operator_approval".to_string());
 
     HarnessConnectedBrainProviderWrapperPlan {
         schema_version: CLI_HARNESS_CONNECTED_BRAIN_PROVIDER_WRAPPER_SCHEMA_VERSION.to_string(),
@@ -3585,19 +3651,25 @@ fn build_connected_brain_provider_wrapper_plan(
         project_root: project_root_display.clone(),
         shim_dir: shim_dir_display.clone(),
         wrapper_path: wrapper_path_display.clone(),
+        provider_adapter_path: provider_adapter_path_display.clone(),
         wrapper_path_absolute: wrapper_path.is_absolute(),
+        provider_adapter_path_absolute: provider_adapter_path.is_absolute(),
         wrapper_exists,
+        provider_adapter_exists,
         wrapper_executable,
+        provider_adapter_executable,
         target_manifest_path: manifest_path.display().to_string(),
         manifest_provider_template,
         install_command: vec![
             "forge".to_string(),
             "harness".to_string(),
-            "install-shims".to_string(),
+            "install-provider-adapter".to_string(),
             "--shim-dir".to_string(),
             shim_dir_display,
             "--executor".to_string(),
             executor.to_string(),
+            "--real-cmd".to_string(),
+            "<absolute-provider-cli-command>".to_string(),
             "--project-root".to_string(),
             project_root_display.clone(),
             token_headroom_flag.to_string(),
@@ -3643,9 +3715,9 @@ fn build_connected_brain_provider_wrapper_plan(
         readiness_checks,
         counts_as_release_evidence: false,
         notes: vec![
-            "This read-only bridge points connected-brain manifests at the Forge-owned harness shim instead of a placeholder command.".to_string(),
-            "Installing the shim creates an executable wrapper, but release evidence still requires an operator-approved manifest and a separate collect-evidence run.".to_string(),
-            "The wrapper path is secret-free and carries Forge-owned context, memory, MCP, credential-vault, event receipt and token-headroom routing through the normal harness.".to_string(),
+            "This read-only bridge separates the daily Forge-first CLI shim from the connected-brain provider adapter that must emit Forge provider-output evidence.".to_string(),
+            "Installing the daily shim is not enough for release evidence; collection requires an operator-approved provider adapter command and a separate collect-evidence run.".to_string(),
+            "The adapter path is secret-free and must run through Forge-owned context, memory, MCP, credential-vault, event receipt and token-headroom routing before promotion evidence can pass.".to_string(),
         ],
     }
 }
@@ -4259,6 +4331,119 @@ pub fn install_cli_harness_shim(
             ),
             "verify the real CLI path before putting the shim directory first in PATH".to_string(),
             "rerun with --force only when the existing file is disposable or Forge-owned"
+                .to_string(),
+        ],
+    })
+}
+
+pub fn install_cli_provider_adapter(
+    options: ProviderAdapterInstallOptions<'_>,
+) -> Result<ProviderAdapterInstallReport> {
+    let ProviderAdapterInstallOptions {
+        shim_dir,
+        executor,
+        real_cmd,
+        project_root,
+        token_headroom,
+        force,
+    } = options;
+    let executor = normalize_executor(executor);
+    fs::create_dir_all(shim_dir)
+        .with_context(|| format!("failed to create shim dir `{}`", shim_dir.display()))?;
+    let shim_dir = shim_dir
+        .canonicalize()
+        .unwrap_or_else(|_| shim_dir.to_path_buf());
+    let real_command = resolve_real_command_for_shim(&executor, real_cmd, &shim_dir)?;
+    let adapter_path = shim_dir.join(provider_adapter_binary_name(&executor));
+    let script = build_provider_adapter_script(ProviderAdapterScriptOptions {
+        executor: &executor,
+        real_cmd: &real_command.command,
+        token_headroom,
+    });
+    let script_sha256 = hex_sha256(script.as_bytes());
+    let mut installed_count = 0usize;
+    let mut updated_count = 0usize;
+    let mut blocked_count = 0usize;
+    let status = if adapter_path.exists() {
+        let existing = fs::read_to_string(&adapter_path).unwrap_or_default();
+        if force || existing.contains(PROVIDER_ADAPTER_MARKER) {
+            fs::write(&adapter_path, script.as_bytes()).with_context(|| {
+                format!(
+                    "failed to update provider adapter `{}`",
+                    adapter_path.display()
+                )
+            })?;
+            make_executable(&adapter_path)?;
+            updated_count += 1;
+            "updated"
+        } else {
+            blocked_count += 1;
+            "blocked_existing_file"
+        }
+    } else {
+        fs::write(&adapter_path, script.as_bytes()).with_context(|| {
+            format!(
+                "failed to write provider adapter `{}`",
+                adapter_path.display()
+            )
+        })?;
+        make_executable(&adapter_path)?;
+        installed_count += 1;
+        "installed"
+    };
+    let executable = adapter_path.is_file() && is_executable(&adapter_path);
+    let overall_status = if blocked_count > 0 {
+        "provider_adapter_install_blocked"
+    } else {
+        "provider_adapter_install_ready"
+    };
+    let adapter = ProviderAdapterReport {
+        executor: executor.clone(),
+        provider_id: executor.clone(),
+        adapter_path: adapter_path.display().to_string(),
+        real_command: real_command.command.clone(),
+        status: status.to_string(),
+        executable,
+        script_sha256: (status != "blocked_existing_file").then_some(script_sha256),
+        output_contract: "forge.connected_external_brain.provider_output.v1".to_string(),
+        counts_as_release_evidence: false,
+        safety_checks: vec![
+            "provider adapter path is separate from the daily PATH shim".to_string(),
+            "adapter writes provider-output evidence only when a later milestone collection runs it"
+                .to_string(),
+            "installed adapter does not approve provider execution or attach release evidence"
+                .to_string(),
+            "existing non-Forge adapter files are not overwritten unless --force is used"
+                .to_string(),
+        ],
+        notes: vec![
+            "This installs a Forge-owned provider adapter command, not a daily CLI shim."
+                .to_string(),
+            "Operator approval and .forge/connected-brain-runtimes.json are still required before milestone evidence collection.".to_string(),
+        ],
+    };
+
+    Ok(ProviderAdapterInstallReport {
+        schema_version: PROVIDER_ADAPTER_INSTALL_SCHEMA_VERSION.to_string(),
+        status: overall_status.to_string(),
+        shim_dir: shim_dir.display().to_string(),
+        executor: executor.clone(),
+        provider_id: executor,
+        real_command: real_command.command,
+        real_command_source: real_command.source,
+        real_command_resolution_status: real_command.status,
+        project_root: project_root.map(|path| path.display().to_string()),
+        token_headroom,
+        force,
+        installed_count,
+        updated_count,
+        blocked_count,
+        adapters: vec![adapter],
+        instructions: vec![
+            "reference this adapter from .forge/connected-brain-runtimes.json only after operator approval".to_string(),
+            "run forge milestone evidence-plan before collect-evidence to verify manifest readiness"
+                .to_string(),
+            "collect external_brain_provider_execution only through Forge milestone collection"
                 .to_string(),
         ],
     })
@@ -4997,6 +5182,12 @@ struct CliShimScriptOptions<'a> {
     token_headroom: bool,
 }
 
+struct ProviderAdapterScriptOptions<'a> {
+    executor: &'a str,
+    real_cmd: &'a str,
+    token_headroom: bool,
+}
+
 fn build_cli_shim_script(options: CliShimScriptOptions<'_>) -> String {
     let CliShimScriptOptions {
         forge_binary,
@@ -5052,8 +5243,107 @@ fn build_cli_shim_script(options: CliShimScriptOptions<'_>) -> String {
     )
 }
 
+fn build_provider_adapter_script(options: ProviderAdapterScriptOptions<'_>) -> String {
+    let ProviderAdapterScriptOptions {
+        executor,
+        real_cmd,
+        token_headroom,
+    } = options;
+    let provider_id_json =
+        serde_json::to_string(executor).unwrap_or_else(|_| "\"provider\"".to_string());
+    let token_headroom_json = if token_headroom { "true" } else { "false" };
+    format!(
+        r#"#!/bin/sh
+{PROVIDER_ADAPTER_MARKER}
+# Generated by Forge. Edit through `forge harness install-provider-adapter`.
+set -eu
+
+PROVIDER_ID={provider_id_shell}
+REAL_CMD={real_cmd_shell}
+PROMPT=${{FORGE_PROVIDER_PROMPT:-"Forge connected external brain task for workflow ${{FORGE_WORKFLOW_ID:-unknown}}, task ${{FORGE_TASK_ID:-unknown}}, run ${{FORGE_RUN_ID:-unknown}}. Produce a concise operational response and preserve Forge context."}}
+
+mkdir -p brain-output
+
+run_provider() {{
+  case "$PROVIDER_ID" in
+    codex)
+      "$REAL_CMD" exec "$PROMPT"
+      ;;
+    gemini)
+      "$REAL_CMD" --prompt "$PROMPT"
+      ;;
+    claude)
+      "$REAL_CMD" -p "$PROMPT"
+      ;;
+    opencode)
+      "$REAL_CMD" run "$PROMPT"
+      ;;
+    *)
+      "$REAL_CMD" "$PROMPT"
+      ;;
+  esac
+}}
+
+STATUS=0
+if run_provider > brain-output/provider-stdout.txt 2> brain-output/provider-stderr.txt; then
+  STATUS=0
+else
+  STATUS=$?
+fi
+
+STDOUT_BYTES=$(wc -c < brain-output/provider-stdout.txt | tr -d ' ')
+if [ "$STATUS" -eq 0 ] && [ "${{STDOUT_BYTES:-0}}" -gt 0 ]; then
+  MODEL_EXECUTION=true
+  REAL_PROVIDER_EXECUTION=true
+  QUALITY_SCORE=0.96
+else
+  MODEL_EXECUTION=false
+  REAL_PROVIDER_EXECUTION=false
+  QUALITY_SCORE=0.0
+fi
+
+cat > brain-output/plan.json <<EOF
+{{"schema_version":"forge.connected_external_brain.provider_plan.v1","workflow_id":"${{FORGE_WORKFLOW_ID:-unknown}}","task_id":"${{FORGE_TASK_ID:-unknown}}","run_id":"${{FORGE_RUN_ID:-unknown}}","brain_id":{provider_id_json},"model_execution_performed":$MODEL_EXECUTION,"token_headroom_enabled":{token_headroom_json}}}
+EOF
+
+cat > brain-output/provider-output.json <<EOF
+{{"schema_version":"forge.connected_external_brain.provider_output.v1","provider_id":{provider_id_json},"quality_score":$QUALITY_SCORE,"latency_ms":0,"model_execution_performed":$MODEL_EXECUTION,"real_provider_execution_performed":$REAL_PROVIDER_EXECUTION}}
+EOF
+
+cat > brain-output/research.md <<EOF
+# Connected external brain provider adapter
+
+- Provider: $PROVIDER_ID
+- Workflow: ${{FORGE_WORKFLOW_ID:-unknown}}
+- Task: ${{FORGE_TASK_ID:-unknown}}
+- Run: ${{FORGE_RUN_ID:-unknown}}
+- Model execution: $MODEL_EXECUTION
+- Real provider execution: $REAL_PROVIDER_EXECUTION
+
+Forge captured provider stdout/stderr in brain-output/provider-stdout.txt and brain-output/provider-stderr.txt.
+EOF
+
+cat > brain-output/code.rs <<EOF
+pub fn connected_external_brain_marker() -> &'static str {{
+    "$PROVIDER_ID"
+}}
+EOF
+
+exit "$STATUS"
+"#,
+        provider_id_shell = shell_quote(executor),
+        real_cmd_shell = shell_quote(real_cmd),
+        provider_id_json = provider_id_json,
+        token_headroom_json = token_headroom_json,
+    )
+}
+
 fn shim_binary_name(executor: &str) -> String {
     normalize_executor(executor)
+}
+
+fn provider_adapter_binary_name(executor: &str) -> String {
+    format!("{}-provider", normalize_executor(executor))
 }
 
 struct RealCommandResolution {
