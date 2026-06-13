@@ -46217,6 +46217,35 @@ fn interactive_command_palette_surfaces_contextual_actions_for_replacement_cli()
                         && entry["operation_plan"]["recommended_action"] == "execute_command"
                         && entry["operation_plan"]["diagnostic_only"] == false
                 })
+                && group["entries"].as_array().unwrap().iter().any(|entry| {
+                    entry["action_id"] == "harness.apply_activation_profile"
+                        && entry["title"] == "Apply harness activation profile"
+                        && entry["source_panel"] == "harness_panel"
+                        && entry["commands"]
+                            == serde_json::json!([
+                                "harness",
+                                "activation-profile",
+                                "--executor",
+                                "codex",
+                                "--shim-dir",
+                                "$HOME/.forge/bin",
+                                "--project-root",
+                                ".",
+                                "--shell-rc",
+                                "<shell-rc>",
+                                "--apply",
+                                "--approved-by",
+                                "<operator>",
+                                "--output",
+                                "json"
+                            ])
+                        && entry["mutates_workflow"] == true
+                        && entry["requires_approval"] == true
+                        && entry["risk_level"] == "medium"
+                        && entry["operation_plan"]["status"] == "ready"
+                        && entry["operation_plan"]["recommended_action"] == "execute_command"
+                        && entry["operation_plan"]["diagnostic_only"] == false
+                })
         }));
     let lineage_output = forge()
         .args([
