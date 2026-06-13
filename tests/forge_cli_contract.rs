@@ -46170,6 +46170,54 @@ fn interactive_command_palette_surfaces_contextual_actions_for_replacement_cli()
                         && entry["operation_plan"]["diagnostic_only"] == false
                 })
         }));
+    let activation_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "command-palette",
+            "--query",
+            "activation",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let activation_json: Value = serde_json::from_slice(&activation_output).unwrap();
+    assert!(activation_json["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|group| {
+            group["group_id"] == "harness"
+                && group["entries"].as_array().unwrap().iter().any(|entry| {
+                    entry["action_id"] == "harness.activation_profile"
+                        && entry["title"] == "Inspect harness activation profile"
+                        && entry["source_panel"] == "harness_panel"
+                        && entry["commands"]
+                            == serde_json::json!([
+                                "harness",
+                                "activation-profile",
+                                "--executor",
+                                "codex",
+                                "--shim-dir",
+                                "$HOME/.forge/bin",
+                                "--project-root",
+                                ".",
+                                "--output",
+                                "json"
+                            ])
+                        && entry["mutates_workflow"] == false
+                        && entry["requires_approval"] == false
+                        && entry["risk_level"] == "low"
+                        && entry["operation_plan"]["status"] == "ready"
+                        && entry["operation_plan"]["recommended_action"] == "execute_command"
+                        && entry["operation_plan"]["diagnostic_only"] == false
+                })
+        }));
     let lineage_output = forge()
         .args([
             "--store",
