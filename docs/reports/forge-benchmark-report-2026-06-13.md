@@ -7,7 +7,8 @@ This report captures the current benchmark split and the TUI rendering update.
 ## Summary
 
 - Core benchmarks now cover runtime control: Codex, Gemini CLI, OpenCode, LangGraph, LangChain and the Forge orchestrator itself.
-- Addon-first benchmarks now cover optional capability classes: OpenClaw, Hermes, Open Design, Penpot and n8n.
+- Addon-first benchmarks now cover optional capability classes: OpenClaw, Hermes, Open Design and Penpot.
+- Dual-use benchmarks now cover tools that shape both the core graph and the optional surfaces: n8n, Obsidian and OpenSquad.
 - File creation is treated as a workflow, not a raw write.
 - The TUI now wraps panel text when lines exceed the available width, instead of clipping them.
 
@@ -31,7 +32,12 @@ These should be explicit but not always loaded:
 - Hermes: file-first memory and semantic retrieval.
 - Open Design: artifact-centric creative workflows.
 - Penpot: design tokens, components and layout systems.
-- n8n: triggers, actions, schedules and node-marketplace semantics.
+
+Dual-use benchmarks that should stay visible in both layers:
+
+- n8n: triggers, actions, schedules and node-marketplace semantics, plus workflow graph and UI inspiration for Forge Core.
+- Obsidian: linked context, canvas and local-first knowledge navigation.
+- OpenSquad: multi-agent collaboration and visible handoffs.
 
 These are benchmark references, but they are better treated as optional Addons unless a workflow requires them.
 
@@ -64,4 +70,4 @@ That matters for:
 
 ## Current Direction
 
-The benchmark inventory should keep listing everything the user asked for, but the runtime should only surface Core items by default and load Addon-first items when they are actually needed.
+The benchmark inventory should keep listing everything the user asked for, but the runtime should surface Core items by default, keep dual-use items visible in workflow and UI views, and load Addon-first items only when the feature is actually needed.

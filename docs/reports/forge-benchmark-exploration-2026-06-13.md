@@ -29,7 +29,7 @@ Também vale uma regra transversal:
 
 Benchmarks dual-use que exigem leitura cuidadosa:
 
-- n8n: informa o Core de workflow graph e a superfície Addon de automação/interoperabilidade.
+- n8n: informa o Core de workflow graph e a superfície Addon de automação/interoperabilidade. Não é só Addon; é referência de grafo e de UI ao mesmo tempo.
 - Obsidian: informa tanto o Core de contexto ligado quanto o Addon de canvas, backlinks e navegação local-first.
 
 ## More Benchmarks That Shape The Contract
