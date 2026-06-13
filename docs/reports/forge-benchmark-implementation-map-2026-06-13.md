@@ -20,7 +20,7 @@ Benchmark contracts absorbed here:
 - Gemini CLI: shell-first session continuity.
 - OpenCode: default TUI entrypoint and compact operator surface.
 - Claude CLI: named session resume and visible plan boundary.
-- n8n: workflow graph visibility in the operator surface.
+- n8n: workflow graph visibility in the operator surface; Core graph semantics and UI inspiration, not only an Addon reference.
 - Obsidian: linked context and local-first navigation cues.
 
 ### `src/interactive.rs`
@@ -34,7 +34,7 @@ Owns:
 Benchmark contracts absorbed here:
 - LangGraph: stateful graphs, checkpoints, resume and subgraphs.
 - LangChain: middleware-like context shaping and tool boundaries.
-- n8n: node graph semantics and operator-visible workflow states.
+- n8n: node graph semantics and operator-visible workflow states; the core workflow graph should be able to render and reuse n8n-style structures.
 - Paperclip: document queues, audit trail and workflow queues.
 - OpenSquad: visible multi-agent collaboration and handoffs.
 
@@ -85,7 +85,7 @@ Owns:
 
 Benchmark contracts absorbed here:
 - Penpot and Open Design: design system artifacts as optional capabilities.
-- n8n: add-on style node ecosystem and external automation interoperability.
+- n8n: dual-use node ecosystem and external automation interoperability; keep the Addon boundary explicit but preserve the Core graph model.
 - telegram-delivery: optional handoff/delivery output.
 
 ### `src/workflow.rs` and `src/request.rs`
@@ -125,7 +125,7 @@ Owns:
 Benchmark contracts absorbed here:
 - LangGraph: subgraphs and checkpoints.
 - LangChain: lightweight harness and composition.
-- n8n: node/trigger mental model for graph composition.
+- n8n: node/trigger mental model for graph composition, especially where Forge nodes should interoperate with external n8n workflows.
 
 ### `installer/`
 
