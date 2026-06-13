@@ -53367,6 +53367,42 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
         .unwrap()
         .iter()
         .any(|check| check["id"] == "connected_brain_manifest"));
+    assert!(
+        panel["provider_readiness_count"].as_u64().unwrap() >= 1,
+        "replacement CLI panel should expose provider-level readiness rows"
+    );
+    assert!(
+        panel["installed_provider_count"].as_u64().unwrap() >= 1,
+        "detected local CLIs should be counted separately from release evidence"
+    );
+    assert!(
+        panel["wrapper_required_provider_count"].as_u64().unwrap() >= 1,
+        "detected CLIs still need approved Forge wrappers before evidence collection"
+    );
+    let provider_rows = panel["provider_readiness"].as_array().unwrap();
+    let codex_provider = provider_rows
+        .iter()
+        .find(|provider| provider["provider_id"] == "codex")
+        .expect("codex provider readiness row should be visible");
+    assert_eq!(codex_provider["brain_id"], "codex");
+    assert_eq!(codex_provider["installed"], true);
+    assert_eq!(codex_provider["wrapper_required"], true);
+    assert_eq!(
+        codex_provider["required_output_schema"],
+        "forge.connected_external_brain.provider_output.v1"
+    );
+    assert!(codex_provider["manifest_provider_template"]["command"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "forge.connected_external_brain.provider_output.v1"
+        )));
+    assert!(codex_provider["collect_evidence_command"]
+        .as_array()
+        .unwrap()
+        .windows(2)
+        .any(|pair| pair[0] == serde_json::json!("--connected-brain")
+            && pair[1] == serde_json::json!("codex")));
     assert!(panel["commands"]["evidence_plan"]
         .as_array()
         .unwrap()
@@ -53486,6 +53522,8 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
     let text = String::from_utf8(text_output).unwrap();
     assert!(text.contains("Replacement CLI:"));
     assert!(text.contains("External brain evidence:"));
+    assert!(text.contains("Provider readiness:"));
+    assert!(text.contains("codex:cli_detected_wrapper_required"));
     assert!(text.contains("file_editing_ux[ready]"));
     assert!(text.contains("forge milestone cli-demo"));
     assert!(text.contains("external_brain_provider_execution"));

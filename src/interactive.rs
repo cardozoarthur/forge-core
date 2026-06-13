@@ -778,6 +778,10 @@ pub struct InteractiveReplacementCliPanel {
     pub readiness_percent: u64,
     pub surfaces: Vec<InteractiveReplacementCliSurface>,
     pub external_brain_evidence_plan: InteractiveReleaseGateEvidencePlan,
+    pub provider_readiness_count: usize,
+    pub installed_provider_count: usize,
+    pub wrapper_required_provider_count: usize,
+    pub provider_readiness: Vec<InteractiveReplacementCliProviderReadiness>,
     pub blockers: Vec<String>,
     pub next_actions: Vec<String>,
     pub commands: InteractiveReplacementCliCommands,
@@ -794,6 +798,23 @@ pub struct InteractiveReplacementCliSurface {
     pub evidence: Vec<String>,
     pub blockers: Vec<String>,
     pub commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveReplacementCliProviderReadiness {
+    pub provider_id: String,
+    pub brain_id: String,
+    pub binary: String,
+    pub installed: bool,
+    pub detected_path: Option<String>,
+    pub readiness: String,
+    pub version_status: String,
+    pub wrapper_required: bool,
+    pub required_output_schema: String,
+    pub manifest_provider_template: serde_json::Value,
+    pub evidence_blocker: String,
+    pub next_action: String,
+    pub collect_evidence_command: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -9658,6 +9679,19 @@ pub fn build_interactive_replacement_cli_with_options(
     let next_actions =
         replacement_cli_next_actions(promotion_ready, &missing_attached_evidence_kinds);
     let replacement_commands = replacement_cli_commands(&project_root);
+    let provider_readiness = replacement_cli_provider_readiness(
+        &external_brain_evidence_plan.provider_candidates,
+        &replacement_commands.collect_external_brain_evidence,
+    );
+    let provider_readiness_count = provider_readiness.len();
+    let installed_provider_count = provider_readiness
+        .iter()
+        .filter(|provider| provider.installed)
+        .count();
+    let wrapper_required_provider_count = provider_readiness
+        .iter()
+        .filter(|provider| provider.wrapper_required)
+        .count();
 
     let mut surfaces = vec![
         replacement_cli_surface(
@@ -9885,6 +9919,10 @@ pub fn build_interactive_replacement_cli_with_options(
         readiness_percent,
         surfaces,
         external_brain_evidence_plan,
+        provider_readiness_count,
+        installed_provider_count,
+        wrapper_required_provider_count,
+        provider_readiness,
         blockers,
         next_actions,
         commands: replacement_commands,
@@ -9948,6 +9986,43 @@ fn replacement_cli_surface_owned(
         blockers,
         commands,
     }
+}
+
+fn replacement_cli_provider_readiness(
+    candidates: &[MilestoneEvidenceProviderCandidate],
+    collect_external_brain_evidence_command: &[String],
+) -> Vec<InteractiveReplacementCliProviderReadiness> {
+    candidates
+        .iter()
+        .map(|candidate| {
+            let collect_evidence_command = collect_external_brain_evidence_command
+                .iter()
+                .map(|part| {
+                    if part == "<provider-id>" {
+                        candidate.provider_id.clone()
+                    } else {
+                        part.clone()
+                    }
+                })
+                .collect::<Vec<_>>();
+            InteractiveReplacementCliProviderReadiness {
+                provider_id: candidate.provider_id.clone(),
+                brain_id: candidate.brain_id.clone(),
+                binary: candidate.binary.clone(),
+                installed: candidate.installed,
+                detected_path: candidate.detected_path.clone(),
+                readiness: candidate.readiness.clone(),
+                version_status: candidate.version_status.clone(),
+                wrapper_required: candidate.readiness == "cli_detected_wrapper_required",
+                required_output_schema: "forge.connected_external_brain.provider_output.v1"
+                    .to_string(),
+                manifest_provider_template: candidate.manifest_provider_template.clone(),
+                evidence_blocker: candidate.evidence_blocker.clone(),
+                next_action: candidate.next_action.clone(),
+                collect_evidence_command,
+            }
+        })
+        .collect()
 }
 
 fn replacement_cli_milestone_evidence_items(
@@ -13958,7 +14033,7 @@ pub fn render_interactive_workflow_sidebar(panel: &InteractiveWorkflowSidebarPan
 
 pub fn render_interactive_replacement_cli(panel: &InteractiveReplacementCliPanel) -> String {
     format!(
-        "Replacement CLI: {status}; milestone {milestone}; capability {capability_id}; readiness {readiness_percent}% ({ready_surface_count}/{surface_count}); promotion_ready {promotion_ready}\nExternal brain evidence: {external_plan_status}; ready {external_ready}; providers {external_providers}; templates {external_templates}\nSurfaces: {surfaces}\nBlockers: {blockers}\nCommands: {commands}\n",
+        "Replacement CLI: {status}; milestone {milestone}; capability {capability_id}; readiness {readiness_percent}% ({ready_surface_count}/{surface_count}); promotion_ready {promotion_ready}\nExternal brain evidence: {external_plan_status}; ready {external_ready}; providers {external_providers}; templates {external_templates}\nProvider readiness: {provider_readiness}\nSurfaces: {surfaces}\nBlockers: {blockers}\nCommands: {commands}\n",
         status = panel.status,
         milestone = panel.milestone,
         capability_id = panel.capability_id,
@@ -13981,6 +14056,7 @@ pub fn render_interactive_replacement_cli(panel: &InteractiveReplacementCliPanel
                 .manifest_template_ids
                 .join(",")
         },
+        provider_readiness = render_replacement_cli_provider_readiness_summary(panel),
         surfaces = render_replacement_cli_surface_summary(panel),
         blockers = if panel.blockers.is_empty() {
             "none".to_string()
@@ -14000,6 +14076,26 @@ pub fn render_interactive_replacement_cli(panel: &InteractiveReplacementCliPanel
         ]
         .join(" | "),
     )
+}
+
+fn render_replacement_cli_provider_readiness_summary(
+    panel: &InteractiveReplacementCliPanel,
+) -> String {
+    if panel.provider_readiness.is_empty() {
+        return "none".to_string();
+    }
+    panel
+        .provider_readiness
+        .iter()
+        .take(5)
+        .map(|provider| {
+            format!(
+                "{}:{}:{}",
+                provider.provider_id, provider.readiness, provider.version_status
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub fn render_interactive_multimodal_runtime(panel: &InteractiveMultimodalRuntimePanel) -> String {
