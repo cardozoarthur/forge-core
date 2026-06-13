@@ -9748,6 +9748,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 command: &command,
                 forge_first,
                 forge_first_source,
+                project_root,
                 workflow_id: workflow_id.as_deref(),
                 task_id: task_id.as_deref(),
                 run_id: run_id.as_deref(),

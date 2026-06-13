@@ -9488,6 +9488,12 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
         "the packaged Forge skill should teach agents to inspect the replacement CLI Headroom wrapper contract"
     );
     assert!(
+        forge_core::skill::SKILL_MD.contains("connected_brain_provider_wrapper")
+            && forge_core::skill::SKILL_MD
+                .contains("forge.harness.connected_brain_provider_wrapper.v1"),
+        "the packaged Forge skill should teach agents how harness wrap-plan bridges shims to connected brain provider manifests"
+    );
+    assert!(
         forge_core::skill::SKILL_MD.contains("manifest_templates")
             && forge_core::skill::SKILL_MD.contains(".forge/connected-brain-runtimes.json"),
         "the packaged Forge skill should teach agents to use secret-free connected brain manifest templates before evidence collection"
@@ -48096,6 +48102,7 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert!(text.contains(json["headroom_recommended_action"].as_str().unwrap()));
     assert!(text.contains("session lifecycle"));
     assert!(text.contains("Wrapper plan: forge_first true"));
+    assert!(text.contains("provider wrapper provider_wrapper_missing"));
     assert!(text.contains("Headroom runtime: forge.harness.headroom_runtime_plan.v1"));
     assert!(text.contains("tool_output:compress_then_return_retrieval_ref"));
     assert!(text.contains("launch forge harness exec --executor codex"));
@@ -52198,6 +52205,148 @@ fn forge_first_harness_smoke_proves_headroom_wrapper_and_shim_without_child_exec
     assert!(text.contains("Headroom: token_headroom_ready"));
     assert!(text.contains("external executed false"));
     assert!(text.contains("forge smoke forge-first-harness --output json"));
+}
+
+#[test]
+fn harness_wrap_plan_bridges_shim_to_connected_brain_provider_manifest() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("project");
+    let shim_dir = project.join(".forge/bin");
+    fs::create_dir_all(project.join(".forge")).unwrap();
+    let wrapper_path = shim_dir.join("codex");
+    let manifest_path = project.join(".forge/connected-brain-runtimes.json");
+
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "wrap-plan",
+            "--executor",
+            "codex",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--token-headroom",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let provider_wrapper = &json["connected_brain_provider_wrapper"];
+    assert_eq!(
+        provider_wrapper["schema_version"],
+        "forge.harness.connected_brain_provider_wrapper.v1"
+    );
+    assert_eq!(provider_wrapper["status"], "provider_wrapper_missing");
+    assert_eq!(provider_wrapper["executor"], "codex");
+    assert_eq!(provider_wrapper["provider_id"], "codex");
+    assert_eq!(
+        provider_wrapper["wrapper_path"],
+        wrapper_path.display().to_string()
+    );
+    assert_eq!(provider_wrapper["wrapper_path_absolute"], true);
+    assert_eq!(provider_wrapper["wrapper_executable"], false);
+    assert_eq!(provider_wrapper["counts_as_release_evidence"], false);
+    assert_eq!(
+        provider_wrapper["target_manifest_path"],
+        manifest_path.display().to_string()
+    );
+    assert_eq!(
+        provider_wrapper["manifest_provider_template"]["command"],
+        serde_json::json!([wrapper_path.display().to_string()])
+    );
+    assert_eq!(
+        provider_wrapper["manifest_provider_template"]["capabilities"],
+        serde_json::json!(["replacement_grade_cli"])
+    );
+    assert_eq!(
+        provider_wrapper["install_command"],
+        serde_json::json!([
+            "forge",
+            "harness",
+            "install-shims",
+            "--shim-dir",
+            shim_dir.display().to_string(),
+            "--executor",
+            "codex",
+            "--project-root",
+            project.display().to_string(),
+            "--token-headroom",
+            "--output",
+            "json"
+        ])
+    );
+    assert!(provider_wrapper["evidence_plan_command"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("--connected-brain")));
+    assert!(provider_wrapper["collection_command"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("external_brain_provider_execution")));
+
+    forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "install-shims",
+            "--shim-dir",
+            shim_dir.to_str().unwrap(),
+            "--executor",
+            "codex",
+            "--real-cmd",
+            "/bin/echo",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--token-headroom",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let installed_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "harness",
+            "wrap-plan",
+            "--executor",
+            "codex",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--token-headroom",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let installed_json: Value = serde_json::from_slice(&installed_output).unwrap();
+    let installed_wrapper = &installed_json["connected_brain_provider_wrapper"];
+    assert_eq!(installed_wrapper["status"], "provider_wrapper_ready");
+    assert_eq!(installed_wrapper["wrapper_executable"], true);
+    assert_eq!(
+        installed_wrapper["readiness_checks"],
+        serde_json::json!([
+            "wrapper_path_absolute",
+            "wrapper_file_exists",
+            "wrapper_file_executable",
+            "manifest_template_command_points_to_wrapper",
+            "release_evidence_still_requires_operator_approval"
+        ])
+    );
 }
 
 #[test]

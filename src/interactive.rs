@@ -15452,11 +15452,14 @@ fn render_harness_wrapper_plan(plan: &CliWrapperPlanReport) -> String {
         .map(|item| format!("{}={}", item.name, item.value))
         .collect::<Vec<_>>()
         .join(", ");
+    let provider_wrapper = &plan.connected_brain_provider_wrapper;
     format!(
-        "forge_first {}; strategy {}; launch {}; env {}",
+        "forge_first {}; strategy {}; launch {}; provider wrapper {} {}; env {}",
         plan.forge_first,
         plan.wrapper_strategy,
         plan.launch_command.join(" "),
+        provider_wrapper.status,
+        provider_wrapper.wrapper_path,
         if env.is_empty() {
             "none".to_string()
         } else {

@@ -6562,6 +6562,7 @@ fn run() -> Result<i32> {
                     command: &command,
                     forge_first,
                     forge_first_source,
+                    project_root: project_root.as_deref(),
                     workflow_id: workflow_id.as_deref(),
                     task_id: task_id.as_deref(),
                     run_id: run_id.as_deref(),

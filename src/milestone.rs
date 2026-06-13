@@ -3448,6 +3448,7 @@ fn build_milestone_headroom_runtime_wrapper_demo(
         command: &command,
         forge_first: true,
         forge_first_source: "milestone_cli_demo_headroom_runtime_wrapper",
+        project_root: None,
         workflow_id: Some(workflow_id),
         task_id: Some(task_id),
         run_id: None,

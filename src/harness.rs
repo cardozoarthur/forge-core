@@ -22,6 +22,8 @@ pub const CLI_HARNESS_DOCTOR_SCHEMA_VERSION: &str = "forge.harness.doctor.v1";
 pub const CLI_HARNESS_HEADROOM_PLAN_SCHEMA_VERSION: &str = "forge.harness.headroom_plan.v1";
 pub const CLI_HARNESS_HEADROOM_RUNTIME_PLAN_SCHEMA_VERSION: &str =
     "forge.harness.headroom_runtime_plan.v1";
+pub const CLI_HARNESS_CONNECTED_BRAIN_PROVIDER_WRAPPER_SCHEMA_VERSION: &str =
+    "forge.harness.connected_brain_provider_wrapper.v1";
 pub const CLI_HARNESS_ADOPTION_PLAN_SCHEMA_VERSION: &str = "forge.harness.adoption_plan.v1";
 pub const CLI_HARNESS_ACTIVATION_PROFILE_SCHEMA_VERSION: &str =
     "forge.harness.activation_profile.v1";
@@ -89,6 +91,7 @@ pub struct CliWrapperPlanReport {
     pub launch_command: Vec<String>,
     pub orchestration_contract: HarnessOrchestrationContract,
     pub headroom_runtime_plan: HarnessHeadroomRuntimePlan,
+    pub connected_brain_provider_wrapper: HarnessConnectedBrainProviderWrapperPlan,
     pub session_lifecycle_plan: HarnessSessionLifecyclePlan,
     pub harness_checks: Vec<String>,
     pub notes: Vec<String>,
@@ -138,6 +141,28 @@ pub struct HarnessHeadroomReversibleStore {
     pub persistence_mode: String,
     pub retrieval_command: Vec<String>,
     pub ttl_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessConnectedBrainProviderWrapperPlan {
+    pub schema_version: String,
+    pub status: String,
+    pub executor: String,
+    pub provider_id: String,
+    pub project_root: String,
+    pub shim_dir: String,
+    pub wrapper_path: String,
+    pub wrapper_path_absolute: bool,
+    pub wrapper_exists: bool,
+    pub wrapper_executable: bool,
+    pub target_manifest_path: String,
+    pub manifest_provider_template: Value,
+    pub install_command: Vec<String>,
+    pub evidence_plan_command: Vec<String>,
+    pub collection_command: Vec<String>,
+    pub readiness_checks: Vec<String>,
+    pub counts_as_release_evidence: bool,
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -198,6 +223,7 @@ pub struct CliWrapperPlanOptions<'a> {
     pub command: &'a [String],
     pub forge_first: bool,
     pub forge_first_source: &'a str,
+    pub project_root: Option<&'a Path>,
     pub workflow_id: Option<&'a str>,
     pub task_id: Option<&'a str>,
     pub run_id: Option<&'a str>,
@@ -1264,6 +1290,7 @@ pub fn build_harness_doctor_report(
         command: &[],
         forge_first: mode.forge_first,
         forge_first_source: &mode.forge_first_source,
+        project_root: Some(&project_root_path),
         workflow_id,
         task_id,
         run_id,
@@ -1385,6 +1412,7 @@ pub fn build_harness_headroom_plan(
         command,
         forge_first,
         forge_first_source,
+        project_root,
         workflow_id,
         task_id,
         run_id,
@@ -3325,6 +3353,7 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         command,
         forge_first,
         forge_first_source,
+        project_root,
         workflow_id,
         task_id,
         run_id,
@@ -3462,6 +3491,8 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         run_id,
         orchestration_env,
     );
+    let connected_brain_provider_wrapper =
+        build_connected_brain_provider_wrapper_plan(&executor, project_root, token_headroom);
 
     CliWrapperPlanReport {
         schema_version: CLI_WRAPPER_PLAN_SCHEMA_VERSION.to_string(),
@@ -3483,12 +3514,138 @@ pub fn build_cli_wrapper_plan(options: CliWrapperPlanOptions<'_>) -> CliWrapperP
         launch_command,
         orchestration_contract,
         headroom_runtime_plan,
+        connected_brain_provider_wrapper,
         session_lifecycle_plan,
         harness_checks,
         notes: vec![
             "Headroom-inspired ideas absorbed: local-first compression, reversible retrieval refs, CLI wrapper env shaping, tool-search preservation and shim-based harness tests".to_string(),
             "This plan is non-destructive; actual exec remains a separate guarded harness action".to_string(),
             "Session lifecycle commands are plan-only and must be recorded through Forge before relying on external brain shell state.".to_string(),
+        ],
+    }
+}
+
+fn build_connected_brain_provider_wrapper_plan(
+    executor: &str,
+    project_root: Option<&Path>,
+    token_headroom: bool,
+) -> HarnessConnectedBrainProviderWrapperPlan {
+    let project_root_path = absolute_project_root(project_root);
+    let shim_dir = project_root_path.join(".forge/bin");
+    let wrapper_path = shim_dir.join(shim_binary_name(executor));
+    let manifest_path = project_root_path.join(".forge/connected-brain-runtimes.json");
+    let wrapper_exists = wrapper_path.is_file();
+    let wrapper_executable = wrapper_exists && is_executable(&wrapper_path);
+    let status = if wrapper_executable {
+        "provider_wrapper_ready"
+    } else if wrapper_exists {
+        "provider_wrapper_not_executable"
+    } else {
+        "provider_wrapper_missing"
+    };
+    let project_root_display = project_root_path.display().to_string();
+    let shim_dir_display = shim_dir.display().to_string();
+    let wrapper_path_display = wrapper_path.display().to_string();
+    let token_headroom_flag = if token_headroom {
+        "--token-headroom"
+    } else {
+        "--no-token-headroom"
+    };
+    let manifest_provider_template = json!({
+        "id": executor,
+        "brain_id": executor,
+        "provider_class": "external_cli",
+        "command": [wrapper_path_display.clone()],
+        "capabilities": ["replacement_grade_cli"],
+        "approved_by": "<operator>",
+        "approval_ref": "<approval-or-change-record>",
+        "model_id": "<approved-model-id>",
+        "allow_model_execution": true,
+        "network_access": false,
+        "device_access": false,
+        "external_resources_mutated": false
+    });
+    let mut readiness_checks = vec![
+        "wrapper_path_absolute".to_string(),
+        "manifest_template_command_points_to_wrapper".to_string(),
+        "release_evidence_still_requires_operator_approval".to_string(),
+    ];
+    if wrapper_exists {
+        readiness_checks.insert(1, "wrapper_file_exists".to_string());
+    }
+    if wrapper_executable {
+        readiness_checks.insert(2, "wrapper_file_executable".to_string());
+    }
+
+    HarnessConnectedBrainProviderWrapperPlan {
+        schema_version: CLI_HARNESS_CONNECTED_BRAIN_PROVIDER_WRAPPER_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        executor: executor.to_string(),
+        provider_id: executor.to_string(),
+        project_root: project_root_display.clone(),
+        shim_dir: shim_dir_display.clone(),
+        wrapper_path: wrapper_path_display.clone(),
+        wrapper_path_absolute: wrapper_path.is_absolute(),
+        wrapper_exists,
+        wrapper_executable,
+        target_manifest_path: manifest_path.display().to_string(),
+        manifest_provider_template,
+        install_command: vec![
+            "forge".to_string(),
+            "harness".to_string(),
+            "install-shims".to_string(),
+            "--shim-dir".to_string(),
+            shim_dir_display,
+            "--executor".to_string(),
+            executor.to_string(),
+            "--project-root".to_string(),
+            project_root_display.clone(),
+            token_headroom_flag.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        evidence_plan_command: vec![
+            "forge".to_string(),
+            "milestone".to_string(),
+            "evidence-plan".to_string(),
+            "--version".to_string(),
+            "0.5".to_string(),
+            "--capability".to_string(),
+            "replacement_grade_cli".to_string(),
+            "--project-root".to_string(),
+            project_root_display.clone(),
+            "--connected-brain".to_string(),
+            executor.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        collection_command: vec![
+            "forge".to_string(),
+            "milestone".to_string(),
+            "collect-evidence".to_string(),
+            "--version".to_string(),
+            "0.5".to_string(),
+            "--capability".to_string(),
+            "replacement_grade_cli".to_string(),
+            "--kind".to_string(),
+            "external_brain_provider_execution".to_string(),
+            "--project-root".to_string(),
+            project_root_display,
+            "--connected-brain".to_string(),
+            executor.to_string(),
+            "--approved-by".to_string(),
+            "<operator>".to_string(),
+            "--origin".to_string(),
+            "forge_cli".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        readiness_checks,
+        counts_as_release_evidence: false,
+        notes: vec![
+            "This read-only bridge points connected-brain manifests at the Forge-owned harness shim instead of a placeholder command.".to_string(),
+            "Installing the shim creates an executable wrapper, but release evidence still requires an operator-approved manifest and a separate collect-evidence run.".to_string(),
+            "The wrapper path is secret-free and carries Forge-owned context, memory, MCP, credential-vault, event receipt and token-headroom routing through the normal harness.".to_string(),
         ],
     }
 }
@@ -4253,6 +4410,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         command,
         forge_first,
         forge_first_source,
+        project_root,
         workflow_id,
         task_id,
         run_id,
@@ -4263,7 +4421,6 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         require_token_headroom_for_forge_first,
         dry_run,
         allow_exec,
-        project_root,
         cwd,
     } = options;
     let wrapper_plan = build_cli_wrapper_plan(CliWrapperPlanOptions {
@@ -4271,6 +4428,7 @@ pub fn run_cli_harness_exec(options: CliHarnessExecOptions<'_>) -> Result<CliHar
         command,
         forge_first,
         forge_first_source,
+        project_root,
         workflow_id,
         task_id,
         run_id,
@@ -4585,6 +4743,20 @@ fn normalize_optional_text(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+fn absolute_project_root(project_root: Option<&Path>) -> PathBuf {
+    let root = project_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let absolute = if root.is_absolute() {
+        root
+    } else {
+        env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(root)
+    };
+    absolute.canonicalize().unwrap_or(absolute)
 }
 
 fn normalize_harness_mode_source(value: &str, forge_first: bool) -> String {
