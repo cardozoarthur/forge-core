@@ -3574,6 +3574,103 @@ fn build_architecture_compass_panel(
                 .to_string(),
         );
     }
+    let replacement_cli_gate = inputs
+        .release_gates_panel
+        .gate_cards
+        .iter()
+        .find(|gate| gate.capability_id == "replacement_grade_cli");
+    let replacement_cli_promotion_ready = replacement_cli_gate
+        .map(|gate| gate.promotion_ready)
+        .unwrap_or(inputs.replacement_cli_panel.promotion_ready);
+    let replacement_cli_required_count = replacement_cli_gate
+        .map(|gate| gate.required_attached_evidence_kinds.len())
+        .unwrap_or(
+            inputs
+                .replacement_cli_panel
+                .required_attached_evidence_kinds
+                .len(),
+        );
+    let replacement_cli_attached_count = replacement_cli_gate
+        .map(|gate| gate.attached_evidence_kinds.len())
+        .unwrap_or(inputs.replacement_cli_panel.attached_evidence_kinds.len());
+    let replacement_cli_missing_kinds = replacement_cli_gate
+        .map(|gate| gate.missing_attached_evidence_kinds.clone())
+        .unwrap_or_else(|| {
+            inputs
+                .replacement_cli_panel
+                .missing_attached_evidence_kinds
+                .clone()
+        });
+    let replacement_cli_missing_count = replacement_cli_missing_kinds.len();
+    let mut harness_evidence_refs = vec![
+        format!(
+            "harness:{} headroom={} forge_first_status={}",
+            inputs.harness_panel.status,
+            inputs.harness_panel.token_headroom_ready,
+            inputs.harness_panel.forge_first_adoption_readiness.status
+        ),
+        format!(
+            "replacement_cli:ready={}/{} readiness={}%",
+            inputs.replacement_cli_panel.ready_surface_count,
+            inputs.replacement_cli_panel.surface_count,
+            inputs.replacement_cli_panel.readiness_percent
+        ),
+        format!(
+            "release_gates:{} blocked={}",
+            inputs.release_gates_panel.status, inputs.release_gates_panel.blocked_gate_count
+        ),
+    ];
+    harness_evidence_refs.push(format!(
+        "replacement_cli:promotion_ready={} attached={}/{} missing={} external_plan={} provider_audit={}",
+        replacement_cli_promotion_ready,
+        replacement_cli_attached_count,
+        replacement_cli_required_count,
+        replacement_cli_missing_count,
+        inputs.replacement_cli_panel.external_brain_evidence_plan.status,
+        inputs
+            .replacement_cli_panel
+            .provider_wrapper_manifest_audit
+            .status
+    ));
+    let mut harness_gaps = inputs
+        .harness_panel
+        .forge_first_adoption_readiness
+        .blocked_reasons
+        .iter()
+        .map(|reason| format!("Forge-first default blocked by {reason}."))
+        .collect::<Vec<_>>();
+    if !replacement_cli_promotion_ready {
+        if replacement_cli_missing_kinds
+            .iter()
+            .any(|kind| kind == "external_brain_provider_execution")
+        {
+            harness_gaps.push(
+                "Provider/model execution evidence must remain real and approved before promotion."
+                    .to_string(),
+            );
+        } else if !replacement_cli_missing_kinds.is_empty() {
+            harness_gaps.push(format!(
+                "Replacement-grade CLI milestone evidence still missing: {}.",
+                replacement_cli_missing_kinds.join(", ")
+            ));
+        } else {
+            harness_gaps.push(
+                "Replacement-grade CLI evidence is attached but not promotion-ready; inspect release gates for invalid receipts."
+                    .to_string(),
+            );
+        }
+    }
+    let harness_next_increment = if !inputs
+        .harness_panel
+        .forge_first_adoption_readiness
+        .ready_to_use_as_default
+    {
+        "Instalar e ativar shims aprovados mantendo headroom reversível e execução externa auditável."
+    } else if !replacement_cli_promotion_ready {
+        "Coletar/anexar evidência real de provider e UX CLI antes de promover o replacement-grade CLI."
+    } else {
+        "Manter shims e evidências de provider atualizados enquanto expande os brains substituíveis."
+    };
 
     let mut tracks = vec![
         architecture_track(
@@ -3819,36 +3916,9 @@ fn build_architecture_compass_panel(
                 inputs.harness_panel.token_headroom_ready
                     || inputs.replacement_cli_panel.ready_surface_count > 0,
             ),
-            vec![
-                format!(
-                    "harness:{} headroom={} forge_first_status={}",
-                    inputs.harness_panel.status,
-                    inputs.harness_panel.token_headroom_ready,
-                    inputs.harness_panel.forge_first_adoption_readiness.status
-                ),
-                format!(
-                    "replacement_cli:ready={}/{} readiness={}%",
-                    inputs.replacement_cli_panel.ready_surface_count,
-                    inputs.replacement_cli_panel.surface_count,
-                    inputs.replacement_cli_panel.readiness_percent
-                ),
-                format!(
-                    "release_gates:{} blocked={}",
-                    inputs.release_gates_panel.status, inputs.release_gates_panel.blocked_gate_count
-                ),
-            ],
-            inputs
-                .harness_panel
-                .forge_first_adoption_readiness
-                .blocked_reasons
-                .iter()
-                .map(|reason| format!("Forge-first default blocked by {reason}."))
-                .chain(std::iter::once(
-                    "Provider/model execution evidence must remain real and approved before promotion."
-                        .to_string(),
-                ))
-                .collect(),
-            "Instalar shims aprovados e continuar usando headroom reversível sem executar CLIs externas em smokes.",
+            harness_evidence_refs,
+            harness_gaps,
+            harness_next_increment,
             "Forge controla contexto, memória, permissões, custos e sessões; CLIs executam como brains substituíveis.",
         ),
         architecture_track(
@@ -5229,7 +5299,7 @@ pub fn build_replacement_cli_evidence_smoke(
                 && evidence.collection_promotion_ready
         })
     };
-    let skipped_kind = |capability_id: &str, kind: &str| {
+    let skipped_not_ready_kind = |capability_id: &str, kind: &str| {
         collect_ready.skipped_evidence.iter().any(|evidence| {
             evidence.capability_id == capability_id
                 && evidence.kind == kind
@@ -5239,10 +5309,13 @@ pub fn build_replacement_cli_evidence_smoke(
                     .evidence_plan
                     .config_checks
                     .iter()
-                    .any(|check| check.status == "missing")
+                    .any(|check| check.status != "ready")
                 && !evidence.evidence_plan.manifest_templates.is_empty()
         })
     };
+    let external_provider_collected = collected_kind("external_brain_provider_execution");
+    let external_provider_not_ready =
+        skipped_not_ready_kind("replacement_grade_cli", "external_brain_provider_execution");
     let replacement_gate = release_gates
         .gate_cards
         .iter()
@@ -5262,6 +5335,28 @@ pub fn build_replacement_cli_evidence_smoke(
                 .iter()
                 .any(|kind| kind == "external_brain_provider_execution")
     });
+    let replacement_gate_promotion_ready = replacement_gate.is_some_and(|gate| {
+        gate.promotion_ready
+            && gate.attached_evidence_state == "required_attached_evidence_present"
+            && gate.missing_attached_evidence_kinds.is_empty()
+            && gate
+                .attached_evidence_kinds
+                .iter()
+                .any(|kind| kind == "external_brain_provider_execution")
+            && gate
+                .attached_evidence_kinds
+                .iter()
+                .any(|kind| kind == "broader_project_coding_research_workflow")
+            && gate
+                .attached_evidence_kinds
+                .iter()
+                .any(|kind| kind == "terminal_file_editing_ux")
+    });
+    let replacement_gate_state_ok = if external_provider_collected {
+        replacement_gate_promotion_ready
+    } else {
+        replacement_gate_partial
+    };
 
     let checks = vec![
         operational_tui_smoke_check(
@@ -5292,19 +5387,26 @@ pub fn build_replacement_cli_evidence_smoke(
             "forge milestone collect-evidence --version 0.5 --capability replacement_grade_cli --kind terminal_file_editing_ux --output json",
         ),
         operational_tui_smoke_check(
-            "skips_external_provider_until_manifest",
-            "Provider evidence stays skipped until an approved connected-brain manifest exists",
-            skipped_kind("replacement_grade_cli", "external_brain_provider_execution"),
+            "external_provider_evidence_manifest_state",
+            "Provider evidence is collected when an approved manifest is ready, otherwise skipped with manifest guidance",
+            external_provider_collected || external_provider_not_ready,
             format!(
-                "skipped {} item(s); next {}",
-                collect_ready.skipped_count, collect_ready.next_action
+                "provider collected {}; provider skipped {}; collected {}; skipped {}; next {}",
+                external_provider_collected,
+                external_provider_not_ready,
+                collect_ready.collected_count,
+                collect_ready.skipped_count,
+                collect_ready.next_action
             ),
             "forge milestone evidence-plan --version 0.5 --capability replacement_grade_cli --project-root <project-root> --output json",
         ),
         operational_tui_smoke_check(
-            "skips_multimodal_until_runtime_manifest",
-            "Production multimodal evidence stays skipped until approved runtime manifests exist",
-            skipped_kind("experimental_multimodal_runtime", "production_runtime_benchmark"),
+            "skips_multimodal_until_runtime_ready",
+            "Production multimodal evidence stays skipped until approved runtime evidence inputs are ready",
+            skipped_not_ready_kind(
+                "experimental_multimodal_runtime",
+                "production_runtime_benchmark",
+            ),
             format!(
                 "skipped {} item(s); failed {}",
                 collect_ready.skipped_count, collect_ready.failed_count
@@ -5312,14 +5414,15 @@ pub fn build_replacement_cli_evidence_smoke(
             "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --output json",
         ),
         operational_tui_smoke_check(
-            "release_gate_tracks_partial_replacement_cli_evidence",
-            "Release gate shows partial replacement CLI evidence instead of overclaiming promotion",
-            replacement_gate_partial,
+            "release_gate_tracks_replacement_cli_evidence_state",
+            "Release gate shows the current replacement CLI evidence state without overclaiming Forge 0.5 promotion",
+            replacement_gate_state_ok,
             replacement_gate
                 .map(|gate| {
                     format!(
-                        "{}; attached {}; missing {}",
+                        "{}; promotion_ready {}; attached {}; missing {}",
                         gate.attached_evidence_state,
+                        gate.promotion_ready,
                         gate.attached_evidence_kinds.join(", "),
                         gate.missing_attached_evidence_kinds.join(", ")
                     )

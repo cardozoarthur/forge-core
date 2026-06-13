@@ -5267,7 +5267,7 @@ mkdir -p brain-output
 run_provider() {{
   case "$PROVIDER_ID" in
     codex)
-      "$REAL_CMD" exec "$PROMPT"
+      "$REAL_CMD" exec --skip-git-repo-check --ephemeral "$PROMPT"
       ;;
     gemini)
       "$REAL_CMD" --prompt "$PROMPT"

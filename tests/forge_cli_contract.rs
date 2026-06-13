@@ -22,6 +22,94 @@ fn forge() -> Command {
     Command::cargo_bin("forge").expect("forge binary should build")
 }
 
+fn attach_milestone_receipt(
+    store: &Path,
+    artifact_root: &Path,
+    capability: &str,
+    kind: &str,
+    payload: Value,
+) {
+    let receipt = artifact_root.join(format!("{capability}-{kind}.json"));
+    fs::write(&receipt, serde_json::to_vec_pretty(&payload).unwrap()).unwrap();
+    forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "attach-evidence",
+            "--version",
+            "0.5",
+            "--capability",
+            capability,
+            "--kind",
+            kind,
+            "--summary",
+            "Operator-approved required milestone receipt.",
+            "--artifact",
+        ])
+        .arg(receipt.to_str().unwrap())
+        .args([
+            "--approved-by",
+            "arthur",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+}
+
+fn attach_replacement_grade_cli_ready_evidence(store: &Path, artifact_root: &Path) {
+    for (kind, payload) in [
+        (
+            "external_brain_provider_execution",
+            serde_json::json!({
+                "collection_promotion_ready": true,
+                "promotion_gates": [
+                    {"id":"provider_contract_validated","passed":true,"summary":"ok"},
+                    {"id":"output_schema_valid","passed":true,"summary":"ok"},
+                    {"id":"real_provider_execution_performed","passed":true,"summary":"ok"},
+                    {"id":"model_execution_performed","passed":true,"summary":"ok"},
+                    {"id":"harness_exec_event_recorded","passed":true,"summary":"ok"},
+                    {"id":"external_resources_untouched","passed":true,"summary":"ok"}
+                ]
+            }),
+        ),
+        (
+            "broader_project_coding_research_workflow",
+            serde_json::json!({
+                "collection_promotion_ready": true,
+                "promotion_gates": [
+                    {"id":"completed_through_forge","passed":true,"summary":"ok"},
+                    {"id":"real_project_demo_completed","passed":true,"summary":"ok"},
+                    {"id":"handoff_ready","passed":true,"summary":"ok"},
+                    {"id":"exec_event_recorded","passed":true,"summary":"ok"},
+                    {"id":"validated_multi_file_artifacts","passed":true,"summary":"ok"},
+                    {"id":"external_resources_untouched","passed":true,"summary":"ok"}
+                ]
+            }),
+        ),
+        (
+            "terminal_file_editing_ux",
+            serde_json::json!({
+                "collection_promotion_ready": true,
+                "promotion_gates": [
+                    {"id":"completed_through_forge","passed":true,"summary":"ok"},
+                    {"id":"patch_lifecycle_ready","passed":true,"summary":"ok"},
+                    {"id":"review_before_apply","passed":true,"summary":"ok"},
+                    {"id":"restore_approval_recorded","passed":true,"summary":"ok"},
+                    {"id":"restored_to_clean_state","passed":true,"summary":"ok"},
+                    {"id":"artifact_lineage_complete","passed":true,"summary":"ok"},
+                    {"id":"external_resources_untouched","passed":true,"summary":"ok"}
+                ]
+            }),
+        ),
+    ] {
+        attach_milestone_receipt(store, artifact_root, "replacement_grade_cli", kind, payload);
+    }
+}
+
 fn sqlite_table_columns(connection: &Connection, table: &str) -> Vec<String> {
     let mut statement = connection
         .prepare(&format!("PRAGMA table_info({table})"))
@@ -47362,6 +47450,65 @@ tenant_policy_mode: audit
 }
 
 #[test]
+fn interactive_architecture_compass_reflects_replacement_cli_provider_evidence_state() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    attach_replacement_grade_cli_ready_evidence(&store, temp.path());
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "architecture",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let compass: Value = serde_json::from_slice(&output).unwrap();
+    let harness_track = compass["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["track_id"] == "harness_headroom_cli_brains")
+        .expect("architecture compass must expose the harness track");
+
+    assert!(harness_track["evidence_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|evidence| evidence
+            .as_str()
+            .unwrap()
+            .contains("replacement_cli:promotion_ready=true")));
+    assert!(
+        !harness_track["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap
+                .as_str()
+                .unwrap()
+                .contains("Provider/model execution evidence")),
+        "provider/model execution should stop appearing as an open architecture gap after replacement-grade CLI evidence is attached and promotion-ready"
+    );
+    assert!(compass["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|conflict| conflict
+            .as_str()
+            .unwrap()
+            .contains("approved manifests and real execution receipts")));
+}
+
+#[test]
 fn interactive_operational_cockpit_is_dedicated_cli_slash_and_mcp_surface() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -52523,6 +52670,10 @@ fn harness_wrap_plan_bridges_shim_to_connected_brain_provider_manifest() {
     assert!(adapter_script.contains("brain-output/provider-output.json"));
     assert!(adapter_script.contains("forge.connected_external_brain.provider_output.v1"));
     assert!(adapter_script.contains("FORGE_WORKFLOW_ID"));
+    assert!(
+        adapter_script.contains("\"$REAL_CMD\" exec --skip-git-repo-check --ephemeral \"$PROMPT\""),
+        "Codex provider adapters must run non-interactively in ephemeral mode without requiring the isolated evidence project to be a git repository"
+    );
 
     let mcp_manifest_output = forge()
         .current_dir(temp.path())
@@ -52793,9 +52944,9 @@ fn replacement_cli_evidence_smoke_collects_ready_receipts_and_reports_manifest_g
     for check_id in [
         "collects_broader_project_coding_research_workflow",
         "collects_terminal_file_editing_ux",
-        "skips_external_provider_until_manifest",
-        "skips_multimodal_until_runtime_manifest",
-        "release_gate_tracks_partial_replacement_cli_evidence",
+        "external_provider_evidence_manifest_state",
+        "skips_multimodal_until_runtime_ready",
+        "release_gate_tracks_replacement_cli_evidence_state",
         "does_not_auto_promote",
     ] {
         let check = json["checks"]
@@ -52834,6 +52985,167 @@ fn replacement_cli_evidence_smoke_collects_ready_receipts_and_reports_manifest_g
     assert!(text.contains("collected 2/4"));
     assert!(text.contains("replacement_grade_cli:terminal_file_editing_ux"));
     assert!(text.contains("forge smoke replacement-cli-evidence --output json"));
+}
+
+#[test]
+fn replacement_cli_evidence_smoke_collects_external_provider_when_manifest_is_ready() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("replacement-cli-evidence-project");
+    let forge_dir = project.join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    let provider_script = r#"set -eu
+mkdir -p brain-output
+cat > brain-output/plan.json <<EOF
+{"schema_version":"forge.connected_external_brain.provider_plan.v1","workflow_id":"$FORGE_WORKFLOW_ID","task_id":"$FORGE_TASK_ID","run_id":"$FORGE_RUN_ID","brain_id":"smoke-provider","model_execution_performed":true}
+EOF
+cat > brain-output/provider-output.json <<EOF
+{"schema_version":"forge.connected_external_brain.provider_output.v1","provider_id":"smoke-provider","quality_score":0.98,"latency_ms":10,"model_execution_performed":true,"real_provider_execution_performed":true}
+EOF
+cat > brain-output/research.md <<EOF
+# Smoke provider evidence
+
+- Workflow: $FORGE_WORKFLOW_ID
+- Provider: smoke-provider
+EOF
+cat > brain-output/code.rs <<'RS'
+pub fn smoke_provider_marker() -> &'static str {
+    "smoke-provider"
+}
+RS
+printf 'smoke_provider_ok\n'
+"#;
+    fs::write(
+        forge_dir.join("connected-brain-runtimes.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "providers": [{
+                "id": "smoke-provider",
+                "brain_id": "smoke-provider",
+                "model_id": "smoke-model-v1",
+                "provider_class": "external_cli",
+                "capabilities": ["replacement_grade_cli"],
+                "command": [
+                    "/bin/sh",
+                    "-c",
+                    provider_script
+                ],
+                "approved_by": "arthur",
+                "approval_ref": "smoke-provider-approval",
+                "allow_model_execution": true,
+                "network_access": false,
+                "device_access": false,
+                "external_resources_mutated": false
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "smoke",
+            "replacement-cli-evidence",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--approved-by",
+            "arthur",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.smoke.replacement_cli_evidence.v1"
+    );
+    assert_eq!(json["status"], "replacement_cli_evidence_smoke_passed");
+    assert_eq!(json["collect_ready"]["status"], "partial_collection");
+    assert_eq!(json["collect_ready"]["required_count"], 4);
+    assert_eq!(json["collect_ready"]["collected_count"], 3);
+    assert_eq!(json["collect_ready"]["skipped_count"], 1);
+    assert_eq!(json["collect_ready"]["failed_count"], 0);
+    assert!(json["collect_ready"]["collected_evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["capability_id"] == "replacement_grade_cli"
+            && item["kind"] == "external_brain_provider_execution"
+            && item["configured_evidence_source"] == "connected_brain_provider:smoke-provider"
+            && item["collection_promotion_ready"] == true));
+
+    let replacement_gate = json["release_gates"]["gate_cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|gate| gate["capability_id"] == "replacement_grade_cli")
+        .expect("replacement gate should be present");
+    assert_eq!(replacement_gate["promotion_ready"], true);
+    assert_eq!(
+        replacement_gate["attached_evidence_state"],
+        "required_attached_evidence_present"
+    );
+    assert!(replacement_gate["missing_attached_evidence_kinds"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        json["release_gates"]["blocked_by"],
+        serde_json::json!(["experimental_multimodal_runtime"])
+    );
+
+    for check_id in [
+        "collects_broader_project_coding_research_workflow",
+        "collects_terminal_file_editing_ux",
+        "external_provider_evidence_manifest_state",
+        "skips_multimodal_until_runtime_ready",
+        "release_gate_tracks_replacement_cli_evidence_state",
+        "does_not_auto_promote",
+    ] {
+        let check = json["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["check_id"] == check_id)
+            .unwrap_or_else(|| panic!("missing replacement CLI evidence smoke check {check_id}"));
+        assert_eq!(
+            check["passed"], true,
+            "replacement CLI evidence smoke check {check_id} failed: {check:?}"
+        );
+    }
+
+    let text_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "smoke",
+            "replacement-cli-evidence",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--approved-by",
+            "arthur",
+            "--origin",
+            "codex",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Replacement CLI evidence smoke: replacement_cli_evidence_smoke_passed"));
+    assert!(text.contains("collected 3/4"));
+    assert!(text.contains("replacement_grade_cli:external_brain_provider_execution"));
 }
 
 #[test]
