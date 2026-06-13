@@ -138,7 +138,7 @@ use forge_core::interactive::{
     render_interactive_workflow_dag, render_interactive_workflow_mutation,
     render_interactive_workflow_sidebar, render_multimodal_runtime_evidence_smoke,
     render_operational_tui_smoke, render_replacement_cli_evidence_smoke, route_interactive_input,
-    run_interactive_repl, slash_command_catalog, InteractiveHarnessOptions, InteractiveHomeOptions,
+    slash_command_catalog, InteractiveHarnessOptions, InteractiveHomeOptions,
     InteractiveReplacementCliOptions, InteractiveSessionsOptions,
 };
 use forge_core::ir::{CreativeArtifact, TokenCollection};
@@ -167,6 +167,7 @@ use forge_core::multimodal::{
     resolve_multimodal_feature_flag, MultimodalBenchmarkResultOptions,
     MultimodalDemoReceiptOptions, MultimodalReadinessOptions, MultimodalRuntimeBenchmarkOptions,
 };
+use forge_core::opencode_tui::{build_forge_tui, render_forge_tui, run_forge_tui};
 use forge_core::ops::{
     build_ops_snapshot_with_addon_dirs_and_project, record_addon_renderer_client_event,
     serve_ops_console_with_addon_dirs_and_project, OpsAddonRendererClientEventInput,
@@ -407,6 +408,12 @@ enum Commands {
     Mcp {
         #[command(subcommand)]
         command: McpCommands,
+    },
+    Tui {
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
     },
     Interactive {
         #[command(subcommand)]
@@ -4113,7 +4120,7 @@ fn main() {
 fn run() -> Result<i32> {
     let cli = Cli::parse();
     let Some(command) = cli.command else {
-        return run_interactive_repl(&cli.store);
+        return run_forge_tui(&cli.store, Some(std::env::current_dir()?));
     };
     match command {
         Commands::Plan {
@@ -8406,6 +8413,18 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
         },
+        Commands::Tui {
+            project_root,
+            output,
+        } => {
+            let store = ForgeStore::open(cli.store)?;
+            let report = build_forge_tui(&store, project_root)?;
+            match output {
+                OutputFormat::Json => print_response(output, &report)?,
+                OutputFormat::Human => println!("{}", render_forge_tui(&report)),
+            }
+            Ok(0)
+        }
         Commands::Interactive { command } => match command {
             InteractiveCommands::Home {
                 project_root,

@@ -26,6 +26,7 @@ pub mod memory;
 pub mod milestone;
 pub mod multimodal;
 pub mod notify;
+pub mod opencode_tui;
 pub mod ops;
 pub mod outcome;
 pub mod patch;

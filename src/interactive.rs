@@ -4741,7 +4741,9 @@ pub fn build_operational_tui_smoke(
     )?;
     let d = &home.dashboard;
     let readme = include_str!("../README.md");
-    let default_tui_preview = render_interactive_home(&home);
+    let default_tui_report =
+        crate::opencode_tui::build_forge_tui(store, project_root.map(Path::to_path_buf))?;
+    let default_tui_preview = crate::opencode_tui::render_forge_tui(&default_tui_report);
     let dashboard = OperationalTuiSmokeDashboard {
         active_runs: d.active_runs,
         workflow_count: d.task_board_panel.workflow_count,
@@ -4767,40 +4769,44 @@ pub fn build_operational_tui_smoke(
         operational_tui_smoke_check(
             "opens_useful_tui",
             "forge opens the operational TUI",
-            home.status == "interactive_home_ready"
-                && default_tui_preview.contains("Forge operational TUI")
-                && default_tui_preview.contains("Active workflows:")
-                && default_tui_preview.contains("Events/schedules:")
-                && default_tui_preview.contains("Addons/capabilities:")
-                && default_tui_preview.contains("Costs:")
-                && default_tui_preview.contains("Improvement loop:")
-                && default_tui_preview.contains("Handoffs/approvals:"),
+            default_tui_report.status == "forge_tui_ready"
+                && default_tui_preview.contains("Forge TUI")
+                && default_tui_preview.contains("workflows")
+                && default_tui_preview.contains("/events")
+                && default_tui_preview.contains("/addons")
+                && default_tui_preview.contains("/costs")
+                && default_tui_preview.contains("/approvals"),
             format!(
-                "{}; cockpit {}; focus panels {}; default render {} bytes",
-                home.status,
+                "{}; cockpit {}; capabilities {}; default render {} bytes",
+                default_tui_report.status,
                 d.operational_cockpit_panel.status,
-                d.navigation_panel.keybindings.len(),
+                default_tui_report.capabilities.len(),
                 default_tui_preview.len()
             ),
             "forge",
         ),
         operational_tui_smoke_check(
-            "opens_guided_cockpit_by_default",
-            "forge opens the advanced guided cockpit by default",
-            d.guided_cockpit_panel.schema_version == INTERACTIVE_GUIDED_COCKPIT_SCHEMA_VERSION
-                && dashboard.guided_cockpit_step_count == 8
-                && default_tui_preview.contains("Guided cockpit:")
-                && default_tui_preview.contains("Guided steps:")
-                && default_tui_preview.contains("Safe actions:")
-                && default_tui_preview.contains("create_workflow")
-                && default_tui_preview.contains("close_outcome"),
+            "opens_opencode_style_orchestrator_first_tui_by_default",
+            "forge opens the OpenCode-style orchestrator-first TUI by default",
+            default_tui_report.schema_version == "forge.tui.opencode_orchestrator.v1"
+                && default_tui_report.layout == "opencode_style_orchestrator_first_tui"
+                && default_tui_report.orchestrator.default_interaction
+                    == "conversation_with_forge_orchestrator"
+                && default_tui_report.orchestrator.decision_policy
+                    == "direct_answer_or_create_workflow"
+                && default_tui_report.shell.prefix == "!"
+                && default_tui_preview.contains("orchestrator-first OpenCode-style")
+                && default_tui_preview.contains("Prompt:")
+                && default_tui_preview.contains("!<cmd>")
+                && default_tui_preview.contains("plan/build are Forge workflows")
+                && default_tui_preview.contains("Legacy panels: forge interactive home"),
             format!(
-                "{}; steps {}/{}; current {}; confirmations {}; default render {} bytes",
-                d.guided_cockpit_panel.status,
+                "{}; layout {}; shell prefix {}; legacy guided steps {}/{}; default render {} bytes",
+                default_tui_report.status,
+                default_tui_report.layout,
+                default_tui_report.shell.prefix,
                 dashboard.guided_cockpit_completed_step_count,
                 dashboard.guided_cockpit_step_count,
-                dashboard.guided_cockpit_current_step,
-                dashboard.guided_cockpit_confirmation_step_count,
                 default_tui_preview.len()
             ),
             "forge",
@@ -4867,7 +4873,10 @@ pub fn build_operational_tui_smoke(
             d.core_boundary_panel.schema_version == INTERACTIVE_CORE_BOUNDARY_SCHEMA_VERSION
                 && dashboard.core_boundary_status == "core_boundary_clean"
                 && dashboard.domain_specific_core_leak_count == 0
-                && default_tui_preview.contains("Core boundary:"),
+                && default_tui_report
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability.id == "core_boundary"),
             format!(
                 "{}; leaks {}; compatibility {}",
                 d.core_boundary_panel.status,
@@ -5005,6 +5014,7 @@ pub fn build_operational_tui_smoke(
         checks,
         commands: vec![
             "forge".to_string(),
+            "forge tui --output json".to_string(),
             "forge interactive guided-cockpit --output json".to_string(),
             "forge interactive home --output json".to_string(),
             "forge interactive operational-cockpit --output json".to_string(),
@@ -17952,7 +17962,7 @@ fn build_guided_cockpit_panel(inputs: GuidedCockpitInputs<'_>) -> InteractiveGui
         next_command,
         next_commands: current_commands,
         notes: vec![
-            "`forge` opens this cockpit first, like opencode/gemini style entrypoints.".to_string(),
+            "`forge` opens the OpenCode-style orchestrator-first TUI; this guided cockpit remains available as a detailed legacy panel.".to_string(),
             "The eight steps turn the README five-minute flow into an operator checklist.".to_string(),
             "The panel is read-only; actions are surfaced as explicit commands with preview and recovery.".to_string(),
         ],

@@ -52172,19 +52172,31 @@ fn no_args_non_tty_renders_operational_dashboard_and_exits_for_scripts() {
 
     let stdout = String::from_utf8_lossy(&output);
     assert!(stdout.contains("forge"));
-    assert!(stdout.contains("Forge operational TUI"));
-    assert!(stdout.contains("Active workflows:"));
-    assert!(stdout.contains("Events/schedules:"));
-    assert!(stdout.contains("Addons/capabilities:"));
-    assert!(stdout.contains("Costs:"));
-    assert!(stdout.contains("Handoffs/approvals:"));
-    assert!(stdout.contains("Architecture compass:"));
-    assert!(stdout.contains("Architecture execution plan:"));
-    assert!(stdout.contains("Entrypoint snapshot:"));
-    assert!(stdout.contains("detailed panels load on demand"));
-    assert!(stdout.contains("Smoke test: forge smoke operational-tui"));
-    assert!(stdout.contains("Quick actions"));
-    assert!(stdout.contains("Useful next commands"));
+    assert!(stdout.contains("Forge TUI"));
+    assert!(stdout.contains("orchestrator-first"));
+    assert!(stdout.contains("Prompt"));
+    assert!(stdout.contains("!<cmd>"));
+    assert!(stdout.contains("/orchestrator"));
+    assert!(stdout.contains("/workflows"));
+    assert!(stdout.contains("/agents"));
+    assert!(stdout.contains("/subagents"));
+    assert!(stdout.contains("/events"));
+    assert!(stdout.contains("/addons"));
+    assert!(stdout.contains("/costs"));
+    assert!(stdout.contains("/approvals"));
+    assert!(stdout.contains("workflows"));
+    assert!(stdout.contains("events"));
+    assert!(stdout.contains("cost"));
+    assert!(
+        stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()
+            <= 18,
+        "no-arg Forge TUI should be compact and prompt-first:\n{stdout}"
+    );
+    assert!(!stdout.contains("Forge advanced operational TUI"));
+    assert!(!stdout.contains("Architecture execution plan:"));
     assert!(store.exists());
 }
 
@@ -52209,23 +52221,202 @@ fn no_args_tty_enters_repl_and_shows_dashboard_when_pseudo_terminal_is_available
     let binary = assert_cmd::cargo::cargo_bin("forge");
     let command = format!("{} --store {}", binary.display(), store.display());
 
-    let output = std::process::Command::new(timeout)
+    let mut child = std::process::Command::new(timeout)
         .args(["30", script, "-q", "-c", &command, "/dev/null"])
-        .output()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin
+            .write_all(b"/orchestrator\n/agents\n/subagents\n/nodes\nq\n")
+            .unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("forge"));
-    assert!(stdout.contains("Forge operational TUI"));
-    assert!(stdout.contains("Active runs"));
-    assert!(stdout.contains("Active workflows:"));
-    assert!(stdout.contains("Events/schedules:"));
-    assert!(stdout.contains("Addons/capabilities:"));
-    assert!(stdout.contains("Costs:"));
-    assert!(stdout.contains("Handoffs/approvals:"));
-    assert!(stdout.contains("Smoke test: forge smoke operational-tui"));
-    assert!(stdout.contains("Quick actions"));
-    assert!(stdout.contains("/status"));
+    assert!(
+        stdout.contains("\u{1b}[?1049h"),
+        "TTY Forge must enter alternate screen like opencode:\n{stdout}"
+    );
+    assert!(stdout.contains("FORGE"));
+    assert!(stdout.contains("ORCHESTRATOR"));
+    assert!(stdout.contains("WORKFLOWS"));
+    assert!(stdout.contains("AGENTS"));
+    assert!(stdout.contains("SUBAGENTS"));
+    assert!(stdout.contains("NODE AGENTS"));
+    assert!(stdout.contains("orchestrator decides direct answer or workflow"));
+    assert!(stdout.contains("!<cmd>"));
+    assert!(stdout.contains("/workflows"));
+    assert!(stdout.contains("/events"));
+    assert!(stdout.contains("/addons"));
+    assert!(stdout.contains("/approvals"));
+    assert!(stdout.contains("Talk to the Forge orchestrator"));
+}
+
+#[test]
+fn forge_tui_command_exposes_opencode_style_forge_capabilities() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "tui",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.tui.opencode_orchestrator.v1");
+    assert_eq!(json["status"], "forge_tui_ready");
+    assert_eq!(json["layout"], "opencode_style_orchestrator_first_tui");
+    assert_eq!(
+        json["orchestrator"]["schema_version"],
+        "forge.tui.orchestrator.v1"
+    );
+    assert_eq!(
+        json["orchestrator"]["default_interaction"],
+        "conversation_with_forge_orchestrator"
+    );
+    assert_eq!(
+        json["orchestrator"]["decision_policy"],
+        "direct_answer_or_create_workflow"
+    );
+    assert_eq!(json["orchestrator"]["plan_mode"], "forge_workflow");
+    assert_eq!(json["orchestrator"]["build_mode"], "forge_workflow");
+    assert_eq!(
+        json["orchestrator"]["agent_model"],
+        "agents_and_subagents_are_workflows_or_nodes"
+    );
+    assert_eq!(
+        json["orchestrator"]["node_agent_routing"],
+        "per_node_agent_allowed"
+    );
+    assert_eq!(
+        json["renderer_strategy"]["schema_version"],
+        "forge.tui.renderer_strategy.v1"
+    );
+    assert_eq!(
+        json["renderer_strategy"]["current_backend"],
+        "rust_crossterm_fullscreen_fallback"
+    );
+    assert_eq!(
+        json["renderer_strategy"]["target_backend"],
+        "opentui_native_core_bridge_or_incremental_rust_port"
+    );
+    for source in [
+        "anomalyco/opentui native Zig renderer and TypeScript bindings",
+        "msmps/create-tui OpenTUI starter templates",
+        "msmps/awesome-opentui ecosystem map and testing references",
+        "msmps/opentui-ui component, dialog, toast and styled-slot patterns",
+    ] {
+        assert!(
+            json["renderer_strategy"]["ecosystem_sources"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(source)),
+            "missing renderer ecosystem source {source}: {json}"
+        );
+    }
+    for candidate in [
+        "Forge-owned component metadata, slots, states and variant contracts",
+        "dialog manager pattern for confirmations, handoffs and approvals",
+        "toast pattern for operation feedback, shell events and workflow notifications",
+    ] {
+        let rust_candidates = json["renderer_strategy"]["rust_native_candidates"]
+            .as_array()
+            .unwrap();
+        let component_candidates = json["renderer_strategy"]["component_system_candidates"]
+            .as_array()
+            .unwrap();
+        assert!(
+            rust_candidates.contains(&serde_json::json!(candidate))
+                || component_candidates.contains(&serde_json::json!(candidate)),
+            "missing renderer strategy candidate {candidate}: {json}"
+        );
+    }
+    assert_eq!(json["shell"]["prefix"], "!");
+    assert_eq!(json["shell"]["toggle"], "!");
+    assert_eq!(
+        json["prompt"]["placeholder"],
+        "Talk to the Forge orchestrator; use /commands for configuration"
+    );
+    for capability in [
+        "orchestrator",
+        "plan_workflows",
+        "build_workflows",
+        "workflows",
+        "agents",
+        "subagents",
+        "node_agents",
+        "events",
+        "addons",
+        "costs",
+        "handoffs",
+        "approvals",
+        "shells",
+        "command_palette",
+    ] {
+        assert!(
+            json["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["id"] == capability),
+            "missing TUI capability {capability}: {json}"
+        );
+    }
+    for visualization in ["workflows", "agents", "subagents", "node_agents"] {
+        assert!(
+            json["visualizations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["id"] == visualization),
+            "missing TUI visualization {visualization}: {json}"
+        );
+    }
+    assert!(json["quick_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/orchestrator")));
+    assert!(json["quick_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/workflows")));
+    assert!(json["quick_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/agents")));
+    assert!(json["quick_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/subagents")));
+    assert!(json["quick_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/nodes")));
+    assert!(json["quick_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/approvals")));
+    assert!(json["quick_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("/config")));
 }
 
 #[test]
@@ -52276,7 +52467,7 @@ fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
 
     for check_id in [
         "opens_useful_tui",
-        "opens_guided_cockpit_by_default",
+        "opens_opencode_style_orchestrator_first_tui_by_default",
         "shows_active_workflows",
         "shows_events_and_schedules",
         "shows_event_workflow_lifecycle",
@@ -52302,6 +52493,10 @@ fn operational_tui_smoke_command_runs_end_to_end_dashboard_demo() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("forge")));
+    assert!(json["commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("forge tui --output json")));
     assert!(json["commands"]
         .as_array()
         .unwrap()
@@ -52457,13 +52652,11 @@ fn interactive_guided_cockpit_is_default_forge_tui_cli_and_mcp_surface() {
         .stdout
         .clone();
     let default_text = String::from_utf8(default_output).unwrap();
-    assert!(default_text.contains("Forge advanced operational TUI"));
-    assert!(default_text.contains("Forge operational TUI"));
-    assert!(default_text.contains("Guided cockpit:"));
-    assert!(default_text.contains("Guided steps:"));
-    assert!(default_text.contains("Safe actions:"));
-    assert!(default_text.contains("create_workflow"));
-    assert!(default_text.contains("close_outcome"));
+    assert!(default_text.contains("Forge TUI"));
+    assert!(default_text.contains("orchestrator-first"));
+    assert!(default_text.contains("Prompt"));
+    assert!(default_text.contains("!<cmd>"));
+    assert!(default_text.contains("/workflows"));
 
     let home_output = forge()
         .current_dir(temp.path())
@@ -53576,28 +53769,73 @@ fn interactive_repl_slash_commands_render_operational_panels_in_place() {
         use std::io::Write;
         let stdin = child.stdin.as_mut().unwrap();
         stdin
-            .write_all(b"/cockpit\n/task-board\n/readiness\n/exit\n")
+            .write_all(b"/workflows\n/events\n/addons\n/costs\n/approvals\n/boundary\n/exit\n")
             .unwrap();
     }
     let output = child.wait_with_output().unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.matches("Operational cockpit:").count() >= 2);
-    assert!(stdout.matches("Task board:").count() >= 2);
-    assert!(stdout.contains("Interactive readiness:"));
-    assert!(
-        !stdout.contains("Equivalent: forge interactive operational-cockpit"),
-        "/cockpit should render the operational cockpit inside the REPL, not ask the operator to run another command"
-    );
-    assert!(
-        !stdout.contains("Equivalent: forge interactive task-board"),
-        "/task-board should render the task board inside the REPL"
-    );
+    assert!(stdout.contains("Forge TUI"));
+    assert!(stdout.contains("Workflows:"));
+    assert!(stdout.contains("Events:"));
+    assert!(stdout.contains("Addons:"));
+    assert!(stdout.contains("Costs:"));
+    assert!(stdout.contains("Approvals:"));
+    assert!(stdout.contains("Core boundary:"));
+    assert!(!stdout.contains("Unknown command"));
     assert!(stdout.contains("goodbye"));
 }
 
 #[test]
-fn interactive_repl_keyboard_navigation_controls_focus_mode_theme_and_open() {
+fn forge_tui_prompt_commands_keep_the_default_surface_simple() {
+    let script = if Path::new("/usr/bin/script").exists() {
+        "/usr/bin/script"
+    } else if Path::new("/bin/script").exists() {
+        "/bin/script"
+    } else {
+        return;
+    };
+    let timeout = if Path::new("/usr/bin/timeout").exists() {
+        "/usr/bin/timeout"
+    } else if Path::new("/bin/timeout").exists() {
+        "/bin/timeout"
+    } else {
+        return;
+    };
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let binary = assert_cmd::cargo::cargo_bin("forge");
+    let command = format!("{} --store {}", binary.display(), store.display());
+
+    let mut child = std::process::Command::new(timeout)
+        .args(["30", script, "-q", "-c", &command, "/dev/null"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"/commands\n/workflows\nq\n").unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Forge TUI"));
+    assert!(stdout.contains("Orchestrator-first"));
+    assert!(stdout.contains("Commands: /orchestrator /workflows /agents /subagents /nodes /events"));
+    assert!(stdout.contains("Commands: /addons /costs /approvals /config /boundary"));
+    assert!(stdout.contains("Commands: /shells /commands /help"));
+    assert!(stdout.contains("Shell: !<cmd> or ! to toggle shell mode"));
+    assert!(stdout.contains("Workflows:"));
+    assert!(!stdout.contains("Focus: guided_cockpit_panel"));
+    assert!(!stdout.contains("Orchestrator: new_workflow"));
+    assert!(stdout.contains("goodbye"));
+}
+
+#[test]
+fn forge_tui_shell_first_executes_bang_commands_without_creating_workflow() {
     let script = if Path::new("/usr/bin/script").exists() {
         "/usr/bin/script"
     } else if Path::new("/bin/script").exists() {
@@ -53628,21 +53866,21 @@ fn interactive_repl_keyboard_navigation_controls_focus_mode_theme_and_open() {
         use std::io::Write;
         let stdin = child.stdin.as_mut().unwrap();
         stdin
-            .write_all(b"j\nenter\nm\nt\nk\nenter\n/exit\n")
+            .write_all(b"!echo forge_shell_ok\n!\necho forge_shell_mode_ok\n!\nq\n")
             .unwrap();
     }
     let output = child.wait_with_output().unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Focus: guided_cockpit_panel (Guided cockpit) [1/"));
-    assert!(stdout.contains("Focus: operational_cockpit_panel (Operational cockpit) [2/"));
-    assert!(stdout.contains("Opened focused panel: operational_cockpit_panel"));
-    assert!(stdout.contains("Operational cockpit:"));
-    assert!(stdout.contains("Display mode: focus"));
-    assert!(stdout.contains("Theme: forge_light"));
-    assert!(stdout.contains("Opened focused panel: guided_cockpit_panel"));
-    assert!(stdout.contains("Guided cockpit:"));
-    assert!(!stdout.contains("Routing: direct_answer"));
+    assert!(stdout.contains("Shell command: echo forge_shell_ok"));
+    assert!(stdout.contains("forge_shell_ok"));
+    assert!(stdout.contains("Shell mode enabled"));
+    assert!(stdout.contains("forge-shell>"));
+    assert!(stdout.contains("Shell command: echo forge_shell_mode_ok"));
+    assert!(stdout.contains("forge_shell_mode_ok"));
+    assert!(stdout.contains("Shell mode disabled"));
+    assert!(!stdout.contains("Orchestrator: new_workflow"));
+    assert!(!stdout.contains("Workflow ID:"));
     assert!(stdout.contains("goodbye"));
 }
 
@@ -53682,9 +53920,10 @@ fn interactive_repl_q_exits_without_routing_a_workflow() {
     let output = child.wait_with_output().unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Forge operational TUI"));
+    assert!(stdout.contains("Forge TUI"));
+    assert!(stdout.contains("Orchestrator-first"));
     assert!(stdout.contains("goodbye"));
-    assert!(!stdout.contains("Routing: new_workflow"));
+    assert!(!stdout.contains("Orchestrator: new_workflow"));
     assert!(!stdout.contains("Workflow ID:"));
 }
 
@@ -55655,10 +55894,16 @@ fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
         "the packaged Forge skill should expose interactive home state through MCP"
     );
     assert!(
+        forge_core::skill::SKILL_MD.contains("forge tui --output json")
+            && forge_core::skill::SKILL_MD.contains("OpenCode-style orchestrator-first")
+            && forge_core::skill::SKILL_MD.contains("!<cmd>"),
+        "the packaged Forge skill should expose the new default orchestrator-first TUI"
+    );
+    assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.guided_cockpit")
             && forge_core::skill::SKILL_MD.contains("forge interactive guided-cockpit")
-            && forge_core::skill::SKILL_MD.contains("dashboard.guided_cockpit_panel"),
-        "the packaged Forge skill should expose the default guided cockpit through MCP, CLI and home"
+            && forge_core::skill::SKILL_MD.contains("legacy detailed cockpit"),
+        "the packaged Forge skill should expose the guided cockpit as a legacy detailed panel"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.interactive.task_board"),
