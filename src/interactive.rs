@@ -49,12 +49,13 @@ use crate::memory::{
 };
 use crate::milestone::{
     build_milestone_evidence_plan, build_milestone_manifest_with_store, build_milestone_status,
-    collect_ready_milestone_evidence, milestone_required_attached_evidence_kinds,
-    MilestoneAttachedEvidence, MilestoneCollectReadyEvidenceOptions,
-    MilestoneCollectReadyEvidenceReport, MilestoneEvidencePlanConfigCheck,
-    MilestoneEvidencePlanManifestTemplate, MilestoneEvidencePlanOptions,
-    MilestoneEvidenceProviderCandidate, MilestonePromotionDecision, MilestonePromotionGateTemplate,
-    MilestoneStatusSummary,
+    collect_milestone_evidence, collect_ready_milestone_evidence,
+    milestone_required_attached_evidence_kinds, MilestoneAttachedEvidence,
+    MilestoneCollectEvidenceOptions, MilestoneCollectEvidenceReport,
+    MilestoneCollectReadyEvidenceOptions, MilestoneCollectReadyEvidenceReport,
+    MilestoneEvidencePlanConfigCheck, MilestoneEvidencePlanManifestTemplate,
+    MilestoneEvidencePlanOptions, MilestoneEvidencePlanReport, MilestoneEvidenceProviderCandidate,
+    MilestonePromotionDecision, MilestonePromotionGateTemplate, MilestoneStatusSummary,
 };
 use crate::multimodal::{
     build_multimodal_benchmark_template, build_multimodal_demo_plan, build_multimodal_install_plan,
@@ -137,6 +138,8 @@ const OPERATIONAL_TUI_SMOKE_SCHEMA_VERSION: &str = "forge.smoke.operational_tui.
 const FORGE_FIRST_HARNESS_SMOKE_SCHEMA_VERSION: &str = "forge.smoke.forge_first_harness.v1";
 const REPLACEMENT_CLI_EVIDENCE_SMOKE_SCHEMA_VERSION: &str =
     "forge.smoke.replacement_cli_evidence.v1";
+const MULTIMODAL_RUNTIME_EVIDENCE_SMOKE_SCHEMA_VERSION: &str =
+    "forge.smoke.multimodal_runtime_evidence.v1";
 const INTERACTIVE_UI_COMPOSITION_SCHEMA_VERSION: &str = "forge.interactive.ui_composition.v1";
 const INTERACTIVE_STRUCTURED_LOGS_SCHEMA_VERSION: &str = "forge.interactive.structured_logs.v1";
 const INTERACTIVE_EVENT_RUNTIME_SCHEMA_VERSION: &str = "forge.interactive.event_runtime.v1";
@@ -2942,6 +2945,22 @@ pub struct ReplacementCliEvidenceSmokeReport {
     pub commands: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct MultimodalRuntimeEvidenceSmokeReport {
+    pub schema_version: String,
+    pub status: String,
+    pub project_root: String,
+    pub connected_runtime: Option<String>,
+    pub collected: bool,
+    pub evidence_plan: InteractiveReleaseGateEvidencePlan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collect_evidence: Option<MilestoneCollectEvidenceReport>,
+    pub release_gates: InteractiveReleaseGatesPanel,
+    pub multimodal_runtime_panel: InteractiveMultimodalRuntimePanel,
+    pub checks: Vec<OperationalTuiSmokeCheck>,
+    pub commands: Vec<String>,
+}
+
 pub fn build_interactive_home(store: &ForgeStore) -> Result<InteractiveHomeReport> {
     build_interactive_home_with_options(store, InteractiveHomeOptions::default())
 }
@@ -5466,6 +5485,223 @@ pub fn build_replacement_cli_evidence_smoke(
     })
 }
 
+pub fn build_multimodal_runtime_evidence_smoke(
+    store: &ForgeStore,
+    project_root: Option<&Path>,
+    connected_runtime: Option<&str>,
+    approved_by: &str,
+    origin: &str,
+) -> Result<MultimodalRuntimeEvidenceSmokeReport> {
+    let smoke_project_root = project_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(multimodal_runtime_evidence_smoke_root);
+    std::fs::create_dir_all(smoke_project_root.join(".forge"))?;
+    let connected_runtime = connected_runtime
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let approved_by = approved_by.trim();
+    let approved_by = if approved_by.is_empty() {
+        "forge_smoke"
+    } else {
+        approved_by
+    };
+    let origin = origin.trim();
+    let origin = if origin.is_empty() {
+        "forge_smoke"
+    } else {
+        origin
+    };
+
+    let raw_evidence_plan = build_milestone_evidence_plan(
+        store,
+        MilestoneEvidencePlanOptions {
+            version: "0.5",
+            capability_id: "experimental_multimodal_runtime",
+            project_root: Some(&smoke_project_root),
+            connected_brain: None,
+            connected_runtime: connected_runtime.as_deref(),
+        },
+    )?;
+    let collect_evidence = if raw_evidence_plan.ready_to_collect_evidence {
+        Some(collect_milestone_evidence(
+            store,
+            MilestoneCollectEvidenceOptions {
+                version: "0.5",
+                capability_id: "experimental_multimodal_runtime",
+                kind: Some("production_runtime_benchmark"),
+                project_root: Some(&smoke_project_root),
+                connected_brain: None,
+                connected_runtime: connected_runtime.as_deref(),
+                approved_by,
+                origin,
+            },
+        )?)
+    } else {
+        None
+    };
+    let evidence_plan = interactive_release_gate_evidence_plan_from_report(raw_evidence_plan);
+    let release_gates = build_interactive_release_gates(store, "0.5", Some(&smoke_project_root))?;
+    let multimodal_runtime_panel =
+        build_interactive_multimodal_runtime(store, &smoke_project_root, false)?;
+    let collected = collect_evidence.is_some();
+
+    let multimodal_gate = release_gates
+        .gate_cards
+        .iter()
+        .find(|gate| gate.capability_id == "experimental_multimodal_runtime");
+    let gate_has_missing_benchmark = multimodal_gate.is_some_and(|gate| {
+        !gate.promotion_ready
+            && gate
+                .missing_attached_evidence_kinds
+                .iter()
+                .any(|kind| kind == "production_runtime_benchmark")
+    });
+    let gate_has_attached_benchmark = multimodal_gate.is_some_and(|gate| {
+        gate.promotion_ready
+            && gate.attached_evidence_state == "required_attached_evidence_present"
+            && gate.missing_attached_evidence_kinds.is_empty()
+            && gate
+                .attached_evidence_kinds
+                .iter()
+                .any(|kind| kind == "production_runtime_benchmark")
+    });
+    let release_gate_tracks_multimodal = if collected {
+        gate_has_attached_benchmark
+    } else {
+        gate_has_missing_benchmark || gate_has_attached_benchmark
+    };
+    let manifest_templates_visible = evidence_plan
+        .manifest_template_ids
+        .iter()
+        .any(|template| template == "multimodal_feature_flag")
+        && evidence_plan
+            .manifest_template_ids
+            .iter()
+            .any(|template| template == "multimodal_runtime_manifest");
+    let collection_ready = collect_evidence.as_ref().is_some_and(|report| {
+        report.capability_id == "experimental_multimodal_runtime"
+            && report.kind == "production_runtime_benchmark"
+            && report
+                .configured_evidence_source
+                .starts_with("connected_multimodal_runtime:")
+            && report.collection_promotion_ready
+    });
+    let runtime_evidence_manifest_state = if collected {
+        evidence_plan.ready_to_collect_evidence && collection_ready
+    } else {
+        !evidence_plan.ready_to_collect_evidence && manifest_templates_visible
+    };
+    let addon_boundary_visible = multimodal_runtime_panel.addon_id == "forge.addon.multimodal"
+        && multimodal_runtime_panel.capability_id == "experimental_multimodal_runtime"
+        && multimodal_runtime_panel.addon_view_id == "multimodal.benchmark_center"
+        && !multimodal_runtime_panel.installs_performed
+        && !multimodal_runtime_panel.model_execution_performed
+        && !multimodal_runtime_panel.device_access_performed
+        && !multimodal_runtime_panel.network_access_performed;
+    let collection_did_not_promote = collect_evidence
+        .as_ref()
+        .is_none_or(|report| report.promotion_impact == "collected_and_attached_not_auto_promoted");
+
+    let checks = vec![
+        operational_tui_smoke_check(
+            "addon_boundary_visible",
+            "Multimodal runtime remains visible as an Addon-owned capability in the TUI",
+            addon_boundary_visible,
+            format!(
+                "addon {}; capability {}; view {}; installs {}; model {}; device {}; network {}",
+                multimodal_runtime_panel.addon_id,
+                multimodal_runtime_panel.capability_id,
+                multimodal_runtime_panel.addon_view_id,
+                multimodal_runtime_panel.installs_performed,
+                multimodal_runtime_panel.model_execution_performed,
+                multimodal_runtime_panel.device_access_performed,
+                multimodal_runtime_panel.network_access_performed
+            ),
+            "forge interactive multimodal-runtime --project-root <project-root> --output json",
+        ),
+        operational_tui_smoke_check(
+            "runtime_evidence_manifest_state",
+            "Runtime evidence is collected only when the approved project manifest is ready",
+            runtime_evidence_manifest_state,
+            format!(
+                "plan {}; ready {}; collected {}; templates {}; source {}",
+                evidence_plan.status,
+                evidence_plan.ready_to_collect_evidence,
+                collected,
+                if evidence_plan.manifest_template_ids.is_empty() {
+                    "none".to_string()
+                } else {
+                    evidence_plan.manifest_template_ids.join(", ")
+                },
+                collect_evidence
+                    .as_ref()
+                    .map(|report| report.configured_evidence_source.clone())
+                    .unwrap_or_else(|| "not_collected".to_string())
+            ),
+            "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --output json",
+        ),
+        operational_tui_smoke_check(
+            "release_gate_tracks_multimodal_state",
+            "Release gate reflects missing or attached production runtime benchmark evidence",
+            release_gate_tracks_multimodal,
+            multimodal_gate
+                .map(|gate| {
+                    format!(
+                        "{}; promotion_ready {}; attached {}; missing {}",
+                        gate.attached_evidence_state,
+                        gate.promotion_ready,
+                        gate.attached_evidence_kinds.join(", "),
+                        gate.missing_attached_evidence_kinds.join(", ")
+                    )
+                })
+                .unwrap_or_else(|| "experimental_multimodal_runtime gate missing".to_string()),
+            "forge interactive release-gates --version 0.5 --output json",
+        ),
+        operational_tui_smoke_check(
+            "does_not_auto_promote",
+            "Evidence collection attaches receipts but does not run a promotion action",
+            collection_did_not_promote,
+            format!(
+                "collected {}; release promotion {}; decision {}; promotion impact {}",
+                collected,
+                release_gates.promotion_ready,
+                release_gates.promotion_decision.decision,
+                collect_evidence
+                    .as_ref()
+                    .map(|report| report.promotion_impact.clone())
+                    .unwrap_or_else(|| "planning_only_not_auto_promoted".to_string())
+            ),
+            "forge milestone manifest --version 0.5 --output json",
+        ),
+    ];
+    let status = if checks.iter().all(|check| check.passed) {
+        "multimodal_runtime_evidence_smoke_passed"
+    } else {
+        "multimodal_runtime_evidence_smoke_failed"
+    };
+
+    Ok(MultimodalRuntimeEvidenceSmokeReport {
+        schema_version: MULTIMODAL_RUNTIME_EVIDENCE_SMOKE_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        project_root: smoke_project_root.display().to_string(),
+        connected_runtime,
+        collected,
+        evidence_plan,
+        collect_evidence,
+        release_gates,
+        multimodal_runtime_panel,
+        checks,
+        commands: vec![
+            "forge smoke multimodal-runtime-evidence --output json".to_string(),
+            "forge milestone evidence-plan --version 0.5 --capability experimental_multimodal_runtime --project-root <project-root> --connected-runtime <runtime-id> --output json".to_string(),
+            "forge milestone collect-evidence --version 0.5 --capability experimental_multimodal_runtime --kind production_runtime_benchmark --project-root <project-root> --connected-runtime <runtime-id> --approved-by <operator> --origin codex --output json".to_string(),
+            "forge interactive multimodal-runtime --project-root <project-root> --output json".to_string(),
+            "forge interactive release-gates --version 0.5 --output json".to_string(),
+        ],
+    })
+}
+
 fn forge_harness_smoke_root() -> PathBuf {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5484,6 +5720,17 @@ fn replacement_cli_evidence_smoke_root() -> PathBuf {
         .unwrap_or(0);
     env::temp_dir().join(format!(
         "forge-replacement-cli-evidence-smoke-{}-{now}",
+        std::process::id()
+    ))
+}
+
+fn multimodal_runtime_evidence_smoke_root() -> PathBuf {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    env::temp_dir().join(format!(
+        "forge-multimodal-runtime-evidence-smoke-{}-{now}",
         std::process::id()
     ))
 }
@@ -5621,6 +5868,51 @@ pub fn render_replacement_cli_evidence_smoke(report: &ReplacementCliEvidenceSmok
         promotion_ready = report.release_gates.promotion_ready,
         collected = if collected.is_empty() { "none" } else { &collected },
         skipped = if skipped.is_empty() { "none" } else { &skipped },
+        checks = checks,
+        commands = report.commands.join(" | "),
+    )
+}
+
+pub fn render_multimodal_runtime_evidence_smoke(
+    report: &MultimodalRuntimeEvidenceSmokeReport,
+) -> String {
+    let checks = report
+        .checks
+        .iter()
+        .map(|check| format!("{}={} ({})", check.check_id, check.passed, check.evidence))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let evidence = report
+        .collect_evidence
+        .as_ref()
+        .map(|evidence| format!("{}:{}", evidence.capability_id, evidence.kind))
+        .unwrap_or_else(|| {
+            "experimental_multimodal_runtime:production_runtime_benchmark".to_string()
+        });
+    let source = report
+        .collect_evidence
+        .as_ref()
+        .map(|evidence| evidence.configured_evidence_source.clone())
+        .or_else(|| {
+            report
+                .connected_runtime
+                .as_ref()
+                .map(|runtime| runtime.to_string())
+        })
+        .unwrap_or_else(|| "not_collected".to_string());
+    format!(
+        "Multimodal runtime evidence smoke: {status}; project {project_root}; connected_runtime {connected_runtime}; collected {collected}; plan {plan_status}; release promotion {promotion_ready}\nEvidence: {evidence}; source {source}\nchecks: {checks}\ncommands: {commands}\n",
+        status = report.status,
+        project_root = report.project_root,
+        connected_runtime = report
+            .connected_runtime
+            .as_deref()
+            .unwrap_or("not_selected"),
+        collected = report.collected,
+        plan_status = report.evidence_plan.status,
+        promotion_ready = report.release_gates.promotion_ready,
+        evidence = evidence,
+        source = source,
         checks = checks,
         commands = report.commands.join(" | "),
     )
@@ -6277,6 +6569,12 @@ fn interactive_release_gate_evidence_plan(
             connected_runtime: None,
         },
     )?;
+    Ok(interactive_release_gate_evidence_plan_from_report(plan))
+}
+
+fn interactive_release_gate_evidence_plan_from_report(
+    plan: MilestoneEvidencePlanReport,
+) -> InteractiveReleaseGateEvidencePlan {
     let missing_config_check_count = plan
         .config_checks
         .iter()
@@ -6292,7 +6590,7 @@ fn interactive_release_gate_evidence_plan(
         .iter()
         .map(|template| template.target_path.clone())
         .collect::<Vec<_>>();
-    Ok(InteractiveReleaseGateEvidencePlan {
+    InteractiveReleaseGateEvidencePlan {
         schema_version: "forge.interactive.release_gate_evidence_plan.v1".to_string(),
         status: plan.status,
         ready_to_collect_evidence: plan.ready_to_collect_evidence,
@@ -6309,7 +6607,7 @@ fn interactive_release_gate_evidence_plan(
         promotion_gate_templates: plan.promotion_gate_templates,
         evidence_collection_commands: plan.evidence_collection_commands,
         next_action: plan.next_action,
-    })
+    }
 }
 
 pub fn build_interactive_command_palette(

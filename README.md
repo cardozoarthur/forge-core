@@ -39,6 +39,7 @@ O fluxo mental é simples:
 11. `forge smoke operational-tui --output json` prova localmente que `forge` abre o cockpit guiado, cria um fluxo demonstrável e expõe workflows ativos, eventos/schedules, Addons/capabilities, custos, replanejamento e handoffs/approvals.
 12. `forge smoke forge-first-harness --output json` prova localmente que headroom, adoption-plan, bootstrap dry-run, shim Forge-owned e exec dry-run funcionam sem executar ou modificar a CLI externa.
 13. `forge smoke replacement-cli-evidence --output json` prova que o gate de CLI substituta coleta as evidências prontas, reporta os skips que dependem de manifesto aprovado e não promove o milestone automaticamente.
+14. `forge smoke multimodal-runtime-evidence --output json` prova que o runtime multimodal continua Addon-owned, coleta `production_runtime_benchmark` só quando o manifesto aprovado está pronto e deixa a promoção no release gate.
 
 Use `j`/`k` para mover o foco no REPL, `enter` para abrir o painel focado, `m` para alternar modo de visualização, `t` para alternar tema e `q`, `quit`, `exit`, `/quit` ou `/exit` para sair sem criar workflow. Os comandos slash como `/guided-cockpit`, `/guide`, `/cockpit`, `/ui-composition`, `/architecture`, `/task-board`, `/workflow-mutation`, `/operating-context`, `/improvement-loop`, `/readiness`, `/addons`, `/sessions`, `/logs`, `/permissions` e `/dag` renderizam painéis dentro do próprio REPL.
 
@@ -147,6 +148,7 @@ This is the first functional CLI + Skill version:
 - Forge-first adoption readiness embedded in `forge interactive harness` / MCP `forge.interactive.harness` as `forge.interactive.harness_forge_first_adoption.v1`, showing whether Forge can be the default CLI front door, which shim/headroom/lineage gates still block adoption, which prompt/context routes Forge controls, which token-headroom interception points apply and which commands unblock the operator next
 - Forge-first harness smoke through `forge smoke forge-first-harness`, proving persisted reversible headroom, read-only adoption-plan, approval-gated bootstrap dry-run, isolated Forge-owned shim installation, shim audit and `harness exec` dry-run without executing or mutating the external CLI
 - replacement-grade CLI evidence smoke through `forge smoke replacement-cli-evidence`, proving `collect-ready-evidence` attaches ready coding/research and terminal file-editing receipts while skipping provider/runtime evidence until approved project manifests exist
+- multimodal runtime evidence smoke through `forge smoke multimodal-runtime-evidence`, proving the Addon-owned multimodal runtime gate reports missing manifests without collecting, then attaches `production_runtime_benchmark` evidence only for approved connected runtime manifests without auto-promotion
 - intent v2 records workflow mode, event policy, operating context, required capabilities, active addons and capability resolution
 - capability resolution exposes workflow-extension activations, runtime contracts and missing-capability suggestions with source Addon/capability lineage, including trusted local marketplace packages on the store-aware resolver
 - capability-first internal workflow-extension planner registry for first-party Addon builders and policy mutations, with textual matching kept only for legacy intents
@@ -212,6 +214,7 @@ forge shells --executor codex --workflow <workflow-id> --task <task-id> --run <r
 forge harness exec --executor codex --forge-first --workflow <workflow-id> --task <task-id> --run <run-id> --context-budget 8000 --output json -- codex --version
 forge smoke forge-first-harness --output json
 forge smoke replacement-cli-evidence --output json
+forge smoke multimodal-runtime-evidence --output json
 forge addons catalog --output json
 forge addons installed --output json
 forge addons capabilities --addon forge.addon.example --lifecycle enabled --output json

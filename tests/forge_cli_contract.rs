@@ -53149,6 +53149,234 @@ printf 'smoke_provider_ok\n'
 }
 
 #[test]
+fn multimodal_runtime_evidence_smoke_reports_missing_manifest_without_collecting() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("multimodal-evidence-project");
+    fs::create_dir_all(project.join(".forge")).unwrap();
+
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "smoke",
+            "multimodal-runtime-evidence",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--approved-by",
+            "arthur",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.smoke.multimodal_runtime_evidence.v1"
+    );
+    assert_eq!(json["status"], "multimodal_runtime_evidence_smoke_passed");
+    assert_eq!(json["collected"], false);
+    assert_eq!(json["evidence_plan"]["ready_to_collect_evidence"], false);
+    assert_eq!(
+        json["evidence_plan"]["status"],
+        "missing_project_evidence_inputs"
+    );
+    assert!(json["evidence_plan"]["manifest_template_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("multimodal_feature_flag")));
+    assert!(json["evidence_plan"]["manifest_template_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("multimodal_runtime_manifest")));
+    assert!(json["collect_evidence"].is_null());
+    let gate = json["release_gates"]["gate_cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|gate| gate["capability_id"] == "experimental_multimodal_runtime")
+        .expect("multimodal gate should be present");
+    assert_eq!(gate["promotion_ready"], false);
+    assert!(gate["missing_attached_evidence_kinds"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("production_runtime_benchmark")));
+
+    for check_id in [
+        "addon_boundary_visible",
+        "runtime_evidence_manifest_state",
+        "release_gate_tracks_multimodal_state",
+        "does_not_auto_promote",
+    ] {
+        let check = json["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["check_id"] == check_id)
+            .unwrap_or_else(|| panic!("missing multimodal evidence smoke check {check_id}"));
+        assert_eq!(
+            check["passed"], true,
+            "multimodal evidence smoke check {check_id} failed: {check:?}"
+        );
+    }
+
+    let text_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "smoke",
+            "multimodal-runtime-evidence",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--approved-by",
+            "arthur",
+            "--origin",
+            "codex",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text
+        .contains("Multimodal runtime evidence smoke: multimodal_runtime_evidence_smoke_passed"));
+    assert!(text.contains("collected false"));
+    assert!(text.contains("experimental_multimodal_runtime:production_runtime_benchmark"));
+}
+
+#[test]
+fn multimodal_runtime_evidence_smoke_collects_when_runtime_manifest_is_ready() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("multimodal-evidence-project");
+    let forge_dir = project.join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    fs::write(
+        forge_dir.join("multimodal.json"),
+        r#"{"experimental_enabled":true,"approved_by":"arthur","reason":"production runtime smoke evidence","scope":"project"}"#,
+    )
+    .unwrap();
+    fs::write(
+        forge_dir.join("multimodal-runtimes.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "runtimes": [{
+                "id": "smoke-vision-runtime",
+                "model_id": "smoke-vision-model-v1",
+                "capabilities": ["image_understanding"],
+                "probe_command": [
+                    "/bin/sh",
+                    "-c",
+                    "printf '{\"labels\":[\"document\",\"production-runtime\"],\"quality_score\":0.97,\"latency_ms\":12}'"
+                ],
+                "network_access": false,
+                "device_access": false,
+                "production": {
+                    "approved_by": "arthur",
+                    "approval_ref": "smoke-runtime-approval",
+                    "runtime_version": "smoke-vision-runtime 1.0.0",
+                    "model_manifest_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "model_license": "internal-production-approved",
+                    "evidence_artifacts": ["benchmarks/smoke-vision-runtime.json"],
+                    "min_quality_score": 0.95,
+                    "max_latency_ms": 20
+                }
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "smoke",
+            "multimodal-runtime-evidence",
+            "--project-root",
+            project.to_str().unwrap(),
+            "--connected-runtime",
+            "smoke-vision-runtime",
+            "--approved-by",
+            "arthur",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.smoke.multimodal_runtime_evidence.v1"
+    );
+    assert_eq!(json["status"], "multimodal_runtime_evidence_smoke_passed");
+    assert_eq!(json["collected"], true);
+    assert_eq!(json["evidence_plan"]["ready_to_collect_evidence"], true);
+    assert_eq!(
+        json["collect_evidence"]["capability_id"],
+        "experimental_multimodal_runtime"
+    );
+    assert_eq!(
+        json["collect_evidence"]["kind"],
+        "production_runtime_benchmark"
+    );
+    assert_eq!(
+        json["collect_evidence"]["configured_evidence_source"],
+        "connected_multimodal_runtime:smoke-vision-runtime"
+    );
+    assert_eq!(json["collect_evidence"]["collection_promotion_ready"], true);
+    let gate = json["release_gates"]["gate_cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|gate| gate["capability_id"] == "experimental_multimodal_runtime")
+        .expect("multimodal gate should be present");
+    assert_eq!(gate["promotion_ready"], true);
+    assert_eq!(
+        gate["attached_evidence_state"],
+        "required_attached_evidence_present"
+    );
+    assert!(gate["missing_attached_evidence_kinds"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    for check_id in [
+        "addon_boundary_visible",
+        "runtime_evidence_manifest_state",
+        "release_gate_tracks_multimodal_state",
+        "does_not_auto_promote",
+    ] {
+        let check = json["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["check_id"] == check_id)
+            .unwrap_or_else(|| panic!("missing multimodal evidence smoke check {check_id}"));
+        assert_eq!(
+            check["passed"], true,
+            "multimodal evidence smoke check {check_id} failed: {check:?}"
+        );
+    }
+}
+
+#[test]
 fn readme_explains_forge_in_five_minutes_and_names_operational_smoke() {
     let readme = fs::read_to_string("README.md").unwrap();
 
@@ -53162,6 +53390,7 @@ fn readme_explains_forge_in_five_minutes_and_names_operational_smoke() {
     assert!(readme.contains("handoffs/approvals"));
     assert!(readme.contains("forge smoke forge-first-harness"));
     assert!(readme.contains("forge smoke replacement-cli-evidence"));
+    assert!(readme.contains("forge smoke multimodal-runtime-evidence"));
 }
 
 #[test]
