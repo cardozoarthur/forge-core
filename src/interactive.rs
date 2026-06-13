@@ -838,6 +838,7 @@ pub struct InteractiveMultimodalRuntimePanel {
     pub missing_config_check_count: usize,
     pub config_checks: Vec<MilestoneEvidencePlanConfigCheck>,
     pub manifest_template_ids: Vec<String>,
+    pub production_runtime_evidence_plan: InteractiveReleaseGateEvidencePlan,
     pub installs_performed: bool,
     pub model_execution_performed: bool,
     pub device_access_performed: bool,
@@ -10283,6 +10284,8 @@ pub fn build_interactive_multimodal_runtime(
         false,
     )?;
     let release_gates = build_interactive_release_gates(store, "0.5", Some(project_root))?;
+    let production_runtime_evidence_plan =
+        interactive_release_gate_evidence_plan(store, "0.5", capability_id, Some(project_root))?;
     let multimodal_gate = release_gates
         .gate_cards
         .iter()
@@ -10301,19 +10304,23 @@ pub fn build_interactive_multimodal_runtime(
         .unwrap_or_default();
     let evidence_plan_status = multimodal_gate
         .map(|gate| gate.evidence_plan.status.clone())
-        .unwrap_or_else(|| "missing".to_string());
+        .unwrap_or_else(|| production_runtime_evidence_plan.status.clone());
     let ready_to_collect_evidence = multimodal_gate
         .map(|gate| gate.evidence_plan.ready_to_collect_evidence)
-        .unwrap_or(false);
+        .unwrap_or(production_runtime_evidence_plan.ready_to_collect_evidence);
     let missing_config_check_count = multimodal_gate
         .map(|gate| gate.evidence_plan.missing_config_check_count)
-        .unwrap_or_default();
+        .unwrap_or(production_runtime_evidence_plan.missing_config_check_count);
     let config_checks = multimodal_gate
         .map(|gate| gate.evidence_plan.config_checks.clone())
-        .unwrap_or_default();
+        .unwrap_or_else(|| production_runtime_evidence_plan.config_checks.clone());
     let manifest_template_ids = multimodal_gate
         .map(|gate| gate.evidence_plan.manifest_template_ids.clone())
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            production_runtime_evidence_plan
+                .manifest_template_ids
+                .clone()
+        });
     let blockers = multimodal_runtime_evidence_blockers(
         multimodal_gate.is_some(),
         promotion_ready,
@@ -10546,6 +10553,7 @@ pub fn build_interactive_multimodal_runtime(
         missing_config_check_count,
         config_checks,
         manifest_template_ids,
+        production_runtime_evidence_plan,
         installs_performed: status_report.installs_performed
             || install_plan.installs_performed
             || readiness.installs_performed
@@ -10913,7 +10921,7 @@ fn multimodal_runtime_commands(project_root: &Path) -> InteractiveMultimodalRunt
             "--capability".to_string(),
             "experimental_multimodal_runtime".to_string(),
             "--project-root".to_string(),
-            project_root,
+            project_root.clone(),
             "--connected-runtime".to_string(),
             "<runtime-id>".to_string(),
             "--approved-by".to_string(),
@@ -10924,6 +10932,8 @@ fn multimodal_runtime_commands(project_root: &Path) -> InteractiveMultimodalRunt
         addon_capabilities: vec![
             "interactive".to_string(),
             "addon-capabilities".to_string(),
+            "--project-root".to_string(),
+            project_root,
             "--output".to_string(),
             "json".to_string(),
         ],
@@ -13994,7 +14004,7 @@ pub fn render_interactive_replacement_cli(panel: &InteractiveReplacementCliPanel
 
 pub fn render_interactive_multimodal_runtime(panel: &InteractiveMultimodalRuntimePanel) -> String {
     format!(
-        "Multimodal runtime: {status}; capability {capability_id}; addon {addon_id}; view {addon_view_id}; readiness {readiness_percent}% ({ready_surface_count}/{surface_count}); promotion_ready {promotion_ready}; feature {feature_enabled} from {feature_source}/{feature_status}\nSurfaces: {surfaces}\nBlockers: {blockers}\nCommands: {commands}\nNotes: {notes}\n",
+        "Multimodal runtime: {status}; capability {capability_id}; addon {addon_id}; view {addon_view_id}; readiness {readiness_percent}% ({ready_surface_count}/{surface_count}); promotion_ready {promotion_ready}; feature {feature_enabled} from {feature_source}/{feature_status}\nProduction runtime evidence: {evidence_status}; ready {evidence_ready}; templates {evidence_templates}; config checks {evidence_config_checks}\nSurfaces: {surfaces}\nBlockers: {blockers}\nCommands: {commands}\nNotes: {notes}\n",
         status = panel.status,
         capability_id = panel.capability_id,
         addon_id = panel.addon_id,
@@ -14006,6 +14016,25 @@ pub fn render_interactive_multimodal_runtime(panel: &InteractiveMultimodalRuntim
         feature_enabled = panel.feature_flag_enabled,
         feature_source = panel.feature_flag_source,
         feature_status = panel.feature_flag_status,
+        evidence_status = panel.production_runtime_evidence_plan.status,
+        evidence_ready = panel
+            .production_runtime_evidence_plan
+            .ready_to_collect_evidence,
+        evidence_templates = if panel
+            .production_runtime_evidence_plan
+            .manifest_template_ids
+            .is_empty()
+        {
+            "none".to_string()
+        } else {
+            panel
+                .production_runtime_evidence_plan
+                .manifest_template_ids
+                .join(",")
+        },
+        evidence_config_checks = panel
+            .production_runtime_evidence_plan
+            .config_check_count,
         surfaces = render_multimodal_runtime_surface_summary(panel),
         blockers = if panel.blockers.is_empty() {
             "none".to_string()

@@ -53621,6 +53621,42 @@ fn interactive_multimodal_runtime_panel_surfaces_addon_guard_and_evidence_path()
         .unwrap()
         .iter()
         .any(|check| check["id"] == "multimodal_runtime_manifest" && check["status"] == "missing"));
+    assert_eq!(
+        panel["production_runtime_evidence_plan"]["schema_version"],
+        "forge.interactive.release_gate_evidence_plan.v1"
+    );
+    assert_eq!(
+        panel["production_runtime_evidence_plan"]["status"],
+        "missing_project_evidence_inputs"
+    );
+    assert_eq!(
+        panel["production_runtime_evidence_plan"]["project_root"],
+        project.display().to_string()
+    );
+    assert_eq!(
+        panel["production_runtime_evidence_plan"]["ready_to_collect_evidence"],
+        false
+    );
+    assert!(
+        panel["production_runtime_evidence_plan"]["manifest_template_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("multimodal_runtime_manifest"))
+    );
+    assert!(panel["production_runtime_evidence_plan"]["config_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["id"] == "multimodal_feature_flag" && check["status"] == "missing"));
+    assert!(panel["production_runtime_evidence_plan"]["config_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["id"] == "multimodal_runtime_manifest" && check["status"] == "missing"));
+    assert_eq!(
+        panel["production_runtime_evidence_plan"]["provider_candidate_count"],
+        0
+    );
     assert!(panel["blockers"]
         .as_array()
         .unwrap()
@@ -53637,6 +53673,12 @@ fn interactive_multimodal_runtime_panel_surfaces_addon_guard_and_evidence_path()
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("experimental_multimodal_runtime")));
+    assert!(panel["commands"]["addon_capabilities"]
+        .as_array()
+        .unwrap()
+        .windows(2)
+        .any(|pair| pair[0] == serde_json::json!("--project-root")
+            && pair[1] == serde_json::json!(project.display().to_string())));
 
     let surfaces = panel["surfaces"].as_array().unwrap();
     for surface_id in [
@@ -53760,6 +53802,7 @@ fn interactive_multimodal_runtime_panel_surfaces_addon_guard_and_evidence_path()
     assert!(text.contains("Multimodal runtime:"));
     assert!(text.contains("addon_ownership[ready]"));
     assert!(text.contains("production_evidence[blocked]"));
+    assert!(text.contains("Production runtime evidence: missing_project_evidence_inputs"));
     assert!(text.contains("forge multimodal runtime-benchmark"));
 
     let tools = forge()
