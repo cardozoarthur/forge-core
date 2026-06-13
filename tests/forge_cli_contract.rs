@@ -48102,6 +48102,45 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
         "forge.harness.adoption_plan.v1"
     );
     assert_eq!(
+        json["activation_profile"]["schema_version"],
+        "forge.harness.activation_profile.v1"
+    );
+    assert_eq!(
+        json["activation_profile"]["status"],
+        "harness_activation_profile_ready"
+    );
+    assert_eq!(json["activation_profile"]["executor"], "codex");
+    assert_eq!(
+        json["activation_profile"]["project_root"],
+        project_root.display().to_string()
+    );
+    assert_eq!(
+        json["activation_profile"]["shim_dir"],
+        shim_dir.display().to_string()
+    );
+    assert_eq!(json["activation_profile"]["apply"], false);
+    assert_eq!(json["activation_profile"]["applied"], false);
+    assert_eq!(json["activation_profile"]["mutates_state"], false);
+    assert_eq!(json["activation_profile"]["executes_child"], false);
+    assert_eq!(json["activation_profile"]["writes_shell_rc"], false);
+    assert_eq!(json["activation_profile"]["would_write_shell_rc"], true);
+    assert!(json["activation_profile"]["activation_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("FORGE_HARNESS_DEFAULT_MODE=forge_first")));
+    assert!(json["activation_profile"]["rollback_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("# >>> forge harness activation profile")));
+    assert_eq!(
         json["forge_first_adoption_readiness"]["schema_version"],
         "forge.interactive.harness_forge_first_adoption.v1"
     );
@@ -48511,6 +48550,14 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
         "forge.harness.adoption_plan.v1"
     );
     assert_eq!(
+        home["dashboard"]["harness_panel"]["activation_profile"]["schema_version"],
+        "forge.harness.activation_profile.v1"
+    );
+    assert_eq!(
+        home["dashboard"]["harness_panel"]["activation_profile"]["mutates_state"],
+        false
+    );
+    assert_eq!(
         home["dashboard"]["harness_panel"]["forge_first_adoption_readiness"]["schema_version"],
         "forge.interactive.harness_forge_first_adoption.v1"
     );
@@ -48609,6 +48656,14 @@ fn interactive_harness_command_and_mcp_surface_are_dedicated() {
     assert_eq!(
         mcp_json["result"]["adoption_plan"]["schema_version"],
         "forge.harness.adoption_plan.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["activation_profile"]["schema_version"],
+        "forge.harness.activation_profile.v1"
+    );
+    assert_eq!(
+        mcp_json["result"]["activation_profile"]["executes_child"],
+        false
     );
     assert_eq!(
         mcp_json["result"]["forge_first_adoption_readiness"]["schema_version"],

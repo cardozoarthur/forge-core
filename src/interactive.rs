@@ -19,19 +19,21 @@ use crate::executor::{
 };
 use crate::graph::{AtomicTask, ExecutorKind, TaskStatus};
 use crate::harness::{
-    analyze_token_headroom, build_harness_adoption_plan, build_harness_bootstrap_report,
-    build_harness_doctor_report, build_harness_executor_compatibility_report,
-    build_harness_headroom_plan, build_harness_mode_report, build_headroom_stats_report,
-    inspect_cli_harness_shim_status, inspect_cli_harness_shim_status_with_path,
-    install_cli_harness_shim, persist_token_headroom_report,
-    resolve_harness_forge_first_source_for_project, resolve_harness_runtime_policy,
-    run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions, CliShimInstallReport,
-    CliShimStatusOptions, CliShimStatusReport, CliWrapperPlanReport, HarnessAdoptionPlanOptions,
-    HarnessAdoptionPlanReport, HarnessBootstrapOptions, HarnessBootstrapReport,
-    HarnessDoctorOptions, HarnessDoctorReport, HarnessExecutorCompatibilityReport,
-    HarnessHeadroomPlanOptions, HarnessHeadroomPlanReport, HarnessModeOptions, HarnessModeReport,
-    HarnessRuntimePolicyOptions, HarnessSessionLifecyclePlan, HeadroomStatsContentKindBucket,
-    HeadroomStatsOptions, HeadroomStatsReport, HeadroomStatsSourceBucket, TokenHeadroomReport,
+    analyze_token_headroom, build_harness_activation_profile, build_harness_adoption_plan,
+    build_harness_bootstrap_report, build_harness_doctor_report,
+    build_harness_executor_compatibility_report, build_harness_headroom_plan,
+    build_harness_mode_report, build_headroom_stats_report, inspect_cli_harness_shim_status,
+    inspect_cli_harness_shim_status_with_path, install_cli_harness_shim,
+    persist_token_headroom_report, resolve_harness_forge_first_source_for_project,
+    resolve_harness_runtime_policy, run_cli_harness_exec, CliHarnessExecOptions,
+    CliShimInstallOptions, CliShimInstallReport, CliShimStatusOptions, CliShimStatusReport,
+    CliWrapperPlanReport, HarnessActivationProfileOptions, HarnessActivationProfileReport,
+    HarnessAdoptionPlanOptions, HarnessAdoptionPlanReport, HarnessBootstrapOptions,
+    HarnessBootstrapReport, HarnessDoctorOptions, HarnessDoctorReport,
+    HarnessExecutorCompatibilityReport, HarnessHeadroomPlanOptions, HarnessHeadroomPlanReport,
+    HarnessModeOptions, HarnessModeReport, HarnessRuntimePolicyOptions,
+    HarnessSessionLifecyclePlan, HeadroomStatsContentKindBucket, HeadroomStatsOptions,
+    HeadroomStatsReport, HeadroomStatsSourceBucket, TokenHeadroomReport,
 };
 use crate::identity::{
     audit_tenant_index, inspect_project_operating_context, list_identity_links,
@@ -1305,6 +1307,7 @@ pub struct InteractiveHarnessPanel {
     pub wrapper_plan: CliWrapperPlanReport,
     pub headroom_plan: HarnessHeadroomPlanReport,
     pub adoption_plan: HarnessAdoptionPlanReport,
+    pub activation_profile: HarnessActivationProfileReport,
     pub forge_first_adoption_readiness: InteractiveHarnessForgeFirstAdoptionReadiness,
     pub headroom_stats: HeadroomStatsReport,
     pub headroom_operational_status: String,
@@ -6049,6 +6052,18 @@ pub fn build_interactive_harness(
         require_token_headroom_for_forge_first: runtime_policy
             .require_token_headroom_for_forge_first,
     })?;
+    let activation_profile = build_harness_activation_profile(HarnessActivationProfileOptions {
+        shim_dir: &options.shim_dir,
+        executor: &options.executor,
+        project_root: Some(&project_root),
+        context_budget: runtime_policy.context_budget,
+        context_budget_source: &runtime_policy.context_budget_source,
+        token_headroom: runtime_policy.token_headroom,
+        token_headroom_source: &runtime_policy.token_headroom_source,
+        apply: false,
+        shell_rc: None,
+        approved_by: None,
+    })?;
     let headroom_preview = analyze_token_headroom(
         "Forge harness preview: route bounded context, shell receipts, logs, tool output and CLI stdout through local token headroom while preserving retrieval references.",
         Some("text"),
@@ -6123,6 +6138,7 @@ pub fn build_interactive_harness(
         wrapper_plan,
         headroom_plan,
         adoption_plan,
+        activation_profile,
         forge_first_adoption_readiness,
         headroom_stats,
         headroom_operational_status,
