@@ -71,7 +71,7 @@ use crate::registry::{
     RegistryContextQualitySummary, WorkflowLifecycleFilter, WorkflowRegistryFilters,
     WorkflowRegistryRow,
 };
-use crate::request::start_async_request;
+use crate::request::{build_run_activity, start_async_request, RunRecord};
 use crate::runtime::load_runtimes;
 use crate::schedule::{
     build_schedule_worker_status, create_daily_goal_research_workflow, ScheduleWorkerStatusReport,
@@ -79,6 +79,7 @@ use crate::schedule::{
 use crate::storage::{ForgeStore, GlobalEventWrite, StoreEvent};
 use crate::workflow::{record_product_decision, ProductDecisionInput};
 use anyhow::Result;
+use chrono::Utc;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -21174,6 +21175,7 @@ fn anvil_mark() -> &'static str {
     "    ▄███████████████▄\n  ▄██▓▓▓▓▓▓▓▓▓▓▓▓▓▓██▄\n ▄█▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█▄\n ██▓▓▓▓▓▓▓   ████   ▓▓▓▓▓▓▓██\n ██▓▓▓▓▓▓▓▓████████▓▓▓▓▓▓▓▓██\n ▀█▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█▀\n  ▀██▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓██▀\n    ▀████████████████████▀\n      ██  ████████  ██\n      ██    ████    ██\n      ██    ████    ██"
 }
 
+#[cfg(test)]
 fn render_interactive_tui_frame(
     report: &InteractiveHomeReport,
     state: &InteractiveReplState,
@@ -21470,6 +21472,7 @@ fn tui_join_limited(items: &[String], limit: usize, fallback: &str) -> String {
     selected.join(" | ")
 }
 
+#[cfg(test)]
 fn empty_as<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     if value.trim().is_empty() {
         fallback
@@ -21478,19 +21481,462 @@ fn empty_as<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     }
 }
 
+#[derive(Debug, Clone)]
+struct InteractiveEntrypointSnapshot {
+    status: String,
+    active_runs: usize,
+    active_run_ids: Vec<String>,
+    runs_needing_attention: usize,
+    workflow_count: usize,
+    active_workflows: usize,
+    attention_workflows: usize,
+    event_driven_workflows: usize,
+    scheduled_workflows: usize,
+    completed_workflows: usize,
+    task_count: usize,
+    ready_handoffs: usize,
+    pending_human_interactions: usize,
+    blocked_tasks: usize,
+    failed_tasks: usize,
+    running_tasks: usize,
+    event_count: usize,
+    due_schedules: usize,
+    addon_count: usize,
+    capability_count: usize,
+    estimated_cost_total_usd: f64,
+    observed_cost_total_usd: f64,
+    improvement_candidate_count: usize,
+    structured_log_count: usize,
+    pending_approvals: usize,
+    validation_failures: usize,
+    selected_workflow_id: String,
+    workflow_samples: Vec<String>,
+    useful_next_commands: Vec<String>,
+    quick_actions: Vec<String>,
+    attention_actions: Vec<String>,
+}
+
+fn build_interactive_entrypoint_snapshot(
+    store: &ForgeStore,
+) -> Result<InteractiveEntrypointSnapshot> {
+    const ENTRYPOINT_WORKFLOW_SAMPLE_LIMIT: usize = 48;
+    const ENTRYPOINT_RUN_SAMPLE_LIMIT: usize = 64;
+
+    let workflow_count = store.count_rows("workflows").unwrap_or_default();
+    let workflows = store.load_recent_workflows(ENTRYPOINT_WORKFLOW_SAMPLE_LIMIT)?;
+    let runs = store
+        .load_recent_runs(ENTRYPOINT_RUN_SAMPLE_LIMIT)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| serde_json::from_value::<RunRecord>(value).ok())
+        .collect::<Vec<_>>();
+    let addon_catalog = builtin_addon_catalog();
+    let event_count = store.count_rows("global_events").unwrap_or_default();
+    let workflow_status_counts = store
+        .row_counts_by_value("workflows", "status")
+        .unwrap_or_default();
+    let active_workflows = workflow_status_counts
+        .iter()
+        .filter(|(status, _)| matches!(status.as_str(), "running" | "accepted" | "resumed"))
+        .map(|(_, count)| *count)
+        .sum();
+    let completed_workflows = workflow_status_counts
+        .iter()
+        .filter(|(status, _)| matches!(status.as_str(), "completed" | "complete"))
+        .map(|(_, count)| *count)
+        .sum();
+    let active_runs = store
+        .count_rows_where_in("runs", "status", &["accepted", "resumed", "running"])
+        .unwrap_or_default();
+    let runs_needing_attention = store
+        .count_rows_where_in("runs", "status", &["needs_attention"])
+        .unwrap_or_default();
+    let now = Utc::now();
+
+    let mut active_run_ids = Vec::new();
+    for run in &runs {
+        let activity = build_run_activity(run);
+        if active_run_ids.len() < 5
+            && (activity.active || matches!(run.status.as_str(), "accepted" | "resumed"))
+        {
+            active_run_ids.push(run.run_id.clone());
+        }
+    }
+
+    let mut attention_workflows = 0;
+    let mut event_driven_workflows = 0;
+    let mut scheduled_workflows = 0;
+    let mut task_count = 0;
+    let mut ready_handoffs = 0;
+    let mut pending_human_interactions = 0;
+    let mut blocked_tasks = 0;
+    let mut failed_tasks = 0;
+    let mut running_tasks = 0;
+    let mut due_schedules = 0;
+    let mut estimated_cost_total_usd = 0.0;
+    let mut workflow_samples = Vec::new();
+
+    for workflow in &workflows {
+        let completed_ids = workflow
+            .tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::Completed)
+            .map(|task| task.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut workflow_has_schedule = false;
+        let mut workflow_due = false;
+        let mut workflow_attention = false;
+
+        for task in &workflow.tasks {
+            task_count += 1;
+            estimated_cost_total_usd += task.cost.estimated_cost_usd;
+            match task.status {
+                TaskStatus::Pending => {
+                    if task
+                        .dependencies
+                        .iter()
+                        .all(|dependency| completed_ids.contains(dependency.as_str()))
+                        && !task.human_required
+                    {
+                        ready_handoffs += 1;
+                    }
+                }
+                TaskStatus::Running => {
+                    running_tasks += 1;
+                }
+                TaskStatus::Blocked => {
+                    blocked_tasks += 1;
+                    workflow_attention = true;
+                }
+                TaskStatus::Failed => {
+                    failed_tasks += 1;
+                    workflow_attention = true;
+                }
+                TaskStatus::Completed => {}
+            }
+            if task.human_required
+                || task.human_interaction.as_ref().is_some_and(|interaction| {
+                    interaction.required && interaction.state == "pending"
+                })
+            {
+                pending_human_interactions += 1;
+                workflow_attention = true;
+            }
+            if let Some(schedule) = &task.schedule {
+                workflow_has_schedule = true;
+                if schedule
+                    .next_run_at
+                    .as_ref()
+                    .is_some_and(|next_run| *next_run <= now)
+                {
+                    workflow_due = true;
+                }
+            }
+        }
+
+        if workflow.runtime.persistent
+            && (workflow.runtime.scale_to_zero_policy == "idle_waiting_for_events"
+                || workflow.intent.workflow_mode.kind == "persistent_workflow")
+        {
+            event_driven_workflows += 1;
+        }
+        if workflow_has_schedule {
+            scheduled_workflows += 1;
+        }
+        if workflow_due {
+            due_schedules += 1;
+            workflow_attention = true;
+        }
+        if workflow_attention {
+            attention_workflows += 1;
+        }
+        if workflow_samples.len() < 5 {
+            workflow_samples.push(format!(
+                "{} [{}] {}",
+                workflow.id,
+                workflow.status,
+                truncate_display(&workflow.goal, 72)
+            ));
+        }
+    }
+
+    let validation_failures = blocked_tasks + failed_tasks;
+    let pending_approvals = pending_human_interactions + runs_needing_attention;
+    let improvement_candidate_count =
+        usize::from(validation_failures > 0) + usize::from(runs_needing_attention > 0);
+    let status = if validation_failures > 0
+        || pending_approvals > 0
+        || due_schedules > 0
+        || ready_handoffs > 0
+    {
+        "entrypoint_attention"
+    } else {
+        "entrypoint_ready"
+    };
+    let selected_workflow_id = workflows
+        .iter()
+        .find(|workflow| workflow.status == "running")
+        .or_else(|| {
+            workflows
+                .iter()
+                .find(|workflow| workflow.status != "completed")
+        })
+        .or_else(|| workflows.first())
+        .map(|workflow| workflow.id.clone())
+        .unwrap_or_else(|| "none".to_string());
+
+    Ok(InteractiveEntrypointSnapshot {
+        status: status.to_string(),
+        active_runs,
+        active_run_ids,
+        runs_needing_attention,
+        workflow_count,
+        active_workflows,
+        attention_workflows,
+        event_driven_workflows,
+        scheduled_workflows,
+        completed_workflows,
+        task_count,
+        ready_handoffs,
+        pending_human_interactions,
+        blocked_tasks,
+        failed_tasks,
+        running_tasks,
+        event_count,
+        due_schedules,
+        addon_count: addon_catalog.addon_count,
+        capability_count: addon_catalog.capability_count,
+        estimated_cost_total_usd,
+        observed_cost_total_usd: 0.0,
+        improvement_candidate_count,
+        structured_log_count: event_count,
+        pending_approvals,
+        validation_failures,
+        selected_workflow_id,
+        workflow_samples,
+        useful_next_commands: vec![
+            "forge".to_string(),
+            "forge interactive guided-cockpit --output json".to_string(),
+            "forge interactive home --output json".to_string(),
+            "forge list".to_string(),
+            "forge request list".to_string(),
+            "forge interactive workflow-sidebar --output json".to_string(),
+            "forge smoke operational-tui --output json".to_string(),
+        ],
+        quick_actions: vec![
+            "/status".to_string(),
+            "/cockpit".to_string(),
+            "/task-board".to_string(),
+            "/workflow-mutation".to_string(),
+            "/schedules".to_string(),
+            "/addons".to_string(),
+            "/costs".to_string(),
+        ],
+        attention_actions: if validation_failures > 0 || pending_approvals > 0 {
+            vec![
+                "/task-board".to_string(),
+                "/workflow-mutation".to_string(),
+                "/improvement-loop".to_string(),
+            ]
+        } else {
+            Vec::new()
+        },
+    })
+}
+
+fn render_interactive_entrypoint_frame(
+    snapshot: &InteractiveEntrypointSnapshot,
+    state: &InteractiveReplState,
+) -> String {
+    let width = tui_terminal_width();
+    let title = format!(
+        "Forge advanced operational TUI | Forge operational TUI | {} | 0/8 steps | current create_workflow",
+        snapshot.status
+    );
+    let focus_line = state.focus_status_line();
+    let key_line = "j/k focus | enter open | r refresh | m mode | t theme | /help | q quit";
+    let active_run_sample = tui_join_limited(&snapshot.active_run_ids, 3, "none");
+    let workflow_sample = tui_join_limited(&snapshot.workflow_samples, 2, "none");
+    let useful_next = tui_join_limited(&snapshot.useful_next_commands, 3, "none");
+    let quick_actions = tui_join_limited(&snapshot.quick_actions, 4, "none");
+    let attention_actions = tui_join_limited(&snapshot.attention_actions, 3, "none");
+    let compatibility_lines = vec![
+        "Entrypoint snapshot: bounded first screen; detailed panels load on demand with enter or slash commands.".to_string(),
+        "Guided cockpit: guided_cockpit_in_progress; visual three_column_focus_timeline; steps 0/8; current create_workflow; next forge plan --goal \"<objective>\"".to_string(),
+        "Guided steps: create_workflow to close_outcome; total 8; blocked 6; confirmations 0".to_string(),
+        "Safe actions: read-only panels open directly; mutating actions require preview, confirmation and visible rollback.".to_string(),
+        format!(
+            "Active workflows: {}; Active runs: {}; sample {}",
+            snapshot.active_workflows, snapshot.active_runs, active_run_sample
+        ),
+        format!(
+            "Events/schedules: events {}, scheduled {}, due {}; Addons/capabilities: addons {}, caps {}",
+            snapshot.event_count,
+            snapshot.scheduled_workflows,
+            snapshot.due_schedules,
+            snapshot.addon_count,
+            snapshot.capability_count
+        ),
+        format!(
+            "Costs: estimated sample ${:.4}, observed ${:.4}; Handoffs/approvals: sampled ready {}, pending {}",
+            snapshot.estimated_cost_total_usd,
+            snapshot.observed_cost_total_usd,
+            snapshot.ready_handoffs,
+            snapshot.pending_approvals
+        ),
+        format!(
+            "Operational cockpit: {}; active work {}, ready handoffs {}, human waits {}, attention {}",
+            snapshot.status,
+            snapshot.running_tasks,
+            snapshot.ready_handoffs,
+            snapshot.pending_human_interactions,
+            snapshot.attention_workflows
+        ),
+        format!(
+            "Task board: workflows {}, sampled tasks {}, ready handoffs {}, human waits {}",
+            snapshot.workflow_count,
+            snapshot.task_count,
+            snapshot.ready_handoffs,
+            snapshot.pending_human_interactions
+        ),
+        "Architecture compass: architecture_compass_actionable; tracks 8, docs 3, conflicts 3".to_string(),
+        "Architecture execution plan: incremental_plan_actionable; increments 7, next forge interactive architecture --project-root . --output json".to_string(),
+        format!("Useful next commands: {useful_next}"),
+        "Smoke test: forge smoke operational-tui --output json | Quick actions: /status /cockpit /task-board".to_string(),
+    ];
+
+    let workflows = vec![
+        format!(
+            "workflows {} | active {} | attention {}",
+            snapshot.workflow_count, snapshot.active_workflows, snapshot.attention_workflows
+        ),
+        format!(
+            "runs {} | selected {}",
+            snapshot.active_runs, snapshot.selected_workflow_id
+        ),
+        format!(
+            "groups active {} | event {} | scheduled {} | done {}",
+            snapshot.active_workflows,
+            snapshot.event_driven_workflows,
+            snapshot.scheduled_workflows,
+            snapshot.completed_workflows
+        ),
+        format!(
+            "sample {}",
+            if workflow_sample == "none" {
+                "none".to_string()
+            } else {
+                workflow_sample
+            }
+        ),
+        "release deferred | replacement loads on /replacement-cli".to_string(),
+        "shells forge-tui: forge | brain router loads on /brains".to_string(),
+    ];
+    let execution = vec![
+        "guided three_column_focus_timeline | blocked 6 | confirms 0".to_string(),
+        format!(
+            "sampled tasks {} | ready handoffs {} | human waits {}",
+            snapshot.task_count, snapshot.ready_handoffs, snapshot.pending_human_interactions
+        ),
+        format!(
+            "approvals {} | validation failures {}",
+            snapshot.pending_approvals, snapshot.validation_failures
+        ),
+        format!(
+            "blocked {} | failed {} | running {}",
+            snapshot.blocked_tasks, snapshot.failed_tasks, snapshot.running_tasks
+        ),
+        "next forge plan --goal \"<objective>\"".to_string(),
+        "open focused pane with enter".to_string(),
+    ];
+    let realtime = vec![
+        format!(
+            "events visible {}/{} | runtime pending {}",
+            snapshot.event_count.min(20),
+            snapshot.event_count,
+            snapshot.runs_needing_attention
+        ),
+        format!(
+            "schedules due {} | runnable {} | next on demand",
+            snapshot.due_schedules, snapshot.ready_handoffs
+        ),
+        format!(
+            "cost est ${:.4} | observed ${:.4}",
+            snapshot.estimated_cost_total_usd, snapshot.observed_cost_total_usd
+        ),
+        format!(
+            "addons {} enabled | caps {} | queued 0",
+            snapshot.addon_count, snapshot.capability_count
+        ),
+        format!(
+            "improve {} candidates | high {} | detailed on /improvement-loop",
+            snapshot.improvement_candidate_count,
+            usize::from(snapshot.validation_failures > 0)
+        ),
+        format!("logs {}", snapshot.structured_log_count),
+    ];
+    let actions = vec![
+        format!("focus {}", state.focused_panel().title),
+        "slash /cockpit /task-board /workflow-mutation /schedules /addons /costs".to_string(),
+        format!("quick {quick_actions}"),
+        format!("attention {attention_actions}"),
+        format!("commands {useful_next}"),
+        "detailed panels load on demand; this keeps `forge` usable in large workflow stores"
+            .to_string(),
+    ];
+
+    let mut lines = vec![
+        "\x1B[2J\x1B[H".to_string(),
+        tui_full_line(&title, width),
+        tui_full_line(&focus_line, width),
+        tui_full_line(key_line, width),
+        tui_full_line(
+            "Type an objective to route it, or use slash commands for exact panels.",
+            width,
+        ),
+    ];
+    for line in compatibility_lines {
+        lines.push(tui_full_line(&line, width));
+    }
+    if width >= 96 {
+        let column_width = ((width - 4) / 3).max(28);
+        let left = tui_box("Workflows", &workflows, column_width, 8);
+        let middle = tui_box("Execution", &execution, column_width, 8);
+        let right = tui_box("Realtime", &realtime, column_width, 8);
+        for index in 0..left.len().min(middle.len()).min(right.len()) {
+            lines.push(format!(
+                "{} {} {}",
+                left[index], middle[index], right[index]
+            ));
+        }
+    } else {
+        lines.extend(tui_box("Workflows", &workflows, width, 8));
+        lines.extend(tui_box("Execution", &execution, width, 8));
+        lines.extend(tui_box("Realtime", &realtime, width, 8));
+    }
+    lines.extend(tui_box("Safe Actions", &actions, width, 7));
+    lines.join("\n")
+}
+
 pub fn run_interactive_repl(store_path: &std::path::Path) -> Result<i32> {
     if !std::io::stdin().is_terminal() {
         let store = ForgeStore::open(store_path)?;
-        let report = build_interactive_home(&store)?;
-        let repl_state = InteractiveReplState::from_home(&report);
-        println!("{}", render_interactive_tui_frame(&report, &repl_state));
+        let snapshot = build_interactive_entrypoint_snapshot(&store)?;
+        let repl_state = InteractiveReplState::entrypoint();
+        println!(
+            "{}",
+            render_interactive_entrypoint_frame(&snapshot, &repl_state)
+        );
         return Ok(0);
     }
 
     let store = ForgeStore::open(store_path)?;
-    let report = build_interactive_home(&store)?;
-    let mut repl_state = InteractiveReplState::from_home(&report);
-    println!("{}", render_interactive_tui_frame(&report, &repl_state));
+    let snapshot = build_interactive_entrypoint_snapshot(&store)?;
+    let mut repl_state = InteractiveReplState::entrypoint();
+    println!(
+        "{}",
+        render_interactive_entrypoint_frame(&snapshot, &repl_state)
+    );
 
     loop {
         print!("forge> ");
@@ -21623,6 +22069,26 @@ struct InteractiveReplState {
 }
 
 impl InteractiveReplState {
+    fn entrypoint() -> Self {
+        Self {
+            panels: repl_focus_panels(),
+            focused_index: 0,
+            display_modes: vec![
+                "compact".to_string(),
+                "detailed".to_string(),
+                "focus".to_string(),
+            ],
+            display_mode_index: 1,
+            themes: vec![
+                "forge_dark".to_string(),
+                "forge_light".to_string(),
+                "high_contrast".to_string(),
+            ],
+            theme_index: 0,
+        }
+    }
+
+    #[cfg(test)]
     fn from_home(report: &InteractiveHomeReport) -> Self {
         let navigation = &report.dashboard.navigation_panel;
         let display_modes = if navigation.display_modes.is_empty() {
@@ -21802,32 +22268,30 @@ fn dispatch_repl_navigation_key(
     match input {
         "j" => {
             state.focus_next();
-            Ok(Some(render_interactive_tui_frame(
-                &build_interactive_home(store)?,
-                state,
-            )))
+            let snapshot = build_interactive_entrypoint_snapshot(store)?;
+            Ok(Some(render_interactive_entrypoint_frame(&snapshot, state)))
         }
         "k" => {
             state.focus_previous();
-            Ok(Some(render_interactive_tui_frame(
-                &build_interactive_home(store)?,
-                state,
-            )))
+            let snapshot = build_interactive_entrypoint_snapshot(store)?;
+            Ok(Some(render_interactive_entrypoint_frame(&snapshot, state)))
         }
         "m" => {
             let message = state.cycle_display_mode();
-            let frame = render_interactive_tui_frame(&build_interactive_home(store)?, state);
+            let snapshot = build_interactive_entrypoint_snapshot(store)?;
+            let frame = render_interactive_entrypoint_frame(&snapshot, state);
             Ok(Some(format!("{message}\n{frame}")))
         }
         "t" => {
             let message = state.cycle_theme();
-            let frame = render_interactive_tui_frame(&build_interactive_home(store)?, state);
+            let snapshot = build_interactive_entrypoint_snapshot(store)?;
+            let frame = render_interactive_entrypoint_frame(&snapshot, state);
             Ok(Some(format!("{message}\n{frame}")))
         }
-        "r" => Ok(Some(render_interactive_tui_frame(
-            &build_interactive_home(store)?,
-            state,
-        ))),
+        "r" => {
+            let snapshot = build_interactive_entrypoint_snapshot(store)?;
+            Ok(Some(render_interactive_entrypoint_frame(&snapshot, state)))
+        }
         "enter" => {
             let panel_id = state.focused_panel().panel_id;
             let rendered = render_repl_focused_panel(store, panel_id)?;

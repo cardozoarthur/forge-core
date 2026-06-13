@@ -3,7 +3,8 @@ use crate::event::{build_event_observability, categorize_event, infer_severity};
 use crate::graph::Workflow;
 use crate::intent::OperatingContextSpec;
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 type InboundEventRow = (
@@ -1408,6 +1409,68 @@ impl ForgeStore {
             workflows.push(serde_json::from_str(&row?)?);
         }
         Ok(workflows)
+    }
+
+    pub fn load_recent_workflows(&self, limit: usize) -> Result<Vec<Workflow>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut statement = self.connection.prepare(
+            "SELECT data_json FROM workflows ORDER BY created_at DESC, id DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![limit], |row| row.get::<_, String>(0))?;
+        let mut workflows = Vec::new();
+        for row in rows {
+            workflows.push(serde_json::from_str(&row?)?);
+        }
+        Ok(workflows)
+    }
+
+    pub fn count_rows(&self, table: &str) -> Result<usize> {
+        let table = checked_count_table(table)?;
+        let count: i64 =
+            self.connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })?;
+        Ok(count.max(0) as usize)
+    }
+
+    pub fn count_rows_where_in(&self, table: &str, column: &str, values: &[&str]) -> Result<usize> {
+        let table = checked_count_table(table)?;
+        let column = checked_count_column(table, column)?;
+        if values.is_empty() {
+            return self.count_rows(table);
+        }
+        let placeholders = std::iter::repeat_n("?", values.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("SELECT COUNT(*) FROM {table} WHERE {column} IN ({placeholders})");
+        let count: i64 =
+            self.connection
+                .query_row(&sql, params_from_iter(values.iter().copied()), |row| {
+                    row.get(0)
+                })?;
+        Ok(count.max(0) as usize)
+    }
+
+    pub fn row_counts_by_value(
+        &self,
+        table: &str,
+        column: &str,
+    ) -> Result<BTreeMap<String, usize>> {
+        let table = checked_count_table(table)?;
+        let column = checked_count_column(table, column)?;
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {column}, COUNT(*) FROM {table} GROUP BY {column}"
+        ))?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut counts = BTreeMap::new();
+        for row in rows {
+            let (value, count) = row?;
+            counts.insert(value, count.max(0) as usize);
+        }
+        Ok(counts)
     }
 
     fn replace_workflow_tenant_projection(&self, workflow: &Workflow) -> Result<()> {
@@ -4501,6 +4564,19 @@ impl ForgeStore {
         Ok(runs)
     }
 
+    pub fn load_recent_runs(&self, limit: usize) -> Result<Vec<serde_json::Value>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut statement = self
+            .connection
+            .prepare("SELECT data_json FROM runs ORDER BY created_at DESC, id DESC LIMIT ?1")?;
+        let rows = statement.query_map(params![limit], |row| row.get::<_, String>(0))?;
+        let mut runs = Vec::new();
+        for row in rows {
+            runs.push(serde_json::from_str(&row?)?);
+        }
+        Ok(runs)
+    }
+
     pub fn try_save_task_lease(&self, lease: TaskLeaseWrite<'_>) -> Result<bool> {
         let workflow = self.load_workflow(lease.workflow_id).ok();
         let tenant = operational_tenant_columns(workflow.as_ref());
@@ -4947,6 +5023,31 @@ fn stored_headroom_blob_from_row(row: &Row<'_>) -> rusqlite::Result<StoredHeadro
         created_at: row.get(16)?,
         updated_at: row.get(17)?,
     })
+}
+
+fn checked_count_table(table: &str) -> Result<&'static str> {
+    match table {
+        "workflows" => Ok("workflows"),
+        "runs" => Ok("runs"),
+        "events" => Ok("events"),
+        "global_events" => Ok("global_events"),
+        "artifacts" => Ok("artifacts"),
+        "cost_ledger_index" => Ok("cost_ledger_index"),
+        "task_checkpoints" => Ok("task_checkpoints"),
+        "harness_headroom_blobs" => Ok("harness_headroom_blobs"),
+        _ => anyhow::bail!("unsupported count table: {table}"),
+    }
+}
+
+fn checked_count_column(table: &str, column: &str) -> Result<&'static str> {
+    match (table, column) {
+        ("workflows", "status") => Ok("status"),
+        ("runs", "status") => Ok("status"),
+        ("global_events", "status") => Ok("status"),
+        ("global_events", "kind") => Ok("kind"),
+        ("events", "kind") => Ok("kind"),
+        _ => anyhow::bail!("unsupported count column: {table}.{column}"),
+    }
 }
 
 fn normalize_optional_filter(value: Option<&str>) -> Option<String> {

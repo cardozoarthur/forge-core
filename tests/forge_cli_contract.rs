@@ -51901,6 +51901,8 @@ fn no_args_non_tty_renders_operational_dashboard_and_exits_for_scripts() {
     assert!(stdout.contains("Handoffs/approvals:"));
     assert!(stdout.contains("Architecture compass:"));
     assert!(stdout.contains("Architecture execution plan:"));
+    assert!(stdout.contains("Entrypoint snapshot:"));
+    assert!(stdout.contains("detailed panels load on demand"));
     assert!(stdout.contains("Smoke test: forge smoke operational-tui"));
     assert!(stdout.contains("Quick actions"));
     assert!(stdout.contains("Useful next commands"));
