@@ -5841,6 +5841,81 @@ fn milestone_evidence_plan_inspects_project_inputs_without_collecting_evidence()
 }
 
 #[test]
+fn milestone_evidence_plan_blocks_missing_connected_brain_wrapper_command() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("missing-wrapper-project");
+    let forge_dir = project.join(".forge");
+    fs::create_dir_all(&forge_dir).unwrap();
+    let missing_wrapper = temp.path().join("missing-provider-wrapper.sh");
+
+    fs::write(
+        forge_dir.join("connected-brain-runtimes.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "providers": [{
+                "id": "project-provider",
+                "brain_id": "project-provider",
+                "model_id": "project-provider-model-v1",
+                "provider_class": "external_cli",
+                "capabilities": ["replacement_grade_cli"],
+                "command": [missing_wrapper.display().to_string()],
+                "approved_by": "arthur",
+                "approval_ref": "provider-approval-missing-wrapper-001",
+                "allow_model_execution": true,
+                "network_access": false,
+                "device_access": false,
+                "external_resources_mutated": false
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "evidence-plan",
+            "--version",
+            "0.5",
+            "--capability",
+            "replacement_grade_cli",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args(["--connected-brain", "project-provider", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "blocked_project_evidence_inputs");
+    assert_eq!(json["ready_to_collect_evidence"], false);
+    assert!(json["config_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["id"] == "connected_brain_provider"
+            && check["status"] == "ready"
+            && check["selected_id"] == "project-provider"));
+    let command_check = json["config_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == "connected_brain_provider_command")
+        .expect("evidence-plan should statically audit connected brain wrapper command");
+    assert_eq!(command_check["status"], "blocked");
+    assert_eq!(command_check["selected_id"], "project-provider");
+    assert_eq!(command_check["path"], missing_wrapper.display().to_string());
+    assert!(command_check["summary"]
+        .as_str()
+        .unwrap()
+        .contains("missing"));
+}
+
+#[test]
 fn milestone_prepare_evidence_inputs_writes_secret_free_manifest_templates_with_approval() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

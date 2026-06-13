@@ -2045,7 +2045,7 @@ fn plan_replacement_grade_cli_evidence(
         return Ok(());
     };
 
-    let provider_command_ready = !provider.command.is_empty()
+    let provider_command_declared = !provider.command.is_empty()
         && provider
             .command
             .iter()
@@ -2062,7 +2062,7 @@ fn plan_replacement_grade_cli_evidence(
         .model_id
         .as_deref()
         .is_some_and(|value| !milestone_manifest_placeholder(value));
-    let provider_ready = provider_command_ready
+    let provider_config_ready = provider_command_declared
         && provider_approval_ready
         && provider_model_ready
         && provider.allow_model_execution
@@ -2073,8 +2073,12 @@ fn plan_replacement_grade_cli_evidence(
             .capabilities
             .iter()
             .any(|capability| capability == "replacement_grade_cli");
-    let status = if provider_ready { "ready" } else { "blocked" };
-    let summary = if provider_ready {
+    let status = if provider_config_ready {
+        "ready"
+    } else {
+        "blocked"
+    };
+    let summary = if provider_config_ready {
         "Connected brain provider is declared, approved for guarded execution and safe to probe."
             .to_string()
     } else {
@@ -2088,7 +2092,10 @@ fn plan_replacement_grade_cli_evidence(
         selected_id: Some(provider.id.clone()),
         summary,
     });
-    if !provider_ready {
+    let command_check = milestone_connected_brain_provider_command_check(&provider, project_root);
+    let command_ready = command_check.status == "ready";
+    config_checks.push(command_check);
+    if !provider_config_ready || !command_ready {
         manifest_templates.push(connected_brain_manifest_template(
             project_root,
             Some(&provider.id),
@@ -2120,6 +2127,80 @@ fn milestone_manifest_placeholder(value: &str) -> bool {
         || value.contains("<approved-")
         || value.contains("<operator>")
         || value.contains("<approval-or-change-record>")
+}
+
+fn milestone_connected_brain_provider_command_check(
+    provider: &ConnectedBrainProviderConfig,
+    project_root: &Path,
+) -> MilestoneEvidencePlanConfigCheck {
+    let command = connected_brain_provider_command(provider, project_root);
+    let command_path = command.first().cloned();
+    let (status, summary) = milestone_connected_brain_command_path_status(command_path.as_deref());
+    MilestoneEvidencePlanConfigCheck {
+        id: "connected_brain_provider_command".to_string(),
+        status,
+        path: command_path,
+        selected_id: Some(provider.id.clone()),
+        summary,
+    }
+}
+
+fn milestone_connected_brain_command_path_status(command_path: Option<&str>) -> (String, String) {
+    let Some(command_path) = command_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return (
+            "blocked".to_string(),
+            "Connected brain provider command is missing.".to_string(),
+        );
+    };
+    if milestone_manifest_placeholder(command_path) {
+        return (
+            "blocked".to_string(),
+            "Connected brain provider command still contains a placeholder.".to_string(),
+        );
+    }
+    let path = Path::new(command_path);
+    if !path.is_absolute() {
+        return (
+            "blocked".to_string(),
+            "Connected brain provider command must be an absolute executable path before evidence collection.".to_string(),
+        );
+    }
+    let Ok(metadata) = fs::metadata(path) else {
+        return (
+            "blocked".to_string(),
+            format!("Connected brain provider command is missing: {command_path}."),
+        );
+    };
+    if !metadata.is_file() {
+        return (
+            "blocked".to_string(),
+            format!("Connected brain provider command is not a file: {command_path}."),
+        );
+    }
+    if !milestone_metadata_executable(&metadata) {
+        return (
+            "blocked".to_string(),
+            format!("Connected brain provider command is not executable: {command_path}."),
+        );
+    }
+    (
+        "ready".to_string(),
+        "Connected brain provider wrapper command exists and is executable; evidence collection still requires explicit approval and will run through Forge harness lineage.".to_string(),
+    )
+}
+
+#[cfg(unix)]
+fn milestone_metadata_executable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn milestone_metadata_executable(metadata: &fs::Metadata) -> bool {
+    !metadata.permissions().readonly()
 }
 
 fn detect_replacement_cli_provider_candidates() -> Vec<MilestoneEvidenceProviderCandidate> {
