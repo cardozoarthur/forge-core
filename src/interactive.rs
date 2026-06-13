@@ -82,6 +82,7 @@ use anyhow::Result;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -784,6 +785,7 @@ pub struct InteractiveReplacementCliPanel {
     pub provider_readiness: Vec<InteractiveReplacementCliProviderReadiness>,
     pub provider_wrapper_plan_count: usize,
     pub provider_wrapper_plans: Vec<InteractiveReplacementCliProviderWrapperPlan>,
+    pub provider_wrapper_manifest_audit: InteractiveReplacementCliProviderWrapperManifestAudit,
     pub blockers: Vec<String>,
     pub next_actions: Vec<String>,
     pub commands: InteractiveReplacementCliCommands,
@@ -842,6 +844,40 @@ pub struct InteractiveReplacementCliProviderWrapperPlan {
     pub safety_requirements: Vec<String>,
     pub next_action: String,
     pub promotion_impact: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveReplacementCliProviderWrapperManifestAudit {
+    pub schema_version: String,
+    pub status: String,
+    pub manifest_path: String,
+    pub manifest_present: bool,
+    pub manifest_parseable: bool,
+    pub provider_count: usize,
+    pub selected_provider_id: Option<String>,
+    pub selected_brain_id: Option<String>,
+    pub capability_declared: bool,
+    pub command_declared: bool,
+    pub command_placeholders_absent: bool,
+    pub command_first_binary: Option<String>,
+    pub command_path_status: String,
+    pub command_executable: bool,
+    pub approval_ready: bool,
+    pub model_ready: bool,
+    pub allow_model_execution: bool,
+    pub network_access_blocked: bool,
+    pub device_access_blocked: bool,
+    pub external_resources_untouched: bool,
+    pub evidence_plan_ready: bool,
+    pub ready_to_collect_evidence: bool,
+    pub counts_as_release_evidence: bool,
+    pub model_execution_performed: bool,
+    pub blockers: Vec<String>,
+    pub safety_requirements: Vec<String>,
+    pub evidence_plan_command: Vec<String>,
+    pub prepare_evidence_inputs_command: Vec<String>,
+    pub collect_evidence_command: Vec<String>,
+    pub next_action: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -9716,6 +9752,11 @@ pub fn build_interactive_replacement_cli_with_options(
         &project_root,
     );
     let provider_wrapper_plan_count = provider_wrapper_plans.len();
+    let provider_wrapper_manifest_audit = replacement_cli_provider_wrapper_manifest_audit(
+        &external_brain_evidence_plan,
+        &replacement_commands,
+        &project_root,
+    );
     let provider_readiness_count = provider_readiness.len();
     let installed_provider_count = provider_readiness
         .iter()
@@ -9958,6 +9999,7 @@ pub fn build_interactive_replacement_cli_with_options(
         provider_readiness,
         provider_wrapper_plan_count,
         provider_wrapper_plans,
+        provider_wrapper_manifest_audit,
         blockers,
         next_actions,
         commands: replacement_commands,
@@ -10129,6 +10171,345 @@ fn replacement_cli_provider_wrapper_plans(
             }
         })
         .collect()
+}
+
+fn replacement_cli_provider_wrapper_manifest_audit(
+    evidence_plan: &InteractiveReleaseGateEvidencePlan,
+    commands: &InteractiveReplacementCliCommands,
+    project_root: &Path,
+) -> InteractiveReplacementCliProviderWrapperManifestAudit {
+    let manifest_path = project_root
+        .join(".forge")
+        .join("connected-brain-runtimes.json");
+    let manifest_path_display = manifest_path.display().to_string();
+    let mut audit = replacement_cli_empty_manifest_audit(
+        "wrapper_manifest_missing",
+        &manifest_path_display,
+        evidence_plan.ready_to_collect_evidence,
+        commands,
+        "<provider-id>",
+    );
+    if !manifest_path.is_file() {
+        audit
+            .blockers
+            .push("connected-brain-runtimes.json is missing".to_string());
+        audit.next_action =
+            "Materialize the secret-free connected-brain manifest template before provider execution.".to_string();
+        return audit;
+    }
+
+    audit.manifest_present = true;
+    let manifest_bytes = match fs::read(&manifest_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            audit.status = "wrapper_manifest_unreadable".to_string();
+            audit
+                .blockers
+                .push(format!("manifest could not be read: {error}"));
+            return audit;
+        }
+    };
+    let manifest: serde_json::Value = match serde_json::from_slice(&manifest_bytes) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            audit.status = "wrapper_manifest_invalid".to_string();
+            audit
+                .blockers
+                .push(format!("manifest is not valid JSON: {error}"));
+            return audit;
+        }
+    };
+    audit.manifest_parseable = true;
+    let providers = manifest
+        .get("providers")
+        .and_then(|providers| providers.as_array())
+        .cloned()
+        .unwrap_or_default();
+    audit.provider_count = providers.len();
+    let planned_provider_id = evidence_plan
+        .config_checks
+        .iter()
+        .find(|check| check.id == "connected_brain_provider")
+        .and_then(|check| check.selected_id.clone());
+    let provider = planned_provider_id
+        .as_deref()
+        .and_then(|id| replacement_cli_manifest_provider_by_id(&providers, id))
+        .or_else(|| {
+            providers.iter().find(|provider| {
+                replacement_cli_json_string_array(provider.get("capabilities"))
+                    .iter()
+                    .any(|capability| capability == "replacement_grade_cli")
+            })
+        });
+    let Some(provider) = provider else {
+        audit.status = "wrapper_manifest_provider_missing".to_string();
+        audit.blockers.push(
+            "no provider declares replacement_grade_cli in connected-brain-runtimes.json"
+                .to_string(),
+        );
+        audit.next_action =
+            "Add a provider with replacement_grade_cli capability before collecting provider evidence."
+                .to_string();
+        return audit;
+    };
+
+    let provider_id = replacement_cli_json_string(provider.get("id"))
+        .unwrap_or_else(|| "<provider-id>".to_string());
+    audit.selected_provider_id = Some(provider_id.clone());
+    audit.selected_brain_id = replacement_cli_json_string(provider.get("brain_id"));
+    audit.evidence_plan_command =
+        replacement_cli_provider_command(&commands.evidence_plan, &provider_id);
+    audit.prepare_evidence_inputs_command =
+        replacement_cli_provider_command(&commands.prepare_evidence_inputs, &provider_id);
+    audit.collect_evidence_command =
+        replacement_cli_provider_command(&commands.collect_external_brain_evidence, &provider_id);
+
+    let capabilities = replacement_cli_json_string_array(provider.get("capabilities"));
+    audit.capability_declared = capabilities
+        .iter()
+        .any(|capability| capability == "replacement_grade_cli");
+    let command = replacement_cli_json_string_array(provider.get("command"));
+    audit.command_declared = !command.is_empty();
+    audit.command_placeholders_absent = command
+        .iter()
+        .all(|part| !replacement_cli_manifest_placeholder(part));
+    let (command_first_binary, command_path_status, command_executable) =
+        replacement_cli_static_command_path_status(&command);
+    audit.command_first_binary = command_first_binary;
+    audit.command_path_status = command_path_status;
+    audit.command_executable = command_executable;
+    audit.approval_ready = replacement_cli_manifest_field_ready(provider.get("approved_by"))
+        && replacement_cli_manifest_field_ready(provider.get("approval_ref"));
+    audit.model_ready = replacement_cli_manifest_field_ready(provider.get("model_id"));
+    audit.allow_model_execution = provider
+        .get("allow_model_execution")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    audit.network_access_blocked = !provider
+        .get("network_access")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    audit.device_access_blocked = !provider
+        .get("device_access")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    audit.external_resources_untouched = !provider
+        .get("external_resources_mutated")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+
+    replacement_cli_push_manifest_audit_blockers(&mut audit);
+    audit.ready_to_collect_evidence =
+        audit.evidence_plan_ready && audit.blockers.is_empty() && audit.command_executable;
+    audit.status = if audit.ready_to_collect_evidence {
+        "wrapper_manifest_provider_ready"
+    } else {
+        "wrapper_manifest_provider_blocked"
+    }
+    .to_string();
+    audit.next_action = if audit.ready_to_collect_evidence {
+        "Run collect-evidence only after the operator is ready to execute the approved provider wrapper and inspect the receipt.".to_string()
+    } else {
+        "Fix the connected-brain provider manifest and wrapper executable before collecting provider evidence.".to_string()
+    };
+    audit
+}
+
+fn replacement_cli_empty_manifest_audit(
+    status: &str,
+    manifest_path: &str,
+    evidence_plan_ready: bool,
+    commands: &InteractiveReplacementCliCommands,
+    provider_id: &str,
+) -> InteractiveReplacementCliProviderWrapperManifestAudit {
+    InteractiveReplacementCliProviderWrapperManifestAudit {
+        schema_version:
+            "forge.interactive.replacement_cli.provider_wrapper_manifest_audit.v1".to_string(),
+        status: status.to_string(),
+        manifest_path: manifest_path.to_string(),
+        manifest_present: false,
+        manifest_parseable: false,
+        provider_count: 0,
+        selected_provider_id: None,
+        selected_brain_id: None,
+        capability_declared: false,
+        command_declared: false,
+        command_placeholders_absent: false,
+        command_first_binary: None,
+        command_path_status: "not_checked".to_string(),
+        command_executable: false,
+        approval_ready: false,
+        model_ready: false,
+        allow_model_execution: false,
+        network_access_blocked: false,
+        device_access_blocked: false,
+        external_resources_untouched: false,
+        evidence_plan_ready,
+        ready_to_collect_evidence: false,
+        counts_as_release_evidence: false,
+        model_execution_performed: false,
+        blockers: Vec::new(),
+        safety_requirements: vec![
+            "This audit reads the manifest and filesystem metadata only; it does not execute the provider wrapper.".to_string(),
+            "Release evidence is created only by collect-evidence after explicit operator approval.".to_string(),
+            "Model execution remains false until the provider wrapper runs and emits a reviewed provider-output receipt.".to_string(),
+        ],
+        evidence_plan_command: replacement_cli_provider_command(&commands.evidence_plan, provider_id),
+        prepare_evidence_inputs_command: replacement_cli_provider_command(
+            &commands.prepare_evidence_inputs,
+            provider_id,
+        ),
+        collect_evidence_command: replacement_cli_provider_command(
+            &commands.collect_external_brain_evidence,
+            provider_id,
+        ),
+        next_action: String::new(),
+    }
+}
+
+fn replacement_cli_manifest_provider_by_id<'a>(
+    providers: &'a [serde_json::Value],
+    provider_id: &str,
+) -> Option<&'a serde_json::Value> {
+    providers.iter().find(|provider| {
+        replacement_cli_json_string(provider.get("id")).as_deref() == Some(provider_id)
+    })
+}
+
+fn replacement_cli_json_string(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn replacement_cli_json_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| replacement_cli_json_string(Some(value)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn replacement_cli_manifest_field_ready(value: Option<&serde_json::Value>) -> bool {
+    replacement_cli_json_string(value)
+        .as_deref()
+        .is_some_and(|value| !replacement_cli_manifest_placeholder(value))
+}
+
+fn replacement_cli_manifest_placeholder(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty()
+        || value.contains("<")
+        || value.contains(">")
+        || value.contains("placeholder")
+        || value.contains("approved-")
+        || value.contains("approval-or-change-record")
+}
+
+fn replacement_cli_static_command_path_status(
+    command: &[String],
+) -> (Option<String>, String, bool) {
+    let Some(first) = command
+        .first()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return (None, "missing".to_string(), false);
+    };
+    if replacement_cli_manifest_placeholder(first) {
+        return (Some(first.to_string()), "placeholder".to_string(), false);
+    }
+    let path = Path::new(first);
+    if !path.is_absolute() {
+        return (Some(first.to_string()), "not_absolute".to_string(), false);
+    }
+    let Ok(metadata) = fs::metadata(path) else {
+        return (Some(first.to_string()), "missing".to_string(), false);
+    };
+    if !metadata.is_file() {
+        return (Some(first.to_string()), "not_file".to_string(), false);
+    }
+    if replacement_cli_metadata_executable(&metadata) {
+        (Some(first.to_string()), "executable".to_string(), true)
+    } else {
+        (Some(first.to_string()), "not_executable".to_string(), false)
+    }
+}
+
+#[cfg(unix)]
+fn replacement_cli_metadata_executable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn replacement_cli_metadata_executable(metadata: &fs::Metadata) -> bool {
+    !metadata.permissions().readonly()
+}
+
+fn replacement_cli_push_manifest_audit_blockers(
+    audit: &mut InteractiveReplacementCliProviderWrapperManifestAudit,
+) {
+    if !audit.capability_declared {
+        audit
+            .blockers
+            .push("provider must declare replacement_grade_cli capability".to_string());
+    }
+    if !audit.command_declared {
+        audit
+            .blockers
+            .push("provider command is missing".to_string());
+    }
+    if !audit.command_placeholders_absent {
+        audit
+            .blockers
+            .push("provider command still contains placeholders".to_string());
+    }
+    if !audit.command_executable {
+        audit.blockers.push(format!(
+            "provider wrapper command is not executable: {}",
+            audit.command_path_status
+        ));
+    }
+    if !audit.approval_ready {
+        audit
+            .blockers
+            .push("approved_by and approval_ref must be concrete".to_string());
+    }
+    if !audit.model_ready {
+        audit.blockers.push("model_id must be concrete".to_string());
+    }
+    if !audit.allow_model_execution {
+        audit
+            .blockers
+            .push("allow_model_execution must be true for provider evidence".to_string());
+    }
+    if !audit.network_access_blocked {
+        audit
+            .blockers
+            .push("network_access must be false for this gate".to_string());
+    }
+    if !audit.device_access_blocked {
+        audit
+            .blockers
+            .push("device_access must be false for this gate".to_string());
+    }
+    if !audit.external_resources_untouched {
+        audit
+            .blockers
+            .push("external_resources_mutated must be false".to_string());
+    }
+    if !audit.evidence_plan_ready {
+        audit
+            .blockers
+            .push("milestone evidence plan is not ready".to_string());
+    }
 }
 
 fn replacement_cli_provider_command(command: &[String], provider_id: &str) -> Vec<String> {
@@ -14165,7 +14546,7 @@ pub fn render_interactive_workflow_sidebar(panel: &InteractiveWorkflowSidebarPan
 
 pub fn render_interactive_replacement_cli(panel: &InteractiveReplacementCliPanel) -> String {
     format!(
-        "Replacement CLI: {status}; milestone {milestone}; capability {capability_id}; readiness {readiness_percent}% ({ready_surface_count}/{surface_count}); promotion_ready {promotion_ready}\nExternal brain evidence: {external_plan_status}; ready {external_ready}; providers {external_providers}; templates {external_templates}\nProvider readiness: {provider_readiness}\nProvider wrapper plans: {provider_wrapper_plans}\nSurfaces: {surfaces}\nBlockers: {blockers}\nCommands: {commands}\n",
+        "Replacement CLI: {status}; milestone {milestone}; capability {capability_id}; readiness {readiness_percent}% ({ready_surface_count}/{surface_count}); promotion_ready {promotion_ready}\nExternal brain evidence: {external_plan_status}; ready {external_ready}; providers {external_providers}; templates {external_templates}\nProvider readiness: {provider_readiness}\nProvider wrapper plans: {provider_wrapper_plans}\nWrapper manifest audit: {wrapper_manifest_status}; ready {wrapper_manifest_ready}; provider {wrapper_manifest_provider}; command {wrapper_command_status}; evidence {wrapper_counts_as_evidence}\nSurfaces: {surfaces}\nBlockers: {blockers}\nCommands: {commands}\n",
         status = panel.status,
         milestone = panel.milestone,
         capability_id = panel.capability_id,
@@ -14190,6 +14571,17 @@ pub fn render_interactive_replacement_cli(panel: &InteractiveReplacementCliPanel
         },
         provider_readiness = render_replacement_cli_provider_readiness_summary(panel),
         provider_wrapper_plans = render_replacement_cli_provider_wrapper_plan_summary(panel),
+        wrapper_manifest_status = panel.provider_wrapper_manifest_audit.status,
+        wrapper_manifest_ready = panel.provider_wrapper_manifest_audit.ready_to_collect_evidence,
+        wrapper_manifest_provider = panel
+            .provider_wrapper_manifest_audit
+            .selected_provider_id
+            .as_deref()
+            .unwrap_or("none"),
+        wrapper_command_status = panel.provider_wrapper_manifest_audit.command_path_status,
+        wrapper_counts_as_evidence = panel
+            .provider_wrapper_manifest_audit
+            .counts_as_release_evidence,
         surfaces = render_replacement_cli_surface_summary(panel),
         blockers = if panel.blockers.is_empty() {
             "none".to_string()

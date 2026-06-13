@@ -53637,6 +53637,133 @@ fn interactive_replacement_cli_panel_aggregates_operator_readiness() {
 }
 
 #[test]
+#[cfg(unix)]
+fn interactive_replacement_cli_panel_audits_ready_provider_wrapper_without_execution() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project_root = temp.path().join("replacement-cli-ready-project");
+    let forge_dir = project_root.join(".forge");
+    std::fs::create_dir_all(&forge_dir).unwrap();
+    let sentinel = temp.path().join("provider-executed.sentinel");
+    let provider_script = temp.path().join("project-provider-wrapper.sh");
+    std::fs::write(
+        &provider_script,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nprintf '{{\"schema_version\":\"forge.connected_external_brain.provider_output.v1\",\"provider_id\":\"project-provider\",\"quality_score\":0.98,\"latency_ms\":10,\"model_execution_performed\":true,\"real_provider_execution_performed\":true}}'\n",
+            sentinel.display()
+        ),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&provider_script).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&provider_script, perms).unwrap();
+
+    std::fs::write(
+        forge_dir.join("connected-brain-runtimes.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "providers": [{
+                "id": "project-provider",
+                "brain_id": "project-provider",
+                "model_id": "project-provider-model-v1",
+                "provider_class": "external_cli",
+                "capabilities": ["replacement_grade_cli"],
+                "command": [provider_script.display().to_string()],
+                "approved_by": "arthur",
+                "approval_ref": "provider-approval-ready-001",
+                "allow_model_execution": true,
+                "network_access": false,
+                "device_access": false,
+                "external_resources_mutated": false
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "replacement-cli",
+            "--project-root",
+            project_root.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let panel: Value = serde_json::from_slice(&output).unwrap();
+    let audit = &panel["provider_wrapper_manifest_audit"];
+    assert_eq!(
+        audit["schema_version"],
+        "forge.interactive.replacement_cli.provider_wrapper_manifest_audit.v1"
+    );
+    assert_eq!(audit["status"], "wrapper_manifest_provider_ready");
+    assert_eq!(audit["manifest_present"], true);
+    assert_eq!(audit["manifest_parseable"], true);
+    assert_eq!(audit["provider_count"], 1);
+    assert_eq!(audit["selected_provider_id"], "project-provider");
+    assert_eq!(audit["selected_brain_id"], "project-provider");
+    assert_eq!(audit["capability_declared"], true);
+    assert_eq!(audit["command_declared"], true);
+    assert_eq!(audit["command_executable"], true);
+    assert_eq!(audit["command_path_status"], "executable");
+    assert_eq!(audit["approval_ready"], true);
+    assert_eq!(audit["model_ready"], true);
+    assert_eq!(audit["allow_model_execution"], true);
+    assert_eq!(audit["network_access_blocked"], true);
+    assert_eq!(audit["device_access_blocked"], true);
+    assert_eq!(audit["external_resources_untouched"], true);
+    assert_eq!(audit["evidence_plan_ready"], true);
+    assert_eq!(audit["ready_to_collect_evidence"], true);
+    assert_eq!(audit["counts_as_release_evidence"], false);
+    assert_eq!(audit["model_execution_performed"], false);
+    assert!(audit["collect_evidence_command"]
+        .as_array()
+        .unwrap()
+        .windows(2)
+        .any(|pair| pair[0] == serde_json::json!("--connected-brain")
+            && pair[1] == serde_json::json!("project-provider")));
+    assert!(audit["safety_requirements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item
+            .as_str()
+            .unwrap()
+            .contains("does not execute the provider wrapper")));
+    assert!(
+        !sentinel.exists(),
+        "replacement CLI manifest audit must not execute the provider wrapper"
+    );
+
+    let text_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "replacement-cli",
+            "--project-root",
+            project_root.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(text.contains("Wrapper manifest audit: wrapper_manifest_provider_ready"));
+    assert!(
+        !sentinel.exists(),
+        "human render must also avoid executing the provider wrapper"
+    );
+}
+
+#[test]
 fn interactive_multimodal_runtime_panel_surfaces_addon_guard_and_evidence_path() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
