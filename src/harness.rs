@@ -6,6 +6,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -4452,6 +4453,14 @@ pub fn install_cli_provider_adapter(
 pub fn inspect_cli_harness_shim_status(
     options: CliShimStatusOptions<'_>,
 ) -> Result<CliShimStatusReport> {
+    let path_var = env::var_os("PATH");
+    inspect_cli_harness_shim_status_with_path(options, path_var.as_deref())
+}
+
+pub fn inspect_cli_harness_shim_status_with_path(
+    options: CliShimStatusOptions<'_>,
+    path_var: Option<&OsStr>,
+) -> Result<CliShimStatusReport> {
     let executor = normalize_executor(options.executor);
     let shim_dir = options
         .shim_dir
@@ -4471,8 +4480,9 @@ pub fn inspect_cli_harness_shim_status(
         .as_deref()
         .is_some_and(|content| content.contains(CLI_SHIM_MARKER));
     let executable = shim_exists && is_executable(&shim_path);
-    let path_entry_index = path_entry_index(&shim_dir);
-    let path_resolution = resolve_executable_from_path(&shim_binary_name(&executor));
+    let path_entry_index = path_entry_index_with_path(&shim_dir, path_var);
+    let path_resolution =
+        resolve_executable_from_path_with_path(&shim_binary_name(&executor), path_var);
     let resolved_is_shim = path_resolution
         .path
         .as_deref()
@@ -4492,7 +4502,7 @@ pub fn inspect_cli_harness_shim_status(
         .and_then(|script| script.real_command.as_ref())
         .is_none()
     {
-        resolve_real_command_for_status(&executor, &shim_dir)
+        resolve_real_command_for_status_with_path(&executor, &shim_dir, path_var)
     } else {
         None
     };
@@ -5398,13 +5408,13 @@ fn resolve_real_command_for_shim(
     );
 }
 
-fn resolve_real_command_for_status(
+fn resolve_real_command_for_status_with_path(
     executor: &str,
     shim_dir: &Path,
+    path_var: Option<&OsStr>,
 ) -> Option<RealCommandResolution> {
     let binary_name = shim_binary_name(executor);
-    let path_var = env::var_os("PATH")?;
-    for dir in env::split_paths(&path_var) {
+    for dir in env::split_paths(path_var?) {
         if same_path(&dir, shim_dir) {
             continue;
         }
@@ -5425,14 +5435,17 @@ struct PathResolution {
     status: String,
 }
 
-fn resolve_executable_from_path(binary_name: &str) -> PathResolution {
-    let Some(path_var) = env::var_os("PATH") else {
+fn resolve_executable_from_path_with_path(
+    binary_name: &str,
+    path_var: Option<&OsStr>,
+) -> PathResolution {
+    let Some(path_var) = path_var else {
         return PathResolution {
             path: None,
             status: "path_unavailable".to_string(),
         };
     };
-    for dir in env::split_paths(&path_var) {
+    for dir in env::split_paths(path_var) {
         let candidate = dir.join(binary_name);
         if candidate.is_file() {
             return PathResolution {
@@ -5447,9 +5460,8 @@ fn resolve_executable_from_path(binary_name: &str) -> PathResolution {
     }
 }
 
-fn path_entry_index(path: &Path) -> Option<usize> {
-    let path_var = env::var_os("PATH")?;
-    env::split_paths(&path_var)
+fn path_entry_index_with_path(path: &Path, path_var: Option<&OsStr>) -> Option<usize> {
+    env::split_paths(path_var?)
         .enumerate()
         .find_map(|(index, entry)| same_path(&entry, path).then_some(index))
 }

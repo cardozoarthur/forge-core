@@ -52452,6 +52452,24 @@ fn forge_first_harness_smoke_proves_headroom_wrapper_and_shim_without_child_exec
     assert_eq!(json["shim_status"]["forge_owned"], true);
     assert_eq!(json["shim_status"]["executable"], true);
     assert_eq!(json["shim_status"]["would_recurse"], false);
+    assert_eq!(json["activated_shim_status"]["status"], "shim_status_ready");
+    assert_eq!(
+        json["activated_shim_status"]["path_precedence"],
+        "shim_first"
+    );
+    assert_eq!(
+        json["activated_shim_status"]["activation_diagnostic"]["status"],
+        "shim_activation_active"
+    );
+    assert_eq!(
+        json["activated_shim_status"]["activation_diagnostic"]["activation_required"],
+        false
+    );
+    assert_eq!(json["activated_shim_status"]["would_recurse"], false);
+    assert!(json["activated_shim_status"]["resolved_path_from_path"]
+        .as_str()
+        .unwrap()
+        .contains("/bin/codex"));
     assert_eq!(json["exec_receipt"]["status"], "harness_exec_dry_run");
     assert_eq!(json["exec_receipt"]["executed"], false);
     assert_eq!(json["exec_receipt"]["forge_first"], true);
@@ -52463,6 +52481,7 @@ fn forge_first_harness_smoke_proves_headroom_wrapper_and_shim_without_child_exec
         "bootstrap_dry_run",
         "shim_installed_in_smoke_dir",
         "shim_audit_safe",
+        "one_shot_activation_ready",
         "exec_dry_run_forge_first",
         "external_cli_not_executed_or_modified",
     ] {

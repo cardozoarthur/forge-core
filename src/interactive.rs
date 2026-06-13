@@ -22,7 +22,8 @@ use crate::harness::{
     analyze_token_headroom, build_harness_adoption_plan, build_harness_bootstrap_report,
     build_harness_doctor_report, build_harness_executor_compatibility_report,
     build_harness_headroom_plan, build_harness_mode_report, build_headroom_stats_report,
-    inspect_cli_harness_shim_status, install_cli_harness_shim, persist_token_headroom_report,
+    inspect_cli_harness_shim_status, inspect_cli_harness_shim_status_with_path,
+    install_cli_harness_shim, persist_token_headroom_report,
     resolve_harness_forge_first_source_for_project, resolve_harness_runtime_policy,
     run_cli_harness_exec, CliHarnessExecOptions, CliShimInstallOptions, CliShimInstallReport,
     CliShimStatusOptions, CliShimStatusReport, CliWrapperPlanReport, HarnessAdoptionPlanOptions,
@@ -2929,6 +2930,7 @@ pub struct ForgeFirstHarnessSmokeReport {
     pub bootstrap_plan: HarnessBootstrapReport,
     pub shim_install: CliShimInstallReport,
     pub shim_status: CliShimStatusReport,
+    pub activated_shim_status: CliShimStatusReport,
     pub exec_receipt: crate::harness::CliHarnessExecReceipt,
     pub checks: Vec<OperationalTuiSmokeCheck>,
     pub commands: Vec<String>,
@@ -5101,6 +5103,14 @@ pub fn build_forge_first_harness_smoke(
         shim_dir: &shim_dir,
         executor,
     })?;
+    let activated_path = forge_first_harness_smoke_activation_path(&shim_dir);
+    let activated_shim_status = inspect_cli_harness_shim_status_with_path(
+        CliShimStatusOptions {
+            shim_dir: &shim_dir,
+            executor,
+        },
+        Some(activated_path.as_os_str()),
+    )?;
     let exec_command = vec![real_cmd.clone(), "forge-first-harness-smoke".to_string()];
     let exec_receipt = run_cli_harness_exec(CliHarnessExecOptions {
         store: Some(store),
@@ -5207,6 +5217,25 @@ pub fn build_forge_first_harness_smoke(
             "forge harness shim-status --output json",
         ),
         operational_tui_smoke_check(
+            "one_shot_activation_ready",
+            "One-shot PATH activation makes the Forge-owned shim first without shell rc writes",
+            activated_shim_status.status == "shim_status_ready"
+                && activated_shim_status.path_precedence == "shim_first"
+                && activated_shim_status.activation_diagnostic.status == "shim_activation_active"
+                && !activated_shim_status
+                    .activation_diagnostic
+                    .activation_required
+                && !activated_shim_status.would_recurse,
+            format!(
+                "{}; path {}; activation {}; rc writes false; recurse {}",
+                activated_shim_status.status,
+                activated_shim_status.path_precedence,
+                activated_shim_status.activation_diagnostic.status,
+                activated_shim_status.would_recurse
+            ),
+            "PATH=<shim-dir>:$PATH forge harness shim-status --output json",
+        ),
+        operational_tui_smoke_check(
             "exec_dry_run_forge_first",
             "Harness exec remains dry-run while projecting Forge-first policy",
             exec_receipt.status == "harness_exec_dry_run"
@@ -5260,6 +5289,7 @@ pub fn build_forge_first_harness_smoke(
         bootstrap_plan,
         shim_install,
         shim_status,
+        activated_shim_status,
         exec_receipt,
         checks,
         commands: vec![
@@ -5713,6 +5743,14 @@ fn forge_harness_smoke_root() -> PathBuf {
     ))
 }
 
+fn forge_first_harness_smoke_activation_path(shim_dir: &Path) -> std::ffi::OsString {
+    let mut paths = vec![shim_dir.to_path_buf()];
+    if let Some(current_path) = env::var_os("PATH") {
+        paths.extend(env::split_paths(&current_path));
+    }
+    env::join_paths(paths).unwrap_or_else(|_| shim_dir.as_os_str().to_os_string())
+}
+
 fn replacement_cli_evidence_smoke_root() -> PathBuf {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5813,7 +5851,7 @@ pub fn render_forge_first_harness_smoke(report: &ForgeFirstHarnessSmokeReport) -
         .collect::<Vec<_>>()
         .join(" | ");
     format!(
-        "Forge-first harness smoke: {status}; executor {executor}; project {project_root}; shim {shim_dir}; real_cmd {real_cmd}\nHeadroom: {headroom_status}; saved {saved_tokens} tokens; persisted {persisted}; retrieval {retrieval_available}\nAdoption: {adoption_status}; bootstrap {bootstrap_status}; shim install {shim_install_status}; shim audit {shim_status} ({shim_path_precedence}); exec {exec_status}; external mutated {mutates_external_cli}; external executed {executes_external_cli}\nchecks: {checks}\ncommands: {commands}\n",
+        "Forge-first harness smoke: {status}; executor {executor}; project {project_root}; shim {shim_dir}; real_cmd {real_cmd}\nHeadroom: {headroom_status}; saved {saved_tokens} tokens; persisted {persisted}; retrieval {retrieval_available}\nAdoption: {adoption_status}; bootstrap {bootstrap_status}; shim install {shim_install_status}; shim audit {shim_status} ({shim_path_precedence}); one-shot activation {activated_status} ({activated_path_precedence}); exec {exec_status}; external mutated {mutates_external_cli}; external executed {executes_external_cli}\nchecks: {checks}\ncommands: {commands}\n",
         status = report.status,
         executor = report.executor,
         project_root = report.project_root,
@@ -5828,6 +5866,8 @@ pub fn render_forge_first_harness_smoke(report: &ForgeFirstHarnessSmokeReport) -
         shim_install_status = report.shim_install.status,
         shim_status = report.shim_status.status,
         shim_path_precedence = report.shim_status.path_precedence,
+        activated_status = report.activated_shim_status.status,
+        activated_path_precedence = report.activated_shim_status.path_precedence,
         exec_status = report.exec_receipt.status,
         mutates_external_cli = report.mutates_external_cli,
         executes_external_cli = report.executes_external_cli,
