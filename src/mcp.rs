@@ -1837,6 +1837,9 @@ struct MilestonePrepareEvidenceInputsInput {
     project_root: Option<String>,
     connected_brain: Option<String>,
     connected_runtime: Option<String>,
+    provider_command: Option<String>,
+    model_id: Option<String>,
+    approval_ref: Option<String>,
     apply: Option<bool>,
     approved_by: Option<String>,
     force: Option<bool>,
@@ -6456,6 +6459,9 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("project_root", "string", "project root where .forge manifests are prepared"),
                     ("connected_brain", "string", "optional connected brain provider id"),
                     ("connected_runtime", "string", "optional connected multimodal runtime id"),
+                    ("provider_command", "string", "optional approved absolute connected-brain wrapper command for replacement_grade_cli"),
+                    ("model_id", "string", "approved model or provider profile id for connected-brain manifests"),
+                    ("approval_ref", "string", "approval/change reference for connected-brain manifests"),
                     ("apply", "boolean", "write files when true; dry-run when false or omitted"),
                     ("approved_by", "string", "operator approving file writes when apply is true"),
                     ("force", "boolean", "allow overwriting existing template targets after review"),
@@ -10020,6 +10026,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 .or(input.capability)
                 .context("capability_id is required")?;
             let project_root = input.project_root.map(PathBuf::from);
+            let provider_command = input.provider_command.map(PathBuf::from);
             let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
             serde_json::to_value(prepare_milestone_evidence_inputs(
                 store,
@@ -10029,6 +10036,9 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     project_root: project_root.as_deref(),
                     connected_brain: input.connected_brain.as_deref(),
                     connected_runtime: input.connected_runtime.as_deref(),
+                    provider_command: provider_command.as_deref(),
+                    model_id: input.model_id.as_deref(),
+                    approval_ref: input.approval_ref.as_deref(),
                     apply: input.apply.unwrap_or(false),
                     approved_by: input.approved_by.as_deref(),
                     force: input.force.unwrap_or(false),

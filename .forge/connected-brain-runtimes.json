@@ -2,19 +2,19 @@
   "providers": [
     {
       "allow_model_execution": true,
-      "approval_ref": "<approval-or-change-record>",
-      "approved_by": "<operator>",
+      "approval_ref": "forge-core-local-wrapper-preflight",
+      "approved_by": "arthur",
       "brain_id": "codex",
       "capabilities": [
         "replacement_grade_cli"
       ],
       "command": [
-        "<absolute-path-to-approved-provider-command>"
+        "/home/arthur/projects/forge-core/.forge/bin/codex"
       ],
       "device_access": false,
       "external_resources_mutated": false,
       "id": "codex",
-      "model_id": "<approved-model-id>",
+      "model_id": "codex-cli-local-harness",
       "network_access": false,
       "provider_class": "external_cli"
     }

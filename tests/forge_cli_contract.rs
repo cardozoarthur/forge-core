@@ -6187,6 +6187,155 @@ fn milestone_prepare_evidence_inputs_writes_secret_free_manifest_templates_with_
 }
 
 #[test]
+fn milestone_prepare_evidence_inputs_can_materialize_approved_connected_brain_wrapper_manifest() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let project = temp.path().join("approved-provider-project");
+    let wrapper = project.join(".forge/bin/codex");
+    fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+    fs::write(&wrapper, "#!/usr/bin/env sh\necho '{\"status\":\"ok\"}'\n").unwrap();
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&wrapper).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&wrapper, permissions).unwrap();
+    }
+
+    let apply_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "prepare-evidence-inputs",
+            "--version",
+            "0.5",
+            "--capability",
+            "replacement_grade_cli",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args(["--connected-brain", "codex", "--provider-command"])
+        .arg(wrapper.to_str().unwrap())
+        .args([
+            "--model-id",
+            "codex-cli-approved-test",
+            "--approval-ref",
+            "change-123",
+            "--apply",
+            "--approved-by",
+            "arthur",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let apply_json: Value = serde_json::from_slice(&apply_output).unwrap();
+    assert_eq!(apply_json["status"], "manifest_templates_written");
+    assert_eq!(
+        apply_json["promotion_impact"],
+        "prepares_inputs_only_not_evidence_not_auto_promoted"
+    );
+    assert_eq!(
+        apply_json["evidence_plan"]["ready_to_collect_evidence"],
+        false
+    );
+    assert_eq!(apply_json["approved_by"], "arthur");
+
+    let manifest_path = project.join(".forge/connected-brain-runtimes.json");
+    let manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let provider = &manifest["providers"][0];
+    assert_eq!(provider["id"], "codex");
+    assert_eq!(provider["brain_id"], "codex");
+    assert_eq!(provider["provider_class"], "external_cli");
+    assert_eq!(provider["command"][0], wrapper.display().to_string());
+    assert_eq!(provider["approved_by"], "arthur");
+    assert_eq!(provider["approval_ref"], "change-123");
+    assert_eq!(provider["model_id"], "codex-cli-approved-test");
+    assert_eq!(provider["allow_model_execution"], true);
+    assert_eq!(provider["network_access"], false);
+    assert_eq!(provider["device_access"], false);
+    assert_eq!(provider["external_resources_mutated"], false);
+    assert!(provider["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("replacement_grade_cli")));
+
+    let plan_output = forge()
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args([
+            "milestone",
+            "evidence-plan",
+            "--version",
+            "0.5",
+            "--capability",
+            "replacement_grade_cli",
+            "--project-root",
+        ])
+        .arg(project.to_str().unwrap())
+        .args(["--connected-brain", "codex", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan_json: Value = serde_json::from_slice(&plan_output).unwrap();
+    assert_eq!(plan_json["status"], "evidence_inputs_ready");
+    assert_eq!(plan_json["ready_to_collect_evidence"], true);
+    assert!(plan_json["manifest_templates"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(plan_json["config_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["id"] == "connected_brain_provider"
+            && check["status"] == "ready"
+            && check["selected_id"] == "codex"));
+    assert!(plan_json["config_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["id"] == "connected_brain_provider_command"
+            && check["status"] == "ready"
+            && check["path"] == wrapper.display().to_string()));
+    assert!(plan_json["evidence_collection_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_str()
+            .unwrap()
+            .contains("collect-evidence --version 0.5")));
+
+    let manifest_output = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest_output).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.milestone.prepare_evidence_inputs");
+    assert_eq!(
+        tool["input_schema"]["properties"]["provider_command"]["type"],
+        "string"
+    );
+    assert_eq!(
+        tool["input_schema"]["properties"]["model_id"]["type"],
+        "string"
+    );
+    assert_eq!(
+        tool["input_schema"]["properties"]["approval_ref"]["type"],
+        "string"
+    );
+}
+
+#[test]
 fn milestone_connected_brain_template_placeholders_do_not_count_as_ready_evidence_inputs() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -7007,6 +7156,12 @@ fn packaged_skill_mentions_export_demo_agent_surface() {
     assert!(
         forge_core::skill::SKILL_MD.contains("forge milestone prepare-evidence-inputs"),
         "the packaged Forge skill should teach agents how to materialize secret-free milestone evidence input manifests"
+    );
+    assert!(
+        forge_core::skill::SKILL_MD.contains("--provider-command <absolute-wrapper-path>")
+            && forge_core::skill::SKILL_MD.contains("--model-id <approved-model-id>")
+            && forge_core::skill::SKILL_MD.contains("--approval-ref <approval-ref>"),
+        "the packaged Forge skill should teach agents how to prepare an approved connected-brain wrapper manifest without collecting evidence"
     );
     assert!(
         forge_core::skill::SKILL_MD.contains("forge.milestone.prepare_evidence_inputs"),

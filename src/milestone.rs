@@ -214,6 +214,9 @@ pub struct MilestonePrepareEvidenceInputsOptions<'a> {
     pub project_root: Option<&'a Path>,
     pub connected_brain: Option<&'a str>,
     pub connected_runtime: Option<&'a str>,
+    pub provider_command: Option<&'a Path>,
+    pub model_id: Option<&'a str>,
+    pub approval_ref: Option<&'a str>,
     pub apply: bool,
     pub approved_by: Option<&'a str>,
     pub force: bool,
@@ -971,7 +974,8 @@ pub fn prepare_milestone_evidence_inputs(
     for template in &plan.manifest_templates {
         let target_path = PathBuf::from(&template.target_path);
         let existed_before = target_path.exists();
-        let rendered = serde_json::to_string_pretty(&template.template_json)
+        let template_json = render_prepared_milestone_template_json(template, &options)?;
+        let rendered = serde_json::to_string_pretty(&template_json)
             .context("render milestone evidence input template")?;
         let content = format!("{rendered}\n");
         let created_parent_dir = if options.apply {
@@ -1056,6 +1060,94 @@ pub fn prepare_milestone_evidence_inputs(
         next_action: next_action.to_string(),
         promotion_impact: "prepares_inputs_only_not_evidence_not_auto_promoted".to_string(),
     })
+}
+
+fn render_prepared_milestone_template_json(
+    template: &MilestoneEvidencePlanManifestTemplate,
+    options: &MilestonePrepareEvidenceInputsOptions<'_>,
+) -> Result<serde_json::Value> {
+    if template.id != "connected_brain_runtime_manifest"
+        || options.capability_id != "replacement_grade_cli"
+        || (options.provider_command.is_none()
+            && options.model_id.is_none()
+            && options.approval_ref.is_none())
+    {
+        return Ok(template.template_json.clone());
+    }
+
+    let provider_command = options.provider_command.context(
+        "--provider-command is required when preparing an approved connected brain provider manifest",
+    )?;
+    let model_id = normalize_required(
+        options.model_id.unwrap_or_default(),
+        "model-id for approved connected brain provider manifest",
+    )?;
+    let approval_ref = normalize_required(
+        options.approval_ref.unwrap_or_default(),
+        "approval-ref for approved connected brain provider manifest",
+    )?;
+    let approved_by = normalize_required(
+        options.approved_by.unwrap_or_default(),
+        "approved-by for approved connected brain provider manifest",
+    )?;
+
+    let project_root = options
+        .project_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let command_path =
+        normalize_connected_brain_provider_command_path(&project_root, provider_command);
+    let command_path_text = command_path.display().to_string();
+    let (command_status, command_summary) =
+        milestone_connected_brain_command_path_status(Some(&command_path_text));
+    if command_status != "ready" {
+        bail!("{command_summary}");
+    }
+
+    let mut template_json = template.template_json.clone();
+    let providers = template_json
+        .get_mut("providers")
+        .and_then(serde_json::Value::as_array_mut)
+        .context("connected brain runtime manifest template must contain providers array")?;
+    let provider = providers
+        .first_mut()
+        .context("connected brain runtime manifest template must contain a provider")?;
+    let provider_id = options
+        .connected_brain
+        .map(str::to_string)
+        .or_else(|| {
+            provider
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "codex".to_string());
+
+    provider["id"] = serde_json::json!(provider_id);
+    provider["brain_id"] = serde_json::json!(options.connected_brain.unwrap_or("codex"));
+    provider["provider_class"] = serde_json::json!("external_cli");
+    provider["command"] = serde_json::json!([command_path_text]);
+    provider["approved_by"] = serde_json::json!(approved_by);
+    provider["approval_ref"] = serde_json::json!(approval_ref);
+    provider["model_id"] = serde_json::json!(model_id);
+    provider["allow_model_execution"] = serde_json::json!(true);
+    provider["network_access"] = serde_json::json!(false);
+    provider["device_access"] = serde_json::json!(false);
+    provider["external_resources_mutated"] = serde_json::json!(false);
+    provider["capabilities"] = serde_json::json!(["replacement_grade_cli"]);
+
+    Ok(template_json)
+}
+
+fn normalize_connected_brain_provider_command_path(
+    project_root: &Path,
+    provider_command: &Path,
+) -> PathBuf {
+    if provider_command.is_absolute() {
+        provider_command.to_path_buf()
+    } else {
+        project_root.join(provider_command)
+    }
 }
 
 pub fn collect_milestone_evidence(

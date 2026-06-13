@@ -3707,6 +3707,12 @@ enum MilestoneCommands {
         connected_brain: Option<String>,
         #[arg(long = "connected-runtime")]
         connected_runtime: Option<String>,
+        #[arg(long = "provider-command")]
+        provider_command: Option<PathBuf>,
+        #[arg(long = "model-id")]
+        model_id: Option<String>,
+        #[arg(long = "approval-ref")]
+        approval_ref: Option<String>,
         #[arg(long)]
         apply: bool,
         #[arg(long = "approved-by")]
@@ -8989,6 +8995,9 @@ fn run() -> Result<i32> {
                 project_root,
                 connected_brain,
                 connected_runtime,
+                provider_command,
+                model_id,
+                approval_ref,
                 apply,
                 approved_by,
                 force,
@@ -9004,6 +9013,9 @@ fn run() -> Result<i32> {
                         project_root: project_root.as_deref(),
                         connected_brain: connected_brain.as_deref(),
                         connected_runtime: connected_runtime.as_deref(),
+                        provider_command: provider_command.as_deref(),
+                        model_id: model_id.as_deref(),
+                        approval_ref: approval_ref.as_deref(),
                         apply,
                         approved_by: approved_by.as_deref(),
                         force,
