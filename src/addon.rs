@@ -1538,6 +1538,8 @@ pub struct CapabilityResolutionReport {
     #[serde(default)]
     pub capability_suggestions: Vec<CapabilitySuggestion>,
     #[serde(default)]
+    pub blocked_capabilities: Vec<BlockedCapability>,
+    #[serde(default)]
     pub capability_discovery_plan: CapabilityDiscoveryPlan,
     #[serde(default)]
     pub active_addons: Vec<String>,
@@ -1551,6 +1553,28 @@ pub struct CapabilityResolutionReport {
     pub registry_syncs: Vec<AddonRegistrySyncReport>,
     #[serde(default)]
     pub intent_overlay: CapabilityIntentOverlay,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockedCapability {
+    pub id: String,
+    pub title: String,
+    pub source_addon: String,
+    pub source_addon_version: String,
+    pub lifecycle: String,
+    pub reason: String,
+    #[serde(default)]
+    pub matched_keywords: Vec<String>,
+    #[serde(default)]
+    pub domains: Vec<String>,
+    #[serde(default)]
+    pub workflow_extensions: Vec<String>,
+    #[serde(default)]
+    pub required_permissions: Vec<String>,
+    #[serde(default)]
+    pub authorization_commands: Vec<Vec<String>>,
+    #[serde(default)]
+    pub mcp_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2167,6 +2191,7 @@ impl Default for CapabilityResolutionReport {
             required_capabilities: Vec::new(),
             missing_capabilities: Vec::new(),
             capability_suggestions: Vec::new(),
+            blocked_capabilities: Vec::new(),
             capability_discovery_plan: CapabilityDiscoveryPlan::default(),
             active_addons: Vec::new(),
             available_capabilities: Vec::new(),
@@ -6258,6 +6283,7 @@ pub fn resolve_goal_capabilities(goal: &str, catalog: &AddonCatalog) -> Capabili
         .collect::<BTreeSet<_>>();
     let mut required = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut blocked_capabilities = Vec::new();
 
     for capability_id in [
         CAP_WORKFLOW_RUNTIME,
@@ -6291,15 +6317,7 @@ pub fn resolve_goal_capabilities(goal: &str, catalog: &AddonCatalog) -> Capabili
             if seen.contains(&capability.id) {
                 continue;
             }
-            let matched = capability
-                .keywords
-                .iter()
-                .filter(|keyword| {
-                    let keyword = keyword.trim().to_lowercase();
-                    !keyword.is_empty() && lower_goal.contains(&keyword)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
+            let matched = capability_keyword_matches(capability, &lower_goal);
             if !matched.is_empty() {
                 push_need(
                     &mut required,
@@ -6310,6 +6328,19 @@ pub fn resolve_goal_capabilities(goal: &str, catalog: &AddonCatalog) -> Capabili
                     matched,
                 );
             }
+        }
+    }
+
+    for addon in &catalog.addons {
+        if addon.lifecycle != "unauthorized" {
+            continue;
+        }
+        for capability in &addon.capabilities {
+            let matched = capability_keyword_matches(capability, &lower_goal);
+            if matched.is_empty() {
+                continue;
+            }
+            blocked_capabilities.push(blocked_capability(addon, capability, matched));
         }
     }
 
@@ -6353,6 +6384,7 @@ pub fn resolve_goal_capabilities(goal: &str, catalog: &AddonCatalog) -> Capabili
         required_capabilities: required,
         missing_capabilities: missing,
         capability_suggestions,
+        blocked_capabilities,
         capability_discovery_plan,
         active_addons,
         available_capabilities: available_capabilities.into_iter().collect(),
@@ -10106,6 +10138,67 @@ fn push_need(
         matched_keywords,
         workflow_extensions: capability.workflow_extensions.clone(),
     });
+}
+
+fn capability_keyword_matches(capability: &CapabilityDeclaration, lower_goal: &str) -> Vec<String> {
+    capability
+        .keywords
+        .iter()
+        .filter(|keyword| {
+            let keyword = keyword.trim().to_lowercase();
+            !keyword.is_empty() && lower_goal.contains(&keyword)
+        })
+        .cloned()
+        .collect()
+}
+
+fn blocked_capability(
+    addon: &AddonManifest,
+    capability: &CapabilityDeclaration,
+    matched_keywords: Vec<String>,
+) -> BlockedCapability {
+    let required_permissions = addon
+        .permissions
+        .iter()
+        .filter(|permission| permission.requires_human_approval)
+        .map(|permission| permission.id.clone())
+        .collect::<Vec<_>>();
+    let authorization_commands = addon
+        .permissions
+        .iter()
+        .filter(|permission| permission.requires_human_approval)
+        .map(|permission| {
+            vec![
+                "forge".to_string(),
+                "addons".to_string(),
+                "authorize-permission".to_string(),
+                "--addon".to_string(),
+                addon.id.clone(),
+                "--permission".to_string(),
+                permission.id.clone(),
+                "--risk".to_string(),
+                permission.risk.clone(),
+                "--approved-by".to_string(),
+                "<operator>".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    BlockedCapability {
+        id: capability.id.clone(),
+        title: capability.title.clone(),
+        source_addon: addon.id.clone(),
+        source_addon_version: addon.version.clone(),
+        lifecycle: addon.lifecycle.clone(),
+        reason: "capability matches the goal but the Addon is blocked until required human approvals are recorded".to_string(),
+        matched_keywords,
+        domains: capability.domains.clone(),
+        workflow_extensions: capability.workflow_extensions.clone(),
+        required_permissions,
+        authorization_commands,
+        mcp_tools: vec!["forge.addons.authorize_permission".to_string()],
+    }
 }
 
 fn build_intent_overlay(

@@ -15128,6 +15128,27 @@ runtime_contracts:
         .unwrap()
         .iter()
         .any(|capability| capability["id"] == "payment_charge"));
+    let blocked_capabilities = resolve_after_revoke_json["blocked_capabilities"]
+        .as_array()
+        .expect("resolve should expose authorization-blocked capabilities");
+    let blocked_payment = blocked_capabilities
+        .iter()
+        .find(|capability| capability["id"] == "payment_charge")
+        .expect("revoked matching capability should remain discoverable as blocked");
+    assert_eq!(blocked_payment["source_addon"], "forge.addon.payments");
+    assert_eq!(blocked_payment["lifecycle"], "unauthorized");
+    assert_eq!(
+        blocked_payment["required_permissions"],
+        serde_json::json!(["payments.charge"])
+    );
+    assert!(blocked_payment["authorization_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("authorize-permission".to_string()))));
 }
 
 #[test]
