@@ -37442,6 +37442,48 @@ views:
 "#,
     )
     .unwrap();
+    fs::write(
+        addon_dir.join("unauthorized-ops.yaml"),
+        r#"
+id: forge.addon.unauthorized_ops
+name: Unauthorized Ops Addon
+version: 0.1.0
+lifecycle: enabled
+permissions:
+  - id: unauthorized.workflow.mutate
+    description: High-risk workflow mutation used to prove Ops diagnostics.
+    risk: high
+    requires_human_approval: true
+    actions: [modify_workflow]
+    resources: [workflow]
+views:
+  - id: unauthorized.ops
+    title: Unauthorized Ops
+    surface: ops_console
+    type: dashboard
+    component: forge.ops.unauthorized_ops
+    data_bindings:
+      - id: unauthorized_workflows
+        source: forge.ops.snapshot.operational_digital_twin
+        query: workflow.*
+        scope: workflow
+        refresh_seconds: 5
+        required_capability: workflow_runtime
+    actions:
+      - id: unauthorized.mutate
+        label: Mutate workflow
+        type: command
+        target: forge.workflow.update
+        method: CLI
+        permission: unauthorized.workflow.mutate
+        requires_confirmation: true
+        mutates_workflow: true
+        payload_schema: [workflow_id, goal]
+    permissions:
+      - unauthorized.workflow.mutate
+"#,
+    )
+    .unwrap();
 
     let started = forge()
         .args([
@@ -37809,6 +37851,44 @@ views:
         visual_renderer["interaction_state"]["state_key"],
         "addon:forge.addon.visual_workspace:view:visual.workspace"
     );
+    let unauthorized_view = snapshot_json["addon_views"]["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["addon_id"] == "forge.addon.unauthorized_ops")
+        .unwrap();
+    assert_eq!(unauthorized_view["addon_lifecycle"], "unauthorized");
+    assert_eq!(unauthorized_view["view"]["id"], "unauthorized.ops");
+    assert_eq!(
+        unauthorized_view["permission_gate"]["status"],
+        "missing_human_approval"
+    );
+    assert_eq!(unauthorized_view["permission_gate"]["allowed"], false);
+    let unauthorized_renderer = snapshot_json["addon_view_renderers"]["renderers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["view_id"] == "unauthorized.ops")
+        .unwrap();
+    assert_eq!(unauthorized_renderer["addon_lifecycle"], "unauthorized");
+    assert_eq!(
+        unauthorized_renderer["permission_status"],
+        "missing_human_approval"
+    );
+    assert_eq!(unauthorized_renderer["safe_renderer"], true);
+    assert!(unauthorized_renderer["notes"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("permission_gate_missing_human_approval")));
+    assert!(unauthorized_renderer["required_permissions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("unauthorized.workflow.mutate")));
+    assert!(unauthorized_renderer["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|action| action["enabled"] == false));
 
     let renderer_entries = snapshot_json["addon_view_renderers"]["renderers"]
         .as_array()

@@ -42,6 +42,7 @@ const OPS_MODIFIER_LANE_SCHEMA_VERSION: &str = "forge.ops.modifier_lane.v1";
 const OPS_MODIFIER_PROPOSAL_SCHEMA_VERSION: &str = "forge.ops.modifier_proposal.v1";
 const OPS_MEMORY_CONTEXT_GOVERNANCE_SCHEMA_VERSION: &str = "forge.ops.memory_context_governance.v1";
 const OPS_ADDON_VIEW_RENDERERS_SCHEMA_VERSION: &str = "forge.ops.addon_view_renderers.v1";
+const OPS_ADDON_VIEW_LIFECYCLE_FILTER: &str = "enabled_or_unauthorized";
 const OPS_ADDON_VIEW_INTERACTION_STATE_SCHEMA_VERSION: &str =
     "forge.ops.addon_view_interaction_state.v1";
 const OPS_ADDON_VIEW_RUNTIME_STATE_SCHEMA_VERSION: &str = "forge.ops.addon_view_runtime_state.v1";
@@ -549,7 +550,7 @@ pub fn build_ops_snapshot_with_addon_dirs_and_project(
     let modifier_lane = load_modifier_lane(store)?;
     let addon_catalog = load_addon_catalog_from_store(store, addon_dirs)?;
     let addon_observability = addon_observability_report(store, &addon_catalog, None, None, 1000)?;
-    let addon_views = list_addon_views(&addon_catalog, None, Some("ops_console"), Some("enabled"));
+    let addon_views = list_ops_console_addon_views(&addon_catalog);
     let addon_view_renderers = build_addon_view_renderer_report_with_store(store, &addon_views)?;
     let memory_context_governance = build_memory_context_governance(store, project_root)?;
     let operational_digital_twin = build_operational_digital_twin(store, &modifier_lane)?;
@@ -745,6 +746,16 @@ fn ops_default_audience_for_scope(memory_scope: &str) -> String {
     } else {
         "manager".to_string()
     }
+}
+
+fn list_ops_console_addon_views(addon_catalog: &crate::addon::AddonCatalog) -> AddonViewReport {
+    let mut report = list_addon_views(addon_catalog, None, Some("ops_console"), None);
+    report
+        .views
+        .retain(|entry| matches!(entry.addon_lifecycle.as_str(), "enabled" | "unauthorized"));
+    report.view_count = report.views.len();
+    report.filters.lifecycle = Some(OPS_ADDON_VIEW_LIFECYCLE_FILTER.to_string());
+    report
 }
 
 pub fn build_addon_view_renderer_report(
