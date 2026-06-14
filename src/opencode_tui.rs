@@ -574,8 +574,8 @@ struct CliBenchmarkProbe {
 fn probe_cli_benchmark(label: &str, path: &Path) -> Option<CliBenchmarkProbe> {
     let version = run_cli_probe(path, &["--version"], Duration::from_secs(2)).ok()?;
     let help = run_cli_probe(path, &["--help"], Duration::from_secs(2)).ok()?;
-    if version.status.map_or(false, |status| !status.success())
-        && help.status.map_or(false, |status| !status.success())
+    if version.status.is_some_and(|status| !status.success())
+        && help.status.is_some_and(|status| !status.success())
     {
         return None;
     }
@@ -707,10 +707,9 @@ fn is_executable_path(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        return path
-            .metadata()
+        path.metadata()
             .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false);
+            .unwrap_or(false)
     }
     #[cfg(not(unix))]
     {
@@ -762,7 +761,10 @@ fn run_fullscreen_tui(
     let mut state = ForgeTuiRuntimeState {
         project_root: project_root.clone(),
         chat_session_code,
-        chat_session_path: chat_session_path(project_root.as_deref(), &chat_session.chat_session_code),
+        chat_session_path: chat_session_path(
+            project_root.as_deref(),
+            &chat_session.chat_session_code,
+        ),
         chat_session_created_at: chat_session.created_at,
         input: String::new(),
         shell_mode: false,
@@ -1089,7 +1091,9 @@ fn persist_chat_session_record(
     record: &ForgeChatSessionRecord,
 ) -> Result<()> {
     let session_dir = match project_root_or_path {
-        Some(path) if path.ends_with(CHAT_SESSION_LATEST_FILENAME) || path.extension().is_some() => {
+        Some(path)
+            if path.ends_with(CHAT_SESSION_LATEST_FILENAME) || path.extension().is_some() =>
+        {
             path.parent().unwrap_or(path).to_path_buf()
         }
         Some(path) => path.to_path_buf(),
@@ -1180,7 +1184,11 @@ fn resume_chat_session(
         .strip_prefix("/resume")
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let record = load_chat_session_record_with_exclusion(project_root, code, Some(&state.chat_session_code))?;
+    let record = load_chat_session_record_with_exclusion(
+        project_root,
+        code,
+        Some(&state.chat_session_code),
+    )?;
     let record = match record {
         Some(record) => record,
         None => {
@@ -1499,13 +1507,11 @@ fn wrap_display_lines(lines: &[String], width: usize) -> Vec<String> {
         let mut remaining = line.as_str();
         while !remaining.is_empty() {
             let mut end = 0usize;
-            let mut count = 0usize;
-            for (byte_index, ch) in remaining.char_indices() {
+            for (count, (byte_index, ch)) in remaining.char_indices().enumerate() {
                 if count == width {
                     break;
                 }
                 end = byte_index + ch.len_utf8();
-                count += 1;
             }
             if end == 0 {
                 end = remaining.len();
@@ -1544,9 +1550,7 @@ fn draw_input_lines(_report: &ForgeTuiReport, state: &ForgeTuiRuntimeState) -> V
 
 fn refresh_tui_autocomplete(state: &mut ForgeTuiRuntimeState, report: &ForgeTuiReport) {
     state.autocomplete = tui_autocomplete_suggestions(report, &state.input);
-    if state.autocomplete.is_empty() {
-        state.autocomplete_index = 0;
-    } else if state.autocomplete_index >= state.autocomplete.len() {
+    if state.autocomplete.is_empty() || state.autocomplete_index >= state.autocomplete.len() {
         state.autocomplete_index = 0;
     }
 }
@@ -1756,7 +1760,7 @@ fn collect_file_suggestions_recursive(
     };
 
     let mut paths = entries.filter_map(Result::ok).collect::<Vec<_>>();
-    paths.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    paths.sort_by_key(|entry| entry.file_name());
 
     for entry in paths {
         if files.len() >= max_files {
@@ -2064,7 +2068,9 @@ mod tests {
     #[test]
     fn wrap_display_lines_breaks_long_lines_for_panel_width() {
         let wrapped = wrap_display_lines(
-            &[String::from("Placement: Addon-first = OpenClaw, Hermes, Open Design, Penpot, n8n.")],
+            &[String::from(
+                "Placement: Addon-first = OpenClaw, Hermes, Open Design, Penpot, n8n.",
+            )],
             24,
         );
 

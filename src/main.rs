@@ -1199,6 +1199,8 @@ enum AddonCommands {
         worker: String,
         #[arg(long = "task")]
         task_ref: String,
+        #[arg(long = "workflow")]
+        workflow_id: Option<String>,
         #[arg(long, default_value = "{}")]
         input: String,
         #[arg(long, default_value = "{}")]
@@ -5699,6 +5701,7 @@ fn run() -> Result<i32> {
                 contract,
                 worker,
                 task_ref,
+                workflow_id,
                 input,
                 context,
                 lease_seconds,
@@ -5727,6 +5730,7 @@ fn run() -> Result<i32> {
                         },
                         worker_id: &worker,
                         lease_seconds,
+                        workflow_id: workflow_id.as_deref(),
                     },
                 )?;
                 let should_fail = matches!(

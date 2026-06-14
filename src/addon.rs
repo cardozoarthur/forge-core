@@ -1,9 +1,10 @@
-use crate::artifact::hex_sha256;
+use crate::artifact::{hex_sha256, write_json_artifact};
 use crate::credential_vault::resolve_credential_vault_bin;
 use crate::graph::{
-    create_workflow, task as workflow_task, AtomicTask, ExecutorKind, ValidationRule, Workflow,
-    WorkflowRevision,
+    create_workflow, task as workflow_task, ArtifactRecord, AtomicTask, ExecutorKind,
+    ValidationRule, Workflow, WorkflowRevision,
 };
+use crate::identity::ensure_workflow_policy;
 use crate::intent::{parse_intent, parse_intent_with_catalog};
 use crate::multimodal::{
     build_multimodal_runtime_benchmark, resolve_multimodal_feature_flag,
@@ -115,6 +116,7 @@ pub struct AddonExecutorExecutionInput<'a> {
     pub dispatch: AddonExecutorDispatchInput<'a>,
     pub worker_id: &'a str,
     pub lease_seconds: u64,
+    pub workflow_id: Option<&'a str>,
 }
 
 pub struct AddonHandoffExecutionInput<'a> {
@@ -158,6 +160,7 @@ struct AddonExecutorReportInput<'a> {
     dispatch_report: AddonRuntimeContractDispatchReport,
     executor_result: Option<serde_json::Value>,
     validation: AddonExecutorResultValidation,
+    promotion: Option<AddonExecutorPromotionReport>,
 }
 
 struct AddonHandoffReportInput<'a> {
@@ -679,6 +682,40 @@ pub struct AddonExecutorExecutionReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub executor_result: Option<serde_json::Value>,
     pub validation: AddonExecutorResultValidation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<AddonExecutorPromotionReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddonExecutorPromotionReport {
+    pub schema_version: String,
+    pub status: String,
+    pub workflow_id: String,
+    pub task_ref: String,
+    pub contract_id: String,
+    pub worker_id: String,
+    pub origin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    pub artifact_count: usize,
+    pub event_count: usize,
+    pub artifacts: Vec<AddonExecutorPromotedArtifact>,
+    pub events: Vec<AddonExecutorPromotedEvent>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddonExecutorPromotedArtifact {
+    pub id: String,
+    pub kind: String,
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddonExecutorPromotedEvent {
+    pub kind: String,
+    pub index: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3302,6 +3339,7 @@ pub fn execute_addon_executor(
             dispatch_report: enqueue_report,
             executor_result: None,
             validation,
+            promotion: None,
         }));
     }
 
@@ -3333,6 +3371,16 @@ pub fn execute_addon_executor(
     } else {
         "addon_executor_review_required"
     };
+    let promotion = promote_addon_executor_result_if_requested(AddonExecutorPromotionInput {
+        store,
+        workflow_id: input.workflow_id,
+        task_ref: input.dispatch.task_ref,
+        contract_id: input.dispatch.contract_id,
+        worker_id: input.worker_id,
+        origin: input.dispatch.source,
+        executor_result: executor_result.as_ref(),
+        validation: &validation,
+    })?;
 
     Ok(addon_executor_execution_report(AddonExecutorReportInput {
         status,
@@ -3344,7 +3392,278 @@ pub fn execute_addon_executor(
         dispatch_report: execution_report,
         executor_result,
         validation,
+        promotion,
     }))
+}
+
+struct AddonExecutorPromotionInput<'a> {
+    store: &'a ForgeStore,
+    workflow_id: Option<&'a str>,
+    task_ref: &'a str,
+    contract_id: &'a str,
+    worker_id: &'a str,
+    origin: &'a str,
+    executor_result: Option<&'a serde_json::Value>,
+    validation: &'a AddonExecutorResultValidation,
+}
+
+fn promote_addon_executor_result_if_requested(
+    input: AddonExecutorPromotionInput<'_>,
+) -> Result<Option<AddonExecutorPromotionReport>> {
+    let Some(workflow_id) = input
+        .workflow_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(result) = input.executor_result else {
+        return Ok(Some(addon_executor_promotion_not_promoted(
+            workflow_id,
+            input.task_ref,
+            input.contract_id,
+            input.worker_id,
+            input.origin,
+            "executor result is missing",
+        )));
+    };
+    if input.validation.status != "valid" {
+        return Ok(Some(addon_executor_promotion_not_promoted(
+            workflow_id,
+            input.task_ref,
+            input.contract_id,
+            input.worker_id,
+            input.origin,
+            "executor result schema validation did not pass",
+        )));
+    }
+    if !input.validation.completed {
+        return Ok(Some(addon_executor_promotion_not_promoted(
+            workflow_id,
+            input.task_ref,
+            input.contract_id,
+            input.worker_id,
+            input.origin,
+            "executor result was not completed",
+        )));
+    }
+
+    promote_addon_executor_result_to_workflow(
+        input.store,
+        workflow_id,
+        input.task_ref,
+        input.contract_id,
+        input.worker_id,
+        input.origin,
+        result,
+    )
+    .map(Some)
+}
+
+fn addon_executor_promotion_not_promoted(
+    workflow_id: &str,
+    task_ref: &str,
+    contract_id: &str,
+    worker_id: &str,
+    origin: &str,
+    note: &str,
+) -> AddonExecutorPromotionReport {
+    AddonExecutorPromotionReport {
+        schema_version: "forge.addon_executor_result_promotion.v1".to_string(),
+        status: "addon_executor_result_not_promoted".to_string(),
+        workflow_id: workflow_id.to_string(),
+        task_ref: task_ref.to_string(),
+        contract_id: contract_id.to_string(),
+        worker_id: worker_id.to_string(),
+        origin: origin.to_string(),
+        revision: None,
+        artifact_count: 0,
+        event_count: 0,
+        artifacts: Vec::new(),
+        events: Vec::new(),
+        notes: vec![note.to_string()],
+    }
+}
+
+fn promote_addon_executor_result_to_workflow(
+    store: &ForgeStore,
+    workflow_id: &str,
+    task_ref: &str,
+    contract_id: &str,
+    worker_id: &str,
+    origin: &str,
+    result: &serde_json::Value,
+) -> Result<AddonExecutorPromotionReport> {
+    ensure_workflow_policy(store, workflow_id, "addon executor result promotion")?;
+    let mut workflow = store.load_workflow(workflow_id)?;
+    let mut artifacts = Vec::new();
+    let result_artifacts = result
+        .get("artifacts")
+        .and_then(|value| value.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    for (index, artifact_value) in result_artifacts.iter().enumerate() {
+        let kind = artifact_value
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .unwrap_or("addon_executor_artifact");
+        let source_id = artifact_value
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("artifact");
+        let relative_path = format!(
+            "artifacts/{}/addon-executor-{}-{}-{:02}-{}-{}.json",
+            workflow_id,
+            addon_promotion_slug(contract_id),
+            addon_promotion_slug(task_ref),
+            index + 1,
+            addon_promotion_slug(kind),
+            addon_promotion_slug(source_id)
+        );
+        let payload = serde_json::json!({
+            "schema_version": "forge.addon_executor_promoted_artifact.v1",
+            "workflow_id": workflow_id,
+            "task_ref": task_ref,
+            "contract_id": contract_id,
+            "worker_id": worker_id,
+            "origin": origin,
+            "source": "addon_executor_result.artifacts",
+            "artifact_index": index,
+            "artifact": artifact_value,
+        });
+        let (_full_path, sha256) =
+            write_json_artifact(&store.base_dir(), &relative_path, &payload)?;
+        let artifact = ArtifactRecord {
+            id: format!("artifact_{}", Uuid::new_v4().to_string().replace('-', "")),
+            kind: kind.to_string(),
+            path: relative_path,
+            sha256,
+            created_at: Utc::now(),
+            lineage: None,
+        };
+        artifacts.push(AddonExecutorPromotedArtifact {
+            id: artifact.id.clone(),
+            kind: artifact.kind.clone(),
+            path: artifact.path.clone(),
+            sha256: artifact.sha256.clone(),
+        });
+        workflow.artifacts.push(artifact);
+    }
+
+    let revision = if artifacts.is_empty() {
+        None
+    } else {
+        Some(push_addon_promotion_revision(
+            &mut workflow.revisions,
+            origin,
+            "addon_executor_result_promoted",
+            &format!(
+                "promoted {} Addon executor artifacts from contract {} task {}",
+                artifacts.len(),
+                contract_id,
+                task_ref
+            ),
+        ))
+    };
+    if revision.is_some() {
+        store.save_workflow(&workflow)?;
+    }
+
+    let mut events = Vec::new();
+    let result_events = result
+        .get("events")
+        .and_then(|value| value.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    for (index, event_value) in result_events.iter().enumerate() {
+        let kind = event_value
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .unwrap_or("addon_executor_event");
+        store.record_event(
+            workflow_id,
+            kind,
+            &serde_json::json!({
+                "origin": origin,
+                "source": "addon_executor_result.events",
+                "task_ref": task_ref,
+                "contract_id": contract_id,
+                "worker_id": worker_id,
+                "event_index": index,
+                "event": event_value,
+                "artifact_revision": revision,
+            }),
+        )?;
+        events.push(AddonExecutorPromotedEvent {
+            kind: kind.to_string(),
+            index,
+        });
+    }
+
+    Ok(AddonExecutorPromotionReport {
+        schema_version: "forge.addon_executor_result_promotion.v1".to_string(),
+        status: "addon_executor_result_promoted".to_string(),
+        workflow_id: workflow_id.to_string(),
+        task_ref: task_ref.to_string(),
+        contract_id: contract_id.to_string(),
+        worker_id: worker_id.to_string(),
+        origin: origin.to_string(),
+        revision,
+        artifact_count: artifacts.len(),
+        event_count: events.len(),
+        artifacts,
+        events,
+        notes: vec![
+            "executor result artifacts were persisted as workflow artifacts".to_string(),
+            "executor result events were recorded on the workflow event timeline".to_string(),
+        ],
+    })
+}
+
+fn push_addon_promotion_revision(
+    revisions: &mut Vec<WorkflowRevision>,
+    origin: &str,
+    change_type: &str,
+    summary: &str,
+) -> u64 {
+    let revision = revisions.last().map(|item| item.revision + 1).unwrap_or(1);
+    revisions.push(WorkflowRevision {
+        revision,
+        origin: origin.to_string(),
+        change_type: change_type.to_string(),
+        summary: summary.to_string(),
+        created_at: Utc::now(),
+    });
+    revision
+}
+
+fn addon_promotion_slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_dash = false;
+    for character in value.chars() {
+        let next = if character.is_ascii_alphanumeric() {
+            previous_dash = false;
+            Some(character.to_ascii_lowercase())
+        } else if !previous_dash {
+            previous_dash = true;
+            Some('-')
+        } else {
+            None
+        };
+        if let Some(next) = next {
+            slug.push(next);
+        }
+        if slug.len() >= 80 {
+            break;
+        }
+    }
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "item".to_string()
+    } else {
+        slug
+    }
 }
 
 pub fn execute_addon_handoff(
@@ -4246,6 +4565,7 @@ fn addon_executor_execution_report(
         dispatch_report: input.dispatch_report,
         executor_result: input.executor_result,
         validation: input.validation,
+        promotion: input.promotion,
     }
 }
 

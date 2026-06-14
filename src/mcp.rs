@@ -483,6 +483,8 @@ struct AddonExecutorExecutionInput {
     worker_id: Option<String>,
     task: Option<String>,
     task_ref: Option<String>,
+    workflow: Option<String>,
+    workflow_id: Option<String>,
     input: Option<serde_json::Value>,
     context: Option<serde_json::Value>,
     lease_seconds: Option<u64>,
@@ -4131,6 +4133,11 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                         ("contract_id", "string", "executor runtime contract id"),
                         ("worker_id", "string", "registered runtime worker id"),
                         ("task_ref", "string", "workflow task or operation reference"),
+                        (
+                            "workflow_id",
+                            "string",
+                            "optional workflow id for promoting returned artifacts and events into workflow state",
+                        ),
                         ("input", "object", "executor input payload"),
                         ("context", "object", "optional executor context payload"),
                         ("lease_seconds", "integer", "external worker claim lease"),
@@ -4155,6 +4162,8 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     "<worker-id>",
                     "--task",
                     "<task-ref>",
+                    "--workflow",
+                    "<workflow-id>",
                     "--output",
                     "json",
                 ],
@@ -8349,6 +8358,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let task_ref = input.task_ref.or(input.task).ok_or_else(|| {
                 anyhow::anyhow!("forge.addons.execute_executor requires task_ref")
             })?;
+            let workflow_id = input.workflow_id.or(input.workflow);
             serde_json::to_value(execute_addon_executor(
                 store,
                 &catalog,
@@ -8364,6 +8374,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     },
                     worker_id: &worker_id,
                     lease_seconds: input.lease_seconds.unwrap_or(300),
+                    workflow_id: workflow_id.as_deref(),
                 },
             )?)?
         }

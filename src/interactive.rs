@@ -14041,6 +14041,26 @@ pub fn route_interactive_input_with_context(
         return Ok(route_slash_command(trimmed));
     }
 
+    if let Some(answer) = deterministic_direct_interactive_answer(store, trimmed) {
+        return Ok(InteractiveRouteReport {
+            status: "routed".to_string(),
+            schema_version: INTERACTIVE_ROUTE_SCHEMA_VERSION.to_string(),
+            input_kind: "chat".to_string(),
+            routing_decision: "direct_answer".to_string(),
+            routing_explanation:
+                "Informational question answered directly without creating durable workflow state."
+                    .to_string(),
+            workflow_created: false,
+            run_id: None,
+            workflow_id: None,
+            answer: Some(answer),
+            slash_command: None,
+            product_decision_id: None,
+            product_decision_revision: None,
+            retention_decision: no_retention_decision(),
+        });
+    }
+
     if let Some(route) = brain_route_interactive_input(store, trimmed, conversation_context) {
         if route.decision == "new_workflow" {
             let request = start_async_request(store, trimmed, origin)?;
@@ -14108,6 +14128,72 @@ pub fn route_interactive_input_with_context(
         product_decision_revision: None,
         retention_decision,
     })
+}
+
+fn deterministic_direct_interactive_answer(store: &ForgeStore, input: &str) -> Option<String> {
+    let lower = input.trim().to_lowercase();
+    if lower.is_empty() {
+        return Some("Diga o que você quer saber ou executar no Forge.".to_string());
+    }
+    if is_forge_status_question(&lower) {
+        let status = render_interactive_status_for_store(store).unwrap_or_else(|_| {
+            "Forge está disponível, mas não consegui renderizar o snapshot de status agora."
+                .to_string()
+        });
+        return Some(format!("Status do Forge:\n{status}"));
+    }
+    if is_greeting_question(&lower) {
+        return Some("Olá. Sou o Forge, o orquestrador de workflows deste ambiente.".to_string());
+    }
+    if is_date_question(&lower) {
+        return Some(format!("Hoje é {} em UTC.", Utc::now().date_naive()));
+    }
+    if is_identity_question(&lower) {
+        return Some(
+            "Eu conheço o contexto operacional desta sessão pelo Forge, mas não invento dados pessoais que não estejam registrados no runtime."
+                .to_string(),
+        );
+    }
+    None
+}
+
+fn is_forge_status_question(lower: &str) -> bool {
+    let mentions_forge = lower.contains("forge");
+    let status_term = lower.contains("status")
+        || lower.contains("estado")
+        || lower.contains("situação")
+        || lower.contains("situacao");
+    let asks_or_requests_status = lower.contains('?')
+        || lower.starts_with("what ")
+        || lower.starts_with("qual ")
+        || lower.starts_with("como ")
+        || lower.starts_with("show ")
+        || lower.starts_with("mostre ")
+        || lower == "forge status";
+    mentions_forge && status_term && asks_or_requests_status
+}
+
+fn is_greeting_question(lower: &str) -> bool {
+    matches!(
+        lower.trim_matches(|character: char| character.is_whitespace() || character == '!'),
+        "oi" | "olá" | "ola" | "hello" | "hi"
+    )
+}
+
+fn is_date_question(lower: &str) -> bool {
+    lower.contains("que dia é hoje")
+        || lower.contains("que dia e hoje")
+        || lower.contains("data de hoje")
+        || lower.contains("what day is today")
+        || lower.contains("what date is today")
+}
+
+fn is_identity_question(lower: &str) -> bool {
+    lower.contains("você sabe meu nome")
+        || lower.contains("voce sabe meu nome")
+        || lower.contains("qual é meu nome")
+        || lower.contains("qual e meu nome")
+        || lower.contains("do you know my name")
 }
 
 fn is_repl_exit_command(input: &str) -> bool {
@@ -20888,12 +20974,17 @@ fn build_brain_route_context(store: &ForgeStore) -> String {
         let selected_brain = report
             .brain_router
             .selected_brain
-            .as_ref()
-            .map(|brain| brain.as_str())
+            .as_deref()
             .unwrap_or("none");
         lines.push(format!("selected_brain: {selected_brain}"));
-        lines.push(format!("orchestrator: {}", report.brain_router.orchestrator_brain));
-        lines.push(format!("routing_principle: {}", report.brain_router.routing_principle));
+        lines.push(format!(
+            "orchestrator: {}",
+            report.brain_router.orchestrator_brain
+        ));
+        lines.push(format!(
+            "routing_principle: {}",
+            report.brain_router.routing_principle
+        ));
         let brain_summaries = report
             .brain_router
             .brains
@@ -20940,7 +21031,11 @@ fn build_brain_route_context(store: &ForgeStore) -> String {
             .collect::<Vec<_>>();
         if !workflow_summaries.is_empty() {
             lines.push("existing_workflows:".to_string());
-            lines.extend(workflow_summaries.into_iter().map(|line| format!("- {line}")));
+            lines.extend(
+                workflow_summaries
+                    .into_iter()
+                    .map(|line| format!("- {line}")),
+            );
             lines.push(
                 "reuse_policy: inspect existing workflows first; prefer reuse, copy, or subworkflow composition before creating a new one.".to_string(),
             );
@@ -20963,7 +21058,11 @@ fn build_brain_route_context(store: &ForgeStore) -> String {
             .collect::<Vec<_>>();
         if !capabilities.is_empty() {
             lines.push("capability_samples:".to_string());
-            lines.extend(capabilities.into_iter().map(|capability| format!("- {capability}")));
+            lines.extend(
+                capabilities
+                    .into_iter()
+                    .map(|capability| format!("- {capability}")),
+            );
         }
     }
 
@@ -21188,7 +21287,8 @@ fn run_brain_command(
 
 fn classify_workflow_reason(input: &str) -> String {
     let _ = input;
-    "The brain selected a workflow so Forge can keep this request in a durable orchestration path.".to_string()
+    "The brain selected a workflow so Forge can keep this request in a durable orchestration path."
+        .to_string()
 }
 
 fn decide_retention(input: &str, workflow_created: bool) -> RetentionDecision {

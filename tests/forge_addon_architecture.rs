@@ -2756,6 +2756,24 @@ print(json.dumps({
         .assert()
         .success();
 
+    let plan_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Audit fulfillment Addon artifacts inside a Forge workflow",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan_json: Value = serde_json::from_slice(&plan_output).unwrap();
+    let workflow_id = plan_json["workflow_id"].as_str().unwrap();
+
     let cli_output = forge()
         .args([
             "--store",
@@ -2772,6 +2790,8 @@ print(json.dumps({
             "fulfillment-executor-worker",
             "--task",
             "fulfillment-cli-task",
+            "--workflow",
+            workflow_id,
             "--input",
             r#"{"order_id":"ord-cli-001"}"#,
             "--context",
@@ -2814,6 +2834,60 @@ print(json.dumps({
         "ord-cli-001"
     );
     assert_eq!(cli_json["executor_result"]["context_tenant"], "cli");
+    assert_eq!(
+        cli_json["promotion"]["status"],
+        "addon_executor_result_promoted"
+    );
+    assert_eq!(cli_json["promotion"]["workflow_id"], workflow_id);
+    assert_eq!(cli_json["promotion"]["artifact_count"], 1);
+    assert_eq!(cli_json["promotion"]["event_count"], 1);
+    assert_eq!(cli_json["promotion"]["artifacts"][0]["kind"], "receipt");
+
+    let artifacts_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "artifacts",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let artifacts_json: Value = serde_json::from_slice(&artifacts_output).unwrap();
+    let artifacts = artifacts_json["artifacts"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 1);
+    assert!(artifacts[0]["path"]
+        .as_str()
+        .unwrap()
+        .contains("addon-executor"));
+
+    let events_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "events",
+            "list",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let events_json: Value = serde_json::from_slice(&events_output).unwrap();
+    assert!(events_json["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["kind"] == "fulfilled"));
 
     let mcp_input = serde_json::json!({
         "addon_dirs": [addon_dir.display().to_string()],
@@ -2821,6 +2895,7 @@ print(json.dumps({
         "contract_id": "fulfillment.task.executor",
         "worker_id": "fulfillment-executor-worker",
         "task_ref": "fulfillment-mcp-task",
+        "workflow_id": workflow_id,
         "input": {"order_id": "ord-mcp-001"},
         "context": {"tenant": "mcp"},
         "lease_seconds": 120
@@ -2854,6 +2929,12 @@ print(json.dumps({
         mcp_json["result"]["executor_result"]["outputs"]["order_id"],
         "ord-mcp-001"
     );
+    assert_eq!(
+        mcp_json["result"]["promotion"]["status"],
+        "addon_executor_result_promoted"
+    );
+    assert_eq!(mcp_json["result"]["promotion"]["artifact_count"], 1);
+    assert_eq!(mcp_json["result"]["promotion"]["event_count"], 1);
     assert_eq!(
         mcp_json["result"]["dispatch_report"]["dispatches"][0]["input"]["context"]
             ["provided_context"]["tenant"],
