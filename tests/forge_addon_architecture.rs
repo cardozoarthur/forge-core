@@ -14712,6 +14712,121 @@ capabilities:
 }
 
 #[test]
+fn addon_validation_reports_invalid_event_wiring_references() {
+    let temp = tempdir().unwrap();
+    let addon_dir = temp.path().join("addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        addon_dir.join("broken-events.yaml"),
+        r#"
+id: forge.addon.broken_events
+name: Broken Events Addon
+version: 0.1.0
+permissions:
+  - id: events.allowed
+    risk: medium
+capabilities:
+  - id: events_capability
+    title: Events capability
+workflows:
+  - id: events_workflow
+    kind: workflow
+runtime_contracts:
+  - id: events.executor
+    title: Events executor
+    contract_type: executor
+    capability_id: events_capability
+    workflow_extension_id: events_workflow
+    runtime: external_api
+    entrypoint: http://127.0.0.1/events
+event_types:
+  - id: events.valid
+    title: Valid event
+event_channels:
+  - id: events.channel
+    title: Events channel
+    transport: webhook
+    direction: ingress
+    event_types:
+      - events.valid
+event_adapters:
+  - id: events.adapter
+    title: Events adapter
+    transport: webhook
+    direction: ingress
+    event_types:
+      - events.missing_adapter_event
+    permissions:
+      - events.allowed
+event_triggers:
+  - id: events.trigger
+    title: Broken trigger
+    event_type: events.missing_trigger_event
+    channel: events.missing_channel
+    adapter_id: events.missing_adapter
+    workflow_extension_id: events.missing_workflow
+    capability_id: events.missing_capability
+    actions:
+      - continue_workflow
+    permissions:
+      - events.missing_trigger_permission
+event_listeners:
+  - id: events.listener
+    title: Broken listener
+    event_type: events.missing_listener_event
+    channel: events.missing_listener_channel
+    adapter_id: events.missing_listener_adapter
+    workflow_extension_id: events.missing_listener_workflow
+    capability_id: events.missing_listener_capability
+    handler: forge.event.route
+    runtime_contract_id: events.missing_contract
+    actions:
+      - continue_workflow
+    permissions:
+      - events.missing_listener_permission
+"#,
+    )
+    .unwrap();
+
+    let output = forge()
+        .args([
+            "addons",
+            "validate",
+            "--addon-dir",
+            addon_dir.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.addon_validation.v1");
+    assert_eq!(json["status"], "invalid");
+    for code in [
+        "missing_event_type_reference",
+        "missing_event_channel_reference",
+        "missing_event_adapter_reference",
+        "missing_workflow_extension_reference",
+        "missing_capability_reference",
+        "missing_runtime_contract_reference",
+        "undeclared_permission_reference",
+    ] {
+        assert!(
+            json["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|issue| issue["code"] == code),
+            "expected validation issue {code}"
+        );
+    }
+}
+
+#[test]
 fn addon_permissions_require_human_authorization_before_capability_exposure() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");

@@ -6833,6 +6833,7 @@ pub fn validate_addon_catalog(catalog: &AddonCatalog) -> AddonCatalogValidationR
             }
         }
         validate_addon_permission_references(addon, &mut issues);
+        validate_addon_reference_integrity(addon, &mut issues);
         for capability in &addon.capabilities {
             if !capability_ids.insert(capability.id.clone()) {
                 issues.push(validation_issue(
@@ -10300,6 +10301,36 @@ fn validate_addon_permission_references(
             issues,
         );
     }
+    for channel in &addon.event_channels {
+        validate_permission_reference_list(
+            addon,
+            "event_channel",
+            &channel.id,
+            &channel.permissions,
+            &declared,
+            issues,
+        );
+    }
+    for trigger in &addon.event_triggers {
+        validate_permission_reference_list(
+            addon,
+            "event_trigger",
+            &trigger.id,
+            &trigger.permissions,
+            &declared,
+            issues,
+        );
+    }
+    for listener in &addon.event_listeners {
+        validate_permission_reference_list(
+            addon,
+            "event_listener",
+            &listener.id,
+            &listener.permissions,
+            &declared,
+            issues,
+        );
+    }
     for view in &addon.views {
         validate_permission_reference_list(
             addon,
@@ -10334,6 +10365,314 @@ fn validate_permission_reference_list(
             ),
         ));
     }
+}
+
+fn validate_addon_reference_integrity(
+    addon: &AddonManifest,
+    issues: &mut Vec<AddonValidationIssue>,
+) {
+    let capability_ids = addon
+        .capabilities
+        .iter()
+        .map(|capability| capability.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let workflow_extension_ids = addon
+        .workflows
+        .iter()
+        .map(|workflow| workflow.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let runtime_contract_ids = addon
+        .runtime_contracts
+        .iter()
+        .map(|contract| contract.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let event_type_ids = addon
+        .event_types
+        .iter()
+        .map(|event_type| event_type.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let event_channel_ids = addon
+        .event_channels
+        .iter()
+        .map(|channel| channel.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let event_adapter_ids = addon
+        .event_adapters
+        .iter()
+        .map(|adapter| adapter.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let event_trigger_ids = addon
+        .event_triggers
+        .iter()
+        .map(|trigger| trigger.id.as_str())
+        .collect::<BTreeSet<_>>();
+
+    for capability in &addon.capabilities {
+        for workflow_id in &capability.workflow_extensions {
+            validate_addon_reference_field(
+                addon,
+                AddonReferenceCheck {
+                    owner_kind: "capability",
+                    owner_id: &capability.id,
+                    reference_kind: "workflow extension",
+                    reference_value: workflow_id,
+                    declared: &workflow_extension_ids,
+                    code: "missing_workflow_extension_reference",
+                    allow_implicit_when_empty: true,
+                },
+                issues,
+            );
+        }
+        for trigger_id in &capability.event_triggers {
+            validate_addon_reference_field(
+                addon,
+                AddonReferenceCheck {
+                    owner_kind: "capability",
+                    owner_id: &capability.id,
+                    reference_kind: "event trigger",
+                    reference_value: trigger_id,
+                    declared: &event_trigger_ids,
+                    code: "missing_event_trigger_reference",
+                    allow_implicit_when_empty: true,
+                },
+                issues,
+            );
+        }
+    }
+
+    for contract in &addon.runtime_contracts {
+        validate_addon_reference_field(
+            addon,
+            AddonReferenceCheck {
+                owner_kind: "runtime_contract",
+                owner_id: &contract.id,
+                reference_kind: "capability",
+                reference_value: &contract.capability_id,
+                declared: &capability_ids,
+                code: "missing_capability_reference",
+                allow_implicit_when_empty: false,
+            },
+            issues,
+        );
+        validate_addon_reference_field(
+            addon,
+            AddonReferenceCheck {
+                owner_kind: "runtime_contract",
+                owner_id: &contract.id,
+                reference_kind: "workflow extension",
+                reference_value: &contract.workflow_extension_id,
+                declared: &workflow_extension_ids,
+                code: "missing_workflow_extension_reference",
+                allow_implicit_when_empty: true,
+            },
+            issues,
+        );
+    }
+
+    for channel in &addon.event_channels {
+        for event_type in &channel.event_types {
+            validate_addon_reference_field(
+                addon,
+                AddonReferenceCheck {
+                    owner_kind: "event_channel",
+                    owner_id: &channel.id,
+                    reference_kind: "event type",
+                    reference_value: event_type,
+                    declared: &event_type_ids,
+                    code: "missing_event_type_reference",
+                    allow_implicit_when_empty: true,
+                },
+                issues,
+            );
+        }
+    }
+
+    for adapter in &addon.event_adapters {
+        for event_type in &adapter.event_types {
+            validate_addon_reference_field(
+                addon,
+                AddonReferenceCheck {
+                    owner_kind: "event_adapter",
+                    owner_id: &adapter.id,
+                    reference_kind: "event type",
+                    reference_value: event_type,
+                    declared: &event_type_ids,
+                    code: "missing_event_type_reference",
+                    allow_implicit_when_empty: true,
+                },
+                issues,
+            );
+        }
+    }
+
+    for trigger in &addon.event_triggers {
+        validate_addon_event_endpoint_references(
+            addon,
+            "event_trigger",
+            &trigger.id,
+            &trigger.event_type,
+            &trigger.channel,
+            &trigger.adapter_id,
+            &trigger.workflow_extension_id,
+            &trigger.capability_id,
+            &event_type_ids,
+            &event_channel_ids,
+            &event_adapter_ids,
+            &workflow_extension_ids,
+            &capability_ids,
+            issues,
+        );
+    }
+
+    for listener in &addon.event_listeners {
+        validate_addon_event_endpoint_references(
+            addon,
+            "event_listener",
+            &listener.id,
+            &listener.event_type,
+            &listener.channel,
+            &listener.adapter_id,
+            &listener.workflow_extension_id,
+            &listener.capability_id,
+            &event_type_ids,
+            &event_channel_ids,
+            &event_adapter_ids,
+            &workflow_extension_ids,
+            &capability_ids,
+            issues,
+        );
+        validate_addon_reference_field(
+            addon,
+            AddonReferenceCheck {
+                owner_kind: "event_listener",
+                owner_id: &listener.id,
+                reference_kind: "runtime contract",
+                reference_value: &listener.runtime_contract_id,
+                declared: &runtime_contract_ids,
+                code: "missing_runtime_contract_reference",
+                allow_implicit_when_empty: false,
+            },
+            issues,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_addon_event_endpoint_references(
+    addon: &AddonManifest,
+    owner_kind: &str,
+    owner_id: &str,
+    event_type: &str,
+    channel: &str,
+    adapter_id: &str,
+    workflow_extension_id: &str,
+    capability_id: &str,
+    event_type_ids: &BTreeSet<&str>,
+    event_channel_ids: &BTreeSet<&str>,
+    event_adapter_ids: &BTreeSet<&str>,
+    workflow_extension_ids: &BTreeSet<&str>,
+    capability_ids: &BTreeSet<&str>,
+    issues: &mut Vec<AddonValidationIssue>,
+) {
+    validate_addon_reference_field(
+        addon,
+        AddonReferenceCheck {
+            owner_kind,
+            owner_id,
+            reference_kind: "event type",
+            reference_value: event_type,
+            declared: event_type_ids,
+            code: "missing_event_type_reference",
+            allow_implicit_when_empty: true,
+        },
+        issues,
+    );
+    validate_addon_reference_field(
+        addon,
+        AddonReferenceCheck {
+            owner_kind,
+            owner_id,
+            reference_kind: "event channel",
+            reference_value: channel,
+            declared: event_channel_ids,
+            code: "missing_event_channel_reference",
+            allow_implicit_when_empty: false,
+        },
+        issues,
+    );
+    validate_addon_reference_field(
+        addon,
+        AddonReferenceCheck {
+            owner_kind,
+            owner_id,
+            reference_kind: "event adapter",
+            reference_value: adapter_id,
+            declared: event_adapter_ids,
+            code: "missing_event_adapter_reference",
+            allow_implicit_when_empty: false,
+        },
+        issues,
+    );
+    validate_addon_reference_field(
+        addon,
+        AddonReferenceCheck {
+            owner_kind,
+            owner_id,
+            reference_kind: "workflow extension",
+            reference_value: workflow_extension_id,
+            declared: workflow_extension_ids,
+            code: "missing_workflow_extension_reference",
+            allow_implicit_when_empty: true,
+        },
+        issues,
+    );
+    validate_addon_reference_field(
+        addon,
+        AddonReferenceCheck {
+            owner_kind,
+            owner_id,
+            reference_kind: "capability",
+            reference_value: capability_id,
+            declared: capability_ids,
+            code: "missing_capability_reference",
+            allow_implicit_when_empty: false,
+        },
+        issues,
+    );
+}
+
+struct AddonReferenceCheck<'a> {
+    owner_kind: &'a str,
+    owner_id: &'a str,
+    reference_kind: &'a str,
+    reference_value: &'a str,
+    declared: &'a BTreeSet<&'a str>,
+    code: &'a str,
+    allow_implicit_when_empty: bool,
+}
+
+fn validate_addon_reference_field(
+    addon: &AddonManifest,
+    check: AddonReferenceCheck<'_>,
+    issues: &mut Vec<AddonValidationIssue>,
+) {
+    let reference_value = check.reference_value.trim();
+    if reference_value.is_empty()
+        || check.declared.contains(reference_value)
+        || (check.allow_implicit_when_empty && check.declared.is_empty())
+    {
+        return;
+    }
+
+    issues.push(validation_issue(
+        "error",
+        check.code,
+        &format!("{}:{}:{}", addon.id, check.owner_kind, check.owner_id),
+        &format!(
+            "{} references undeclared {} `{}`",
+            check.owner_kind, check.reference_kind, reference_value
+        ),
+    ));
 }
 
 fn ensure_addon_permissions_authorized(store: &ForgeStore, manifest: &AddonManifest) -> Result<()> {
