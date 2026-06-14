@@ -6873,7 +6873,7 @@ pub fn validate_addon_catalog(catalog: &AddonCatalog) -> AddonCatalogValidationR
 }
 
 pub fn default_addon_dirs() -> Vec<PathBuf> {
-    vec![PathBuf::from(".forge/addons")]
+    vec![PathBuf::from(".forge/addons"), PathBuf::from("addons")]
 }
 
 fn load_addon_catalog_with_records(

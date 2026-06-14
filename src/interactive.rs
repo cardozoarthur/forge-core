@@ -3144,9 +3144,11 @@ pub fn build_interactive_home_with_options(
     )?;
     let token_usage_panel = build_token_usage_panel(store)?;
     let sessions_panel = build_interactive_sessions(store, InteractiveSessionsOptions::default())?;
-    let command_palette_panel = build_interactive_command_palette(store, None)?;
+    let command_palette_panel =
+        build_interactive_command_palette_for_project(store, None, Some(&repository_context_path))?;
     let action_registry_panel = build_action_registry_from_palette(&command_palette_panel);
-    let autocomplete_panel = build_interactive_autocomplete(store, "")?;
+    let autocomplete_panel =
+        build_interactive_autocomplete_for_project(store, "", Some(&repository_context_path))?;
     let release_gates_panel =
         build_interactive_release_gates(store, "0.5", Some(&repository_context_path))?;
     let harness_mode_panel = harness_panel.mode.clone();
@@ -3274,7 +3276,7 @@ pub fn build_interactive_home_with_options(
     let addon_renderer_report = addon_catalog
         .as_ref()
         .map(|catalog| {
-            let addon_views = list_addon_views(catalog, None, None, Some("enabled"));
+            let addon_views = list_addon_views(catalog, None, None, None);
             build_addon_view_renderer_report(&addon_views)
         })
         .unwrap_or_else(|| OpsAddonViewRendererReport {
@@ -6680,13 +6682,26 @@ pub fn build_interactive_command_palette(
     store: &ForgeStore,
     query: Option<&str>,
 ) -> Result<InteractiveCommandPalettePanel> {
+    build_interactive_command_palette_for_project(store, query, None)
+}
+
+pub fn build_interactive_command_palette_for_project(
+    store: &ForgeStore,
+    query: Option<&str>,
+    project_root: Option<&Path>,
+) -> Result<InteractiveCommandPalettePanel> {
     let workflows = list_workflows_with_filters(
         store,
         WorkflowRegistryFilters::new(WorkflowLifecycleFilter::All),
     )?;
     let query = query.unwrap_or_default().trim().to_string();
     let mut entries = base_command_palette_entries();
-    entries.extend(addon_command_palette_entries(store)?);
+    let addon_entries = if project_root.is_some() {
+        addon_command_palette_entries_for_project(store, project_root)?
+    } else {
+        addon_command_palette_entries(store)?
+    };
+    entries.extend(addon_entries);
     entries.extend(workflow_command_palette_entries(&workflows.workflows));
     let entries = entries
         .into_iter()
@@ -6729,7 +6744,15 @@ pub fn build_interactive_action_registry(
     store: &ForgeStore,
     query: Option<&str>,
 ) -> Result<InteractiveActionRegistryPanel> {
-    let palette = build_interactive_command_palette(store, None)?;
+    build_interactive_action_registry_for_project(store, query, None)
+}
+
+pub fn build_interactive_action_registry_for_project(
+    store: &ForgeStore,
+    query: Option<&str>,
+    project_root: Option<&Path>,
+) -> Result<InteractiveActionRegistryPanel> {
+    let palette = build_interactive_command_palette_for_project(store, None, project_root)?;
     Ok(build_action_registry_from_palette_with_query(
         &palette,
         query.unwrap_or_default(),
@@ -6740,8 +6763,16 @@ pub fn build_interactive_action_invocation(
     store: &ForgeStore,
     action_id: &str,
 ) -> Result<InteractiveActionInvocationReport> {
+    build_interactive_action_invocation_for_project(store, action_id, None)
+}
+
+pub fn build_interactive_action_invocation_for_project(
+    store: &ForgeStore,
+    action_id: &str,
+    project_root: Option<&Path>,
+) -> Result<InteractiveActionInvocationReport> {
     let action_id = action_id.trim().to_string();
-    let registry = build_interactive_action_registry(store, None)?;
+    let registry = build_interactive_action_registry_for_project(store, None, project_root)?;
     let matches = registry
         .actions
         .iter()
@@ -7565,7 +7596,14 @@ fn base_command_palette_entries() -> Vec<InteractiveCommandPaletteEntry> {
 fn addon_command_palette_entries(
     store: &ForgeStore,
 ) -> Result<Vec<InteractiveCommandPaletteEntry>> {
-    let addon_dirs = default_addon_dirs();
+    addon_command_palette_entries_for_project(store, None)
+}
+
+fn addon_command_palette_entries_for_project(
+    store: &ForgeStore,
+    project_root: Option<&Path>,
+) -> Result<Vec<InteractiveCommandPaletteEntry>> {
+    let addon_dirs = addon_dirs_for_project(project_root);
     let catalog = load_addon_catalog_from_store(store, &addon_dirs)?;
     Ok(addon_view_command_palette_entries(&catalog))
 }
@@ -7573,7 +7611,7 @@ fn addon_command_palette_entries(
 fn addon_view_command_palette_entries(
     catalog: &AddonCatalog,
 ) -> Vec<InteractiveCommandPaletteEntry> {
-    let views = list_addon_views(catalog, None, Some("tui"), Some("enabled"));
+    let views = list_addon_views(catalog, None, Some("tui"), None);
     views
         .views
         .iter()
@@ -7713,14 +7751,19 @@ fn addon_action_readiness(
 }
 
 fn addon_action_permission_gate_status(view: &AddonViewEntry, action: &AddonViewAction) -> String {
-    if !action.permission.trim().is_empty()
-        && !view
+    let action_permission = action.permission.trim();
+    if !action_permission.is_empty() {
+        if !view
             .permission_gate
             .declared_permissions
             .iter()
-            .any(|permission| permission == &action.permission)
-    {
-        return "undeclared_permission".to_string();
+            .any(|permission| permission == action_permission)
+        {
+            return "undeclared_permission".to_string();
+        }
+        if view.addon_lifecycle == "unauthorized" {
+            return "missing_human_approval".to_string();
+        }
     }
     view.permission_gate.status.clone()
 }
@@ -8108,15 +8151,25 @@ pub fn build_interactive_autocomplete(
     store: &ForgeStore,
     input: &str,
 ) -> Result<InteractiveAutocompletePanel> {
+    build_interactive_autocomplete_for_project(store, input, None)
+}
+
+pub fn build_interactive_autocomplete_for_project(
+    store: &ForgeStore,
+    input: &str,
+    project_root: Option<&Path>,
+) -> Result<InteractiveAutocompletePanel> {
     let input = input.to_string();
     let normalized_query = normalize_autocomplete_query(&input);
     let palette_query = autocomplete_palette_query(&normalized_query);
-    let palette = build_interactive_command_palette(store, Some(&palette_query))?;
+    let palette =
+        build_interactive_command_palette_for_project(store, Some(&palette_query), project_root)?;
     let mut suggestions = slash_autocomplete_suggestions(&normalized_query);
     suggestions.extend(action_invocation_autocomplete_suggestions(
         store,
         &input,
         &normalized_query,
+        project_root,
     )?);
     suggestions.extend(command_palette_autocomplete_suggestions(
         &palette.entries,
@@ -8212,6 +8265,7 @@ fn action_invocation_autocomplete_suggestions(
     store: &ForgeStore,
     input: &str,
     normalized_query: &str,
+    project_root: Option<&Path>,
 ) -> Result<Vec<InteractiveAutocompleteSuggestion>> {
     let action_context = input.trim_start().starts_with("/action ")
         || normalized_query.trim_start().starts_with("/action ");
@@ -8233,9 +8287,10 @@ fn action_invocation_autocomplete_suggestions(
                 .unwrap_or("")
                 .trim()
         });
-    let registry = build_interactive_action_registry(
+    let registry = build_interactive_action_registry_for_project(
         store,
         (!action_query.is_empty()).then_some(action_query),
+        project_root,
     )?;
 
     Ok(registry
@@ -10239,9 +10294,12 @@ pub fn build_interactive_replacement_cli_with_options(
     let task_board = build_task_board_panel(store, &workflows.workflows)?;
     let dag = build_workflow_dag_panel(store, &workflows.workflows)?;
     let patch_workbench = build_interactive_patch_workbench(store)?;
-    let command_palette = build_interactive_command_palette(store, None)?;
-    let action_registry = build_interactive_action_registry(store, None)?;
-    let autocomplete = build_interactive_autocomplete(store, "/pa")?;
+    let command_palette =
+        build_interactive_command_palette_for_project(store, None, Some(&project_root))?;
+    let action_registry =
+        build_interactive_action_registry_for_project(store, None, Some(&project_root))?;
+    let autocomplete =
+        build_interactive_autocomplete_for_project(store, "/pa", Some(&project_root))?;
     let mut harness_options = InteractiveHarnessOptions::default_for_current_dir();
     harness_options.project_root = Some(project_root.clone());
     let harness = build_interactive_harness(store, harness_options)?;
@@ -12825,7 +12883,7 @@ pub fn build_interactive_addon_capabilities_default(
 
 fn addon_dirs_for_project(project_root: Option<&Path>) -> Vec<PathBuf> {
     project_root
-        .map(|root| vec![root.join(".forge/addons")])
+        .map(|root| vec![root.join(".forge/addons"), root.join("addons")])
         .unwrap_or_else(default_addon_dirs)
 }
 
@@ -18145,6 +18203,10 @@ fn build_ui_composition_panel(
     project_root: &Path,
 ) -> InteractiveUiCompositionPanel {
     let project_root_text = project_root.display().to_string();
+    let project_root_arg = format!(
+        "--project-root {}",
+        shell_quote_command_value(&project_root_text)
+    );
     let mut addon_widgets = addon_renderer_report
         .renderers
         .iter()
@@ -18160,7 +18222,9 @@ fn build_ui_composition_panel(
             "capability_index_renderer",
             "standard",
             "full",
-            vec!["forge interactive addon-capabilities --output json".to_string()],
+            vec![format!(
+                "forge interactive addon-capabilities {project_root_arg} --output json"
+            )],
         ),
         core_ui_widget(
             "addon_renderer_panel",
@@ -18199,7 +18263,9 @@ fn build_ui_composition_panel(
                     "command_palette_renderer",
                     "compact",
                     "full",
-                    vec!["forge interactive command-palette --output json".to_string()],
+                    vec![format!(
+                        "forge interactive command-palette {project_root_arg} --output json"
+                    )],
                 ),
                 core_ui_widget(
                     "action_registry_panel",
@@ -18208,7 +18274,9 @@ fn build_ui_composition_panel(
                     "action_registry_renderer",
                     "compact",
                     "full",
-                    vec!["forge interactive action-registry --output json".to_string()],
+                    vec![format!(
+                        "forge interactive action-registry {project_root_arg} --output json"
+                    )],
                 ),
                 core_ui_widget(
                     "autocomplete_panel",
@@ -18218,7 +18286,9 @@ fn build_ui_composition_panel(
                     "compact",
                     "full",
                     vec![
-                        "forge interactive autocomplete --input <input> --output json".to_string(),
+                        format!(
+                            "forge interactive autocomplete --input <input> {project_root_arg} --output json"
+                        ),
                     ],
                 ),
                 core_ui_widget(
@@ -18537,6 +18607,8 @@ fn build_ui_composition_panel(
             refresh: vec![
                 "interactive".to_string(),
                 "ui-composition".to_string(),
+                "--project-root".to_string(),
+                project_root_text.clone(),
                 "--output".to_string(),
                 "json".to_string(),
             ],

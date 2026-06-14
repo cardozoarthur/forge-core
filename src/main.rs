@@ -105,12 +105,13 @@ use forge_core::interaction::{
     CreateChoiceInteractionRequest,
 };
 use forge_core::interactive::{
-    build_forge_first_harness_smoke, build_interactive_action_invocation,
-    build_interactive_action_registry, build_interactive_addon_capabilities_for_project,
-    build_interactive_architecture_compass, build_interactive_artifacts,
-    build_interactive_autocomplete, build_interactive_command_palette,
-    build_interactive_context_memory, build_interactive_core_boundary_for_project,
-    build_interactive_event_runtime, build_interactive_guided_cockpit, build_interactive_harness,
+    build_forge_first_harness_smoke, build_interactive_action_invocation_for_project,
+    build_interactive_action_registry_for_project,
+    build_interactive_addon_capabilities_for_project, build_interactive_architecture_compass,
+    build_interactive_artifacts, build_interactive_autocomplete_for_project,
+    build_interactive_command_palette_for_project, build_interactive_context_memory,
+    build_interactive_core_boundary_for_project, build_interactive_event_runtime,
+    build_interactive_guided_cockpit, build_interactive_harness,
     build_interactive_home_with_options, build_interactive_identity,
     build_interactive_improvement_loop, build_interactive_multimodal_runtime,
     build_interactive_operating_context, build_interactive_operational_cockpit,
@@ -3478,24 +3479,32 @@ enum InteractiveCommands {
     CommandPalette {
         #[arg(long)]
         query: Option<String>,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
     ActionRegistry {
         #[arg(long)]
         query: Option<String>,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
     ActionInvocation {
         #[arg(long = "action")]
         action_id: String,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
     Autocomplete {
         #[arg(long)]
         input: String,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -8660,9 +8669,17 @@ fn run() -> Result<i32> {
                 }
                 Ok(0)
             }
-            InteractiveCommands::CommandPalette { query, output } => {
+            InteractiveCommands::CommandPalette {
+                query,
+                project_root,
+                output,
+            } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = build_interactive_command_palette(&store, query.as_deref())?;
+                let report = build_interactive_command_palette_for_project(
+                    &store,
+                    query.as_deref(),
+                    project_root.as_deref(),
+                )?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => {
@@ -8671,9 +8688,17 @@ fn run() -> Result<i32> {
                 }
                 Ok(0)
             }
-            InteractiveCommands::ActionRegistry { query, output } => {
+            InteractiveCommands::ActionRegistry {
+                query,
+                project_root,
+                output,
+            } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = build_interactive_action_registry(&store, query.as_deref())?;
+                let report = build_interactive_action_registry_for_project(
+                    &store,
+                    query.as_deref(),
+                    project_root.as_deref(),
+                )?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => {
@@ -8682,9 +8707,17 @@ fn run() -> Result<i32> {
                 }
                 Ok(0)
             }
-            InteractiveCommands::ActionInvocation { action_id, output } => {
+            InteractiveCommands::ActionInvocation {
+                action_id,
+                project_root,
+                output,
+            } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = build_interactive_action_invocation(&store, &action_id)?;
+                let report = build_interactive_action_invocation_for_project(
+                    &store,
+                    &action_id,
+                    project_root.as_deref(),
+                )?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => {
@@ -8693,9 +8726,17 @@ fn run() -> Result<i32> {
                 }
                 Ok(0)
             }
-            InteractiveCommands::Autocomplete { input, output } => {
+            InteractiveCommands::Autocomplete {
+                input,
+                project_root,
+                output,
+            } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = build_interactive_autocomplete(&store, &input)?;
+                let report = build_interactive_autocomplete_for_project(
+                    &store,
+                    &input,
+                    project_root.as_deref(),
+                )?;
                 match output {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => println!("{}", render_interactive_autocomplete(&report)),

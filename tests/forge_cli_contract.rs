@@ -46381,9 +46381,10 @@ views:
                     && widget["commands"]
                         .as_array()
                         .unwrap()
-                        .contains(&serde_json::json!(
-                            "forge interactive action-registry --output json"
-                        ))
+                        .contains(&serde_json::json!(format!(
+                            "forge interactive action-registry --project-root {} --output json",
+                            temp.path().display()
+                        )))
             })
         ));
 
@@ -46423,6 +46424,163 @@ views:
     );
     assert_eq!(mcp_json["result"]["action_count"], 2);
     assert_eq!(mcp_json["result"]["blocked_action_count"], 1);
+}
+
+#[test]
+fn interactive_surfaces_discover_standard_project_addons_dir() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let addon_dir = temp.path().join("addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        addon_dir.join("zzproject.yaml"),
+        r#"
+id: forge.addon.zzproject_ops
+name: ZzProject Ops Addon
+version: 0.1.0
+description: Demonstrates project-local Addon discovery from the standard addons directory.
+lifecycle: enabled
+permissions:
+  - id: zzproject.workflow.mutate
+    description: Mutate ZzProject workflow state after approval.
+    risk: medium
+    requires_human_approval: true
+    resources:
+      - zzproject.workflow
+    actions:
+      - modify_workflow
+    tenant_scopes:
+      - project
+capabilities:
+  - id: zzproject_ops
+    title: ZzProject operations
+    description: ZzProject operational controls.
+views:
+  - id: zzproject.ops_panel
+    title: ZzProject Ops Panel
+    surface: tui
+    type: dashboard
+    component: forge.zzproject.ops_panel
+    route: /zzproject/ops
+    layout:
+      zone: main
+      order: 47
+      width: full
+      height: auto
+      density: dense
+    data_bindings:
+      - id: zzproject_state
+        source: forge.zzproject.state
+        query: zzproject.state
+        scope: workflow
+        required_capability: zzproject_ops
+    actions:
+      - id: zzproject.ready
+        label: Ready zzproject action
+        description: Should be projected from the project addons directory.
+        palette_group: zzproject
+        source_panel: zzproject_ops_panel
+        type: command
+        method: CLI
+        target: forge zzproject ready
+        permission: zzproject.workflow.mutate
+        command_template:
+          - zzproject
+          - ready
+        keywords:
+          - zzproject
+          - ready
+"#,
+    )
+    .unwrap();
+
+    let registry_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-registry",
+            "--query",
+            "zzproject",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let registry: Value = serde_json::from_slice(&registry_output).unwrap();
+    assert_eq!(registry["status"], "action_registry_ready");
+    assert_eq!(registry["action_count"], 1);
+    assert_eq!(registry["enabled_action_count"], 0);
+    assert_eq!(registry["blocked_action_count"], 1);
+    let action = registry["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["action_id"] == "zzproject.ready")
+        .expect("project Addon action should be projected from addons/");
+    assert_eq!(action["enabled"], false);
+    assert_eq!(
+        action["blocked_reason"],
+        "permission_gate_missing_human_approval"
+    );
+    assert_eq!(action["commands"], serde_json::json!([]));
+    assert_eq!(action["operation_plan"]["status"], "blocked");
+    assert_eq!(
+        action["operation_plan"]["recommended_action"],
+        "inspect_addon_permission_gate"
+    );
+    assert_eq!(
+        action["addon_contract"]["source_addon"],
+        "forge.addon.zzproject_ops"
+    );
+
+    let composition_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "ui-composition",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let composition: Value = serde_json::from_slice(&composition_output).unwrap();
+    assert!(composition["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |region| region["widgets"].as_array().unwrap().iter().any(|widget| {
+                widget["widget_id"] == "action_registry_panel"
+                    && widget["commands"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!(format!(
+                            "forge interactive action-registry --project-root {} --output json",
+                            temp.path().display()
+                        )))
+            })
+        ));
+    assert!(composition["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |region| region["widgets"].as_array().unwrap().iter().any(|widget| {
+                widget["widget_id"] == "addon:forge.addon.zzproject_ops:zzproject.ops_panel"
+                    && widget["renderer_family"] == "dashboard_renderer"
+            })
+        ));
 }
 
 #[test]
@@ -46874,6 +47032,7 @@ fn interactive_command_palette_surfaces_contextual_actions_for_replacement_cli()
         home["dashboard"]["command_palette_panel"]["schema_version"],
         "forge.interactive.command_palette.v1"
     );
+    let current_project_root = std::env::current_dir().unwrap();
     assert!(home["dashboard"]["ui_composition_panel"]["regions"]
         .as_array()
         .unwrap()
@@ -46884,9 +47043,10 @@ fn interactive_command_palette_surfaces_contextual_actions_for_replacement_cli()
                     && widget["commands"]
                         .as_array()
                         .unwrap()
-                        .contains(&serde_json::json!(
-                            "forge interactive command-palette --output json"
-                        ))
+                        .contains(&serde_json::json!(format!(
+                            "forge interactive command-palette --project-root {} --output json",
+                            current_project_root.display()
+                        )))
             })
         ));
 
@@ -47073,6 +47233,7 @@ fn interactive_autocomplete_suggests_slash_and_palette_actions_for_replacement_c
         home["dashboard"]["autocomplete_panel"]["schema_version"],
         "forge.interactive.autocomplete.v1"
     );
+    let current_project_root = std::env::current_dir().unwrap();
     assert!(home["dashboard"]["ui_composition_panel"]["regions"]
         .as_array()
         .unwrap()
@@ -47083,9 +47244,10 @@ fn interactive_autocomplete_suggests_slash_and_palette_actions_for_replacement_c
                     && widget["commands"]
                         .as_array()
                         .unwrap()
-                        .contains(&serde_json::json!(
-                            "forge interactive autocomplete --input <input> --output json"
-                        ))
+                        .contains(&serde_json::json!(format!(
+                            "forge interactive autocomplete --input <input> --project-root {} --output json",
+                            current_project_root.display()
+                        )))
             })
         ));
 
@@ -50396,6 +50558,7 @@ fn interactive_addon_capabilities_command_and_mcp_surface_are_dedicated() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("/addons")));
+    let current_project_root = std::env::current_dir().unwrap();
     assert!(home["dashboard"]["ui_composition_panel"]["regions"]
         .as_array()
         .unwrap()
@@ -50406,9 +50569,10 @@ fn interactive_addon_capabilities_command_and_mcp_surface_are_dedicated() {
                     && widget["commands"]
                         .as_array()
                         .unwrap()
-                        .contains(&serde_json::json!(
-                            "forge interactive addon-capabilities --output json"
-                        ))
+                        .contains(&serde_json::json!(format!(
+                            "forge interactive addon-capabilities --project-root {} --output json",
+                            current_project_root.display()
+                        )))
             })
         ));
 
@@ -50520,7 +50684,10 @@ fn interactive_ui_composition_command_and_mcp_surface_are_dedicated() {
     let text = String::from_utf8(text_output).unwrap();
     assert!(text.contains("UI composition"));
     assert!(text.contains("Addon renderer families"));
-    assert!(text.contains("interactive ui-composition --output json"));
+    assert!(text.contains(&format!(
+        "interactive ui-composition --project-root {} --output json",
+        project_root.display()
+    )));
 
     let home_output = forge()
         .args([

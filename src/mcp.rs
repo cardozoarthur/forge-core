@@ -93,12 +93,12 @@ use crate::interaction::{
     expire_human_interaction, list_human_interactions, CreateChoiceInteractionRequest,
 };
 use crate::interactive::{
-    build_interactive_action_invocation, build_interactive_action_registry,
+    build_interactive_action_invocation_for_project, build_interactive_action_registry_for_project,
     build_interactive_addon_capabilities_for_project, build_interactive_architecture_compass,
-    build_interactive_artifacts, build_interactive_autocomplete, build_interactive_command_palette,
-    build_interactive_context_memory, build_interactive_core_boundary_for_project,
-    build_interactive_guided_cockpit, build_interactive_harness,
-    build_interactive_home_with_options, build_interactive_identity,
+    build_interactive_artifacts, build_interactive_autocomplete_for_project,
+    build_interactive_command_palette_for_project, build_interactive_context_memory,
+    build_interactive_core_boundary_for_project, build_interactive_guided_cockpit,
+    build_interactive_harness, build_interactive_home_with_options, build_interactive_identity,
     build_interactive_improvement_loop, build_interactive_multimodal_runtime,
     build_interactive_operating_context, build_interactive_operational_cockpit,
     build_interactive_patch_workbench, build_interactive_permissions, build_interactive_readiness,
@@ -638,17 +638,20 @@ struct InteractiveHarnessInput {
 #[derive(Debug, Deserialize, Default)]
 struct InteractiveCommandPaletteInput {
     query: Option<String>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 struct InteractiveActionInvocationInput {
     action: Option<String>,
     action_id: Option<String>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 struct InteractiveAutocompleteInput {
     input: Option<String>,
+    project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -3329,9 +3332,10 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
             tool(
                 "forge.interactive.command_palette",
                 "Inspect Interactive Command Palette",
-                "Return contextual Forge operator commands grouped by panel, including workflow, patch, permission, harness and observability actions without mutating state.",
+                "Return contextual Forge operator commands grouped by panel, including workflow, patch, Addon, permission, harness and observability actions without mutating state.",
                 object_schema(&[
                     ("query", "string", "optional search query used to filter non-workflow command entries"),
+                    ("project_root", "string", "optional project root used to load project-scoped .forge/addons and addons directories"),
                 ], &[]),
                 "forge.interactive.command_palette.v1",
                 &["forge", "interactive", "command-palette", "--output", "json"],
@@ -3343,6 +3347,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "Return a read-only action registry derived from the command palette for TUI, web and agent clients, including readiness counts, Addon lineage and operation plans without mutating state.",
                 object_schema(&[
                     ("query", "string", "optional search query used to filter non-workflow actions"),
+                    ("project_root", "string", "optional project root used to load project-scoped .forge/addons and addons directories"),
                 ], &[]),
                 "forge.interactive.action_registry.v1",
                 &["forge", "interactive", "action-registry", "--output", "json"],
@@ -3355,6 +3360,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 object_schema(&[
                     ("action_id", "string", "action id to resolve, such as patch.diff"),
                     ("action", "string", "alias for action_id"),
+                    ("project_root", "string", "optional project root used to resolve project-scoped Addon actions"),
                 ], &[]),
                 "forge.interactive.action_invocation.v1",
                 &["forge", "interactive", "action-invocation", "--action", "<action-id>", "--output", "json"],
@@ -3366,6 +3372,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "Return read-only slash-command and command-palette suggestions for a partial operator input without launching a TTY.",
                 object_schema(&[
                     ("input", "string", "partial operator input such as /patch r or patch"),
+                    ("project_root", "string", "optional project root used to suggest project-scoped Addon actions"),
                 ], &["input"]),
                 "forge.interactive.autocomplete.v1",
                 &["forge", "interactive", "autocomplete", "--input", "<input>", "--output", "json"],
@@ -7919,9 +7926,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             } else {
                 parse_input(input)?
             };
-            serde_json::to_value(build_interactive_command_palette(
+            let project_root = input.project_root.map(PathBuf::from);
+            serde_json::to_value(build_interactive_command_palette_for_project(
                 store,
                 input.query.as_deref(),
+                project_root.as_deref(),
             )?)?
         }
         "forge.interactive.action_registry" => {
@@ -7930,9 +7939,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             } else {
                 parse_input(input)?
             };
-            serde_json::to_value(build_interactive_action_registry(
+            let project_root = input.project_root.map(PathBuf::from);
+            serde_json::to_value(build_interactive_action_registry_for_project(
                 store,
                 input.query.as_deref(),
+                project_root.as_deref(),
             )?)?
         }
         "forge.interactive.action_invocation" => {
@@ -7944,7 +7955,12 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             let action_id = input.action_id.or(input.action).ok_or_else(|| {
                 anyhow::anyhow!("forge.interactive.action_invocation requires action_id")
             })?;
-            serde_json::to_value(build_interactive_action_invocation(store, &action_id)?)?
+            let project_root = input.project_root.map(PathBuf::from);
+            serde_json::to_value(build_interactive_action_invocation_for_project(
+                store,
+                &action_id,
+                project_root.as_deref(),
+            )?)?
         }
         "forge.interactive.autocomplete" => {
             let input: InteractiveAutocompleteInput = if input.is_null() {
@@ -7952,9 +7968,11 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
             } else {
                 parse_input(input)?
             };
-            serde_json::to_value(build_interactive_autocomplete(
+            let project_root = input.project_root.map(PathBuf::from);
+            serde_json::to_value(build_interactive_autocomplete_for_project(
                 store,
                 input.input.as_deref().unwrap_or_default(),
+                project_root.as_deref(),
             )?)?
         }
         "forge.interactive.patch_workbench" => {
