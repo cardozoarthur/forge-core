@@ -15,9 +15,10 @@ use crate::identity::{
 };
 use crate::intent::{parse_intent, parse_intent_with_catalog_and_context};
 use crate::outcome::{
-    assess_workflow_outcome, is_final_completion_audit_artifact,
-    workflow_has_explicit_final_criteria, workflow_requires_final_outcome_audit,
-    OutcomeStatusReport, FINAL_COMPLETION_AUDIT_KIND,
+    assess_workflow_outcome, assess_workflow_outcome_with_evidence,
+    is_final_completion_audit_artifact, workflow_has_explicit_final_criteria,
+    workflow_requires_final_outcome_audit, OutcomeEvidenceDeliverable, OutcomeStatusReport,
+    FINAL_COMPLETION_AUDIT_KIND,
 };
 use crate::registry::{
     attach_reuse_candidates_as_child_subflows, find_reuse_candidates, WorkflowReuseCandidate,
@@ -2689,11 +2690,101 @@ pub fn load_request_status(store: &ForgeStore, run_id: &str) -> Result<RequestSt
 
 fn request_outcome_status(store: &ForgeStore, workflow: &Workflow) -> Result<OutcomeStatusReport> {
     let final_completion_audit_block_reason = final_completion_audit_block_reason(store, workflow)?;
-    Ok(assess_workflow_outcome(
+    let evidence_deliverables = load_addon_user_outcome_evidence(store, workflow);
+    Ok(assess_workflow_outcome_with_evidence(
         workflow,
         true,
         final_completion_audit_block_reason.as_deref(),
+        &evidence_deliverables,
     ))
+}
+
+fn load_addon_user_outcome_evidence(
+    store: &ForgeStore,
+    workflow: &Workflow,
+) -> Vec<OutcomeEvidenceDeliverable> {
+    let mut evidence = Vec::new();
+    for artifact in &workflow.artifacts {
+        let artifact_text = format!("{} {}", artifact.kind, artifact.path)
+            .to_lowercase()
+            .replace('-', "_");
+        if !artifact_text.contains("outcome_manifest")
+            && !artifact_text.contains("user_outcome")
+            && !artifact_text.contains("readiness_report")
+        {
+            continue;
+        }
+        let Ok(bytes) = fs::read(store.base_dir().join(&artifact.path)) else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        collect_user_outcome_evidence(&payload, &artifact.path, &mut evidence);
+    }
+    evidence.sort_by(|left, right| left.name.cmp(&right.name));
+    evidence.dedup_by(|left, right| {
+        left.name.eq_ignore_ascii_case(&right.name) && left.artifact_ref == right.artifact_ref
+    });
+    evidence
+}
+
+fn collect_user_outcome_evidence(
+    payload: &serde_json::Value,
+    artifact_ref: &str,
+    evidence: &mut Vec<OutcomeEvidenceDeliverable>,
+) {
+    for key in ["outcomes", "deliverables", "user_facing_deliverables"] {
+        if let Some(items) = payload.get(key).and_then(|value| value.as_array()) {
+            collect_user_outcome_array(items, artifact_ref, evidence);
+        }
+    }
+    if let Some(data) = payload.get("data") {
+        collect_user_outcome_evidence(data, artifact_ref, evidence);
+    }
+}
+
+fn collect_user_outcome_array(
+    items: &[serde_json::Value],
+    artifact_ref: &str,
+    evidence: &mut Vec<OutcomeEvidenceDeliverable>,
+) {
+    for item in items {
+        if !outcome_item_is_ready(item) {
+            continue;
+        }
+        let name = item
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| {
+                ["deliverable", "name", "title", "outcome"]
+                    .iter()
+                    .find_map(|key| item.get(key).and_then(|value| value.as_str()))
+                    .map(str::to_string)
+            })
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            continue;
+        }
+        evidence.push(OutcomeEvidenceDeliverable {
+            name,
+            artifact_ref: artifact_ref.to_string(),
+        });
+    }
+}
+
+fn outcome_item_is_ready(item: &serde_json::Value) -> bool {
+    let status = item
+        .get("status")
+        .and_then(|value| value.as_str())
+        .unwrap_or("ready")
+        .to_lowercase();
+    !matches!(
+        status.as_str(),
+        "blocked" | "failed" | "missing" | "rework_required" | "not_ready"
+    )
 }
 
 fn latest_actionable_checkpoint(

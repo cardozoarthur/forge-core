@@ -381,6 +381,9 @@ pub fn parse_intent_with_catalog_and_context(
             "component, page, wireframe and flow artifacts",
         );
     }
+    for deliverable in explicit_user_facing_deliverables(&lower) {
+        push_deliverable_once(&mut deliverables, &deliverable);
+    }
     for deliverable in &capability_resolution.intent_overlay.deliverables {
         push_deliverable_once(&mut deliverables, deliverable);
     }
@@ -482,6 +485,87 @@ fn push_deliverable_once(deliverables: &mut Vec<String>, deliverable: &str) {
     {
         deliverables.push(deliverable.to_string());
     }
+}
+
+fn explicit_user_facing_deliverables(normalized_goal: &str) -> Vec<String> {
+    let markers = [
+        "whose user-facing deliverables are",
+        "whose user facing deliverables are",
+        "user-facing deliverables are",
+        "user facing deliverables are",
+        "final user-facing deliverables are",
+        "final user facing deliverables are",
+        "deliverables are",
+        "entregáveis de usuário são",
+        "entregaveis de usuario sao",
+        "entregáveis finais são",
+        "entregaveis finais sao",
+    ];
+    let Some((marker_index, marker)) = markers
+        .iter()
+        .filter_map(|marker| normalized_goal.find(marker).map(|index| (index, *marker)))
+        .min_by_key(|(index, _)| *index)
+    else {
+        return Vec::new();
+    };
+
+    let tail = &normalized_goal[marker_index + marker.len()..];
+    let mut section = tail
+        .split(['.', ';', '\n'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    for clause_boundary in [
+        ", all ",
+        ", without ",
+        ", using ",
+        ", backed by ",
+        ", operated ",
+        ", powered ",
+        ", todos ",
+        ", todas ",
+        ", sem ",
+        ", usando ",
+    ] {
+        if let Some(index) = section.find(clause_boundary) {
+            section.truncate(index);
+        }
+    }
+
+    section = section
+        .replace(" and ", ",")
+        .replace(" e ", ",")
+        .replace(" & ", ",")
+        .replace(" / ", ",");
+
+    section
+        .split(',')
+        .map(clean_explicit_deliverable)
+        .filter(|deliverable| deliverable.chars().count() >= 3)
+        .collect()
+}
+
+fn clean_explicit_deliverable(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|character: char| {
+            character == ':'
+                || character == '-'
+                || character == '–'
+                || character == '—'
+                || character == '"'
+                || character == '\''
+                || character.is_whitespace()
+        })
+        .trim_start_matches("a ")
+        .trim_start_matches("an ")
+        .trim_start_matches("the ")
+        .trim_start_matches("o ")
+        .trim_start_matches("a ")
+        .trim_start_matches("os ")
+        .trim_start_matches("as ")
+        .trim()
+        .to_string()
 }
 
 fn push_once(values: &mut Vec<String>, value: &str) {

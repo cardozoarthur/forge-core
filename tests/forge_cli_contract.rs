@@ -21691,6 +21691,124 @@ fn final_audit_cannot_verify_support_only_workflow_without_user_deliverables() {
 }
 
 #[test]
+fn outcome_status_uses_addon_user_outcome_manifest_as_delivery_evidence() {
+    use chrono::Utc;
+    use forge_core::graph::{self, ArtifactRecord, ExecutorKind, TaskStatus};
+
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+    let manifest_path = temp
+        .path()
+        .join("artifacts/crm/crm_user_outcome_manifest.json");
+    fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "forge.addon_user_outcome_manifest.v1",
+            "outcomes": [
+                {"deliverable": "relationship workspace", "status": "ready"},
+                {"deliverable": "commercial command center", "status": "ready"},
+                {"deliverable": "support inbox", "status": "ready"},
+                {"deliverable": "marketing automation", "status": "ready"},
+                {"deliverable": "document approvals", "status": "ready"},
+                {"deliverable": "project handoff", "status": "ready"}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let store = ForgeStore::open(&store_path).unwrap();
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Build forge-crm with explicit user-facing deliverables and final criteria verified.",
+    ));
+    workflow.status = "completed".to_string();
+    workflow.intent.deliverables = vec![
+        "atomic task graph".to_string(),
+        "relationship workspace".to_string(),
+        "commercial command center".to_string(),
+        "support inbox".to_string(),
+        "marketing automation".to_string(),
+        "document approvals".to_string(),
+        "project handoff".to_string(),
+    ];
+    workflow.tasks = vec![graph::task(
+        "task-readiness",
+        "Generate CRM operating readiness package",
+        &[],
+        &[],
+        vec![],
+        "CRM user outcome manifest",
+        (ExecutorKind::Command, 0.0002),
+    )];
+    workflow.tasks[0].status = TaskStatus::Completed;
+    workflow.artifacts.push(ArtifactRecord {
+        id: "artifact-crm-user-outcomes".to_string(),
+        kind: "crm_user_outcome_manifest".to_string(),
+        path: "artifacts/crm/crm_user_outcome_manifest.json".to_string(),
+        sha256: hex_sha256(&fs::read(&manifest_path).unwrap()),
+        created_at: Utc::now(),
+        lineage: None,
+    });
+    store.save_workflow(&workflow).unwrap();
+    let run = forge_core::request::create_run_record(&workflow, "codex", "accepted");
+    let run_id = run.run_id.clone();
+    forge_core::request::save_run_record(&store, &run).unwrap();
+    drop(store);
+
+    let status = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            &run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(
+        status_json["outcome_status"]["user_facing_deliverable_count"],
+        6
+    );
+    assert_eq!(
+        status_json["outcome_status"]["evidenced_user_facing_deliverable_count"],
+        6
+    );
+    assert_eq!(
+        status_json["outcome_status"]["missing_user_facing_deliverable_count"],
+        0
+    );
+    assert_eq!(
+        status_json["outcome_status"]["status"],
+        "needs_final_outcome_audit"
+    );
+    assert_eq!(
+        status_json["outcome_status"]["action"],
+        "attach_final_completion_audit"
+    );
+    let relationship = status_json["outcome_status"]["deliverables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|deliverable| deliverable["name"] == "relationship workspace")
+        .unwrap();
+    assert_eq!(relationship["status"], "evidence_present");
+    assert!(relationship["artifact_refs"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(
+            "artifacts/crm/crm_user_outcome_manifest.json".to_string()
+        )));
+}
+
+#[test]
 fn mcp_call_starts_resumes_and_polls_async_run_for_agent_handoff() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -24241,6 +24359,106 @@ fn workflow_goal_update_reparses_intent_deliverables_and_outcome_gate() {
         .iter()
         .any(|deliverable| deliverable["name"] == "final Markdown report"
             && deliverable["kind"] == "user_facing"));
+}
+
+#[test]
+fn workflow_goal_update_extracts_explicit_user_facing_deliverable_list() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Generate internal workflow support artifacts",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+
+    let update_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "workflow",
+            "update-goal",
+            "--workflow",
+            workflow_id,
+            "--goal",
+            "Build forge-crm as a Forge-native enterprise CRM reference product whose user-facing deliverables are relationship workspace, commercial command center, support inbox, marketing automation, document approvals and project handoff, all operated through Forge workflows, artifacts, events, validation gates and runtime contracts without CRM-local state.",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let update_json: Value = serde_json::from_slice(&update_output).unwrap();
+    let added = update_json["added_deliverables"].as_array().unwrap();
+    for expected in [
+        "relationship workspace",
+        "commercial command center",
+        "support inbox",
+        "marketing automation",
+        "document approvals",
+        "project handoff",
+    ] {
+        assert!(
+            added.contains(&Value::String(expected.to_string())),
+            "missing explicit user-facing deliverable {expected}"
+        );
+    }
+
+    let after = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let after_json: Value = serde_json::from_slice(&after).unwrap();
+    assert_ne!(after_json["outcome_status"]["status"], "support_only");
+    assert_eq!(
+        after_json["outcome_status"]["action"],
+        "produce_user_facing_deliverables"
+    );
+    assert!(
+        after_json["outcome_status"]["user_facing_deliverable_count"]
+            .as_u64()
+            .unwrap()
+            >= 6
+    );
+    assert!(after_json["outcome_status"]["deliverables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |deliverable| deliverable["name"] == "relationship workspace"
+                && deliverable["kind"] == "user_facing"
+        ));
 }
 
 #[test]

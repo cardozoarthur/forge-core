@@ -37,6 +37,12 @@ pub struct OutcomeDeliverableStatus {
     pub completed_task_refs: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct OutcomeEvidenceDeliverable {
+    pub name: String,
+    pub artifact_ref: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct OutcomeRegistrySummary {
     pub schema_version: String,
@@ -88,6 +94,20 @@ pub fn assess_workflow_outcome(
     final_completion_audit_evaluated: bool,
     final_completion_audit_block_reason: Option<&str>,
 ) -> OutcomeStatusReport {
+    assess_workflow_outcome_with_evidence(
+        workflow,
+        final_completion_audit_evaluated,
+        final_completion_audit_block_reason,
+        &[],
+    )
+}
+
+pub fn assess_workflow_outcome_with_evidence(
+    workflow: &Workflow,
+    final_completion_audit_evaluated: bool,
+    final_completion_audit_block_reason: Option<&str>,
+    evidence_deliverables: &[OutcomeEvidenceDeliverable],
+) -> OutcomeStatusReport {
     let final_completion_audit_required = workflow_requires_final_outcome_audit(workflow);
     let final_completion_audit_present = workflow
         .artifacts
@@ -99,7 +119,7 @@ pub fn assess_workflow_outcome(
     let (user_facing_artifact_count, support_artifact_count) =
         count_artifact_kinds(&workflow.artifacts);
 
-    let deliverables = workflow
+    let mut deliverables = workflow
         .intent
         .deliverables
         .iter()
@@ -112,6 +132,7 @@ pub fn assess_workflow_outcome(
             )
         })
         .collect::<Vec<_>>();
+    merge_evidence_deliverables(&mut deliverables, evidence_deliverables);
     let user_facing_deliverable_count = deliverables
         .iter()
         .filter(|deliverable| deliverable.kind == "user_facing")
@@ -216,6 +237,41 @@ pub fn assess_workflow_outcome(
         final_completion_audit_passed,
         final_completion_audit_block_reason: effective_final_completion_audit_block_reason,
         deliverables,
+    }
+}
+
+fn merge_evidence_deliverables(
+    deliverables: &mut Vec<OutcomeDeliverableStatus>,
+    evidence_deliverables: &[OutcomeEvidenceDeliverable],
+) {
+    for evidence in evidence_deliverables {
+        let name = evidence.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if let Some(existing) = deliverables
+            .iter_mut()
+            .find(|deliverable| deliverable.name.eq_ignore_ascii_case(name))
+        {
+            existing.kind = "user_facing".to_string();
+            existing.status = "evidence_present".to_string();
+            if !existing
+                .artifact_refs
+                .iter()
+                .any(|artifact_ref| artifact_ref == &evidence.artifact_ref)
+            {
+                existing.artifact_refs.push(evidence.artifact_ref.clone());
+            }
+            continue;
+        }
+
+        deliverables.push(OutcomeDeliverableStatus {
+            name: name.to_string(),
+            kind: "user_facing".to_string(),
+            status: "evidence_present".to_string(),
+            artifact_refs: vec![evidence.artifact_ref.clone()],
+            completed_task_refs: Vec::new(),
+        });
     }
 }
 
