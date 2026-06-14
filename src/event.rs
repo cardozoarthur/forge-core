@@ -8731,6 +8731,10 @@ fn continue_complete_task(store: &ForgeStore, data: &Value, origin: &str) -> Res
                 .get("ttl_seconds")
                 .and_then(Value::as_u64)
                 .unwrap_or(300),
+            context_budget: data
+                .get("context_budget")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize),
             origin,
         },
     )?)

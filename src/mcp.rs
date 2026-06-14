@@ -1676,6 +1676,7 @@ struct RunCompleteTaskInput {
     tokens_in: Option<i64>,
     tokens_out: Option<i64>,
     ttl_seconds: Option<u64>,
+    context_budget: Option<usize>,
     origin: Option<String>,
 }
 
@@ -5804,10 +5805,11 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("tokens_in", "integer", "non-negative input token count"),
                     ("tokens_out", "integer", "non-negative output token count"),
                     ("ttl_seconds", "integer", "heartbeat freshness TTL"),
+                    ("context_budget", "integer", "context budget used when re-driving the ready handoff before completion"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["run_id", "task_id", "summary"]),
                 "forge.request_task_completion.v1",
-                &["forge", "request", "complete-task", "--run", "<run-id>", "--task", "<task-id>", "--summary", "<summary>", "--output", "json"],
+                &["forge", "request", "complete-task", "--run", "<run-id>", "--task", "<task-id>", "--summary", "<summary>", "--budget", "<bytes>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
             tool(
@@ -9361,6 +9363,7 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                     tokens_in: input.tokens_in.unwrap_or(0),
                     tokens_out: input.tokens_out.unwrap_or(0),
                     ttl_seconds: input.ttl_seconds.unwrap_or(300),
+                    context_budget: input.context_budget,
                     origin: &origin,
                 },
             )?)?

@@ -3033,6 +3033,8 @@ enum RequestCommands {
         tokens_out: i64,
         #[arg(long = "ttl-seconds", default_value_t = 300)]
         ttl_seconds: u64,
+        #[arg(long = "budget")]
+        context_budget: Option<usize>,
         #[arg(long, default_value = "forge_cli")]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -8062,6 +8064,7 @@ fn run() -> Result<i32> {
                 tokens_in,
                 tokens_out,
                 ttl_seconds,
+                context_budget,
                 origin,
                 output,
             } => {
@@ -8080,6 +8083,7 @@ fn run() -> Result<i32> {
                         tokens_in,
                         tokens_out,
                         ttl_seconds,
+                        context_budget,
                         origin: &origin,
                     },
                 )?;

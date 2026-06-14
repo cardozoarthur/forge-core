@@ -37122,6 +37122,8 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
             "12",
             "--tokens-out",
             "34",
+            "--budget",
+            "8000",
             "--origin",
             "codex",
             "--output",
@@ -37157,6 +37159,17 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
         completed_json["drive_after"]["handoff_task"]["task_id"],
         "task-003"
     );
+    let drive_before_command = completed_json["drive_before"]["next_command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+    let budget_index = drive_before_command
+        .iter()
+        .position(|part| *part == "--budget")
+        .unwrap();
+    assert_eq!(drive_before_command[budget_index + 1], "8000");
 
     let status = forge()
         .args([
@@ -37240,6 +37253,7 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
         "summary": "MCP executor recorded task evidence.",
         "evidence_command": "mcp completion gate",
         "evidence_summary": "mcp completion evidence passed",
+        "context_budget": 8000,
         "origin": "mcp"
     })
     .to_string();
@@ -37269,6 +37283,17 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
         mcp_complete_json["result"]["drive_after"]["handoff_task"]["task_id"],
         "task-003"
     );
+    let mcp_drive_before_command = mcp_complete_json["result"]["drive_before"]["next_command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+    let mcp_budget_index = mcp_drive_before_command
+        .iter()
+        .position(|part| *part == "--budget")
+        .unwrap();
+    assert_eq!(mcp_drive_before_command[mcp_budget_index + 1], "8000");
 }
 
 #[test]

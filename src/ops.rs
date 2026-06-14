@@ -2357,6 +2357,7 @@ fn route_ops_http_request(
                     tokens_in: 0,
                     tokens_out: 0,
                     ttl_seconds: 300,
+                    context_budget: None,
                     origin: "ops-web",
                 },
             )?;

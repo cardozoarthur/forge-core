@@ -241,6 +241,7 @@ pub struct RequestTaskCompletionInput<'a> {
     pub tokens_in: i64,
     pub tokens_out: i64,
     pub ttl_seconds: u64,
+    pub context_budget: Option<usize>,
     pub origin: &'a str,
 }
 
@@ -929,16 +930,25 @@ pub fn drive_request(
     ttl_seconds: u64,
     origin: &str,
 ) -> Result<RequestDriveReport> {
+    drive_request_with_context_budget(store, run_id, executor, ttl_seconds, origin, None)
+}
+
+fn drive_request_with_context_budget(
+    store: &ForgeStore,
+    run_id: &str,
+    executor: &str,
+    ttl_seconds: u64,
+    origin: &str,
+    context_budget_override: Option<usize>,
+) -> Result<RequestDriveReport> {
     let run = load_run_record_for_action(store, run_id, "request drive")?;
     let workflow = store.load_workflow(&run.workflow_id)?;
     let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
+    let context_budget =
+        context_budget_override.unwrap_or_else(|| request_drive_context_budget(&workflow));
     let latest_checkpoint = latest_actionable_checkpoint(&workflow, &checkpoints);
     let task_summary = summarize_tasks(&workflow);
-    let handoff_summary = build_context_handoff_summary(
-        &workflow,
-        request_drive_context_budget(&workflow),
-        &checkpoints,
-    )?;
+    let handoff_summary = build_context_handoff_summary(&workflow, context_budget, &checkpoints)?;
     let outcome_status = request_outcome_status(store, &workflow)?;
 
     if let Some(rework) = latest_open_rework(store, &workflow)? {
@@ -1058,13 +1068,12 @@ pub fn drive_request(
     let run = load_run_record(store, run_id)?;
     let mut workflow = store.load_workflow(&run.workflow_id)?;
     let checkpoints = load_workflow_checkpoints(store, &workflow.id)?;
+    let mut context_budget =
+        context_budget_override.unwrap_or_else(|| request_drive_context_budget(&workflow));
     let latest_checkpoint = latest_actionable_checkpoint(&workflow, &checkpoints);
     let mut task_summary = summarize_tasks(&workflow);
-    let mut handoff_summary = build_context_handoff_summary(
-        &workflow,
-        request_drive_context_budget(&workflow),
-        &checkpoints,
-    )?;
+    let mut handoff_summary =
+        build_context_handoff_summary(&workflow, context_budget, &checkpoints)?;
     let mut outcome_status = request_outcome_status(store, &workflow)?;
 
     if task_summary.completed == task_summary.total && task_summary.total > 0 {
@@ -1073,12 +1082,11 @@ pub fn drive_request(
                 ensure_final_completion_audit_task(store, &workflow, origin, &reason)?
             {
                 workflow = updated_workflow;
+                context_budget = context_budget_override
+                    .unwrap_or_else(|| request_drive_context_budget(&workflow));
                 task_summary = summarize_tasks(&workflow);
-                handoff_summary = build_context_handoff_summary(
-                    &workflow,
-                    request_drive_context_budget(&workflow),
-                    &checkpoints,
-                )?;
+                handoff_summary =
+                    build_context_handoff_summary(&workflow, context_budget, &checkpoints)?;
                 outcome_status = request_outcome_status(store, &workflow)?;
             } else {
                 let next_command = vec![
@@ -1198,7 +1206,8 @@ pub fn drive_request(
 
     let parallel_handoff_tasks = ready_handoff_tasks(&workflow, &handoff_summary.tasks);
     if let Some(task) = parallel_handoff_tasks.first().cloned() {
-        let handoff_budget = handoff_context_budget_for_task(&workflow, &task.task_id);
+        let handoff_budget = context_budget_override
+            .unwrap_or_else(|| handoff_context_budget_for_task(&workflow, &task.task_id));
         let next_command = handoff_command(
             &workflow.id,
             &task.task_id,
@@ -1214,7 +1223,9 @@ pub fn drive_request(
                     &task.task_id,
                     executor,
                     ttl_seconds,
-                    handoff_context_budget_for_task(&workflow, &task.task_id),
+                    context_budget_override.unwrap_or_else(|| {
+                        handoff_context_budget_for_task(&workflow, &task.task_id)
+                    }),
                 )
             })
             .collect::<Vec<_>>();
@@ -1441,12 +1452,13 @@ pub fn complete_ready_task(
         anyhow::bail!("request task completion summary is required");
     }
 
-    let drive_before = drive_request(
+    let drive_before = drive_request_with_context_budget(
         store,
         run_id,
         input.executor,
         input.ttl_seconds,
         input.origin,
+        input.context_budget,
     )?;
     let run = load_run_record(store, run_id)?;
     let workflow = store.load_workflow(&run.workflow_id)?;
@@ -1566,9 +1578,13 @@ pub fn complete_ready_task(
     );
 
     let evidence_command = input.evidence_command.map(str::to_string).unwrap_or_else(|| {
+        let budget_arg = input
+            .context_budget
+            .map(|budget| format!(" --budget {budget}"))
+            .unwrap_or_default();
         format!(
-            "forge request complete-task --run {run_id} --task {} --executor {} --summary <executor-summary> --output json",
-            input.task_id, input.executor
+            "forge request complete-task --run {run_id} --task {} --executor {} --summary <executor-summary> --ttl-seconds {}{} --output json",
+            input.task_id, input.executor, input.ttl_seconds, budget_arg
         )
     });
     let evidence_summary = input
@@ -1606,12 +1622,13 @@ pub fn complete_ready_task(
     let validation =
         validate_executor_response_file(store, &workflow.id, &task.id, response_path.as_path())?;
     let drive_after = if validation.accepted {
-        Some(drive_request(
+        Some(drive_request_with_context_budget(
             store,
             run_id,
             input.executor,
             input.ttl_seconds,
             input.origin,
+            input.context_budget,
         )?)
     } else {
         None
