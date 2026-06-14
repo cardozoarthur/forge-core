@@ -33,7 +33,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-const COMPLETION_AUDIT_HANDOFF_CONTEXT_BUDGET: usize = 4096;
+const COMPLETION_AUDIT_HANDOFF_CONTEXT_BUDGET: usize = 12000;
 const REWORK_HANDOFF_CONTEXT_BUDGET: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

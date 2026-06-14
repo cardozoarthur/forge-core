@@ -328,6 +328,9 @@ pub fn parse_intent_with_catalog_and_context(
     if lower.contains("dashboard") || lower.contains("docs") {
         deliverables.push("documentation artifact".to_string());
     }
+    if requires_web_operational_surface(&lower) {
+        push_deliverable_once(&mut deliverables, "operational web workbench");
+    }
     if lower.contains("deploy") || lower.contains("deployment") {
         push_deliverable_once(&mut deliverables, "deployment evidence");
     }
@@ -485,6 +488,19 @@ fn push_deliverable_once(deliverables: &mut Vec<String>, deliverable: &str) {
     {
         deliverables.push(deliverable.to_string());
     }
+}
+
+fn requires_web_operational_surface(normalized_goal: &str) -> bool {
+    [
+        "web workbench",
+        "interface web",
+        "web interface",
+        "web ui",
+        "web app",
+        "web application",
+    ]
+    .iter()
+    .any(|needle| normalized_goal.contains(needle))
 }
 
 fn explicit_user_facing_deliverables(normalized_goal: &str) -> Vec<String> {

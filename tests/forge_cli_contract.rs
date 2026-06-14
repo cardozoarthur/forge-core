@@ -24462,6 +24462,65 @@ fn workflow_goal_update_extracts_explicit_user_facing_deliverable_list() {
 }
 
 #[test]
+fn request_start_treats_web_workbench_as_user_facing_deliverable() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Evoluir o Forge CRM para expor uma web workbench operacional com pipeline, comando comercial, suporte, marketing, documentos e IA derivados do snapshot Forge, sem estado local paralelo.",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let run_id = started_json["run_id"].as_str().unwrap();
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert_ne!(status_json["outcome_status"]["status"], "support_only");
+    assert!(
+        status_json["outcome_status"]["user_facing_deliverable_count"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(status_json["outcome_status"]["deliverables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |deliverable| deliverable["name"] == "operational web workbench"
+                && deliverable["kind"] == "user_facing"
+        ));
+}
+
+#[test]
 fn workflow_artifacts_can_be_attached_during_runtime_from_codex_or_opencode() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -39490,6 +39549,131 @@ fn request_drive_requires_final_audit_for_user_facing_deliverables() {
             |deliverable| deliverable["name"] == "collaborative AI and human whiteboard"
                 && deliverable["kind"] == "user_facing"
         ));
+}
+
+#[test]
+fn final_completion_audit_handoff_honors_explicit_large_context_budget() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let started = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Evoluir o Forge CRM para expor uma web workbench operacional com pipeline, comando comercial, suporte, marketing, documentos e IA derivados do snapshot Forge, sem estado local paralelo.",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started_json: Value = serde_json::from_slice(&started).unwrap();
+    let workflow_id = started_json["workflow_id"].as_str().unwrap();
+    set_all_task_statuses_in_stored_workflow(&store, workflow_id, "completed");
+    set_workflow_status_in_stored_workflow(&store, workflow_id, "completed");
+
+    for index in 0..24 {
+        let artifact_path = temp.path().join(format!(
+            "crm-operational-workbench-evidence-{index:02}-pipeline-commercial-support-marketing-documents-ai.json"
+        ));
+        fs::write(
+            &artifact_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": "forge.crm_operational_workbench_evidence.v1",
+                "index": index,
+                "state_source": "forge_workflow_artifacts_and_events",
+                "mutation_requires_forge": true,
+                "surfaces": ["pipeline", "commercial", "support", "marketing", "documents", "ai"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        forge()
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "workflow",
+                "attach-artifact",
+                "--workflow",
+                workflow_id,
+                "--path",
+                artifact_path.to_str().unwrap(),
+                "--kind",
+                "crm_operational_workbench_snapshot",
+                "--origin",
+                "codex",
+                "--output",
+                "json",
+            ])
+            .assert()
+            .success();
+    }
+
+    let ensured = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "ensure-final-audit",
+            "--workflow",
+            workflow_id,
+            "--executor",
+            "codex",
+            "--origin",
+            "codex",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ensured_json: Value = serde_json::from_slice(&ensured).unwrap();
+    let audit_task_id = ensured_json["audit_task_id"].as_str().unwrap();
+    assert_eq!(ensured_json["action"], "handoff_final_completion_audit");
+
+    let handoff = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            audit_task_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "12000",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
+    assert_eq!(handoff_json["status"], "handoff_ready");
+    assert_eq!(handoff_json["context"]["effective_budget"], 12000);
+    assert_eq!(handoff_json["context"]["handoff_ready"], true);
+    assert!(
+        handoff_json["context"]["replay_manifest"]["included_sections"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("validation_rules".to_string()))
+    );
 }
 
 #[test]
