@@ -116,6 +116,8 @@ const INTERACTIVE_COMMAND_PALETTE_ACTION_PLAN_SCHEMA_VERSION: &str =
     "forge.interactive.command_palette_action_plan.v1";
 const INTERACTIVE_ACTION_REGISTRY_SCHEMA_VERSION: &str = "forge.interactive.action_registry.v1";
 const INTERACTIVE_ACTION_INVOCATION_SCHEMA_VERSION: &str = "forge.interactive.action_invocation.v1";
+const INTERACTIVE_ACTION_HOOK_CONTRACT_SCHEMA_VERSION: &str =
+    "forge.interactive.action_hook_contract.v1";
 const INTERACTIVE_AUTOCOMPLETE_SCHEMA_VERSION: &str = "forge.interactive.autocomplete.v1";
 const INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION: &str = "forge.interactive.patch_workbench.v1";
 const INTERACTIVE_ADDON_ACTION_CONTRACT_SCHEMA_VERSION: &str =
@@ -1120,6 +1122,8 @@ pub struct InteractiveCommandPaletteEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub addon_contract: Option<InteractiveAddonActionContract>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook_contract: Option<InteractiveActionHookContract>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub addon_view_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub addon_view_action_id: Option<String>,
@@ -1200,6 +1204,8 @@ pub struct InteractiveActionInvocationReport {
     pub recommended_action: String,
     pub next_commands: Vec<Vec<String>>,
     pub operation_plan: InteractiveCommandPaletteActionPlan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook_contract: Option<InteractiveActionHookContract>,
     pub action: Option<InteractiveCommandPaletteEntry>,
     pub commands: InteractiveActionInvocationCommands,
 }
@@ -1511,6 +1517,31 @@ pub struct InteractiveAddonActionContract {
     pub action_type: String,
     pub method: String,
     pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveActionHookContract {
+    pub schema_version: String,
+    pub state_owner: String,
+    pub hook_count: usize,
+    pub invocation_policy: String,
+    pub hooks: Vec<InteractiveActionHookTarget>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveActionHookTarget {
+    pub id: String,
+    pub hook_type: String,
+    pub target: String,
+    pub workflow_id: String,
+    pub contract_id: String,
+    pub brain_id: String,
+    pub permission_id: String,
+    pub execution_owner: String,
+    pub execution_boundary: String,
+    pub mutates_workflow: bool,
+    pub command_template: Vec<String>,
+    pub input_schema: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -6856,6 +6887,9 @@ pub fn build_interactive_action_invocation_for_project(
         "diagnostic_only_not_executed"
     }
     .to_string();
+    let hook_contract = action
+        .as_ref()
+        .and_then(|action| action.hook_contract.clone());
 
     Ok(InteractiveActionInvocationReport {
         schema_version: INTERACTIVE_ACTION_INVOCATION_SCHEMA_VERSION.to_string(),
@@ -6876,6 +6910,7 @@ pub fn build_interactive_action_invocation_for_project(
         recommended_action,
         next_commands,
         operation_plan,
+        hook_contract,
         action,
         commands: InteractiveActionInvocationCommands {
             action_invocation: vec![
@@ -7686,6 +7721,7 @@ fn addon_view_command_palette_entry(
         blocked_reason: readiness.blocked_reason.clone(),
         operation_plan,
         addon_contract: Some(addon_action_contract(view, action, &readiness)),
+        hook_contract: addon_action_hook_contract(action),
         addon_view_id: Some(view.view.id.clone()),
         addon_view_action_id: Some(action.id.clone()),
         workflow_id: None,
@@ -7729,6 +7765,56 @@ fn addon_action_contract(
         action_type: action.action_type.clone(),
         method: action.method.clone(),
         target: action.target.clone(),
+    }
+}
+
+fn addon_action_hook_contract(action: &AddonViewAction) -> Option<InteractiveActionHookContract> {
+    if action.hooks.is_empty() {
+        return None;
+    }
+    let hooks = action
+        .hooks
+        .iter()
+        .map(|hook| InteractiveActionHookTarget {
+            id: hook.id.clone(),
+            hook_type: hook.hook_type.clone(),
+            target: hook.target.clone(),
+            workflow_id: hook.workflow_id.clone(),
+            contract_id: hook.contract_id.clone(),
+            brain_id: hook.brain_id.clone(),
+            permission_id: hook.permission.clone(),
+            execution_owner: action_hook_execution_owner(&hook.hook_type).to_string(),
+            execution_boundary: action_hook_execution_boundary(hook).to_string(),
+            mutates_workflow: hook.mutates_workflow,
+            command_template: hook.command_template.clone(),
+            input_schema: hook.input_schema.clone(),
+        })
+        .collect::<Vec<_>>();
+    Some(InteractiveActionHookContract {
+        schema_version: INTERACTIVE_ACTION_HOOK_CONTRACT_SCHEMA_VERSION.to_string(),
+        state_owner: "forge_workflow_state".to_string(),
+        hook_count: hooks.len(),
+        invocation_policy: "plan_only_not_executed_by_registry".to_string(),
+        hooks,
+    })
+}
+
+fn action_hook_execution_owner(hook_type: &str) -> &'static str {
+    match hook_type {
+        "brain_cli" | "cli_brain" | "external_brain" => "forge_harness",
+        "runtime_contract" | "addon_runtime_contract" => "forge_addon_runtime",
+        _ => "forge",
+    }
+}
+
+fn action_hook_execution_boundary(hook: &crate::addon::AddonViewActionHook) -> &str {
+    if !hook.execution_boundary.is_empty() {
+        return &hook.execution_boundary;
+    }
+    match hook.hook_type.as_str() {
+        "brain_cli" | "cli_brain" | "external_brain" => "forge_controlled_brain_hook_plan",
+        "runtime_contract" | "addon_runtime_contract" => "forge_runtime_contract_dispatch_plan",
+        _ => "forge_workflow_invocation_plan",
     }
 }
 
@@ -8015,6 +8101,7 @@ fn command_palette_entry_from_commands(
         blocked_reason: "ready".to_string(),
         operation_plan,
         addon_contract: None,
+        hook_contract: None,
         addon_view_id: None,
         addon_view_action_id: None,
         workflow_id,

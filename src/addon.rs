@@ -946,6 +946,33 @@ pub struct AddonViewAction {
     pub keywords: Vec<String>,
     #[serde(default)]
     pub payload_schema: Vec<String>,
+    #[serde(default)]
+    pub hooks: Vec<AddonViewActionHook>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AddonViewActionHook {
+    pub id: String,
+    #[serde(default, alias = "type", alias = "kind")]
+    pub hook_type: String,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub workflow_id: String,
+    #[serde(default)]
+    pub contract_id: String,
+    #[serde(default)]
+    pub brain_id: String,
+    #[serde(default)]
+    pub permission: String,
+    #[serde(default)]
+    pub execution_boundary: String,
+    #[serde(default)]
+    pub mutates_workflow: bool,
+    #[serde(default)]
+    pub command_template: Vec<String>,
+    #[serde(default)]
+    pub input_schema: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13140,6 +13167,7 @@ fn multimodal_runtime_addon() -> AddonManifest {
                         "fixture_id".to_string(),
                         "approved_by".to_string(),
                     ],
+                    hooks: Vec::new(),
                 },
             ],
             permissions: vec!["multimodal.runtime_benchmark".to_string()],
@@ -13208,6 +13236,7 @@ fn patch_workbench_action(
             .iter()
             .map(|field| (*field).to_string())
             .collect(),
+        hooks: Vec::new(),
     }
 }
 

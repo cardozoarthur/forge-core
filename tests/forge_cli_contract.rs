@@ -46299,6 +46299,45 @@ views:
         command_template:
           - zzdemo
           - ready
+        hooks:
+          - id: zzdemo.ready.workflow_hook
+            hook_type: workflow
+            target: workflow:zzdemo.review
+            workflow_id: zzdemo.review
+            execution_boundary: forge_workflow_invocation_plan
+            permission: zzdemo.workflow.mutate
+            mutates_workflow: true
+            command_template:
+              - workflow
+              - update-goal
+              - --workflow
+              - zzdemo.review
+              - --goal
+              - <goal>
+              - --output
+              - json
+            input_schema:
+              - goal
+              - reason
+          - id: zzdemo.ready.brain_hook
+            hook_type: brain_cli
+            target: brain:codex
+            brain_id: codex
+            execution_boundary: forge_controlled_brain_hook_plan
+            permission: zzdemo.brain.use
+            mutates_workflow: false
+            command_template:
+              - harness
+              - wrap-plan
+              - --executor
+              - codex
+              - --cmd
+              - codex
+              - --output
+              - json
+            input_schema:
+              - task_context
+              - prompt_packet
         keywords:
           - zzdemo
           - ready
@@ -46376,6 +46415,38 @@ views:
         .as_array()
         .unwrap()
         .contains(&serde_json::json!(["zzdemo", "ready"])));
+    assert_eq!(
+        ready["hook_contract"]["schema_version"],
+        "forge.interactive.action_hook_contract.v1"
+    );
+    assert_eq!(
+        ready["hook_contract"]["state_owner"],
+        "forge_workflow_state"
+    );
+    assert_eq!(ready["hook_contract"]["hook_count"], 2);
+    let ready_hooks = ready["hook_contract"]["hooks"].as_array().unwrap();
+    assert!(ready_hooks.iter().any(|hook| {
+        hook["id"] == "zzdemo.ready.workflow_hook"
+            && hook["hook_type"] == "workflow"
+            && hook["workflow_id"] == "zzdemo.review"
+            && hook["execution_owner"] == "forge"
+            && hook["execution_boundary"] == "forge_workflow_invocation_plan"
+            && hook["command_template"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("workflow"))
+    }));
+    assert!(ready_hooks.iter().any(|hook| {
+        hook["id"] == "zzdemo.ready.brain_hook"
+            && hook["hook_type"] == "brain_cli"
+            && hook["brain_id"] == "codex"
+            && hook["execution_owner"] == "forge_harness"
+            && hook["execution_boundary"] == "forge_controlled_brain_hook_plan"
+            && hook["command_template"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("wrap-plan"))
+    }));
 
     let blocked = json["actions"]
         .as_array()
@@ -46430,6 +46501,28 @@ views:
     assert!(text.contains("risk=low"));
     assert!(text.contains("mutates=false"));
     assert!(text.contains("approval=false"));
+
+    let invocation_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-invocation",
+            "--action",
+            "zzdemo.ready",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let invocation: Value = serde_json::from_slice(&invocation_output).unwrap();
+    assert_eq!(invocation["status"], "action_invocation_ready");
+    assert_eq!(invocation["hook_contract"]["hook_count"], 2);
+    assert_eq!(invocation["hook_contract"]["hooks"][1]["brain_id"], "codex");
 
     let home_output = forge()
         .current_dir(temp.path())
