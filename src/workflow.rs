@@ -18,6 +18,7 @@ use crate::validation::{validate_workflow, ValidationReport};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::path::Path;
 use uuid::Uuid;
 
@@ -131,6 +132,7 @@ pub struct AttachedArtifact {
     pub path: String,
     pub sha256: String,
     pub bytes: u64,
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -687,15 +689,28 @@ pub fn attach_workflow_artifact(
     kind: &str,
     origin: &str,
 ) -> Result<ArtifactAttachReport> {
+    attach_workflow_artifact_with_tags(store, workflow_id, source_path, kind, origin, &[])
+}
+
+pub fn attach_workflow_artifact_with_tags(
+    store: &ForgeStore,
+    workflow_id: &str,
+    source_path: &Path,
+    kind: &str,
+    origin: &str,
+    tags: &[String],
+) -> Result<ArtifactAttachReport> {
     ensure_workflow_policy(store, workflow_id, "workflow artifact attach")?;
     let mut workflow = store.load_workflow(workflow_id)?;
     let (relative_path, sha256, bytes) =
         copy_artifact(&store.base_dir(), workflow_id, source_path, kind)?;
+    let tags = normalize_artifact_tags(kind, &relative_path, origin, tags);
     let artifact = ArtifactRecord {
         id: format!("artifact_{}", Uuid::new_v4().to_string().replace('-', "")),
         kind: kind.to_string(),
         path: relative_path.clone(),
         sha256: sha256.clone(),
+        tags: tags.clone(),
         created_at: Utc::now(),
         lineage: None,
     };
@@ -714,6 +729,7 @@ pub fn attach_workflow_artifact(
             "origin": origin,
             "path": relative_path,
             "sha256": sha256,
+            "tags": tags,
             "revision": revision
         }),
     )?;
@@ -729,8 +745,39 @@ pub fn attach_workflow_artifact(
             path: artifact.path,
             sha256: artifact.sha256,
             bytes,
+            tags: artifact.tags,
         },
     })
+}
+
+fn normalize_artifact_tags(
+    kind: &str,
+    path: &str,
+    origin: &str,
+    explicit_tags: &[String],
+) -> Vec<String> {
+    let mut tags = BTreeSet::new();
+    tags.insert("artifact".to_string());
+    collect_tag_parts(&mut tags, kind);
+    collect_tag_parts(&mut tags, path);
+    collect_tag_parts(&mut tags, origin);
+    for tag in explicit_tags {
+        collect_tag_parts(&mut tags, tag);
+    }
+    tags.into_iter().collect()
+}
+
+fn collect_tag_parts(tags: &mut BTreeSet<String>, value: &str) {
+    let normalized = value.trim().to_lowercase();
+    if normalized.is_empty() {
+        return;
+    }
+    tags.insert(normalized.clone());
+    for part in normalized.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+        if part.len() >= 2 {
+            tags.insert(part.to_string());
+        }
+    }
 }
 
 pub fn validate_child_subflow_binding(

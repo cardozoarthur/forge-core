@@ -75,6 +75,7 @@ use crate::registry::{
     RegistryContextQualitySummary, WorkflowLifecycleFilter, WorkflowRegistryFilters,
     WorkflowRegistryRow,
 };
+use crate::request::RequestStartReport;
 use crate::request::{build_run_activity, start_async_request, RunRecord};
 use crate::runtime::load_runtimes;
 use crate::schedule::{
@@ -116,8 +117,13 @@ const INTERACTIVE_COMMAND_PALETTE_ACTION_PLAN_SCHEMA_VERSION: &str =
     "forge.interactive.command_palette_action_plan.v1";
 const INTERACTIVE_ACTION_REGISTRY_SCHEMA_VERSION: &str = "forge.interactive.action_registry.v1";
 const INTERACTIVE_ACTION_INVOCATION_SCHEMA_VERSION: &str = "forge.interactive.action_invocation.v1";
+const INTERACTIVE_ACTION_DISPATCH_SCHEMA_VERSION: &str = "forge.interactive.action_dispatch.v1";
 const INTERACTIVE_ACTION_HOOK_CONTRACT_SCHEMA_VERSION: &str =
     "forge.interactive.action_hook_contract.v1";
+const INTERACTIVE_WORKFLOW_HOOK_CONTRACT_SCHEMA_VERSION: &str =
+    "forge.interactive.workflow_hook_contract.v1";
+const INTERACTIVE_BRAIN_HOOK_CONTRACT_SCHEMA_VERSION: &str =
+    "forge.interactive.brain_hook_contract.v1";
 const INTERACTIVE_AUTOCOMPLETE_SCHEMA_VERSION: &str = "forge.interactive.autocomplete.v1";
 const INTERACTIVE_PATCH_WORKBENCH_SCHEMA_VERSION: &str = "forge.interactive.patch_workbench.v1";
 const INTERACTIVE_ADDON_ACTION_CONTRACT_SCHEMA_VERSION: &str =
@@ -1124,6 +1130,10 @@ pub struct InteractiveCommandPaletteEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hook_contract: Option<InteractiveActionHookContract>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_hook_contract: Option<InteractiveWorkflowHookContract>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brain_hook_contract: Option<InteractiveBrainHookContract>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub addon_view_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub addon_view_action_id: Option<String>,
@@ -1206,6 +1216,10 @@ pub struct InteractiveActionInvocationReport {
     pub operation_plan: InteractiveCommandPaletteActionPlan,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hook_contract: Option<InteractiveActionHookContract>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_hook_contract: Option<InteractiveWorkflowHookContract>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brain_hook_contract: Option<InteractiveBrainHookContract>,
     pub action: Option<InteractiveCommandPaletteEntry>,
     pub commands: InteractiveActionInvocationCommands,
 }
@@ -1216,6 +1230,89 @@ pub struct InteractiveActionInvocationCommands {
     pub action_registry: Vec<String>,
     pub command_palette: Vec<String>,
     pub autocomplete: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveActionDispatchReport {
+    pub schema_version: String,
+    pub status: String,
+    pub requested_action_id: String,
+    pub origin: String,
+    pub match_count: usize,
+    pub requested_hook_ids: Vec<String>,
+    pub requested_hook_tags: Vec<String>,
+    pub dispatched: bool,
+    pub workflow_dispatch_count: usize,
+    pub brain_hook_plan_count: usize,
+    pub not_executed_brain_hook_count: usize,
+    pub blocked_reason: String,
+    pub invocation: InteractiveActionInvocationReport,
+    pub workflow_dispatches: Vec<InteractiveWorkflowHookDispatchReceipt>,
+    pub brain_hook_plans: Vec<InteractiveBrainHookDispatchReceipt>,
+    pub action: Option<InteractiveCommandPaletteEntry>,
+    pub commands: InteractiveActionDispatchCommands,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowHookDispatchReceipt {
+    pub hook_id: String,
+    pub hook_type: String,
+    pub tags: Vec<String>,
+    pub target: String,
+    pub target_workflow_ref: String,
+    pub contract_id: String,
+    pub permission_id: String,
+    pub invocation_mode: String,
+    pub state: String,
+    pub state_owner: String,
+    pub execution_owner: String,
+    pub mutates_workflow: bool,
+    pub goal: String,
+    pub payload: serde_json::Value,
+    pub artifact_ref: String,
+    pub lineage_ref: String,
+    pub request: RequestStartReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveBrainHookDispatchReceipt {
+    pub status: String,
+    pub hook_id: String,
+    pub hook_type: String,
+    pub tags: Vec<String>,
+    pub target: String,
+    pub brain_id: String,
+    pub workflow_id: String,
+    pub contract_id: String,
+    pub permission_id: String,
+    pub execution_owner: String,
+    pub queue_owner: String,
+    pub state: String,
+    pub execution_boundary: String,
+    pub dispatch_operation: String,
+    pub quota_policy: InteractiveBrainHookQuotaPolicy,
+    pub fallback_brains: Vec<String>,
+    pub not_executed: bool,
+    pub mutates_workflow: bool,
+    pub command: Vec<String>,
+    pub artifact_ref: String,
+    pub lineage_ref: String,
+    pub input_schema: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveBrainHookQuotaPolicy {
+    pub schema_version: String,
+    pub ai_limits_required: bool,
+    pub ai_limits_command_template: Vec<String>,
+    pub stop_or_fallback_before_quota_burn: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveActionDispatchCommands {
+    pub action_dispatch: Vec<String>,
+    pub action_invocation: Vec<String>,
+    pub action_registry: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -1532,6 +1629,7 @@ pub struct InteractiveActionHookContract {
 pub struct InteractiveActionHookTarget {
     pub id: String,
     pub hook_type: String,
+    pub tags: Vec<String>,
     pub target: String,
     pub workflow_id: String,
     pub contract_id: String,
@@ -1539,6 +1637,67 @@ pub struct InteractiveActionHookTarget {
     pub permission_id: String,
     pub execution_owner: String,
     pub execution_boundary: String,
+    pub mutates_workflow: bool,
+    pub command_template: Vec<String>,
+    pub input_schema: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowHookContract {
+    pub schema_version: String,
+    pub state_owner: String,
+    pub hook_execution_owner: String,
+    pub workflow_hook_count: usize,
+    pub dispatch_policy: String,
+    pub not_executed: bool,
+    pub hooks: Vec<InteractiveWorkflowHookDispatchPlan>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveWorkflowHookDispatchPlan {
+    pub id: String,
+    pub hook_type: String,
+    pub tags: Vec<String>,
+    pub target: String,
+    pub workflow_id: String,
+    pub contract_id: String,
+    pub permission_id: String,
+    pub state_owner: String,
+    pub execution_owner: String,
+    pub execution_boundary: String,
+    pub dispatch_operation: String,
+    pub not_executed: bool,
+    pub mutates_workflow: bool,
+    pub command_template: Vec<String>,
+    pub input_schema: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveBrainHookContract {
+    pub schema_version: String,
+    pub state_owner: String,
+    pub hook_execution_owner: String,
+    pub brain_hook_count: usize,
+    pub dispatch_policy: String,
+    pub not_executed: bool,
+    pub hooks: Vec<InteractiveBrainHookDispatchPlan>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractiveBrainHookDispatchPlan {
+    pub id: String,
+    pub hook_type: String,
+    pub tags: Vec<String>,
+    pub target: String,
+    pub brain_id: String,
+    pub workflow_id: String,
+    pub contract_id: String,
+    pub permission_id: String,
+    pub state_owner: String,
+    pub execution_owner: String,
+    pub execution_boundary: String,
+    pub dispatch_operation: String,
+    pub not_executed: bool,
     pub mutates_workflow: bool,
     pub command_template: Vec<String>,
     pub input_schema: Vec<String>,
@@ -6890,6 +7049,12 @@ pub fn build_interactive_action_invocation_for_project(
     let hook_contract = action
         .as_ref()
         .and_then(|action| action.hook_contract.clone());
+    let workflow_hook_contract = action
+        .as_ref()
+        .and_then(|action| action.workflow_hook_contract.clone());
+    let brain_hook_contract = action
+        .as_ref()
+        .and_then(|action| action.brain_hook_contract.clone());
 
     Ok(InteractiveActionInvocationReport {
         schema_version: INTERACTIVE_ACTION_INVOCATION_SCHEMA_VERSION.to_string(),
@@ -6911,6 +7076,8 @@ pub fn build_interactive_action_invocation_for_project(
         next_commands,
         operation_plan,
         hook_contract,
+        workflow_hook_contract,
+        brain_hook_contract,
         action,
         commands: InteractiveActionInvocationCommands {
             action_invocation: vec![
@@ -6947,6 +7114,428 @@ pub fn build_interactive_action_invocation_for_project(
             ],
         },
     })
+}
+
+pub fn dispatch_interactive_action_hooks_for_project(
+    store: &ForgeStore,
+    action_id: &str,
+    project_root: Option<&Path>,
+    origin: &str,
+    payload: serde_json::Value,
+) -> Result<InteractiveActionDispatchReport> {
+    let invocation =
+        build_interactive_action_invocation_for_project(store, action_id, project_root)?;
+    let action = invocation.action.clone();
+    let action_enabled = action.as_ref().is_some_and(|action| action.enabled);
+    let dispatch_origin = format!("{origin}:action_hook:{}", invocation.requested_action_id);
+    let requested_hook_ids = requested_action_hook_ids(&payload);
+    let requested_hook_tags = requested_action_hook_tags(&payload);
+    let requested_hook_id_list = requested_hook_ids
+        .as_ref()
+        .map(|hook_ids| hook_ids.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let requested_hook_tag_list = requested_hook_tags
+        .as_ref()
+        .map(|hook_tags| hook_tags.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    if invocation.match_count != 1 || !action_enabled {
+        return Ok(InteractiveActionDispatchReport {
+            schema_version: INTERACTIVE_ACTION_DISPATCH_SCHEMA_VERSION.to_string(),
+            status: "action_dispatch_blocked".to_string(),
+            requested_action_id: invocation.requested_action_id.clone(),
+            origin: origin.to_string(),
+            match_count: invocation.match_count,
+            requested_hook_ids: requested_hook_id_list,
+            requested_hook_tags: requested_hook_tag_list,
+            dispatched: false,
+            workflow_dispatch_count: 0,
+            brain_hook_plan_count: 0,
+            not_executed_brain_hook_count: 0,
+            blocked_reason: invocation.blocked_reason.clone(),
+            invocation,
+            workflow_dispatches: Vec::new(),
+            brain_hook_plans: Vec::new(),
+            action,
+            commands: action_dispatch_commands(action_id),
+        });
+    }
+
+    let hook_requested = |hook_id: &str, hook_tags: &[String]| {
+        let id_matches = requested_hook_ids
+            .as_ref()
+            .is_none_or(|hook_ids| hook_ids.contains(hook_id));
+        let tag_matches = requested_hook_tags.as_ref().is_none_or(|requested_tags| {
+            requested_tags
+                .iter()
+                .all(|requested_tag| hook_tags.iter().any(|hook_tag| hook_tag == requested_tag))
+        });
+        id_matches && tag_matches
+    };
+
+    let workflow_hooks = invocation
+        .workflow_hook_contract
+        .as_ref()
+        .map(|contract| {
+            contract
+                .hooks
+                .iter()
+                .filter(|hook| hook_requested(&hook.id, &hook.tags))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let brain_hooks = invocation
+        .brain_hook_contract
+        .as_ref()
+        .map(|contract| {
+            contract
+                .hooks
+                .iter()
+                .filter(|hook| hook_requested(&hook.id, &hook.tags))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if workflow_hooks.is_empty() && brain_hooks.is_empty() {
+        return Ok(InteractiveActionDispatchReport {
+            schema_version: INTERACTIVE_ACTION_DISPATCH_SCHEMA_VERSION.to_string(),
+            status: "action_dispatch_no_hooks".to_string(),
+            requested_action_id: invocation.requested_action_id.clone(),
+            origin: origin.to_string(),
+            match_count: invocation.match_count,
+            requested_hook_ids: requested_hook_id_list,
+            requested_hook_tags: requested_hook_tag_list,
+            dispatched: false,
+            workflow_dispatch_count: 0,
+            brain_hook_plan_count: 0,
+            not_executed_brain_hook_count: 0,
+            blocked_reason: if requested_hook_ids.is_some() || requested_hook_tags.is_some() {
+                "action_has_no_hooks_matching_selector".to_string()
+            } else {
+                "action_has_no_hooks".to_string()
+            },
+            invocation,
+            workflow_dispatches: Vec::new(),
+            brain_hook_plans: Vec::new(),
+            action,
+            commands: action_dispatch_commands(action_id),
+        });
+    }
+
+    let mut workflow_dispatches = Vec::new();
+    for hook in workflow_hooks {
+        let goal = action_workflow_hook_goal(&invocation, &hook, &payload);
+        let request = start_async_request(store, &goal, &dispatch_origin)?;
+        let artifact_ref = format!(
+            "forge://workflow/{}/action-hook/{}",
+            request.workflow_id, hook.id
+        );
+        let lineage_ref = format!(
+            "forge://event/interactive_action_workflow_hook_dispatched/{}/{}",
+            request.workflow_id, hook.id
+        );
+        let receipt = InteractiveWorkflowHookDispatchReceipt {
+            hook_id: hook.id.clone(),
+            hook_type: hook.hook_type.clone(),
+            tags: hook.tags.clone(),
+            target: hook.target.clone(),
+            target_workflow_ref: hook.workflow_id.clone(),
+            contract_id: hook.contract_id.clone(),
+            permission_id: hook.permission_id.clone(),
+            invocation_mode: "start_async_request".to_string(),
+            state: "workflow_dispatched".to_string(),
+            state_owner: "forge_workflow_runtime".to_string(),
+            execution_owner: "forge_workflow_runtime".to_string(),
+            mutates_workflow: hook.mutates_workflow,
+            goal,
+            payload: payload.clone(),
+            artifact_ref,
+            lineage_ref,
+            request,
+        };
+        store.record_event(
+            &receipt.request.workflow_id,
+            "interactive_action_workflow_hook_dispatched",
+            &serde_json::json!({
+                "schema_version": INTERACTIVE_ACTION_DISPATCH_SCHEMA_VERSION,
+                "action_id": &invocation.requested_action_id,
+                "hook_id": &receipt.hook_id,
+                "target_workflow_ref": &receipt.target_workflow_ref,
+                "origin": origin,
+                "dispatch_origin": &dispatch_origin,
+                "payload": &payload,
+                "request": &receipt.request,
+                "tags": &receipt.tags,
+                "artifact_ref": &receipt.artifact_ref,
+                "lineage_ref": &receipt.lineage_ref,
+            }),
+        )?;
+        workflow_dispatches.push(receipt);
+    }
+
+    let first_dispatched_workflow_id = workflow_dispatches
+        .first()
+        .map(|receipt| receipt.request.workflow_id.clone())
+        .unwrap_or_default();
+    let mut brain_hook_plans = Vec::new();
+    for hook in brain_hooks {
+        let workflow_id = if hook.workflow_id.trim().is_empty() {
+            first_dispatched_workflow_id.clone()
+        } else {
+            hook.workflow_id.clone()
+        };
+        let workflow_ref = if workflow_id.trim().is_empty() {
+            "unbound".to_string()
+        } else {
+            workflow_id.clone()
+        };
+        let receipt = InteractiveBrainHookDispatchReceipt {
+            status: "brain_hook_routed_through_forge_harness".to_string(),
+            hook_id: hook.id.clone(),
+            hook_type: hook.hook_type.clone(),
+            tags: hook.tags.clone(),
+            target: hook.target.clone(),
+            brain_id: hook.brain_id.clone(),
+            workflow_id: workflow_id.clone(),
+            contract_id: hook.contract_id.clone(),
+            permission_id: hook.permission_id.clone(),
+            execution_owner: "forge_harness".to_string(),
+            queue_owner: "forge_harness".to_string(),
+            state: "queued_waiting_executor_policy".to_string(),
+            execution_boundary: hook.execution_boundary.clone(),
+            dispatch_operation: "route_cli_brain_hook_through_forge_harness".to_string(),
+            quota_policy: brain_hook_quota_policy(),
+            fallback_brains: brain_hook_fallback_brains(&hook.brain_id),
+            not_executed: true,
+            mutates_workflow: hook.mutates_workflow,
+            command: action_brain_hook_command(&hook),
+            artifact_ref: format!("forge://workflow/{workflow_ref}/brain-hook/{}", hook.id),
+            lineage_ref: format!(
+                "forge://event/interactive_action_brain_hook_queued/{workflow_ref}/{}",
+                hook.id
+            ),
+            input_schema: hook.input_schema.clone(),
+        };
+        if !workflow_id.trim().is_empty() {
+            store.record_event(
+                &workflow_id,
+                "interactive_action_brain_hook_queued",
+                &serde_json::json!({
+                    "schema_version": INTERACTIVE_ACTION_DISPATCH_SCHEMA_VERSION,
+                    "action_id": &invocation.requested_action_id,
+                    "hook_id": &receipt.hook_id,
+                    "brain_id": &receipt.brain_id,
+                    "origin": origin,
+                    "dispatch_origin": &dispatch_origin,
+                    "state": &receipt.state,
+                    "tags": &receipt.tags,
+                    "quota_policy": &receipt.quota_policy,
+                    "fallback_brains": &receipt.fallback_brains,
+                    "artifact_ref": &receipt.artifact_ref,
+                    "lineage_ref": &receipt.lineage_ref,
+                }),
+            )?;
+        }
+        brain_hook_plans.push(receipt);
+    }
+    let not_executed_brain_hook_count = brain_hook_plans
+        .iter()
+        .filter(|plan| plan.not_executed)
+        .count();
+    let workflow_dispatch_count = workflow_dispatches.len();
+    let brain_hook_plan_count = brain_hook_plans.len();
+    let dispatched = workflow_dispatch_count > 0;
+    let status = if dispatched || brain_hook_plan_count > 0 {
+        "action_dispatch_completed"
+    } else {
+        "action_dispatch_no_hooks"
+    };
+
+    Ok(InteractiveActionDispatchReport {
+        schema_version: INTERACTIVE_ACTION_DISPATCH_SCHEMA_VERSION.to_string(),
+        status: status.to_string(),
+        requested_action_id: invocation.requested_action_id.clone(),
+        origin: origin.to_string(),
+        match_count: invocation.match_count,
+        requested_hook_ids: requested_hook_id_list,
+        requested_hook_tags: requested_hook_tag_list,
+        dispatched,
+        workflow_dispatch_count,
+        brain_hook_plan_count,
+        not_executed_brain_hook_count,
+        blocked_reason: "ready".to_string(),
+        invocation,
+        workflow_dispatches,
+        brain_hook_plans,
+        action,
+        commands: action_dispatch_commands(action_id),
+    })
+}
+
+fn requested_action_hook_ids(payload: &serde_json::Value) -> Option<BTreeSet<String>> {
+    let mut hook_ids = BTreeSet::new();
+    if let Some(hook_id) = payload
+        .get("requested_hook_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|hook_id| !hook_id.is_empty() && *hook_id != "*")
+    {
+        hook_ids.insert(hook_id.to_string());
+    }
+    if let Some(values) = payload
+        .get("requested_hook_ids")
+        .and_then(serde_json::Value::as_array)
+    {
+        for value in values {
+            if let Some(hook_id) = value.as_str().map(str::trim) {
+                if !hook_id.is_empty() && hook_id != "*" {
+                    hook_ids.insert(hook_id.to_string());
+                }
+            }
+        }
+    }
+    if hook_ids.is_empty() {
+        None
+    } else {
+        Some(hook_ids)
+    }
+}
+
+fn requested_action_hook_tags(payload: &serde_json::Value) -> Option<BTreeSet<String>> {
+    let mut hook_tags = BTreeSet::new();
+    if let Some(hook_tag) = payload
+        .get("requested_hook_tag")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|hook_tag| !hook_tag.is_empty() && *hook_tag != "*")
+    {
+        hook_tags.insert(hook_tag.to_string());
+    }
+    if let Some(values) = payload
+        .get("requested_hook_tags")
+        .and_then(serde_json::Value::as_array)
+    {
+        for value in values {
+            if let Some(hook_tag) = value.as_str().map(str::trim) {
+                if !hook_tag.is_empty() && hook_tag != "*" {
+                    hook_tags.insert(hook_tag.to_string());
+                }
+            }
+        }
+    }
+    if hook_tags.is_empty() {
+        None
+    } else {
+        Some(hook_tags)
+    }
+}
+
+fn action_workflow_hook_goal(
+    invocation: &InteractiveActionInvocationReport,
+    hook: &InteractiveWorkflowHookDispatchPlan,
+    payload: &serde_json::Value,
+) -> String {
+    if let Some(goal) = payload
+        .get("goal")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|goal| !goal.is_empty())
+    {
+        return goal.to_string();
+    }
+
+    format!(
+        "Run workflow hook {} for action {} targeting {} with payload {}",
+        hook.id, invocation.requested_action_id, hook.workflow_id, payload
+    )
+}
+
+fn action_brain_hook_command(hook: &InteractiveBrainHookDispatchPlan) -> Vec<String> {
+    if !hook.command_template.is_empty() {
+        return hook.command_template.clone();
+    }
+
+    vec![
+        "harness".to_string(),
+        "wrap-plan".to_string(),
+        "--executor".to_string(),
+        hook.brain_id.clone(),
+        "--cmd".to_string(),
+        hook.brain_id.clone(),
+        "--output".to_string(),
+        "json".to_string(),
+    ]
+}
+
+fn brain_hook_quota_policy() -> InteractiveBrainHookQuotaPolicy {
+    InteractiveBrainHookQuotaPolicy {
+        schema_version: "forge.brain_hook_quota_policy.v1".to_string(),
+        ai_limits_required: true,
+        ai_limits_command_template: vec![
+            "executor-quota".to_string(),
+            "ai-limits".to_string(),
+            "--ai-limits-cmd".to_string(),
+            "ai-limits".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        stop_or_fallback_before_quota_burn: true,
+    }
+}
+
+fn brain_hook_fallback_brains(brain_id: &str) -> Vec<String> {
+    match brain_id.trim() {
+        "codex" => vec![
+            "agy".to_string(),
+            "opencode".to_string(),
+            "ollama".to_string(),
+        ],
+        "agy" | "antigravity" => vec![
+            "codex".to_string(),
+            "opencode".to_string(),
+            "ollama".to_string(),
+        ],
+        "opencode" => vec!["ollama".to_string(), "codex".to_string()],
+        "gemini" => vec![
+            "codex".to_string(),
+            "agy".to_string(),
+            "opencode".to_string(),
+        ],
+        "claude" => vec!["opencode".to_string(), "ollama".to_string()],
+        "ollama" => Vec::new(),
+        _ => vec!["ollama".to_string()],
+    }
+}
+
+fn action_dispatch_commands(action_id: &str) -> InteractiveActionDispatchCommands {
+    InteractiveActionDispatchCommands {
+        action_dispatch: vec![
+            "interactive".to_string(),
+            "action-dispatch".to_string(),
+            "--action".to_string(),
+            action_id.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        action_invocation: vec![
+            "interactive".to_string(),
+            "action-invocation".to_string(),
+            "--action".to_string(),
+            action_id.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+        action_registry: vec![
+            "interactive".to_string(),
+            "action-registry".to_string(),
+            "--query".to_string(),
+            action_id.to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ],
+    }
 }
 
 fn build_action_registry_from_palette(
@@ -7009,8 +7598,6 @@ fn build_action_registry_from_palette_with_query(
             inspect_addons: vec![
                 "addons".to_string(),
                 "views".to_string(),
-                "--surface".to_string(),
-                "tui".to_string(),
                 "--output".to_string(),
                 "json".to_string(),
             ],
@@ -7646,10 +8233,11 @@ fn addon_command_palette_entries_for_project(
 fn addon_view_command_palette_entries(
     catalog: &AddonCatalog,
 ) -> Vec<InteractiveCommandPaletteEntry> {
-    let views = list_addon_views(catalog, None, Some("tui"), None);
+    let views = list_addon_views(catalog, None, None, None);
     views
         .views
         .iter()
+        .filter(|view| addon_view_is_operator_action_surface(&view.view.surface))
         .flat_map(|view| {
             view.view
                 .actions
@@ -7657,6 +8245,10 @@ fn addon_view_command_palette_entries(
                 .filter_map(|action| addon_view_command_palette_entry(view, action))
         })
         .collect()
+}
+
+fn addon_view_is_operator_action_surface(surface: &str) -> bool {
+    matches!(surface, "tui" | "ops_console")
 }
 
 fn addon_view_command_palette_entry(
@@ -7693,16 +8285,7 @@ fn addon_view_command_palette_entry(
     } else {
         action.risk_level.clone()
     };
-    let keywords = if action.keywords.is_empty() {
-        vec![
-            view.addon_id.clone(),
-            view.view.id.clone(),
-            action.id.clone(),
-            action.permission.clone(),
-        ]
-    } else {
-        action.keywords.clone()
-    };
+    let keywords = addon_action_keywords(view, action);
     let readiness = addon_action_readiness(view, action);
     let commands = if readiness.enabled {
         addon_action_command_template(action)
@@ -7722,6 +8305,8 @@ fn addon_view_command_palette_entry(
         operation_plan,
         addon_contract: Some(addon_action_contract(view, action, &readiness)),
         hook_contract: addon_action_hook_contract(action),
+        workflow_hook_contract: addon_action_workflow_hook_contract(action),
+        brain_hook_contract: addon_action_brain_hook_contract(action),
         addon_view_id: Some(view.view.id.clone()),
         addon_view_action_id: Some(action.id.clone()),
         workflow_id: None,
@@ -7731,6 +8316,50 @@ fn addon_view_command_palette_entry(
         risk_level,
         keywords,
     })
+}
+
+fn addon_action_keywords(view: &AddonViewEntry, action: &AddonViewAction) -> Vec<String> {
+    let mut keywords = Vec::new();
+    for value in [
+        view.addon_id.as_str(),
+        view.view.id.as_str(),
+        action.id.as_str(),
+        action.permission.as_str(),
+        action.palette_group.as_str(),
+        action.source_panel.as_str(),
+    ] {
+        push_unique_non_empty(&mut keywords, value);
+    }
+    for value in &action.keywords {
+        push_unique_non_empty(&mut keywords, value);
+    }
+    for hook in &action.hooks {
+        push_unique_non_empty(&mut keywords, &hook.id);
+        push_unique_non_empty(&mut keywords, &hook.hook_type);
+        push_unique_non_empty(&mut keywords, &hook.target);
+        push_unique_non_empty(&mut keywords, &hook.workflow_id);
+        push_unique_non_empty(&mut keywords, &hook.brain_id);
+        for tag in &hook.tags {
+            push_unique_non_empty(&mut keywords, tag);
+        }
+    }
+    keywords
+}
+
+fn action_hook_tags(hook: &crate::addon::AddonViewActionHook) -> Vec<String> {
+    let mut tags = Vec::new();
+    for tag in &hook.tags {
+        push_unique_non_empty(&mut tags, tag);
+    }
+    tags
+}
+
+fn push_unique_non_empty(values: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if value.is_empty() || values.iter().any(|existing| existing == value) {
+        return;
+    }
+    values.push(value.to_string());
 }
 
 fn addon_action_contract(
@@ -7778,6 +8407,7 @@ fn addon_action_hook_contract(action: &AddonViewAction) -> Option<InteractiveAct
         .map(|hook| InteractiveActionHookTarget {
             id: hook.id.clone(),
             hook_type: hook.hook_type.clone(),
+            tags: action_hook_tags(hook),
             target: hook.target.clone(),
             workflow_id: hook.workflow_id.clone(),
             contract_id: hook.contract_id.clone(),
@@ -7799,6 +8429,89 @@ fn addon_action_hook_contract(action: &AddonViewAction) -> Option<InteractiveAct
     })
 }
 
+fn addon_action_workflow_hook_contract(
+    action: &AddonViewAction,
+) -> Option<InteractiveWorkflowHookContract> {
+    let hooks = action
+        .hooks
+        .iter()
+        .filter(|hook| action_hook_is_workflow(&hook.hook_type))
+        .map(|hook| InteractiveWorkflowHookDispatchPlan {
+            id: hook.id.clone(),
+            hook_type: hook.hook_type.clone(),
+            tags: action_hook_tags(hook),
+            target: hook.target.clone(),
+            workflow_id: action_hook_workflow_id(hook),
+            contract_id: hook.contract_id.clone(),
+            permission_id: hook.permission.clone(),
+            state_owner: "forge_workflow_runtime".to_string(),
+            execution_owner: "forge_workflow_runtime".to_string(),
+            execution_boundary: action_hook_execution_boundary(hook).to_string(),
+            dispatch_operation: "route_action_hook_to_forge_workflow".to_string(),
+            not_executed: true,
+            mutates_workflow: hook.mutates_workflow,
+            command_template: hook.command_template.clone(),
+            input_schema: hook.input_schema.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    if hooks.is_empty() {
+        return None;
+    }
+
+    Some(InteractiveWorkflowHookContract {
+        schema_version: INTERACTIVE_WORKFLOW_HOOK_CONTRACT_SCHEMA_VERSION.to_string(),
+        state_owner: "forge_workflow_runtime".to_string(),
+        hook_execution_owner: "forge_workflow_runtime".to_string(),
+        workflow_hook_count: hooks.len(),
+        dispatch_policy: "forge_workflow_plan_only_not_executed".to_string(),
+        not_executed: true,
+        hooks,
+    })
+}
+
+fn addon_action_brain_hook_contract(
+    action: &AddonViewAction,
+) -> Option<InteractiveBrainHookContract> {
+    let hooks = action
+        .hooks
+        .iter()
+        .filter(|hook| action_hook_is_brain_cli(&hook.hook_type))
+        .map(|hook| InteractiveBrainHookDispatchPlan {
+            id: hook.id.clone(),
+            hook_type: hook.hook_type.clone(),
+            tags: action_hook_tags(hook),
+            target: hook.target.clone(),
+            brain_id: action_hook_brain_id(hook),
+            workflow_id: hook.workflow_id.clone(),
+            contract_id: hook.contract_id.clone(),
+            permission_id: hook.permission.clone(),
+            state_owner: "forge_workflow_runtime".to_string(),
+            execution_owner: "forge_harness".to_string(),
+            execution_boundary: action_hook_execution_boundary(hook).to_string(),
+            dispatch_operation: "route_cli_brain_hook_through_forge_harness".to_string(),
+            not_executed: true,
+            mutates_workflow: hook.mutates_workflow,
+            command_template: hook.command_template.clone(),
+            input_schema: hook.input_schema.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    if hooks.is_empty() {
+        return None;
+    }
+
+    Some(InteractiveBrainHookContract {
+        schema_version: INTERACTIVE_BRAIN_HOOK_CONTRACT_SCHEMA_VERSION.to_string(),
+        state_owner: "forge_workflow_runtime".to_string(),
+        hook_execution_owner: "forge_harness".to_string(),
+        brain_hook_count: hooks.len(),
+        dispatch_policy: "forge_first_plan_only_not_executed".to_string(),
+        not_executed: true,
+        hooks,
+    })
+}
+
 fn action_hook_execution_owner(hook_type: &str) -> &'static str {
     match hook_type {
         "brain_cli" | "cli_brain" | "external_brain" => "forge_harness",
@@ -7816,6 +8529,54 @@ fn action_hook_execution_boundary(hook: &crate::addon::AddonViewActionHook) -> &
         "runtime_contract" | "addon_runtime_contract" => "forge_runtime_contract_dispatch_plan",
         _ => "forge_workflow_invocation_plan",
     }
+}
+
+fn action_hook_is_brain_cli(hook_type: &str) -> bool {
+    matches!(hook_type, "brain_cli" | "cli_brain" | "external_brain")
+}
+
+fn action_hook_is_workflow(hook_type: &str) -> bool {
+    matches!(
+        hook_type,
+        "workflow" | "workflow_dispatch" | "subworkflow" | "workflow_run"
+    )
+}
+
+fn action_hook_workflow_id(hook: &crate::addon::AddonViewActionHook) -> String {
+    let explicit = hook.workflow_id.trim();
+    if !explicit.is_empty() {
+        return explicit.to_string();
+    }
+
+    let target = hook.target.trim();
+    [
+        "workflow:",
+        "workflow_dispatch:",
+        "subworkflow:",
+        "workflow_run:",
+    ]
+    .iter()
+    .find_map(|prefix| target.strip_prefix(prefix))
+    .map(str::trim)
+    .filter(|candidate| !candidate.is_empty())
+    .unwrap_or(target)
+    .to_string()
+}
+
+fn action_hook_brain_id(hook: &crate::addon::AddonViewActionHook) -> String {
+    let explicit = hook.brain_id.trim();
+    if !explicit.is_empty() {
+        return explicit.to_string();
+    }
+
+    let target = hook.target.trim();
+    ["brain:", "cli_brain:", "external_brain:"]
+        .iter()
+        .find_map(|prefix| target.strip_prefix(prefix))
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+        .unwrap_or(target)
+        .to_string()
 }
 
 fn addon_action_readiness(
@@ -8102,6 +8863,8 @@ fn command_palette_entry_from_commands(
         operation_plan,
         addon_contract: None,
         hook_contract: None,
+        workflow_hook_contract: None,
+        brain_hook_contract: None,
         addon_view_id: None,
         addon_view_action_id: None,
         workflow_id,
@@ -16519,6 +17282,33 @@ pub fn render_interactive_action_invocation(report: &InteractiveActionInvocation
     )
 }
 
+pub fn render_interactive_action_dispatch(report: &InteractiveActionDispatchReport) -> String {
+    let workflow_ids = report
+        .workflow_dispatches
+        .iter()
+        .map(|dispatch| dispatch.request.workflow_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let brain_ids = report
+        .brain_hook_plans
+        .iter()
+        .map(|plan| plan.brain_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Action dispatch: {status}; action {action_id}; origin {origin}; dispatched {dispatched}; workflows {workflow_count}; brain_hook_plans {brain_count}; blocked_reason {blocked_reason}\nWorkflow ids: {workflow_ids}\nBrain hooks: {brain_ids}\n",
+        status = report.status,
+        action_id = report.requested_action_id,
+        origin = report.origin,
+        dispatched = report.dispatched,
+        workflow_count = report.workflow_dispatch_count,
+        brain_count = report.brain_hook_plan_count,
+        blocked_reason = report.blocked_reason,
+        workflow_ids = if workflow_ids.is_empty() { "none" } else { &workflow_ids },
+        brain_ids = if brain_ids.is_empty() { "none" } else { &brain_ids },
+    )
+}
+
 pub fn render_interactive_autocomplete(panel: &InteractiveAutocompletePanel) -> String {
     let input = if panel.input.is_empty() {
         "none"
@@ -21245,7 +22035,7 @@ fn extract_json_object(output: &str) -> Option<&str> {
 
 fn answer_with_codex_brain(prompt: &str) -> Option<String> {
     answer_with_codex_cli(prompt)
-        .or_else(|| answer_with_gemini_cli(prompt))
+        .or_else(|| answer_with_agy_cli(prompt))
         .or_else(|| answer_with_ollama_cli(prompt))
 }
 
@@ -21291,29 +22081,14 @@ fn answer_with_codex_cli(prompt: &str) -> Option<String> {
     }
 }
 
-fn answer_with_gemini_cli(prompt: &str) -> Option<String> {
-    if !command_available("gemini") {
+fn answer_with_agy_cli(prompt: &str) -> Option<String> {
+    if !command_available("agy") {
         return None;
     }
-
-    let output = run_brain_command(
-        "gemini",
-        &[
-            "-p",
-            prompt,
-            "--output-format",
-            "text",
-            "--raw-output",
-            "--accept-raw-output-risk",
-        ],
-        Duration::from_secs(45),
-    )
-    .ok()?;
-
+    let output = run_brain_command("agy", &["--print", prompt], Duration::from_secs(45)).ok()?;
     if !output.status.success() {
         return None;
     }
-
     let answer = first_nonempty_line(&output.stdout)
         .or_else(|| first_nonempty_line(&output.stderr))?
         .trim()

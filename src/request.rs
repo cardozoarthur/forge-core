@@ -892,8 +892,10 @@ pub fn heartbeat_request(
     run.updated_at = heartbeat_at;
     save_run_record(store, &run)?;
     if let Ok(mut workflow) = store.load_workflow(&run.workflow_id) {
-        workflow.status = "running".to_string();
-        store.save_workflow(&workflow)?;
+        if workflow.status != "running" {
+            workflow.status = "running".to_string();
+            store.save_workflow(&workflow)?;
+        }
     }
     let activity = build_run_activity_at(&run, heartbeat_at);
     store.record_event(

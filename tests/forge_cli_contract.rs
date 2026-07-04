@@ -867,11 +867,11 @@ fn harness_headroom_stats_aggregates_persisted_blobs_for_cli_mcp_and_skill() {
     );
 
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge harness headroom-stats"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge harness headroom-stats"),
         "the packaged Forge skill should expose the headroom stats CLI command"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.harness.headroom_stats"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.harness.headroom_stats"),
         "the packaged Forge skill should expose the headroom stats MCP tool"
     );
 }
@@ -1774,11 +1774,11 @@ fn harness_headroom_plan_exposes_wrapper_policy_for_cli_mcp_and_skill() {
     );
 
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge harness headroom-plan"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge harness headroom-plan"),
         "the packaged Forge skill should include the explicit harness headroom plan CLI command"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.harness.headroom_plan"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.harness.headroom_plan"),
         "the packaged Forge skill should expose the harness headroom plan MCP tool"
     );
 }
@@ -2017,19 +2017,19 @@ fn harness_adoption_plan_models_forge_first_headroom_for_cli_mcp_and_skill() {
     assert_eq!(mcp_json["result"]["executes_child"], false);
 
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge harness adoption-plan"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge harness adoption-plan"),
         "the packaged Forge skill should include the harness adoption plan CLI command"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.harness.adoption_plan"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.harness.adoption_plan"),
         "the packaged Forge skill should expose the harness adoption plan MCP tool"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("commands.exec_with_lineage_dry_run"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("commands.exec_with_lineage_dry_run"),
         "the packaged Forge skill should tell operators to validate lineage exec as a dry-run first"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains(
+        forge_core::skill::AGENT_REFERENCE_MD.contains(
             "forge harness exec --executor codex --forge-first --project-root <project-root>"
         ),
         "the packaged Forge skill should include the Forge-first harness exec dry-run command"
@@ -2765,11 +2765,11 @@ printf 'bootstrap:%s\n' "$FORGE_HARNESS"
     assert_eq!(mcp_json["result"]["mutates_state"], false);
 
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge harness bootstrap"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge harness bootstrap"),
         "the packaged Forge skill should include the harness bootstrap CLI command"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.harness.bootstrap"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.harness.bootstrap"),
         "the packaged Forge skill should expose the harness bootstrap MCP tool"
     );
 }
@@ -5541,8 +5541,15 @@ fn milestone_evidence_plan_inspects_project_inputs_without_collecting_evidence()
     let provider_candidates = missing_json["provider_candidates"]
         .as_array()
         .expect("evidence-plan should expose external brain provider candidates");
-    assert_eq!(provider_candidates.len(), 5);
-    for provider_id in ["codex", "opencode", "gemini", "claude", "ollama"] {
+    assert_eq!(provider_candidates.len(), 6);
+    for provider_id in [
+        "codex",
+        "opencode",
+        "gemini",
+        "claude",
+        "ollama",
+        "antigravity",
+    ] {
         let candidate = provider_candidates
             .iter()
             .find(|candidate| candidate["provider_id"] == provider_id)
@@ -7234,33 +7241,33 @@ fn milestone_boundary_document_matches_validated_export_demo_runtime_state() {
 #[test]
 fn packaged_skill_mentions_export_demo_agent_surface() {
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge milestone export-demo"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge milestone export-demo"),
         "the packaged Forge skill should teach agents how to generate export/demo evidence"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.milestone.export_demo"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.milestone.export_demo"),
         "the packaged Forge skill should expose the MCP export-demo tool to agent callers"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge milestone prepare-evidence-inputs"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge milestone prepare-evidence-inputs"),
         "the packaged Forge skill should teach agents how to materialize secret-free milestone evidence input manifests"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("--provider-command <absolute-provider-adapter-path>")
-            && forge_core::skill::SKILL_MD.contains("--model-id <approved-model-id>")
-            && forge_core::skill::SKILL_MD.contains("--approval-ref <approval-ref>"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("--provider-command <absolute-provider-adapter-path>")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("--model-id <approved-model-id>")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("--approval-ref <approval-ref>"),
         "the packaged Forge skill should teach agents how to prepare an approved connected-brain provider adapter manifest without collecting evidence"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.milestone.prepare_evidence_inputs"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.milestone.prepare_evidence_inputs"),
         "the packaged Forge skill should expose the MCP prepare-evidence-inputs tool to agent callers"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge milestone collect-ready-evidence"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge milestone collect-ready-evidence"),
         "the packaged Forge skill should teach agents how to collect all ready milestone evidence without overclaiming promotion"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.milestone.collect_ready_evidence"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.milestone.collect_ready_evidence"),
         "the packaged Forge skill should expose the MCP collect-ready-evidence tool to agent callers"
     );
 }
@@ -7268,27 +7275,27 @@ fn packaged_skill_mentions_export_demo_agent_surface() {
 #[test]
 fn packaged_skill_mentions_experimental_multimodal_agent_surface() {
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.addon.multimodal"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.addon.multimodal"),
         "the packaged Forge skill should identify multimodal as an Addon-owned capability"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("multimodal_runtime"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("multimodal_runtime"),
         "the packaged Forge skill should teach agents to resolve multimodal through the Addon capability"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.addons.run_dispatch"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.addons.run_dispatch"),
         "the packaged Forge skill should expose the Addon runtime dispatch path for multimodal execution"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge multimodal status"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge multimodal status"),
         "the packaged Forge skill should teach agents how to inspect experimental multimodal status"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.multimodal.status"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.multimodal.status"),
         "the packaged Forge skill should expose the MCP multimodal status tool to agent callers"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge multimodal guard"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge multimodal guard"),
         "the packaged Forge skill should teach agents to route camera/screen/input access through runtime guards"
     );
 }
@@ -7296,67 +7303,67 @@ fn packaged_skill_mentions_experimental_multimodal_agent_surface() {
 #[test]
 fn packaged_skill_mentions_multimodal_benchmark_and_demo_plan_surfaces() {
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge multimodal benchmark-template"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge multimodal benchmark-template"),
         "the packaged Forge skill should teach agents how to generate multimodal benchmark templates"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.multimodal.benchmark_template"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.multimodal.benchmark_template"),
         "the packaged Forge skill should expose the MCP benchmark-template tool to agent callers"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge multimodal readiness"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge multimodal readiness"),
         "the packaged Forge skill should teach agents how to inspect multimodal runtime/model readiness without executing models"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.multimodal.readiness"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.multimodal.readiness"),
         "the packaged Forge skill should expose the MCP readiness tool to agent callers"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge multimodal benchmark-result"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge multimodal benchmark-result"),
         "the packaged Forge skill should teach agents how to record approved fixture-only benchmark results"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.multimodal.benchmark_result"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.multimodal.benchmark_result"),
         "the packaged Forge skill should expose the MCP benchmark-result tool to agent callers"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge multimodal runtime-benchmark"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge multimodal runtime-benchmark"),
         "the packaged Forge skill should teach agents how to run guarded runtime benchmarks"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.multimodal.runtime_benchmark"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.multimodal.runtime_benchmark"),
         "the packaged Forge skill should expose the MCP runtime-benchmark tool to agent callers"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains(".forge/multimodal.json"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains(".forge/multimodal.json"),
         "the packaged Forge skill should teach agents where explicit multimodal feature-flag config lives"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains(".forge/multimodal-runtimes.json"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains(".forge/multimodal-runtimes.json"),
         "the packaged Forge skill should teach agents where connected multimodal runtime manifests live"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("--connected-runtime"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("--connected-runtime"),
         "the packaged Forge skill should teach agents how to select an approved connected runtime benchmark"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("\"project_root\""),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("\"project_root\""),
         "the packaged Forge skill should expose project-root based multimodal MCP inspection"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge multimodal demo-plan"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge multimodal demo-plan"),
         "the packaged Forge skill should teach agents how to generate guarded multimodal demo plans"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.multimodal.demo_plan"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.multimodal.demo_plan"),
         "the packaged Forge skill should expose the MCP demo-plan tool to agent callers"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge multimodal demo-receipt"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge multimodal demo-receipt"),
         "the packaged Forge skill should teach agents how to record guarded multimodal demo receipts"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.multimodal.demo_receipt"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.multimodal.demo_receipt"),
         "the packaged Forge skill should expose the MCP demo-receipt tool to agent callers"
     );
 }
@@ -9688,81 +9695,83 @@ fn mcp_exposes_replacement_cli_demo_tool_and_skill_guidance() {
     let store = temp.path().join("forge.sqlite");
 
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge milestone cli-demo"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge milestone cli-demo"),
         "the packaged Forge skill should teach agents how to generate replacement CLI demo evidence"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.milestone.cli_demo"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.milestone.cli_demo"),
         "the packaged Forge skill should expose the MCP replacement CLI demo tool"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.milestone.patch_lifecycle_demo.v1"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.milestone.patch_lifecycle_demo.v1"),
         "the packaged Forge skill should mention the replacement CLI patch lifecycle demo receipt"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.milestone.real_project_workflow_demo.v1"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.milestone.real_project_workflow_demo.v1"),
         "the packaged Forge skill should mention the replacement CLI real project workflow demo receipt"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.milestone.connected_external_brain_demo.v1"),
+        forge_core::skill::AGENT_REFERENCE_MD
+            .contains("forge.milestone.connected_external_brain_demo.v1"),
         "the packaged Forge skill should mention the connected external brain demo receipt"
     );
     assert!(
-        forge_core::skill::SKILL_MD
+        forge_core::skill::AGENT_REFERENCE_MD
             .contains("forge.milestone.connected_external_brain_provider.v1"),
         "the packaged Forge skill should mention the connected external brain provider contract receipt"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.milestone.headroom_runtime_wrapper_demo.v1"),
+        forge_core::skill::AGENT_REFERENCE_MD
+            .contains("forge.milestone.headroom_runtime_wrapper_demo.v1"),
         "the packaged Forge skill should mention the Headroom runtime wrapper demo receipt"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("--connected-brain <provider-id>"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("--connected-brain <provider-id>"),
         "the packaged Forge skill should teach project connected brain provider selection"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("top-level `headroom_stats`")
-            && forge_core::skill::SKILL_MD.contains("aggregated replacement-CLI token savings"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("top-level `headroom_stats`")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("aggregated replacement-CLI token savings"),
         "the packaged Forge skill should teach agents to inspect aggregated replacement CLI headroom stats"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("top-level `headroom_runtime_wrapper`")
-            && forge_core::skill::SKILL_MD.contains("structured wrapper runtime contract"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("top-level `headroom_runtime_wrapper`")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("structured wrapper runtime contract"),
         "the packaged Forge skill should teach agents to inspect the replacement CLI Headroom wrapper contract"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("connected_brain_provider_wrapper")
-            && forge_core::skill::SKILL_MD
+        forge_core::skill::AGENT_REFERENCE_MD.contains("connected_brain_provider_wrapper")
+            && forge_core::skill::AGENT_REFERENCE_MD
                 .contains("forge.harness.connected_brain_provider_wrapper.v1"),
         "the packaged Forge skill should teach agents how harness wrap-plan bridges shims to connected brain provider manifests"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("manifest_templates")
-            && forge_core::skill::SKILL_MD.contains(".forge/connected-brain-runtimes.json"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("manifest_templates")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains(".forge/connected-brain-runtimes.json"),
         "the packaged Forge skill should teach agents to use secret-free connected brain manifest templates before evidence collection"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge interactive command-palette"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive command-palette"),
         "the packaged Forge skill should teach agents how to inspect replacement-grade command palette actions"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.command_palette"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.command_palette"),
         "the packaged Forge skill should expose the MCP command palette tool"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge interactive autocomplete"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive autocomplete"),
         "the packaged Forge skill should teach agents how to inspect replacement-grade autocomplete suggestions"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.autocomplete"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.autocomplete"),
         "the packaged Forge skill should expose the MCP autocomplete tool"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("/action <action-id>"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("/action <action-id>"),
         "the packaged Forge skill should teach agents how to plan selected action invocation from the interactive REPL"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("/action <partial>"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("/action <partial>"),
         "the packaged Forge skill should teach agents how action-id autocomplete works"
     );
 
@@ -10210,11 +10219,11 @@ fn mcp_exposes_patch_plan_and_skill_guidance_for_agent_file_editing() {
     let store = temp.path().join("forge.sqlite");
 
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge patch plan"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge patch plan"),
         "the packaged Forge skill should teach agents to request bounded patch plans"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.patch.plan"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.patch.plan"),
         "the packaged Forge skill should expose the MCP patch plan tool"
     );
 
@@ -10961,19 +10970,19 @@ fn mcp_exposes_patch_apply_and_revert_tools() {
     let store = temp.path().join("forge.sqlite");
 
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge patch apply"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge patch apply"),
         "the packaged Forge skill should teach agents to record bounded patch apply artifacts"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge patch revert"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge patch revert"),
         "the packaged Forge skill should teach agents to request guarded patch revert proposals"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.patch.apply"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.patch.apply"),
         "the packaged Forge skill should expose the MCP patch apply tool"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.patch.revert"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.patch.revert"),
         "the packaged Forge skill should expose the MCP patch revert tool"
     );
 
@@ -11035,11 +11044,11 @@ fn mcp_exposes_patch_apply_and_revert_tools() {
 #[test]
 fn mcp_exposes_patch_review_tool_and_skill_guidance() {
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge patch review"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge patch review"),
         "the packaged Forge skill should teach agents to request bounded patch reviews"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.patch.review"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.patch.review"),
         "the packaged Forge skill should expose the MCP patch review tool"
     );
 
@@ -11073,11 +11082,11 @@ fn mcp_exposes_patch_review_tool_and_skill_guidance() {
 #[test]
 fn mcp_exposes_patch_diff_tool_and_skill_guidance() {
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge patch diff"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge patch diff"),
         "the packaged Forge skill should teach agents to inspect multi-file patch diffs"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.patch.diff"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.patch.diff"),
         "the packaged Forge skill should expose the MCP patch diff tool"
     );
 
@@ -11111,11 +11120,11 @@ fn mcp_exposes_patch_diff_tool_and_skill_guidance() {
 #[test]
 fn mcp_exposes_patch_restore_tool_and_skill_guidance() {
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge patch restore"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge patch restore"),
         "the packaged Forge skill should teach agents to execute approved patch restores"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.patch.restore"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.patch.restore"),
         "the packaged Forge skill should expose the MCP patch restore tool"
     );
 
@@ -12182,6 +12191,343 @@ fn context_controller_returns_minimal_task_local_context() {
 }
 
 #[test]
+fn context_package_exposes_deferred_discovery_plan_for_node_scoped_routing() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Create a CRM workflow that only discovers workflow templates, MCP tools, skills and customer data when the current node needs them",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let task = find_task(json["tasks"].as_array().unwrap(), "Extract requirements");
+
+    let context_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "context",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task["id"].as_str().unwrap(),
+            "--budget",
+            "1400",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let context: Value = serde_json::from_slice(&context_output).unwrap();
+
+    let deferred = &context["deferred_discovery"];
+    assert_eq!(
+        deferred["schema_version"],
+        "forge.context.deferred_discovery.v1"
+    );
+    assert_eq!(deferred["state_owner"], "forge_workflow_runtime");
+    assert_eq!(deferred["routing_strategy"], "node_scoped_lazy_discovery");
+    assert_eq!(deferred["global_discovery_allowed"], false);
+    assert_eq!(deferred["avoided_global_discovery"], true);
+    assert_eq!(
+        deferred["litellm_inspiration"],
+        "per-request routing groups, fallbacks, cooldowns and budget-aware selection"
+    );
+    assert_eq!(
+        deferred["current_node"]["task_id"],
+        task["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        deferred["current_node"]["executor_profile_id"],
+        "no_ai_deterministic"
+    );
+
+    let selected_sources = deferred["selected_sources"].as_array().unwrap();
+    assert!(selected_sources.iter().any(|source| {
+        source["source_id"] == "workflow_registry_search"
+            && source["load_state"] == "selected_for_current_node"
+            && source["search_tags"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::String("workflow".to_string()))
+            && source["reason"].as_str().unwrap().contains("workflow")
+    }));
+
+    let deferred_sources = deferred["deferred_sources"].as_array().unwrap();
+    for source_id in [
+        "mcp_servers_and_tools",
+        "skills_catalog",
+        "crm_subject_profile",
+        "crm_account_timeline",
+    ] {
+        assert!(
+            deferred_sources
+                .iter()
+                .any(|source| source["source_id"] == source_id
+                    && source["load_state"] == "deferred_until_node_requires_it"),
+            "expected {source_id} to stay deferred"
+        );
+    }
+    let mcp_source = deferred_sources
+        .iter()
+        .find(|source| source["source_id"] == "mcp_servers_and_tools")
+        .unwrap();
+    assert!(mcp_source["search_tags"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("mcp".to_string())));
+    assert!(mcp_source["search_tags"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("tool".to_string())));
+    let skill_source = deferred_sources
+        .iter()
+        .find(|source| source["source_id"] == "skills_catalog")
+        .unwrap();
+    assert!(skill_source["search_tags"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("skill".to_string())));
+    let crm_source = deferred_sources
+        .iter()
+        .find(|source| source["source_id"] == "crm_subject_profile")
+        .unwrap();
+    assert!(crm_source["search_tags"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("crm".to_string())));
+    assert!(crm_source["search_tags"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("subject".to_string())));
+
+    let expand_commands = deferred["expand_commands"].as_array().unwrap();
+    assert!(expand_commands.iter().any(|command| {
+        command.as_str().unwrap().contains(
+            "forge context --workflow {workflow_id} --task {task_id} --budget {budget} --output json"
+        )
+    }));
+    assert!(
+        !expand_commands
+            .iter()
+            .any(|command| command.as_str().unwrap().contains("forge mcp tools")),
+        "workflow planning nodes must not recommend MCP discovery expansion while MCP is deferred"
+    );
+    assert!(
+        !expand_commands
+            .iter()
+            .any(|command| command.as_str().unwrap().contains("forge skill")),
+        "workflow planning nodes must not recommend skill discovery expansion while skills are deferred"
+    );
+
+    let router = &context["context_router"];
+    assert_eq!(router["schema_version"], "forge.context.router.v1");
+    assert_eq!(router["state_owner"], "forge_workflow_runtime");
+    assert_eq!(
+        router["routing_strategy"],
+        "node_requirement_tag_routing_with_budget_fallbacks"
+    );
+    assert_eq!(router["request_scope"], "current_workflow_node");
+    assert_eq!(router["global_discovery_allowed"], false);
+    assert_eq!(router["avoided_global_discovery"], true);
+    assert_eq!(
+        router["litellm_inspiration"],
+        "routing groups, tags, pre-call context-window checks and ordered fallbacks"
+    );
+    let pre_call_checks = router["pre_call_checks"].as_array().unwrap();
+    for check in [
+        "node_requirement_match",
+        "tenant_scope_allowed",
+        "context_budget_available",
+        "source_permission_allowed",
+        "fallback_route_declared",
+    ] {
+        assert!(
+            pre_call_checks.contains(&Value::String(check.to_string())),
+            "context router should expose {check} pre-call check"
+        );
+    }
+    let selected_source_ids = router["selected_source_ids"].as_array().unwrap();
+    assert!(selected_source_ids.contains(&Value::String("workflow_registry_search".to_string())));
+    let deferred_source_ids = router["deferred_source_ids"].as_array().unwrap();
+    assert!(deferred_source_ids.contains(&Value::String("skills_catalog".to_string())));
+    assert!(deferred_source_ids.contains(&Value::String("crm_subject_profile".to_string())));
+    let route_groups = router["route_groups"].as_array().unwrap();
+    let workflow_group = route_groups
+        .iter()
+        .find(|group| group["group_name"] == "workflow_creation")
+        .unwrap();
+    assert_eq!(workflow_group["selected"], true);
+    assert!(workflow_group["search_tags"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("workflow".to_string())));
+    assert!(workflow_group["selected_source_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("workflow_registry_search".to_string())));
+    let crm_group = route_groups
+        .iter()
+        .find(|group| group["group_name"] == "crm_subject_context")
+        .unwrap();
+    assert_eq!(crm_group["selected"], false);
+    assert!(crm_group["search_tags"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("crm".to_string())));
+    assert!(crm_group["deferred_source_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("crm_subject_profile".to_string())));
+    assert_eq!(
+        router["fallback_policy"]["mode"],
+        "deferred_expansion_before_global_discovery"
+    );
+    assert_eq!(router["fallback_policy"]["not_executed"], true);
+    assert!(router["fallback_policy"]["ordered_fallbacks"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(
+            "forge_context_expansion_command".to_string()
+        )));
+    assert_eq!(router["decision_sha256"].as_str().unwrap().len(), 64);
+
+    assert!(context["routing_fingerprint"]["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|component| component["name"] == "deferred_discovery"
+            && component["sha256"].as_str().unwrap().len() == 64));
+    assert!(context["routing_fingerprint"]["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|component| component["name"] == "context_router"
+            && component["sha256"].as_str().unwrap().len() == 64));
+    assert!(forge_core::skill::AGENT_REFERENCE_MD.contains("forge.context.deferred_discovery.v1"));
+    assert!(forge_core::skill::AGENT_REFERENCE_MD.contains("forge.context.router.v1"));
+    assert!(forge_core::skill::AGENT_REFERENCE_MD.contains("context_router"));
+    assert!(forge_core::skill::AGENT_REFERENCE_MD.contains("deferred_sources"));
+}
+
+#[test]
+fn context_router_requires_bound_crm_subject_before_loading_crm_records() {
+    use forge_core::context::build_context_package;
+    use forge_core::graph::{self, ExecutorKind};
+
+    let mut workflow = graph::create_workflow(forge_core::intent::parse_intent(
+        "Operate CRM workflows with lazy user data routing",
+    ));
+    workflow.tasks = vec![
+        graph::task(
+            "generic-crm-node",
+            "Design CRM user segmentation workflow",
+            &[],
+            &["CRM user management", "tags", "lists"],
+            Vec::new(),
+            "Generic CRM workflow plan",
+            (ExecutorKind::Ai, 0.02),
+        ),
+        graph::task(
+            "bound-crm-node",
+            "Prepare CRM follow-up for bound lead",
+            &["generic-crm-node"],
+            &[
+                "bound_crm_subject:lead_id=lead-42",
+                "contact_id=contact-9",
+                "timeline",
+            ],
+            Vec::new(),
+            "Personalized next action",
+            (ExecutorKind::Ai, 0.02),
+        ),
+    ];
+
+    let generic = build_context_package(&workflow, "generic-crm-node", 3000).unwrap();
+    assert!(!generic.context_router.global_discovery_allowed);
+    assert!(generic.context_router.avoided_global_discovery);
+    assert!(!generic
+        .context_router
+        .node_tags
+        .contains(&"crm_subject_bound".to_string()));
+    assert!(!generic
+        .context_router
+        .selected_source_ids
+        .contains(&"crm_subject_profile".to_string()));
+    assert!(!generic
+        .context_router
+        .selected_source_ids
+        .contains(&"crm_account_timeline".to_string()));
+    assert!(generic
+        .context_router
+        .deferred_source_ids
+        .contains(&"crm_subject_profile".to_string()));
+    assert!(generic
+        .context_router
+        .deferred_source_ids
+        .contains(&"crm_account_timeline".to_string()));
+
+    let generic_crm_group = generic
+        .context_router
+        .route_groups
+        .iter()
+        .find(|group| group.group_name == "crm_subject_context")
+        .unwrap();
+    assert!(!generic_crm_group.selected);
+    assert!(generic_crm_group
+        .fallback_source_ids
+        .contains(&"crm_subject_profile".to_string()));
+
+    let bound = build_context_package(&workflow, "bound-crm-node", 3000).unwrap();
+    assert!(bound
+        .context_router
+        .pre_call_checks
+        .contains(&"bound_subject_or_defer".to_string()));
+    assert!(bound
+        .context_router
+        .node_tags
+        .contains(&"crm_subject_bound".to_string()));
+    assert!(bound
+        .context_router
+        .selected_source_ids
+        .contains(&"crm_subject_profile".to_string()));
+    assert!(bound
+        .context_router
+        .selected_source_ids
+        .contains(&"crm_account_timeline".to_string()));
+    assert!(!bound
+        .context_router
+        .deferred_source_ids
+        .contains(&"crm_subject_profile".to_string()));
+    let bound_crm_group = bound
+        .context_router
+        .route_groups
+        .iter()
+        .find(|group| group.group_name == "crm_subject_context")
+        .unwrap();
+    assert!(bound_crm_group.selected);
+    assert!(bound_crm_group
+        .selected_source_ids
+        .contains(&"crm_subject_profile".to_string()));
+    assert!(forge_core::skill::AGENT_REFERENCE_MD.contains("bound_subject_or_defer"));
+    assert!(forge_core::skill::AGENT_REFERENCE_MD.contains("bound_crm_subject"));
+}
+
+#[test]
 fn context_controller_returns_versioned_shard_manifest() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -12733,7 +13079,7 @@ fn context_package_exposes_versioned_prompt_packet_for_executor_adapters() {
             "--task",
             documentation_task["id"].as_str().unwrap(),
             "--budget",
-            "1200",
+            "4096",
             "--output",
             "json",
         ])
@@ -12881,7 +13227,7 @@ fn context_package_exposes_replay_manifest_for_resumable_executor_context() {
             "--task",
             task_id,
             "--budget",
-            "1200",
+            "4096",
             "--output",
             "json",
         ])
@@ -12913,7 +13259,7 @@ fn context_package_exposes_replay_manifest_for_resumable_executor_context() {
     assert_eq!(manifest["task_id"], task_id);
     assert_eq!(manifest["workflow_revision"], context["workflow_revision"]);
     assert_eq!(manifest["executor_profile_id"], "no_ai_deterministic");
-    assert_eq!(manifest["requested_budget"], 1200);
+    assert_eq!(manifest["requested_budget"], 4096);
     assert_eq!(manifest["effective_budget"], context["effective_budget"]);
     assert_eq!(manifest["context_sha256"], context["context_sha256"]);
     assert_eq!(manifest["content_bytes"], context["context_bytes"]);
@@ -12931,7 +13277,7 @@ fn context_package_exposes_replay_manifest_for_resumable_executor_context() {
             "--task",
             task_id,
             "--budget",
-            "1200",
+            "4096",
             "--output",
             "json"
         ])
@@ -15542,8 +15888,8 @@ fn inspect_exposes_context_route_summary_for_each_terminal_node() {
     assert_eq!(route["profile_id"], "no_ai_deterministic");
     assert_eq!(route["reasoning_allowed"], false);
     assert_eq!(route["deterministic"], true);
-    assert_eq!(route["requested_budget"], 1200);
-    assert!(route["effective_budget"].as_u64().unwrap() < 1200);
+    assert_eq!(route["requested_budget"], 4096);
+    assert!(route["effective_budget"].as_u64().unwrap() < 4096);
     assert_eq!(route["context_sha256"].as_str().unwrap().len(), 64);
     assert_eq!(route["routing_cache_key"].as_str().unwrap().len(), 64);
     assert_eq!(route["routing_lineage_sha256"].as_str().unwrap().len(), 64);
@@ -16113,7 +16459,7 @@ fn context_package_exposes_versioned_continuation_plan_for_executor_adapters() {
             "--task",
             "task-001",
             "--budget",
-            "1200",
+            "4096",
             "--output",
             "json",
         ])
@@ -16201,7 +16547,7 @@ fn context_package_exposes_versioned_continuation_plan_for_executor_adapters() {
             "--task",
             "task-001",
             "--budget",
-            "1200",
+            "4096",
             "--output",
             "json",
         ])
@@ -16275,7 +16621,7 @@ fn context_package_exposes_versioned_continuation_plan_for_executor_adapters() {
             "--ttl-seconds",
             "600",
             "--budget",
-            "1200",
+            "4096",
             "--output",
             "json",
         ])
@@ -16287,7 +16633,7 @@ fn context_package_exposes_versioned_continuation_plan_for_executor_adapters() {
     let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
     assert_eq!(
         handoff_json["packet"]["schema_version"],
-        "forge.executor_handoff.v8"
+        "forge.executor_handoff.v9"
     );
     assert_eq!(
         handoff_json["packet"]["resume_plan"],
@@ -18233,6 +18579,7 @@ fn improve_candidates_evaluate_attached_final_completion_audit() {
         kind: "final_completion_audit".to_string(),
         path: "artifacts/demo/final_completion_audit.json".to_string(),
         sha256: hex_sha256(&fs::read(&artifact_path).unwrap()),
+        tags: Vec::new(),
         created_at: Utc::now(),
         lineage: None,
     });
@@ -18353,6 +18700,7 @@ fn improve_candidates_deprioritize_final_verified_workflows_below_unfinished_out
         kind: "final_completion_audit".to_string(),
         path: "artifacts/verified/final_completion_audit.json".to_string(),
         sha256: hex_sha256(&fs::read(&final_audit_path).unwrap()),
+        tags: Vec::new(),
         created_at: Utc::now(),
         lineage: None,
     });
@@ -18413,6 +18761,7 @@ fn improve_candidates_deprioritize_final_verified_workflows_below_unfinished_out
         kind: "markdown_report".to_string(),
         path: "artifacts/missing/demo-report.md".to_string(),
         sha256: hex_sha256(&fs::read(&report_path).unwrap()),
+        tags: Vec::new(),
         created_at: Utc::now(),
         lineage: None,
     });
@@ -19093,6 +19442,7 @@ fn improve_candidates_suggest_final_package_for_verified_workflow_with_legacy_ru
         kind: "final_completion_audit".to_string(),
         path: audit_relative_path.to_string(),
         sha256: hex_sha256(&fs::read(&audit_path).unwrap()),
+        tags: Vec::new(),
         created_at: Utc::now(),
         lineage: None,
     });
@@ -19707,6 +20057,27 @@ fn simulated_run_completes_graph_then_validation_allows_improvement_cycle() {
 }
 
 #[test]
+fn packaged_skill_entrypoint_stays_small_and_routes_to_domain_skills() {
+    let skill = forge_core::skill::SKILL_MD;
+
+    assert!(
+        skill.len() < 4_000,
+        "Forge skill entrypoint must stay small; split broad behavior into domain or single-function skills instead"
+    );
+    assert!(skill.contains("## Domain Skill Index"));
+    assert!(skill.contains("## Skill Modularity Rule"));
+    assert!(skill.contains("forge-core-runtime"));
+    assert!(skill.contains("forge-core-context"));
+    assert!(skill.contains("forge-core-artifacts"));
+    assert!(skill.contains("forge-core-executors"));
+    assert!(skill.contains("forge-core-addons-ui"));
+    assert!(
+        !skill.contains("## Useful Commands"),
+        "the entrypoint must route to smaller skills instead of becoming a command encyclopedia"
+    );
+}
+
+#[test]
 fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -19743,21 +20114,77 @@ fn skill_install_creates_codex_and_opencode_compatible_skill_files() {
     assert!(skill.starts_with("---\nname: forge-core\n"));
     assert!(skill.contains("description:"));
     assert!(skill.contains("forge plan"));
-    assert!(skill.contains("forge validate"));
-    assert!(skill.contains("forge mcp tools"));
-    assert!(skill.contains("forge ops renderer-event"));
-    assert!(skill.contains("forge.ops.snapshot"));
-    assert!(skill.contains("forge.ops.addon_renderer_event"));
-    assert!(skill.contains("forge mcp call forge.run.start"));
-    assert!(skill.contains("forge.workflow.attach_artifact"));
-    assert!(skill.contains("forge.context.request"));
-    assert!(skill.contains("forge.task.handoff"));
-    assert!(skill.contains("forge improve candidates"));
-    assert!(skill.contains("forge.improve.candidates"));
-    assert!(skill.contains("forge.schedule.summary"));
-    assert!(skill.contains("forge.schedule.loop_summary"));
-    assert!(skill.contains("forge.schedule.worker_status"));
-    assert!(skill.contains("forge schedule worker-status"));
+    assert!(skill.contains("## Domain Skill Index"));
+    assert!(skill.contains("## Skill Modularity Rule"));
+    assert!(skill.contains("Do not grow Forge into a giant all-purpose skill"));
+    assert!(skill.len() < 4_000);
+
+    let module_expectations = [
+        (
+            "forge-core-runtime",
+            [
+                "forge request start",
+                "forge.task.handoff",
+                "forge schedule worker-status",
+            ],
+        ),
+        (
+            "forge-core-context",
+            [
+                "forge.context.request",
+                "forge.context.router.v1",
+                "forge memory search",
+            ],
+        ),
+        (
+            "forge-core-artifacts",
+            [
+                "forge.workflow.attach_artifact",
+                "--tag <tag>",
+                "forge.artifact.fetch",
+            ],
+        ),
+        (
+            "forge-core-executors",
+            [
+                "forge executor-quota ai-limits",
+                "forge request switch-executor",
+                "forge.brain_router",
+            ],
+        ),
+        (
+            "forge-core-addons-ui",
+            [
+                "forge ops renderer-event",
+                "forge.interactive.action_dispatch",
+                "forge interactive action-dispatch",
+            ],
+        ),
+    ];
+
+    for (module, snippets) in module_expectations {
+        assert!(
+            skill.contains(module),
+            "main skill should route users to {module}"
+        );
+        let module_path = temp
+            .path()
+            .join(".config/opencode/skills")
+            .join(module)
+            .join("SKILL.md");
+        assert!(module_path.exists(), "missing module skill {module}");
+        let module_skill = fs::read_to_string(&module_path).unwrap();
+        assert!(
+            module_skill.len() < 4_000,
+            "module skill {module} should stay small enough for node-scoped loading"
+        );
+        for snippet in snippets {
+            assert!(
+                module_skill.contains(snippet),
+                "module skill {module} should mention {snippet}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -19977,11 +20404,17 @@ fn mcp_tools_manifest_exposes_stable_agent_runtime_surface() {
     let task_handoff = find_mcp_tool(&json, "forge.task.handoff");
     assert_eq!(task_handoff["async_safe"], true);
     assert_eq!(task_handoff["mutates_workflow"], true);
-    assert_eq!(task_handoff["output_schema"], "forge.executor_handoff.v8");
+    assert_eq!(task_handoff["output_schema"], "forge.executor_handoff.v9");
     assert!(task_handoff["description"]
         .as_str()
         .unwrap()
         .contains("Acquire a bounded executor handoff"));
+
+    let attach_artifact = find_mcp_tool(&json, "forge.workflow.attach_artifact");
+    assert_eq!(
+        attach_artifact["input_schema"]["properties"]["tags"]["type"],
+        "array"
+    );
 }
 
 #[test]
@@ -21542,6 +21975,7 @@ fn final_audit_cannot_verify_support_only_workflow_without_user_deliverables() {
         kind: "final_completion_audit".to_string(),
         path: "artifacts/support-only/final_completion_audit.json".to_string(),
         sha256: hex_sha256(&fs::read(&audit_path).unwrap()),
+        tags: Vec::new(),
         created_at: Utc::now(),
         lineage: None,
     });
@@ -21747,6 +22181,7 @@ fn outcome_status_uses_addon_user_outcome_manifest_as_delivery_evidence() {
         kind: "crm_user_outcome_manifest".to_string(),
         path: "artifacts/crm/crm_user_outcome_manifest.json".to_string(),
         sha256: hex_sha256(&fs::read(&manifest_path).unwrap()),
+        tags: Vec::new(),
         created_at: Utc::now(),
         lineage: None,
     });
@@ -22093,7 +22528,7 @@ fn mcp_call_acquires_bounded_task_handoff_packet_for_agent_executor() {
     assert_eq!(handoff_json["result"]["selected_executor"], "codex");
     assert_eq!(
         handoff_json["result"]["packet"]["schema_version"],
-        "forge.executor_handoff.v8"
+        "forge.executor_handoff.v9"
     );
     assert_eq!(
         handoff_json["result"]["packet"]["lease_id"],
@@ -22102,6 +22537,30 @@ fn mcp_call_acquires_bounded_task_handoff_packet_for_agent_executor() {
     assert_eq!(
         handoff_json["result"]["packet"]["context_sha256"],
         handoff_json["result"]["context"]["context_sha256"]
+    );
+    assert_eq!(
+        handoff_json["result"]["packet"]["deferred_discovery"],
+        handoff_json["result"]["context"]["deferred_discovery"]
+    );
+    assert_eq!(
+        handoff_json["result"]["packet"]["context_router"],
+        handoff_json["result"]["context"]["context_router"]
+    );
+    assert_eq!(
+        handoff_json["result"]["packet"]["deferred_discovery"]["global_discovery_allowed"],
+        false
+    );
+    assert!(
+        handoff_json["result"]["packet"]["context_router"]["deferred_source_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("mcp_servers_and_tools".to_string()))
+    );
+    assert!(
+        handoff_json["result"]["packet"]["context_router"]["deferred_source_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("skills_catalog".to_string()))
     );
 }
 
@@ -22251,7 +22710,7 @@ fn sync_persists_human_allowed_executor_policy() {
     assert!(deterministic_route["quota_preservation_rule"]
         .as_str()
         .unwrap()
-        .contains("preserve Gemini/Codex/OpenCode non-local quota"));
+        .contains("preserve Codex/Antigravity/OpenCode non-local quota"));
     let policy_candidates = json["quota_policy"]["candidates"].as_array().unwrap();
     let selection_trace = json["quota_policy"]["selection_trace"]
         .as_array()
@@ -22260,18 +22719,15 @@ fn sync_persists_human_allowed_executor_policy() {
         selection_trace[0]["schema_version"],
         "forge.executor_selection_trace.v1"
     );
-    assert_eq!(selection_trace[0]["executor"], "opencode");
-    assert_eq!(selection_trace[0]["provider"], "configured_cli");
+    assert_eq!(selection_trace[0]["executor"], "codex");
+    assert_eq!(selection_trace[0]["provider"], "openai");
     assert_eq!(selection_trace[0]["local_vs_non_local"], "non_local");
-    assert_eq!(selection_trace[0]["decision"], "skip");
-    assert_eq!(
-        selection_trace[0]["selection_status"],
-        "skipped_not_allowed"
-    );
+    assert_eq!(selection_trace[0]["decision"], "select");
+    assert_eq!(selection_trace[0]["selection_status"], "eligible");
     assert!(selection_trace[0]["next_fallback_reason"]
         .as_str()
         .unwrap()
-        .contains("try next quota-aware candidate"));
+        .contains("selected as first quota-aware candidate"));
     let codex_candidate = policy_candidates
         .iter()
         .find(|candidate| candidate["executor"] == "codex")
@@ -23850,6 +24306,125 @@ fn executor_quota_record_persists_observation_for_policy_reporting() {
 }
 
 #[test]
+fn executor_quota_ai_limits_import_records_codex_and_gemini_capacity_without_secrets() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let ai_limits = temp.path().join("ai-limits");
+    fs::write(
+        &ai_limits,
+        r#"#!/usr/bin/env sh
+cat <<'JSON'
+{
+  "generated_at": "2026-06-15T12:00:00Z",
+  "codex": {
+    "name": "Codex",
+    "status": "ok",
+    "limits": [
+      {
+        "model": "total",
+        "percent_remaining": 0,
+        "reset_at": "2026-06-15T14:00:00Z"
+      }
+    ]
+  },
+  "gemini": {
+    "name": "Gemini",
+    "status": "ok",
+    "limits": [
+      {
+        "model": "gemini-2.5-pro",
+        "percent_remaining": 84,
+        "reset_at": "2026-06-15T13:00:00Z"
+      }
+    ]
+  }
+}
+JSON
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&ai_limits).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&ai_limits, permissions).unwrap();
+    }
+
+    let imported = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "executor-quota",
+            "ai-limits",
+            "--ai-limits-cmd",
+            ai_limits.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let imported_json: Value = serde_json::from_slice(&imported).unwrap();
+    assert_eq!(
+        imported_json["schema_version"],
+        "forge.executor_quota_ai_limits_import.v1"
+    );
+    assert_eq!(imported_json["status"], "ai_limits_imported");
+    assert_eq!(imported_json["observations"].as_array().unwrap().len(), 2);
+    let codex = imported_json["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|observation| observation["executor"] == "codex")
+        .unwrap();
+    assert_eq!(codex["provider"], "openai");
+    assert_eq!(codex["model"], "total");
+    assert_eq!(codex["remaining_quota"], "exhausted_until_reset");
+    assert_eq!(codex["rate_limit_risk"], "blocked");
+    assert_eq!(codex["source"], "ai-limits:codex");
+    assert!(codex["suitability"]
+        .as_str()
+        .unwrap()
+        .contains("stop_or_fallback"));
+    let gemini = imported_json["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|observation| observation["executor"] == "gemini")
+        .unwrap();
+    assert_eq!(gemini["provider"], "google");
+    assert_eq!(gemini["remaining_quota"], "available_84_percent");
+    assert_eq!(gemini["rate_limit_risk"], "low");
+
+    let raw = String::from_utf8(imported).unwrap();
+    assert!(!raw.to_lowercase().contains("access_token"));
+    assert!(!raw.to_lowercase().contains("refresh_token"));
+
+    let executors = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "executors",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let executors_json: Value = serde_json::from_slice(&executors).unwrap();
+    assert!(executors_json["quota_policy"]["observed_quota_evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|observation| observation["source"] == "ai-limits:codex"));
+}
+
+#[test]
 fn sync_enables_opencode_codex_bridge_when_both_are_human_authorized() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -24562,6 +25137,10 @@ fn workflow_artifacts_can_be_attached_during_runtime_from_codex_or_opencode() {
             "runtime_note",
             "--origin",
             "opencode",
+            "--tag",
+            "crm",
+            "--tag",
+            "proposal",
             "--output",
             "json",
         ])
@@ -24576,6 +25155,22 @@ fn workflow_artifacts_can_be_attached_during_runtime_from_codex_or_opencode() {
     assert_eq!(attach["origin"], "opencode");
     assert_eq!(attach["artifact"]["kind"], "runtime_note");
     assert!(attach["artifact"]["sha256"].as_str().unwrap().len() >= 64);
+    assert!(attach["artifact"]["tags"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("crm")));
+    assert!(attach["artifact"]["tags"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("proposal")));
+    assert!(attach["artifact"]["tags"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("runtime_note")));
+    assert!(attach["artifact"]["tags"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("opencode")));
 
     let artifacts = forge()
         .args([
@@ -24598,6 +25193,45 @@ fn workflow_artifacts_can_be_attached_during_runtime_from_codex_or_opencode() {
         .unwrap()
         .iter()
         .any(|item| item["path"].as_str().unwrap().contains("runtime-note.md")));
+    let listed_artifact = artifacts_json["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["path"].as_str().unwrap().contains("runtime-note.md"))
+        .unwrap();
+    assert!(listed_artifact["tags"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("crm")));
+    assert!(listed_artifact["tags"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("proposal")));
+
+    let status = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "status",
+            "--workflow",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&status).unwrap();
+    assert!(status_json["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["tags"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("crm"))));
 }
 
 #[test]
@@ -24775,7 +25409,7 @@ fn self_run_persists_internal_recurring_loop_status_and_next_goal_decision() {
 }
 
 #[test]
-fn self_run_defaults_to_opencode_gemini_codex_order() {
+fn self_run_defaults_to_codex_agy_opencode_order() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
     let repo = temp.path().join("repo");
@@ -24806,16 +25440,16 @@ fn self_run_defaults_to_opencode_gemini_codex_order() {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(
         json["executors"],
-        serde_json::json!(["opencode", "gemini", "codex"])
+        serde_json::json!(["codex", "agy", "opencode"])
     );
     assert_eq!(
         json["executor_fallbacks"],
-        serde_json::json!(["gemini", "codex"])
+        serde_json::json!(["agy", "opencode"])
     );
 }
 
 #[test]
-fn self_run_falls_back_to_gemini_before_codex_if_previous_executor_fails() {
+fn self_run_falls_back_to_agy_before_opencode_if_previous_executor_fails() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
     let repo = temp.path().join("repo");
@@ -24831,13 +25465,17 @@ fn self_run_falls_back_to_gemini_before_codex_if_previous_executor_fails() {
     let executors_dir = temp.path().join("bin");
     fs::create_dir_all(&executors_dir).unwrap();
 
-    write_fake_executor(&executors_dir, "opencode", "#!/bin/sh\nexit 1\n");
     write_fake_executor(
         &executors_dir,
-        "gemini",
-        "#!/bin/sh\nprintf 'ok from gemini'\nexit 0\n",
+        "codex",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'codex 1.0\\n'; exit 0; fi\nexit 1\n",
     );
-    write_fake_executor(&executors_dir, "codex", "#!/bin/sh\nexit 0\n");
+    write_fake_executor(
+        &executors_dir,
+        "agy",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'agy 1.0\\n'; exit 0; fi\nif [ \"$1\" = \"--print\" ]; then printf 'ok from agy\\n'; exit 0; fi\nprintf 'ok from agy\\n'\nexit 0\n",
+    );
+    write_fake_executor(&executors_dir, "opencode", "#!/bin/sh\nexit 0\n");
 
     let old_path = std::env::var("PATH").unwrap_or_else(|_| "".to_string());
     let path = format!("{}:{}", executors_dir.display(), old_path);
@@ -24869,27 +25507,27 @@ fn self_run_falls_back_to_gemini_before_codex_if_previous_executor_fails() {
 
     let json: Value = serde_json::from_slice(&output).unwrap();
     let cycle_report = &json["cycle_reports"][0];
-    assert_eq!(cycle_report["requested_executor"], "opencode");
-    assert_eq!(cycle_report["executor"], "gemini");
+    assert_eq!(cycle_report["requested_executor"], "codex");
+    assert_eq!(cycle_report["executor"], "agy");
     assert_eq!(
         cycle_report["executor_fallbacks"],
-        serde_json::json!(["gemini", "codex"])
+        serde_json::json!(["agy", "opencode"])
     );
     let attempts = cycle_report["executor_attempts"].as_array().unwrap();
     assert_eq!(attempts.len(), 2);
-    assert_eq!(attempts[0]["executor"], "opencode");
+    assert_eq!(attempts[0]["executor"], "codex");
     assert_eq!(attempts[0]["status"], "failed");
     assert_eq!(attempts[0]["local"], false);
-    assert_eq!(attempts[0]["provider"], "google");
-    assert_eq!(attempts[0]["model"], "google/gemini-2.5-pro");
+    assert_eq!(attempts[0]["provider"], "openai");
+    assert!(attempts[0]["model"].is_null());
     assert!(attempts[0]["next_fallback_reason"]
         .as_str()
         .unwrap()
         .contains("selected as first quota-aware candidate"));
-    assert_eq!(attempts[1]["executor"], "gemini");
+    assert_eq!(attempts[1]["executor"], "agy");
     assert_eq!(attempts[1]["status"], "completed");
-    assert_eq!(attempts[1]["provider"], "google");
-    assert_eq!(attempts[1]["model"], "gemini-2.5-pro");
+    assert_eq!(attempts[1]["provider"], "antigravity");
+    assert_eq!(attempts[1]["model"], "agy-default");
     assert!(attempts[1]["next_fallback_reason"]
         .as_str()
         .unwrap()
@@ -24917,11 +25555,11 @@ fn self_run_reports_quota_aware_executor_policy_for_cycle() {
             "--max-cycles",
             "1",
             "--executor",
-            "opencode",
-            "--fallback-executor",
-            "gemini",
-            "--fallback-executor",
             "codex",
+            "--fallback-executor",
+            "agy",
+            "--fallback-executor",
+            "opencode",
             "--dry-run",
             "--output",
             "json",
@@ -24948,46 +25586,46 @@ fn self_run_reports_quota_aware_executor_policy_for_cycle() {
     );
     assert_eq!(
         policy["requested_chain"],
-        serde_json::json!(["opencode", "gemini", "codex"])
+        serde_json::json!(["codex", "agy", "opencode"])
     );
     assert_eq!(
         policy["selected_candidate"],
         serde_json::json!({
-            "executor": "opencode",
-            "provider": "google",
-            "model": "google/gemini-2.5-pro",
+            "executor": "codex",
+            "provider": "openai",
+            "model": null,
             "local_vs_non_local": "non_local",
-            "selection_tier": 10,
+            "selection_tier": 1,
             "selection_status": "eligible",
             "reason": "selected as first quota-aware candidate that is not blocked by prior timeout or configuration evidence",
-            "business_value_justification": "Selected candidate has business_value_score=80 and suitability='high_for_high_value_pm_business_or_creative_reasoning'. Progressing with highest value eligible non-local option."
+            "business_value_justification": "Selected candidate has business_value_score=95 and suitability='high_as_reliable_fallback_for_complex_reasoning'. Progressing with highest value eligible non-local option."
         })
     );
     assert_eq!(
         policy["fallback_order"],
         serde_json::json!([
             {
-                "executor": "opencode",
-                "provider": "google",
-                "model": "google/gemini-2.5-pro",
-                "local_vs_non_local": "non_local",
-                "selection_tier": 10,
-                "selection_status": "eligible"
-            },
-            {
-                "executor": "gemini",
-                "provider": "google",
-                "model": "gemini-2.5-pro",
-                "local_vs_non_local": "non_local",
-                "selection_tier": 21,
-                "selection_status": "eligible"
-            },
-            {
                 "executor": "codex",
                 "provider": "openai",
                 "model": null,
                 "local_vs_non_local": "non_local",
-                "selection_tier": 32,
+                "selection_tier": 1,
+                "selection_status": "eligible"
+            },
+            {
+                "executor": "agy",
+                "provider": "antigravity",
+                "model": "agy-default",
+                "local_vs_non_local": "non_local",
+                "selection_tier": 12,
+                "selection_status": "eligible"
+            },
+            {
+                "executor": "opencode",
+                "provider": "google",
+                "model": "google/gemini-2.5-pro",
+                "local_vs_non_local": "non_local",
+                "selection_tier": 23,
                 "selection_status": "eligible"
             },
             {
@@ -24995,7 +25633,7 @@ fn self_run_reports_quota_aware_executor_policy_for_cycle() {
                 "provider": "configured_cli",
                 "model": null,
                 "local_vs_non_local": "non_local",
-                "selection_tier": 35,
+                "selection_tier": 50,
                 "selection_status": "eligible"
             },
             {
@@ -25003,8 +25641,16 @@ fn self_run_reports_quota_aware_executor_policy_for_cycle() {
                 "provider": "ollama",
                 "model": "ollama/qwen3:14b",
                 "local_vs_non_local": "local",
-                "selection_tier": 40,
+                "selection_tier": 60,
                 "selection_status": "eligible"
+            },
+            {
+                "executor": "gemini",
+                "provider": "google",
+                "model": "gemini-2.5-pro",
+                "local_vs_non_local": "non_local",
+                "selection_tier": 99,
+                "selection_status": "skipped_legacy_invalidated"
             }
         ])
     );
@@ -25016,8 +25662,8 @@ fn self_run_reports_quota_aware_executor_policy_for_cycle() {
         selection_trace[0]["schema_version"],
         "forge.executor_selection_trace.v1"
     );
-    assert_eq!(selection_trace[0]["executor"], "opencode");
-    assert_eq!(selection_trace[0]["provider"], "google");
+    assert_eq!(selection_trace[0]["executor"], "codex");
+    assert_eq!(selection_trace[0]["provider"], "openai");
     assert_eq!(selection_trace[0]["decision"], "select");
     assert_eq!(selection_trace[0]["selection_status"], "eligible");
     assert!(selection_trace[0]["next_fallback_reason"]
@@ -25037,21 +25683,28 @@ fn self_run_reports_quota_aware_executor_policy_for_cycle() {
     assert_eq!(
         ordered,
         vec![
-            ("opencode", "google", "non_local"),
-            ("gemini", "google", "non_local"),
             ("codex", "openai", "non_local"),
+            ("agy", "antigravity", "non_local"),
+            ("opencode", "google", "non_local"),
             ("opencode", "configured_cli", "non_local"),
             ("opencode", "ollama", "local"),
+            ("gemini", "google", "non_local"),
         ]
     );
     assert!(candidates.iter().any(|candidate| {
         candidate["executor"] == "gemini"
             && candidate["local_vs_non_local"] == "non_local"
             && candidate["quota_model"] == "quota_bound"
+            && candidate["selection_status"] == "skipped_legacy_invalidated"
+    }));
+    assert!(candidates.iter().any(|candidate| {
+        candidate["executor"] == "agy"
+            && candidate["provider"] == "antigravity"
+            && candidate["local_vs_non_local"] == "non_local"
             && candidate["non_interactive_requirement"]
                 .as_str()
                 .unwrap()
-                .contains("must not wait for approval")
+                .contains("agy --print")
     }));
     assert!(candidates.iter().any(|candidate| {
         candidate["executor"] == "codex"
@@ -25068,7 +25721,7 @@ fn self_run_reports_quota_aware_executor_policy_for_cycle() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|goal| goal.as_str().unwrap().contains("Gemini non-interactive")));
+        .any(|goal| goal.as_str().unwrap().contains("agy non-interactive")));
 }
 
 #[test]
@@ -25173,11 +25826,11 @@ fn self_run_persists_markdown_executor_policy_report_for_human_review() {
             "--max-cycles",
             "1",
             "--executor",
-            "opencode",
-            "--fallback-executor",
-            "gemini",
-            "--fallback-executor",
             "codex",
+            "--fallback-executor",
+            "agy",
+            "--fallback-executor",
+            "opencode",
             "--dry-run",
             "--output",
             "json",
@@ -25198,17 +25851,17 @@ fn self_run_persists_markdown_executor_policy_report_for_human_review() {
     assert!(markdown.contains("# Forge self-evolution cycle 1"));
     assert!(markdown.contains("## Quota-aware executor policy"));
     assert!(markdown.contains(
-        "- Selected quota-aware candidate: opencode / google / google/gemini-2.5-pro / non_local / tier 10 / eligible"
+        "- Selected quota-aware candidate: codex / openai / default / non_local / tier 1 / eligible"
     ));
     assert!(markdown.contains(
-        "Selected candidate has business_value_score=80 and suitability='high_for_high_value_pm_business_or_creative_reasoning'"
+        "Selected candidate has business_value_score=95 and suitability='high_as_reliable_fallback_for_complex_reasoning'"
     ));
     assert!(markdown.contains(
-        "- Fallback order: opencode:google:google/gemini-2.5-pro:non_local:tier-10 -> gemini:google:gemini-2.5-pro:non_local:tier-21 -> codex:openai:default:non_local:tier-32 -> opencode:configured_cli:default:non_local:tier-35 -> opencode:ollama:ollama/qwen3:14b:local:tier-40"
+        "- Fallback order: codex:openai:default:non_local:tier-1 -> agy:antigravity:agy-default:non_local:tier-12 -> opencode:google:google/gemini-2.5-pro:non_local:tier-23 -> opencode:configured_cli:default:non_local:tier-50 -> opencode:ollama:ollama/qwen3:14b:local:tier-60 -> gemini:google:gemini-2.5-pro:non_local:tier-99"
     ));
     assert!(markdown.contains("## Executor selection trace"));
     assert!(markdown.contains(
-        "| opencode | google | google/gemini-2.5-pro | non_local | select | eligible | selected as first quota-aware candidate"
+        "| codex | openai | default | non_local | select | eligible | selected as first quota-aware candidate"
     ));
     assert!(markdown.contains(
         "- Business reasoning: Stronger non-local reasoning is worth scarce quota for self-evolution cycles where decision quality materially changes product or business outcome."
@@ -25217,7 +25870,9 @@ fn self_run_persists_markdown_executor_policy_report_for_human_review() {
         markdown.contains("- Quota decision: spend_non_local_quota_for_high_value_self_evolution")
     );
     assert!(markdown.contains("## Quota assumptions"));
-    assert!(markdown.contains("- Gemini and Codex are non-local quota-bound capabilities."));
+    assert!(markdown.contains(
+        "- Codex and agy are non-local quota-bound capabilities; legacy Gemini is not an active executor path."
+    ));
     assert!(markdown.contains(
         "| Executor | Provider | Model | Locality | Quota | Cost | Quality | Suitability | Value | Status | Reason |"
     ));
@@ -25225,9 +25880,9 @@ fn self_run_persists_markdown_executor_policy_report_for_human_review() {
     assert!(markdown.contains(
         "| gemini | google | gemini-2.5-pro | non_local | unknown_until_gemini_probe | quota_or_paid_usage_if_configured | high | high_for_product_pm_and_business_decision_tasks | 90 |"
     ));
-    assert!(markdown.contains("Gemini non-interactive repair"));
+    assert!(markdown.contains("agy non-interactive repair"));
     assert!(markdown.contains(
-        "Use deterministic validation commands directly instead of spending Gemini/Codex quota."
+        "Use deterministic validation commands directly instead of spending Codex/agy quota."
     ));
 }
 
@@ -25331,7 +25986,7 @@ fn request_status_surfaces_latest_self_evolution_executor_policy_summary() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|goal| goal.as_str().unwrap().contains("Gemini non-interactive")));
+        .any(|goal| goal.as_str().unwrap().contains("agy non-interactive")));
 }
 
 #[test]
@@ -31079,7 +31734,7 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
     assert_eq!(handoff_json["context"]["handoff_status"], "ready");
 
     let packet = &handoff_json["packet"];
-    assert_eq!(packet["schema_version"], "forge.executor_handoff.v8");
+    assert_eq!(packet["schema_version"], "forge.executor_handoff.v9");
     assert_eq!(packet["workflow_id"], workflow_id);
     assert_eq!(packet["task_id"], task_id);
     assert_eq!(packet["selected_executor"], "codex");
@@ -31158,6 +31813,152 @@ fn task_handoff_packet_acquires_lease_and_wraps_strict_context_for_ready_executo
 }
 
 #[test]
+fn task_handoff_blocks_quota_exhausted_executor_and_suggests_fallback_before_lease() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(temp.path().join(".codex")).unwrap();
+    fs::write(temp.path().join(".codex/config.toml"), "model = \"test\"\n").unwrap();
+    fs::create_dir_all(temp.path().join(".config/opencode")).unwrap();
+    write_fake_cli(&bin, "codex");
+    write_fake_cli(&bin, "opencode");
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "sync",
+            "executors",
+            "--home",
+            temp.path().to_str().unwrap(),
+            "--executor-path",
+            bin.to_str().unwrap(),
+            "--allow",
+            "codex",
+            "--allow",
+            "opencode",
+            "--no-prompt",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "executor-quota",
+            "record",
+            "--executor",
+            "codex",
+            "--provider",
+            "openai",
+            "--model",
+            "total",
+            "--locality",
+            "non_local",
+            "--free-vs-paid",
+            "not_free_quota_bound",
+            "--remaining-quota",
+            "exhausted_until_reset",
+            "--rate-limit-risk",
+            "blocked",
+            "--cost",
+            "quota_or_paid_usage",
+            "--latency",
+            "blocked",
+            "--expected-quality",
+            "high",
+            "--suitability",
+            "blocked_until_reset",
+            "--source",
+            "ai-limits",
+            "--observed-at",
+            "2026-06-15T12:00:00Z",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let planned = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Handoff quota-aware Codex task",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let planned_json: Value = serde_json::from_slice(&planned).unwrap();
+    let workflow_id = planned_json["workflow_id"].as_str().unwrap();
+    let task_id = planned_json["tasks"][0]["id"].as_str().unwrap();
+
+    let handoff = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "task",
+            "handoff",
+            "--workflow",
+            workflow_id,
+            "--task",
+            task_id,
+            "--executor",
+            "codex",
+            "--ttl-seconds",
+            "600",
+            "--budget",
+            "1200",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
+    assert_eq!(handoff_json["status"], "handoff_blocked_executor_capacity");
+    assert_eq!(handoff_json["allowed"], false);
+    assert_eq!(handoff_json["lease"], Value::Null);
+    assert_eq!(handoff_json["packet"]["lease_status"], "not_requested");
+    assert_eq!(
+        handoff_json["packet"]["executor_capacity_decision"]["schema_version"],
+        "forge.executor_capacity_decision.v1"
+    );
+    assert_eq!(
+        handoff_json["packet"]["executor_capacity_decision"]["decision"],
+        "fallback"
+    );
+    assert_eq!(
+        handoff_json["packet"]["executor_capacity_decision"]["selected_executor"],
+        "codex"
+    );
+    assert_eq!(
+        handoff_json["packet"]["executor_capacity_decision"]["remaining_quota"],
+        "exhausted_until_reset"
+    );
+    assert!(
+        handoff_json["packet"]["executor_capacity_decision"]["fallback_executors"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("opencode"))
+    );
+    assert!(handoff_json["reason"]
+        .as_str()
+        .unwrap()
+        .contains("ai-limits"));
+}
+
+#[test]
 fn task_handoff_packet_carries_full_execution_policy_for_deterministic_code_nodes() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -31211,7 +32012,7 @@ fn task_handoff_packet_carries_full_execution_policy_for_deterministic_code_node
     let handoff_json: Value = serde_json::from_slice(&handoff).unwrap();
     let packet = &handoff_json["packet"];
 
-    assert_eq!(packet["schema_version"], "forge.executor_handoff.v8");
+    assert_eq!(packet["schema_version"], "forge.executor_handoff.v9");
     assert_eq!(packet["task_executor"], "command");
     assert_eq!(packet["execution_policy_mode"], "local_code_node");
     assert_eq!(packet["execution_policy"]["mode"], "local_code_node");
@@ -31340,6 +32141,10 @@ fn task_handoff_packet_carries_per_node_brain_routing_for_ai_agents() {
         .unwrap()
         .contains(&serde_json::json!("codex")));
     assert!(packet["node_brain_routing"]["allowed_brains"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("agy")));
+    assert!(!packet["node_brain_routing"]["allowed_brains"]
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("gemini")));
@@ -31937,7 +32742,7 @@ fn task_handoff_packet_exposes_resume_plan_from_checkpoint_route_key() {
     let resumed_packet = &resumed_handoff_json["packet"];
     assert_eq!(
         resumed_packet["schema_version"],
-        "forge.executor_handoff.v8"
+        "forge.executor_handoff.v9"
     );
     assert_eq!(
         resumed_packet["resume_context_status"],
@@ -32047,7 +32852,7 @@ fn task_handoff_packet_carries_node_scoped_persona_contract() {
     let packet = &handoff_json["packet"];
     let contract = &packet["persona_contract"];
 
-    assert_eq!(packet["schema_version"], "forge.executor_handoff.v8");
+    assert_eq!(packet["schema_version"], "forge.executor_handoff.v9");
     assert_eq!(packet["persona_mode"], "operator_report");
     assert_eq!(packet["persona_profile_id"], "persona.operator_report.v1");
     assert_eq!(contract["schema_version"], "forge.persona_handoff.v2");
@@ -37058,8 +37863,8 @@ fn request_step_auto_promotes_ready_deterministic_task_and_advances_drive() {
             && tool["async_safe"] == true
             && tool["mutates_workflow"] == true
     }));
-    assert!(forge_core::skill::SKILL_MD.contains("forge request step"));
-    assert!(forge_core::skill::SKILL_MD.contains("forge.run.step"));
+    assert!(forge_core::skill::AGENT_REFERENCE_MD.contains("forge request step"));
+    assert!(forge_core::skill::AGENT_REFERENCE_MD.contains("forge.run.step"));
 
     let mcp_started = forge()
         .args([
@@ -37264,8 +38069,8 @@ fn request_complete_task_records_trace_validates_and_drives_next_action() {
             && tool["async_safe"] == true
             && tool["mutates_workflow"] == true
     }));
-    assert!(forge_core::skill::SKILL_MD.contains("forge request complete-task"));
-    assert!(forge_core::skill::SKILL_MD.contains("forge.run.complete_task"));
+    assert!(forge_core::skill::AGENT_REFERENCE_MD.contains("forge request complete-task"));
+    assert!(forge_core::skill::AGENT_REFERENCE_MD.contains("forge.run.complete_task"));
 
     let mcp_started = forge()
         .args([
@@ -39266,6 +40071,7 @@ fn request_ensure_final_audit_repairs_dependencies_when_user_outcome_is_evidence
             kind: "report".to_string(),
             path: "artifacts/demo/goal-report.pdf".to_string(),
             sha256: hex_sha256(b"goal report"),
+            tags: Vec::new(),
             created_at: Utc::now(),
             lineage: None,
         },
@@ -39274,6 +40080,7 @@ fn request_ensure_final_audit_repairs_dependencies_when_user_outcome_is_evidence
             kind: "notification".to_string(),
             path: "artifacts/demo/telegram-delivery.json".to_string(),
             sha256: hex_sha256(b"telegram delivery"),
+            tags: Vec::new(),
             created_at: Utc::now(),
             lineage: None,
         },
@@ -40384,11 +41191,11 @@ fn mcp_run_heartbeat_tool_keeps_agent_handoff_observable() {
     }));
 
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge request heartbeat"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge request heartbeat"),
         "the packaged skill must teach executors to keep active runs observable"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.run.heartbeat"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.run.heartbeat"),
         "the packaged skill must expose the MCP heartbeat tool"
     );
 
@@ -40466,11 +41273,11 @@ fn mcp_run_drive_tool_surfaces_rework_and_next_command() {
     }));
 
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge request drive"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge request drive"),
         "the packaged skill must teach executors to drive active runs instead of only polling"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.run.drive"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.run.drive"),
         "the packaged skill must expose the MCP drive tool"
     );
 
@@ -40607,11 +41414,11 @@ fn mcp_run_switch_executor_tool_exposes_hot_swap_contract_to_agents() {
     }));
 
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge request switch-executor"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge request switch-executor"),
         "the packaged skill must teach executors how to hot-swap active agents"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.run.switch_executor"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.run.switch_executor"),
         "the packaged skill must expose the MCP executor switch tool"
     );
 
@@ -41025,11 +41832,11 @@ fn mcp_exposes_stale_request_recovery_tool_for_agent_observability() {
     }));
 
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge request recover-stale"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge request recover-stale"),
         "the packaged skill must teach executors how to transition stale handoffs"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.run.recover_stale"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.run.recover_stale"),
         "the packaged skill must expose the MCP stale recovery tool"
     );
 }
@@ -41120,6 +41927,186 @@ fn request_list_through_mcp_tool_returns_runs() {
     assert_eq!(mcp["tool_name"], "forge.request.list");
     assert_eq!(mcp["result"]["total"], 1);
     assert_eq!(mcp["result"]["runs"][0]["status"], "accepted");
+}
+
+#[test]
+fn cli_factory_create_plans_workflow_backed_agent_native_cli() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "cli",
+            "create",
+            "--name",
+            "hubspot",
+            "--goal",
+            "Create a relationship intelligence CLI over HubSpot",
+            "--source",
+            "https://developers.hubspot.com",
+            "--command",
+            "deals-stale",
+            "--command",
+            "pipeline-risk",
+            "--compound-command",
+            "forecast-health",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "forge.cli_factory.creation_plan.v1");
+    assert_eq!(json["status"], "cli_creation_workflow_created");
+    assert_eq!(json["state_owner"], "forge_workflow_runtime");
+    assert_eq!(json["workflow_created"], true);
+    assert_eq!(json["files_written"], false);
+    assert_eq!(json["cli"]["name"], "hubspot");
+    assert_eq!(json["cli"]["binary_name"], "hubspot-forge-cli");
+    assert_eq!(json["cli"]["mcp_server_name"], "hubspot-forge-mcp");
+    assert_eq!(
+        json["workflow_contract"]["engine"],
+        "forge_workflow_runtime"
+    );
+    assert_eq!(
+        json["workflow_contract"]["workflow_kind"],
+        "cli_factory_workflow"
+    );
+    assert_eq!(
+        json["addon_manifest"]["runtime_contracts"][0]["contract_id"],
+        "hubspot.cli.workflow_executor"
+    );
+    assert_eq!(json["local_first"]["persistence"], "sqlite");
+    assert!(json["agent_native"]["default_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("sync")));
+    assert!(json["agent_native"]["default_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("search")));
+    assert!(json["agent_native"]["default_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("sql")));
+    assert!(json["agent_native"]["compound_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("forecast-health")));
+    assert_eq!(json["surfaces"]["cli"], true);
+    assert_eq!(json["surfaces"]["mcp"], true);
+    assert_eq!(json["surfaces"]["skill"], true);
+    assert!(json["verification_pipeline"]["checks"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("scorecard")));
+    assert!(json["verification_pipeline"]["checks"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("dogfood")));
+    assert_eq!(
+        json["benchmark_inspiration"]["source"],
+        "cli-printing-press"
+    );
+    assert!(json["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| {
+            command
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("workflow"))
+        }));
+
+    let workflow_id = json["workflow_id"].as_str().unwrap();
+    let inspect_output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "inspect",
+            workflow_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspect: Value = serde_json::from_slice(&inspect_output).unwrap();
+    assert_eq!(inspect["workflow_id"], workflow_id);
+    assert!(inspect["current_goal"]
+        .as_str()
+        .unwrap()
+        .contains("workflow-backed CLI hubspot"));
+}
+
+#[test]
+fn mcp_exposes_cli_factory_create_for_agent_invocation() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.cli.create");
+    assert_eq!(tool["output_schema"], "forge.cli_factory.creation_plan.v1");
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], true);
+
+    let input = serde_json::json!({
+        "name": "stripe",
+        "goal": "Create billing health CLI",
+        "source": "https://stripe.com/docs/api",
+        "commands": ["sync-customers"],
+        "compound_commands": ["churn-risk"]
+    });
+    let output = forge()
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "mcp",
+            "call",
+            "forge.cli.create",
+            "--input",
+            &input.to_string(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(mcp["status"], "ok");
+    assert_eq!(mcp["tool_name"], "forge.cli.create");
+    assert_eq!(
+        mcp["result"]["schema_version"],
+        "forge.cli_factory.creation_plan.v1"
+    );
+    assert_eq!(mcp["result"]["cli"]["binary_name"], "stripe-forge-cli");
+    assert_eq!(
+        mcp["result"]["agent_native"]["compound_commands"][0],
+        "churn-risk"
+    );
+    assert!(
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge cli create")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("forge.cli.create"),
+        "the packaged Forge skill should teach agents to create workflow-backed CLIs"
+    );
 }
 
 #[test]
@@ -46251,6 +47238,591 @@ views:
 }
 
 #[test]
+fn interactive_action_dispatch_starts_workflow_and_routes_cli_brain_hooks() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let addon_dir = temp.path().join(".forge/addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        addon_dir.join("crm_hooks.yaml"),
+        r#"
+id: forge.addon.crm_hooks
+name: CRM Hooks Addon
+version: 0.1.0
+description: Demonstrates CRM action hooks routed through Forge workflows and brain hooks.
+lifecycle: enabled
+capabilities:
+  - id: crm_relationships
+    title: CRM relationships
+    description: CRM lead and contact operations.
+views:
+  - id: crm.leads_panel
+    title: CRM Leads Panel
+    surface: tui
+    type: dashboard
+    component: forge.crm.leads_panel
+    route: /crm/leads
+    layout:
+      zone: main
+      order: 10
+      width: full
+      height: auto
+      density: dense
+    data_bindings:
+      - id: crm_leads
+        source: forge.crm.leads
+        query: crm.leads
+        scope: workflow
+        required_capability: crm_relationships
+    actions:
+      - id: crm.lead.add_tag
+        label: Add tag to lead
+        description: Start a Forge workflow that adds a tag and updates lead list membership.
+        palette_group: crm
+        source_panel: crm_leads_panel
+        type: command
+        method: CLI
+        target: forge crm lead add-tag
+        command_template:
+          - crm
+          - lead
+          - add-tag
+        hooks:
+          - id: crm.lead.add_tag.workflow
+            hook_type: workflow_dispatch
+            target: workflow:crm.user_tag_management
+            workflow_id: crm.user_tag_management
+            contract_id: crm.user_tag_management.v1
+            execution_boundary: forge_workflow_invocation
+            mutates_workflow: true
+            tags:
+              - crm
+              - user-management
+              - tag
+              - list-membership
+            input_schema:
+              - lead_id
+              - tag
+              - operation
+          - id: crm.lead.add_tag.brain
+            hook_type: brain_cli
+            target: brain:codex
+            brain_id: codex
+            execution_boundary: forge_controlled_brain_hook
+            mutates_workflow: false
+            tags:
+              - crm
+              - brain
+              - quota-sensitive
+            command_template:
+              - harness
+              - wrap-plan
+              - --executor
+              - codex
+              - --cmd
+              - codex
+              - --output
+              - json
+            input_schema:
+              - prompt_packet
+              - workflow_id
+        keywords:
+          - crm
+          - lead
+          - tag
+          - list
+"#,
+    )
+    .unwrap();
+
+    let payload = r#"{"lead_id":"lead_42","tag":"vip","operation":"add_to_list","goal":"CRM workflow: add tag vip to lead lead_42 and update list membership"}"#;
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-dispatch",
+            "--action",
+            "crm.lead.add_tag",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--origin",
+            "crm_test",
+            "--payload",
+            payload,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["schema_version"],
+        "forge.interactive.action_dispatch.v1"
+    );
+    assert_eq!(json["status"], "action_dispatch_completed");
+    assert_eq!(json["requested_action_id"], "crm.lead.add_tag");
+    assert_eq!(json["origin"], "crm_test");
+    assert_eq!(json["dispatched"], true);
+    assert_eq!(json["workflow_dispatch_count"], 1);
+    assert_eq!(json["brain_hook_plan_count"], 1);
+    assert_eq!(json["not_executed_brain_hook_count"], 1);
+    assert_eq!(
+        json["workflow_dispatches"][0]["hook_id"],
+        "crm.lead.add_tag.workflow"
+    );
+    assert_eq!(
+        json["workflow_dispatches"][0]["target_workflow_ref"],
+        "crm.user_tag_management"
+    );
+    assert!(
+        json["invocation"]["workflow_hook_contract"]["hooks"][0]["tags"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("user-management"))
+    );
+    assert!(json["workflow_dispatches"][0]["tags"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("list-membership")));
+    assert_eq!(
+        json["workflow_dispatches"][0]["invocation_mode"],
+        "start_async_request"
+    );
+    assert_eq!(
+        json["workflow_dispatches"][0]["request"]["status"],
+        "accepted"
+    );
+    assert!(json["workflow_dispatches"][0]["request"]["workflow_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("wf_"));
+    assert!(json["workflow_dispatches"][0]["request"]["run_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("run_"));
+    assert!(json["workflow_dispatches"][0]["request"]["goal"]
+        .as_str()
+        .unwrap()
+        .contains("CRM workflow: add tag vip"));
+    assert_eq!(
+        json["workflow_dispatches"][0]["request"]["origin"],
+        "crm_test:action_hook:crm.lead.add_tag"
+    );
+    let dispatched_workflow_id = json["workflow_dispatches"][0]["request"]["workflow_id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        json["workflow_dispatches"][0]["artifact_ref"],
+        format!("forge://workflow/{dispatched_workflow_id}/action-hook/crm.lead.add_tag.workflow")
+    );
+    assert!(json["workflow_dispatches"][0]["lineage_ref"]
+        .as_str()
+        .unwrap()
+        .contains("interactive_action_workflow_hook_dispatched"));
+    assert_eq!(
+        json["brain_hook_plans"][0]["status"],
+        "brain_hook_routed_through_forge_harness"
+    );
+    assert_eq!(
+        json["brain_hook_plans"][0]["hook_id"],
+        "crm.lead.add_tag.brain"
+    );
+    assert_eq!(json["brain_hook_plans"][0]["brain_id"], "codex");
+    assert_eq!(
+        json["brain_hook_plans"][0]["execution_owner"],
+        "forge_harness"
+    );
+    assert_eq!(json["brain_hook_plans"][0]["queue_owner"], "forge_harness");
+    assert_eq!(
+        json["brain_hook_plans"][0]["state"],
+        "queued_waiting_executor_policy"
+    );
+    assert!(json["brain_hook_plans"][0]["tags"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("quota-sensitive")));
+    assert_eq!(
+        json["brain_hook_plans"][0]["quota_policy"]["schema_version"],
+        "forge.brain_hook_quota_policy.v1"
+    );
+    assert_eq!(
+        json["brain_hook_plans"][0]["quota_policy"]["ai_limits_required"],
+        true
+    );
+    assert_eq!(
+        json["brain_hook_plans"][0]["quota_policy"]["stop_or_fallback_before_quota_burn"],
+        true
+    );
+    assert!(json["brain_hook_plans"][0]["fallback_brains"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("opencode")));
+    assert_eq!(json["brain_hook_plans"][0]["not_executed"], true);
+    assert_eq!(
+        json["brain_hook_plans"][0]["workflow_id"],
+        json["workflow_dispatches"][0]["request"]["workflow_id"]
+    );
+    assert_eq!(
+        json["brain_hook_plans"][0]["artifact_ref"],
+        format!("forge://workflow/{dispatched_workflow_id}/brain-hook/crm.lead.add_tag.brain")
+    );
+    assert!(json["brain_hook_plans"][0]["lineage_ref"]
+        .as_str()
+        .unwrap()
+        .contains("interactive_action_brain_hook_queued"));
+    assert!(json["brain_hook_plans"][0]["command"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("wrap-plan")));
+
+    let tag_search_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-registry",
+            "--query",
+            "quota-sensitive",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tag_search_json: Value = serde_json::from_slice(&tag_search_output).unwrap();
+    assert!(tag_search_json["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["action_id"] == "crm.lead.add_tag"));
+
+    let run_id = json["workflow_dispatches"][0]["request"]["run_id"]
+        .as_str()
+        .unwrap();
+    let request_status = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "request",
+            "status",
+            "--run",
+            run_id,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_json: Value = serde_json::from_slice(&request_status).unwrap();
+    assert_eq!(
+        status_json["workflow_id"],
+        json["workflow_dispatches"][0]["request"]["workflow_id"]
+    );
+
+    let manifest = forge()
+        .args(["mcp", "tools", "--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest_json: Value = serde_json::from_slice(&manifest).unwrap();
+    let tool = find_mcp_tool(&manifest_json, "forge.interactive.action_dispatch");
+    assert_eq!(
+        tool["output_schema"],
+        "forge.interactive.action_dispatch.v1"
+    );
+    assert_eq!(tool["async_safe"], true);
+    assert_eq!(tool["mutates_workflow"], true);
+
+    let mcp_output = forge()
+        .current_dir(temp.path())
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .args(["mcp", "call", "forge.interactive.action_dispatch"])
+        .arg("--input")
+        .arg(
+            serde_json::json!({
+                "action_id": "crm.lead.add_tag",
+                "project_root": temp.path().to_str().unwrap(),
+                "origin": "crm_mcp",
+                "payload": {
+                    "lead_id": "lead_99",
+                    "tag": "hot",
+                    "operation": "add_to_list",
+                    "goal": "CRM workflow: add tag hot to lead lead_99"
+                }
+            })
+            .to_string(),
+        )
+        .args(["--output", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mcp_json: Value = serde_json::from_slice(&mcp_output).unwrap();
+    assert_eq!(
+        mcp_json["result"]["schema_version"],
+        "forge.interactive.action_dispatch.v1"
+    );
+    assert_eq!(mcp_json["result"]["status"], "action_dispatch_completed");
+    assert_eq!(mcp_json["result"]["workflow_dispatch_count"], 1);
+    assert_eq!(
+        mcp_json["result"]["workflow_dispatches"][0]["request"]["origin"],
+        "crm_mcp:action_hook:crm.lead.add_tag"
+    );
+
+    let brain_tag_payload = r#"{"requested_hook_tags":["quota-sensitive"],"lead_id":"lead_42","tag":"vip","operation":"review_with_brain"}"#;
+    let brain_tag_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-dispatch",
+            "--action",
+            "crm.lead.add_tag",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--origin",
+            "crm_brain_tag_test",
+            "--payload",
+            brain_tag_payload,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let brain_tag_json: Value = serde_json::from_slice(&brain_tag_output).unwrap();
+    assert_eq!(brain_tag_json["status"], "action_dispatch_completed");
+    assert_eq!(
+        brain_tag_json["requested_hook_tags"],
+        serde_json::json!(["quota-sensitive"])
+    );
+    assert_eq!(brain_tag_json["workflow_dispatch_count"], 0);
+    assert_eq!(brain_tag_json["dispatched"], false);
+    assert_eq!(brain_tag_json["brain_hook_plan_count"], 1);
+    assert_eq!(
+        brain_tag_json["brain_hook_plans"][0]["hook_id"],
+        "crm.lead.add_tag.brain"
+    );
+    assert_eq!(
+        brain_tag_json["brain_hook_plans"][0]["status"],
+        "brain_hook_routed_through_forge_harness"
+    );
+    assert_eq!(brain_tag_json["brain_hook_plans"][0]["not_executed"], true);
+    assert!(brain_tag_json["brain_hook_plans"][0]["tags"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("quota-sensitive")));
+}
+
+#[test]
+fn interactive_action_dispatch_filters_requested_workflow_hook() {
+    let temp = tempdir().unwrap();
+    let store = temp.path().join("forge.sqlite");
+    let addon_dir = temp.path().join(".forge/addons");
+    fs::create_dir_all(&addon_dir).unwrap();
+    fs::write(
+        addon_dir.join("crm_user_management_hooks.yaml"),
+        r#"
+id: forge.addon.crm_user_management_hooks
+name: CRM User Management Hooks
+version: 0.1.0
+description: Demonstrates selecting one CRM user-management workflow hook.
+lifecycle: enabled
+capabilities:
+  - id: crm_user_management
+    title: CRM user management
+    description: CRM list, tag and email actions.
+views:
+  - id: crm.user_management_panel
+    title: CRM User Management
+    surface: tui
+    type: dashboard
+    component: forge.crm.user_management_panel
+    route: /crm/users
+    layout:
+      zone: main
+      order: 10
+      width: full
+      height: auto
+      density: dense
+    data_bindings: []
+    actions:
+      - id: crm.tui.manage-users
+        label: Manage CRM users
+        description: Route list, tag and email operations through Forge hooks.
+        palette_group: crm
+        source_panel: crm_user_management_panel
+        type: command
+        method: CLI
+        target: forge addons execute-executor
+        command_template:
+          - addons
+          - execute-executor
+          - --contract
+          - crm.user.management.executor
+        hooks:
+          - id: crm.user_management.list_hook
+            hook_type: workflow
+            target: workflow:crm.marketing.segment_builder
+            workflow_id: crm.marketing.segment_builder
+            execution_boundary: forge_workflow_invocation_plan
+            mutates_workflow: true
+            tags:
+              - crm
+              - user-management
+              - workflow-hook
+              - list-membership
+            input_schema:
+              - user_selection
+              - list_changes
+              - tenant_context
+          - id: crm.user_management.tag_hook
+            hook_type: workflow
+            target: workflow:crm.lead.nurture
+            workflow_id: crm.lead.nurture
+            execution_boundary: forge_workflow_invocation_plan
+            mutates_workflow: true
+            tags:
+              - crm
+              - user-management
+              - workflow-hook
+              - tag-assignment
+            input_schema:
+              - user_selection
+              - tag_changes
+              - tenant_context
+        keywords:
+          - crm
+          - users
+          - list
+          - tag
+"#,
+    )
+    .unwrap();
+
+    let payload = serde_json::json!({
+        "requested_hook_id": "crm.user_management.tag_hook",
+        "tenant_context": {"tenant_id": "demo"},
+        "user_selection": {"ids": ["lead_42"]},
+        "tag_changes": {"add": ["priority"]},
+        "goal": "CRM workflow: apply priority tag to selected user"
+    })
+    .to_string();
+    let output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-dispatch",
+            "--action",
+            "crm.tui.manage-users",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--origin",
+            "crm_test",
+            "--payload",
+            &payload,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["status"], "action_dispatch_completed");
+    assert_eq!(json["workflow_dispatch_count"], 1);
+    assert_eq!(
+        json["workflow_dispatches"][0]["hook_id"],
+        "crm.user_management.tag_hook"
+    );
+    assert_eq!(
+        json["workflow_dispatches"][0]["target_workflow_ref"],
+        "crm.lead.nurture"
+    );
+    assert_eq!(
+        json["workflow_dispatches"][0]["payload"]["requested_hook_id"],
+        "crm.user_management.tag_hook"
+    );
+
+    let tag_payload = serde_json::json!({
+        "requested_hook_tags": ["user-management", "tag-assignment"],
+        "tenant_context": {"tenant_id": "demo"},
+        "user_selection": {"ids": ["lead_42"]},
+        "tag_changes": {"add": ["priority"]},
+        "goal": "CRM workflow: apply priority tag by hook tags"
+    })
+    .to_string();
+    let tag_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-dispatch",
+            "--action",
+            "crm.tui.manage-users",
+            "--project-root",
+            temp.path().to_str().unwrap(),
+            "--origin",
+            "crm_tag_filter_test",
+            "--payload",
+            &tag_payload,
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tag_json: Value = serde_json::from_slice(&tag_output).unwrap();
+
+    assert_eq!(tag_json["status"], "action_dispatch_completed");
+    assert_eq!(
+        tag_json["requested_hook_tags"],
+        serde_json::json!(["tag-assignment", "user-management"])
+    );
+    assert_eq!(tag_json["workflow_dispatch_count"], 1);
+    assert_eq!(tag_json["brain_hook_plan_count"], 0);
+    assert_eq!(
+        tag_json["workflow_dispatches"][0]["hook_id"],
+        "crm.user_management.tag_hook"
+    );
+    assert_eq!(
+        tag_json["workflow_dispatches"][0]["target_workflow_ref"],
+        "crm.lead.nurture"
+    );
+    assert!(tag_json["workflow_dispatches"][0]["tags"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("tag-assignment")));
+}
+
+#[test]
 fn interactive_action_registry_projects_palette_actions_for_tui_and_agents() {
     let temp = tempdir().unwrap();
     let store = temp.path().join("forge.sqlite");
@@ -46356,6 +47928,59 @@ views:
         keywords:
           - zzdemo
           - blocked
+  - id: zzdemo.ops_console
+    title: ZzDemo Ops Console
+    surface: ops_console
+    type: dashboard
+    component: forge.zzdemo.ops_console
+    route: /ops/zzdemo
+    layout:
+      zone: main
+      order: 42
+      width: full
+      height: full
+      density: dense
+    data_bindings:
+      - id: zzdemo_ops_state
+        source: forge.ops.snapshot.zzdemo
+        query: zzdemo.ops
+        scope: project
+        required_capability: zzdemo_ops
+    actions:
+      - id: zzdemo.ops_console_brain
+        label: Ops console brain action
+        description: Ops Console action should be visible to agents and carry brain hooks.
+        palette_group: zzdemo
+        source_panel: zzdemo_ops_console
+        type: command
+        method: CLI
+        target: forge zzdemo ops-console-brain
+        command_template:
+          - zzdemo
+          - ops-console-brain
+        hooks:
+          - id: zzdemo.ops_console.brain_hook
+            hook_type: brain_cli
+            target: brain:opencode
+            brain_id: opencode
+            execution_boundary: forge_controlled_brain_hook_plan
+            permission: zzdemo.brain.use
+            mutates_workflow: false
+            command_template:
+              - harness
+              - wrap-plan
+              - --executor
+              - opencode
+              - --cmd
+              - opencode
+              - --output
+              - json
+            input_schema:
+              - ops_context
+              - prompt_packet
+        keywords:
+          - zzdemo
+          - ops_console
 "#,
     )
     .unwrap();
@@ -46384,16 +48009,16 @@ views:
     );
     assert_eq!(json["status"], "action_registry_ready");
     assert_eq!(json["query"], "zzdemo");
-    assert_eq!(json["action_count"], 2);
-    assert_eq!(json["enabled_action_count"], 1);
+    assert_eq!(json["action_count"], 3);
+    assert_eq!(json["enabled_action_count"], 2);
     assert_eq!(json["blocked_action_count"], 1);
     assert_eq!(json["diagnostic_action_count"], 1);
     assert_eq!(json["mutation_action_count"], 0);
     assert_eq!(json["approval_action_count"], 0);
     assert!(json["groups"].as_array().unwrap().iter().any(|group| {
         group["group_id"] == "zzdemo"
-            && group["action_count"] == 2
-            && group["enabled_action_count"] == 1
+            && group["action_count"] == 3
+            && group["enabled_action_count"] == 2
             && group["blocked_action_count"] == 1
             && group["diagnostic_action_count"] == 1
     }));
@@ -46436,6 +48061,50 @@ views:
                 .unwrap()
                 .contains(&serde_json::json!("workflow"))
     }));
+    assert_eq!(
+        ready["workflow_hook_contract"]["schema_version"],
+        "forge.interactive.workflow_hook_contract.v1"
+    );
+    assert_eq!(
+        ready["workflow_hook_contract"]["state_owner"],
+        "forge_workflow_runtime"
+    );
+    assert_eq!(
+        ready["workflow_hook_contract"]["hook_execution_owner"],
+        "forge_workflow_runtime"
+    );
+    assert_eq!(ready["workflow_hook_contract"]["workflow_hook_count"], 1);
+    assert_eq!(
+        ready["workflow_hook_contract"]["dispatch_policy"],
+        "forge_workflow_plan_only_not_executed"
+    );
+    assert_eq!(ready["workflow_hook_contract"]["not_executed"], true);
+    let ready_workflow_hook = &ready["workflow_hook_contract"]["hooks"][0];
+    assert_eq!(ready_workflow_hook["id"], "zzdemo.ready.workflow_hook");
+    assert_eq!(ready_workflow_hook["workflow_id"], "zzdemo.review");
+    assert_eq!(
+        ready_workflow_hook["execution_boundary"],
+        "forge_workflow_invocation_plan"
+    );
+    assert_eq!(
+        ready_workflow_hook["dispatch_operation"],
+        "route_action_hook_to_forge_workflow"
+    );
+    assert_eq!(ready_workflow_hook["not_executed"], true);
+    assert_eq!(ready_workflow_hook["mutates_workflow"], true);
+    assert_eq!(
+        ready_workflow_hook["command_template"],
+        serde_json::json!([
+            "workflow",
+            "update-goal",
+            "--workflow",
+            "zzdemo.review",
+            "--goal",
+            "<goal>",
+            "--output",
+            "json"
+        ])
+    );
     assert!(ready_hooks.iter().any(|hook| {
         hook["id"] == "zzdemo.ready.brain_hook"
             && hook["hook_type"] == "brain_cli"
@@ -46447,6 +48116,48 @@ views:
                 .unwrap()
                 .contains(&serde_json::json!("wrap-plan"))
     }));
+    assert_eq!(
+        ready["brain_hook_contract"]["schema_version"],
+        "forge.interactive.brain_hook_contract.v1"
+    );
+    assert_eq!(
+        ready["brain_hook_contract"]["state_owner"],
+        "forge_workflow_runtime"
+    );
+    assert_eq!(
+        ready["brain_hook_contract"]["hook_execution_owner"],
+        "forge_harness"
+    );
+    assert_eq!(ready["brain_hook_contract"]["brain_hook_count"], 1);
+    assert_eq!(
+        ready["brain_hook_contract"]["dispatch_policy"],
+        "forge_first_plan_only_not_executed"
+    );
+    let ready_brain_hook = &ready["brain_hook_contract"]["hooks"][0];
+    assert_eq!(ready_brain_hook["id"], "zzdemo.ready.brain_hook");
+    assert_eq!(ready_brain_hook["brain_id"], "codex");
+    assert_eq!(
+        ready_brain_hook["execution_boundary"],
+        "forge_controlled_brain_hook_plan"
+    );
+    assert_eq!(
+        ready_brain_hook["dispatch_operation"],
+        "route_cli_brain_hook_through_forge_harness"
+    );
+    assert_eq!(ready_brain_hook["not_executed"], true);
+    assert_eq!(
+        ready_brain_hook["command_template"],
+        serde_json::json!([
+            "harness",
+            "wrap-plan",
+            "--executor",
+            "codex",
+            "--cmd",
+            "codex",
+            "--output",
+            "json"
+        ])
+    );
 
     let blocked = json["actions"]
         .as_array()
@@ -46479,6 +48190,33 @@ views:
             "json"
         ])));
 
+    let ops_console = json["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["action_id"] == "zzdemo.ops_console_brain")
+        .expect("Ops Console Addon action should be projected into the registry");
+    assert_eq!(ops_console["enabled"], true);
+    assert_eq!(ops_console["source_panel"], "zzdemo_ops_console");
+    assert_eq!(ops_console["addon_view_id"], "zzdemo.ops_console");
+    assert_eq!(
+        ops_console["addon_contract"]["view_id"],
+        "zzdemo.ops_console"
+    );
+    assert_eq!(
+        ops_console["brain_hook_contract"]["schema_version"],
+        "forge.interactive.brain_hook_contract.v1"
+    );
+    assert_eq!(ops_console["brain_hook_contract"]["brain_hook_count"], 1);
+    assert_eq!(
+        ops_console["brain_hook_contract"]["hooks"][0]["dispatch_operation"],
+        "route_cli_brain_hook_through_forge_harness"
+    );
+    assert_eq!(
+        ops_console["brain_hook_contract"]["hooks"][0]["brain_id"],
+        "opencode"
+    );
+
     let text_output = forge()
         .current_dir(temp.path())
         .args([
@@ -46498,6 +48236,7 @@ views:
     assert!(text.contains("Action registry"));
     assert!(text.contains("zzdemo.ready"));
     assert!(text.contains("zzdemo.blocked"));
+    assert!(text.contains("zzdemo.ops_console_brain"));
     assert!(text.contains("risk=low"));
     assert!(text.contains("mutates=false"));
     assert!(text.contains("approval=false"));
@@ -46523,6 +48262,63 @@ views:
     assert_eq!(invocation["status"], "action_invocation_ready");
     assert_eq!(invocation["hook_contract"]["hook_count"], 2);
     assert_eq!(invocation["hook_contract"]["hooks"][1]["brain_id"], "codex");
+    assert_eq!(
+        invocation["workflow_hook_contract"]["schema_version"],
+        "forge.interactive.workflow_hook_contract.v1"
+    );
+    assert_eq!(
+        invocation["workflow_hook_contract"]["workflow_hook_count"],
+        1
+    );
+    assert_eq!(
+        invocation["workflow_hook_contract"]["hooks"][0]["dispatch_operation"],
+        "route_action_hook_to_forge_workflow"
+    );
+    assert_eq!(
+        invocation["workflow_hook_contract"]["hooks"][0]["not_executed"],
+        true
+    );
+    assert_eq!(
+        invocation["brain_hook_contract"]["schema_version"],
+        "forge.interactive.brain_hook_contract.v1"
+    );
+    assert_eq!(invocation["brain_hook_contract"]["brain_hook_count"], 1);
+    assert_eq!(
+        invocation["brain_hook_contract"]["hooks"][0]["dispatch_operation"],
+        "route_cli_brain_hook_through_forge_harness"
+    );
+    assert_eq!(
+        invocation["brain_hook_contract"]["hooks"][0]["not_executed"],
+        true
+    );
+
+    let ops_invocation_output = forge()
+        .current_dir(temp.path())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "interactive",
+            "action-invocation",
+            "--action",
+            "zzdemo.ops_console_brain",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ops_invocation: Value = serde_json::from_slice(&ops_invocation_output).unwrap();
+    assert_eq!(ops_invocation["status"], "action_invocation_ready");
+    assert_eq!(
+        ops_invocation["brain_hook_contract"]["hooks"][0]["brain_id"],
+        "opencode"
+    );
+    assert_eq!(
+        ops_invocation["brain_hook_contract"]["hooks"][0]["dispatch_operation"],
+        "route_cli_brain_hook_through_forge_harness"
+    );
 
     let home_output = forge()
         .current_dir(temp.path())
@@ -46595,8 +48391,27 @@ views:
         mcp_json["result"]["schema_version"],
         "forge.interactive.action_registry.v1"
     );
-    assert_eq!(mcp_json["result"]["action_count"], 2);
+    assert_eq!(mcp_json["result"]["action_count"], 3);
     assert_eq!(mcp_json["result"]["blocked_action_count"], 1);
+    assert!(mcp_json["result"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["action_id"] == "zzdemo.ops_console_brain"
+            && action["addon_view_id"] == "zzdemo.ops_console"
+            && action["brain_hook_contract"]["hooks"][0]["brain_id"] == "opencode"));
+    assert!(
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.brain_hook_contract.v1")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("hook_execution_owner=forge_harness"),
+        "the packaged Forge skill should document CLI-brain hook dispatch ownership"
+    );
+    assert!(
+        forge_core::skill::AGENT_REFERENCE_MD
+            .contains("forge.interactive.workflow_hook_contract.v1")
+            && forge_core::skill::AGENT_REFERENCE_MD
+                .contains("route_action_hook_to_forge_workflow"),
+        "the packaged Forge skill should document workflow hook dispatch ownership"
+    );
 }
 
 #[test]
@@ -56886,192 +58701,193 @@ fn mcp_exposes_interactive_cli_home_slash_and_route_for_agents() {
 #[test]
 fn packaged_skill_mentions_interactive_mcp_agent_surfaces() {
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.home"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.home"),
         "the packaged Forge skill should expose interactive home state through MCP"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge tui --output json")
-            && forge_core::skill::SKILL_MD.contains("OpenCode-style orchestrator-first")
-            && forge_core::skill::SKILL_MD.contains("!<cmd>"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge tui --output json")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("OpenCode-style orchestrator-first")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("!<cmd>"),
         "the packaged Forge skill should expose the new default orchestrator-first TUI"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.guided_cockpit")
-            && forge_core::skill::SKILL_MD.contains("forge interactive guided-cockpit")
-            && forge_core::skill::SKILL_MD.contains("legacy detailed cockpit"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.guided_cockpit")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive guided-cockpit")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("legacy detailed cockpit"),
         "the packaged Forge skill should expose the guided cockpit as a legacy detailed panel"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.task_board"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.task_board"),
         "the packaged Forge skill should expose the dedicated interactive task board through MCP"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.operating_context")
-            && forge_core::skill::SKILL_MD.contains("forge interactive operating-context")
-            && forge_core::skill::SKILL_MD.contains("dashboard.operating_context_panel"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.operating_context")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive operating-context")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("dashboard.operating_context_panel"),
         "the packaged Forge skill should expose the operating context panel through MCP, CLI and home"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.workflow_sidebar")
-            && forge_core::skill::SKILL_MD.contains("forge interactive workflow-sidebar"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.workflow_sidebar")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive workflow-sidebar"),
         "the packaged Forge skill should expose the dedicated workflow sidebar through MCP and CLI"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.replacement_cli")
-            && forge_core::skill::SKILL_MD.contains("forge interactive replacement-cli")
-            && forge_core::skill::SKILL_MD.contains("dashboard.replacement_cli_panel"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.replacement_cli")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive replacement-cli")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("dashboard.replacement_cli_panel"),
         "the packaged Forge skill should expose the dedicated replacement CLI readiness surface through MCP, CLI and home"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.multimodal_runtime")
-            && forge_core::skill::SKILL_MD.contains("forge interactive multimodal-runtime")
-            && forge_core::skill::SKILL_MD.contains("dashboard.multimodal_runtime_panel"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.multimodal_runtime")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive multimodal-runtime")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("dashboard.multimodal_runtime_panel"),
         "the packaged Forge skill should expose the Addon-owned multimodal runtime surface through MCP, CLI and home"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge smoke forge-first-harness"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge smoke forge-first-harness"),
         "the packaged Forge skill should expose the Forge-first harness smoke"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge smoke replacement-cli-evidence"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge smoke replacement-cli-evidence"),
         "the packaged Forge skill should expose the replacement CLI evidence smoke"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.workflow_dag"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.workflow_dag"),
         "the packaged Forge skill should expose the dedicated workflow DAG surface through MCP"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge interactive workflow-dag"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive workflow-dag"),
         "the packaged Forge skill should include the workflow DAG CLI command"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.structured_logs"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.structured_logs"),
         "the packaged Forge skill should expose the dedicated structured logs surface through MCP"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.improvement_loop")
-            && forge_core::skill::SKILL_MD.contains("forge interactive improvement-loop")
-            && forge_core::skill::SKILL_MD.contains("dashboard.improvement_loop_panel"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.improvement_loop")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive improvement-loop")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("dashboard.improvement_loop_panel"),
         "the packaged Forge skill should expose the improvement loop through MCP, CLI and home"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.event_runtime.v1")
-            && forge_core::skill::SKILL_MD.contains("dashboard.event_runtime_panel"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.event_runtime.v1")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("dashboard.event_runtime_panel"),
         "the packaged Forge skill should teach agents to inspect the read-only event runtime panel"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.identity"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.identity"),
         "the packaged Forge skill should expose the dedicated interactive identity surface through MCP"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge interactive identity"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive identity"),
         "the packaged Forge skill should include the identity center CLI command"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge interactive structured-logs"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive structured-logs"),
         "the packaged Forge skill should include the structured logs CLI command"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.readiness"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.readiness"),
         "the packaged Forge skill should expose the dedicated readiness surface through MCP"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge interactive readiness"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive readiness"),
         "the packaged Forge skill should include the readiness CLI command"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.release_gates"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.release_gates"),
         "the packaged Forge skill should expose the dedicated release-gates surface through MCP"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge interactive release-gates"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive release-gates"),
         "the packaged Forge skill should include the release-gates CLI command"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.core_boundary")
-            && forge_core::skill::SKILL_MD.contains("forge interactive core-boundary")
-            && forge_core::skill::SKILL_MD.contains("dashboard.core_boundary_panel"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.core_boundary")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive core-boundary")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("dashboard.core_boundary_panel"),
         "the packaged Forge skill should expose the Core boundary audit through MCP, CLI and home"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.harness"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.harness"),
         "the packaged Forge skill should expose the dedicated harness center through MCP"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge interactive harness"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive harness"),
         "the packaged Forge skill should include the harness center CLI command"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("adoption_plan")
-            && forge_core::skill::SKILL_MD.contains("bootstrap_project_harness"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("adoption_plan")
+            && forge_core::skill::AGENT_REFERENCE_MD.contains("bootstrap_project_harness"),
         "the packaged Forge skill should teach agents that the interactive harness panel exposes adoption and bootstrap controls"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.sessions"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.sessions"),
         "the packaged Forge skill should expose the dedicated session center through MCP"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge interactive sessions"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive sessions"),
         "the packaged Forge skill should include the session center CLI command"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.patch_workbench"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.patch_workbench"),
         "the packaged Forge skill should expose the dedicated patch workbench through MCP"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge interactive patch-workbench"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive patch-workbench"),
         "the packaged Forge skill should include the patch workbench CLI command"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("edit_intake"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("edit_intake"),
         "the packaged Forge skill should teach agents to inspect patch edit intake before presenting file-editing actions"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("action_hint"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("action_hint"),
         "the packaged Forge skill should teach agents to inspect per-file action hints before presenting file buttons"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("operation_plan"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("operation_plan"),
         "the packaged Forge skill should teach agents to inspect the ordered patch operation plan before presenting file-editing actions"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("source_code_patch_lifecycle"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("source_code_patch_lifecycle"),
         "the packaged Forge skill should route source-code editing through the software development Addon capability"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("addon_contract"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("addon_contract"),
         "the packaged Forge skill should tell agents to inspect the patch workbench Addon contract"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.permissions"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.permissions"),
         "the packaged Forge skill should expose the dedicated permission center through MCP"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge interactive permissions"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge interactive permissions"),
         "the packaged Forge skill should include the permission center CLI command"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("ui_composition_panel"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("ui_composition_panel"),
         "the packaged Forge skill should teach agents to read the UI composition panel"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("structured_logs_panel"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("structured_logs_panel"),
         "the packaged Forge skill should teach agents to read structured logs"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.interactive.route"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.interactive.route"),
         "the packaged Forge skill should teach agents to route conversational input through Forge"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge mcp call forge.interactive.route"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge mcp call forge.interactive.route"),
         "the packaged Forge skill should include a callable interactive route example"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("forge.brain_router"),
+        forge_core::skill::AGENT_REFERENCE_MD.contains("forge.brain_router"),
         "the packaged Forge skill should expose Forge-owned brain routing boundaries"
     );
     assert!(
-        forge_core::skill::SKILL_MD.contains("Codex, OpenCode, Gemini CLI, Claude CLI"),
+        forge_core::skill::AGENT_REFERENCE_MD
+            .contains("Codex, OpenCode, Antigravity CLI, Claude CLI"),
         "the packaged Forge skill should describe external CLIs as replaceable execution brains"
     );
 }
@@ -60283,4 +62099,69 @@ fn validation_blocks_promotion_when_ai_executor_has_ai_disabled_in_execution_pol
                     .unwrap()
                     .contains("execution policy")
         }));
+}
+
+#[test]
+fn test_detached_execution_plan_and_start() {
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("forge.sqlite");
+
+    // 1. Test 'plan' with detached option
+    let plan_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "plan",
+            "--goal",
+            "Create a delivery platform",
+            "--detached",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let plan_json: Value = serde_json::from_slice(&plan_output).unwrap();
+    assert_eq!(plan_json["status"], "planned");
+    let run_id = plan_json["run_id"]
+        .as_str()
+        .expect("run_id should be in output");
+    assert!(run_id.starts_with("run_"));
+
+    // 2. Verify that run record exists in the store
+    let store = ForgeStore::open(&store_path).unwrap();
+    let run = forge_core::request::load_request_status(&store, run_id).unwrap();
+    assert_eq!(run.status, "accepted");
+
+    // 3. Test 'request start' with detached option
+    let start_output = forge()
+        .args([
+            "--store",
+            store_path.to_str().unwrap(),
+            "request",
+            "start",
+            "--goal",
+            "Deploy a microservice",
+            "--detached",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let start_json: Value = serde_json::from_slice(&start_output).unwrap();
+    let start_run_id = start_json["run_id"]
+        .as_str()
+        .expect("run_id should be in output of request start");
+    assert!(start_run_id.starts_with("run_"));
+
+    // 4. Verify that the start run record exists in the store
+    let start_run = forge_core::request::load_request_status(&store, start_run_id).unwrap();
+    assert_eq!(start_run.status, "accepted");
 }

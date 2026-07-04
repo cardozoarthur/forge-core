@@ -398,8 +398,8 @@ pub fn node_brain_routing_for_executor(executor: &ExecutorKind) -> NodeBrainRout
             routing.scope = "agentic_ai_node".to_string();
             routing.allowed_brains = vec![
                 "codex".to_string(),
+                "agy".to_string(),
                 "opencode".to_string(),
-                "gemini".to_string(),
                 "claude".to_string(),
             ];
             routing.agent_slots = vec![NodeBrainAgentSlotSpec {
@@ -500,6 +500,8 @@ pub struct ArtifactRecord {
     pub kind: String,
     pub path: String,
     pub sha256: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<ArtifactLineageRecord>,

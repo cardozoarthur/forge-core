@@ -7,9 +7,44 @@ pub const SKILL_NAME: &str = "forge-core";
 
 pub const SKILL_MD: &str = r#"---
 name: forge-core
+description: Lightweight Forge Core entrypoint. Load the domain skill that matches the node before loading detailed instructions.
+license: MIT
+compatibility: codex, opencode, agy, claude
+metadata:
+  runtime: rust
+  cli: forge
+---
+
+## What Forge Core Does
+
+Forge Core is the workflow orchestration authority. Use `forge plan --goal "<objective>" --output json` to turn work into an auditable workflow, then load only the domain skill needed by the current node.
+
+## Required First Steps
+
+1. Run `forge plan --goal "<human objective>" --output json`.
+2. Use `forge context --workflow <id> --task <task-id> --project-root <project-root> --budget <bytes> --strict --output json` before giving an agent task-specific context.
+3. Use `forge validate --workflow <id> --output json` before promotion.
+
+## Domain Skill Index
+
+- `forge-core-runtime`: durable workflows, request lifecycle, handoff, schedules, validation and rework.
+- `forge-core-context`: bounded context, memory policy/search, deferred discovery and node-scoped context routing.
+- `forge-core-artifacts`: workflow artifacts, tags, documents, reports, fetch/list and lineage.
+- `forge-core-executors`: brains, sessions, harness, executor quota, `ai-limits`, CLI factory and model fallback.
+- `forge-core-addons-ui`: Addons, renderer events, operational TUI/web surfaces and interactive panels.
+
+Do not load every domain skill by default. Load the smallest skill matching the current workflow node, then ask Forge for explicit expansion commands when more information is required.
+
+## Skill Modularity Rule
+
+Do not grow Forge into a giant all-purpose skill. Keep the entrypoint and each domain skill compact. When a skill starts covering multiple domains, unrelated behaviors or a long command encyclopedia, split it into smaller domain skills or single-function skills and keep this entrypoint as the router.
+"#;
+
+pub const AGENT_REFERENCE_MD: &str = r#"---
+name: forge-core
 description: Use Forge Core to run operational and strategic assisted AI/non-AI workflows with goal-oriented DAGs, executor/runtime sync, live goal/node mutation, mutable artifacts, validation gates, persistence, rework loops, and controlled self-improvement.
 license: MIT
-compatibility: codex, opencode, gemini, claude
+compatibility: codex, opencode, agy, claude
 metadata:
   runtime: rust
   cli: forge
@@ -22,12 +57,12 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 ## Required Workflow
 
 1. Run `forge plan --goal "<human objective>" --output json`.
-2. For skill-style use, prefer `forge request start --goal "<objective>" --origin codex|opencode|gemini|claude|skill --output json` and return the `run_id` to the caller.
+2. For skill-style use, prefer `forge request start --goal "<objective>" --origin codex|opencode|agy|claude|skill --output json` and return the `run_id` to the caller.
 3. Run `forge sync all --home "$HOME" --output json` when executor or runtime availability may have changed. If Forge-first CLI shims are installed, include `--shim-dir "$HOME/.forge/bin"` or the project shim directory so executor readiness includes harness status.
 4. Inspect the generated atomic tasks, task goals, subtasks, impediments, async policy and validation rules.
-5. Use `forge workflow update-goal ... --origin codex|opencode|gemini|forge_cli|skill` when the human changes direction during execution.
-6. Use `forge workflow attach-artifact ... --origin codex|opencode|gemini|forge_cli|skill` when new artifacts appear during execution.
-7. Use `forge context --workflow <id> --task <task-id> --project-root <project-root> --budget <bytes> --strict --output json` before giving an agent task-specific context; include `--project-root` whenever project `.forge/memory-governance.json` should affect the context memory policy.
+5. Use `forge workflow update-goal ... --origin codex|opencode|agy|forge_cli|skill` when the human changes direction during execution.
+6. Use `forge workflow attach-artifact ... --tag <tag> --origin codex|opencode|agy|forge_cli|skill` when new artifacts appear during execution; tags should describe artifact kind, domain, customer/account, workflow stage and search intent.
+7. Use `forge context --workflow <id> --task <task-id> --project-root <project-root> --budget <bytes> --strict --output json` before giving an agent task-specific context; include `--project-root` whenever project `.forge/memory-governance.json` should affect the context memory policy. Read `context_router` (`forge.context.router.v1`) and `deferred_discovery` (`forge.context.deferred_discovery.v1`) before discovering MCP servers, skills, memory or CRM records: only router-selected sources belong in the current node packet, and deferred route groups must wait for a later node or an explicit Forge expansion command.
 8. Use `forge memory policy --project-root <project-root> --output json` and `forge memory search --workflow <workflow-id> --query "<query>" --memory-level none|session|short_term|standard|full|admin --scope global|organization|project|processing --organization <organization-id> --audience public|internal|manager|private --output json` before loading broad historical context. Forge memory is file-first, level-scoped, workflow/tenant-bound when a workflow is supplied, and visibility-gated; search returns snippets and line ranges, not whole files. Configure project defaults explicitly with `forge memory configure --project-root <project-root> ... --approved-by <operator> --reason "<reason>"` or MCP `forge.memory.configure`; when `memory_level`, `scope` and `audience` are omitted, search uses `.forge/memory-governance.json` defaults for that project.
 9. Run `forge validate --workflow <id> --output json` before promotion. If `rework_tasks` is not empty, return those tasks to work.
 10. Run `forge improve candidates --output json` or `forge.improve.candidates` before choosing a workflow to mutate; use its run/event/outcome/parallelization/cost evidence to decide whether to recover a stale run, parallelize ready handoffs, replace avoidable AI work with command nodes, or generate a controlled experiment.
@@ -37,9 +72,10 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 ## MCP Agent Surface
 
 - Use `forge mcp tools --output json` to discover stable agent-facing tools before wiring a Codex/OpenCode workflow.
-- Treat Codex, OpenCode, Gemini CLI, Claude CLI and future CLIs as replaceable execution brains only. Forge owns and routes workflow state, memory, skills, MCP servers/tools, credential-vault references, context packets, shell/session lifecycle, permissions, cost policy, validation gates and self-improvement decisions. Inspect this boundary with `forge brains --output json` or MCP `forge.brain_router`, inspect provider/session state with `forge sessions --output json` or MCP `forge.sessions`, record ordered shell session lifecycle with `forge sessions lifecycle` or MCP `forge.session.lifecycle`, and inspect per-session audit history with `forge sessions history --session <id>` or MCP `forge.session.history`, before handing work to a brain.
+- Treat Codex, OpenCode, Antigravity CLI, Claude CLI and future CLIs as replaceable execution brains only. Forge owns and routes workflow state, memory, skills, MCP servers/tools, credential-vault references, context packets, shell/session lifecycle, permissions, cost policy, validation gates and self-improvement decisions. Inspect this boundary with `forge brains --output json` or MCP `forge.brain_router`, inspect provider/session state with `forge sessions --output json` or MCP `forge.sessions`, record ordered shell session lifecycle with `forge sessions lifecycle` or MCP `forge.session.lifecycle`, and inspect per-session audit history with `forge sessions history --session <id>` or MCP `forge.session.history`, before handing work to a brain.
 - Distinguish the orchestrator brain from node brains. Forge is the orchestrator brain/control plane; each AI or mixed workflow node can carry its own `node_brain_routing` contract with one or more agent slots, different brains per slot, multiple agents on the same brain, Forge-owned memory/skills/MCP routing, parallel execution when leases/quota/context allow it, node-level routing mutation through `forge workflow update-node-brain`, and run-level hot-swap through `forge request switch-executor` without stopping the workflow.
 - In `forge.context.request` / `forge.task.handoff`, treat `prompt_packet.organization_context`, `prompt_packet.personality_decision` and `prompt_packet.company_work_decision` as required executor context. `organization_context` carries organization, brand, product, user, channel, memory/personality scope, tenant policy, brand voice/tone/values, terminology, design-system sources and operating policy. `personality_decision` carries the Forge-owned routing owner, selected persona mode/profile, selected voice/tone, brand voice/tone/values, style sources, fallback mode and audit flag. `company_work_decision` carries the compact multidisciplinary operating checklist for product, technical, financial, administrative, marketing, communication and delivery work. Their checksums plus `organization_context_required`, `personality_decision_required` and `company_work_decision_required` validation gates make agent output accountable to organizational context, personality routing and company operating discipline.
+- Treat `context_router` (`forge.context.router.v1`) as the LiteLLM-inspired node context router and `deferred_discovery` as its source manifest. Forge does not need to rediscover every MCP server or skill for every node; `context_router` exposes `routing_strategy=node_requirement_tag_routing_with_budget_fallbacks`, `route_groups`, `node_tags`, `pre_call_checks` such as `bound_subject_or_defer`, `selected_source_ids`, `deferred_source_ids`, `global_discovery_allowed=false`, `avoided_global_discovery=true` and a plan-only fallback policy, while `deferred_discovery` keeps `selected_sources` and `deferred_sources` for the source-level audit. Agents must not load MCP servers, skill catalogs, memory or CRM subject timelines unless the current node's route group selected that source or Forge returned an explicit expansion command; CRM profile/timeline sources require a concrete bound subject marker such as `bound_crm_subject`, `crm_subject`, `user_id`, `lead_id`, `contact_id` or `account_id`.
 - Before reading historical memory for a task, inspect the `memory_policy` object returned by `forge context --project-root <project-root>` or task handoff with `project_root`, or call `forge memory policy --project-root <project-root> --output json` / MCP `forge.memory.policy` when operating on a project. It carries the workflow/tenant-derived memory level, allowed scopes, tenant boundary, default audience and governed `forge memory search --workflow <workflow-id>` command; project policy also reports `.forge/memory-governance.json` status, source fields and effective defaults. Do not inline broad memory into executor prompts.
 - Promote memory only through `forge memory promote --workflow <workflow-id>` or MCP `forge.memory.promote` with `workflow_id`, using a curated summary, source path, approver, reason, visibility and compatible shareability. Never copy raw private processing memory into project, organization or global memory.
 - Clean up processing memory only through `forge memory cleanup --workflow <workflow-id>` or MCP `forge.memory.cleanup`. Non-dry-run cleanup requires an approver, reason and confirm, and only archives/deletes files that `forge memory retention` classified as `delete_after_final_packaging`.
@@ -53,15 +89,16 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 - Read `dashboard.architecture_compass_panel`, call `forge interactive architecture --project-root <project-root> --output json`, or use MCP `forge.interactive.architecture` with `project_root` before choosing the next architectural increment. It exposes `forge.interactive.architecture_compass.v1` with goal1/goal2/goal3 hashes, project operating context, architecture tracks, benchmark boundaries, conflicts, dependencies, reuse opportunities and an incremental execution plan without mutating state.
 - Use `forge interactive home --project-root <project-root> --output json` or MCP `forge.interactive.home` with `project_root` when the home dashboard must render project-scoped release gates, harness mode, identity context, workflow sidebar navigation, replacement-grade CLI readiness, Addon-owned multimodal runtime readiness and read-only event-runtime state without relying on process cwd. Read `dashboard.workflow_sidebar_panel`, call `forge interactive workflow-sidebar --output json`, or use MCP `forge.interactive.workflow_sidebar` for `forge.interactive.workflow_sidebar.v1` before composing a TUI/sidebar; it groups active, attention, event-driven, scheduled and completed workflows, marks the selected workflow and exposes inspect/task-board/DAG/events/validate commands without mutating state. Read `dashboard.replacement_cli_panel`, call `forge interactive replacement-cli --project-root <project-root> --output json`, or use MCP `forge.interactive.replacement_cli` with `project_root` for `forge.interactive.replacement_cli.v1` before claiming `forge` is replacing daily CLI work; it aggregates operator home, workflow operations, patch editing UX, action discovery, project-scoped harness/session controls, observability, approvals, milestone evidence, `external_brain_evidence_plan`, provider-level `provider_readiness` rows, plan-only `provider_wrapper_plans` and static `provider_wrapper_manifest_audit` for the required connected-brain provider adapter path while keeping promotion false until required evidence is attached; provider adapter plans and manifest audit do not launch child CLIs, execute models, mutate project files or count as release evidence. Read `dashboard.multimodal_runtime_panel`, call `forge interactive multimodal-runtime --project-root <project-root> --output json`, or use MCP `forge.interactive.multimodal_runtime` with `project_root` for `forge.interactive.multimodal_runtime.v1` before presenting multimodal runtime work; it exposes the `forge.addon.multimodal` boundary, feature flag, guard state, safe templates, demo plans, project-scoped Addon commands and `production_runtime_evidence_plan` blockers without installing models, executing models, accessing devices or mutating workflows. Read `dashboard.event_runtime_panel` (`forge.interactive.event_runtime.v1`) for pending inbound events, worker/service status, wakeable persistent workflows, recommendation and explicit inbox/reconcile/supervisor/webhook commands; rendering it must not route events or start workers.
 - Use `forge smoke operational-tui --output json` before claiming the operational TUI is ready. The smoke creates a demonstrable local run, scheduled workflow, event, approval signal, workflow mutation proposal and dashboard evidence, then checks that `forge` opens the OpenCode-style orchestrator-first TUI by default and exposes workflows ativos, agentes/subagentes/node agents, eventos/schedules, Addons/capabilities, custos, replanejamento, core boundary and handoffs/approvals plus the README five-minute intro. Use `forge smoke forge-first-harness --output json` before claiming Forge-first CLI harness readiness; it proves persisted reversible headroom, read-only adoption-plan, approval-gated bootstrap dry-run, isolated Forge-owned shim installation, shim audit, one-shot PATH activation and `harness exec` dry-run without executing or mutating the external CLI. Use `forge smoke replacement-cli-evidence --output json` before claiming replacement-grade CLI evidence collection is operational; it proves ready replacement CLI evidence is attached while provider/runtime evidence remains skipped until approved project manifests exist. Use `forge smoke multimodal-runtime-evidence --output json` before claiming Addon-owned multimodal runtime evidence collection is operational; it proves missing project manifests stay planning-only and approved connected runtime manifests attach `production_runtime_benchmark` without auto-promotion.
+- Use `forge cli create --name <name> --goal "<objective>" --source <api-or-site> --command <command> --compound-command <insight> --output json` or MCP `forge.cli.create` when the deliverable is a generated CLI rather than only a workflow plan. Forge creates a persistent `forge.cli_factory.creation_plan.v1` workflow whose state owner is `forge_workflow_runtime`, keeps generated CLI/MCP/skill/Addons as workflow artifacts/runtime contracts, defaults to local-first SQLite, exposes agent-native commands (`sync`, `search`, `sql`, `insight`, JSON/compact/dry-run) and requires scorecard, dogfood, proof and smoke checks before promotion. Generated CLIs are products built on Forge, not separate orchestration authorities.
 - Read `dashboard.context_memory_panel`, call `forge interactive context-memory --project-root <project-root> --output json`, or use MCP `forge.interactive.context_memory` before rendering context/memory governance operations. It exposes `forge.interactive.context_memory.v1` with context handoff readiness, context routing quality, project memory policy, governed memory/context commands and next actions without building a task packet or mutating workflows.
 - Read `dashboard.operating_context_panel`, call `forge interactive operating-context --project-root <project-root> --output json`, or use MCP `forge.interactive.operating_context` before presenting executor handoff controls. It exposes `forge.interactive.operating_context.v1` with tenant identity, memory policy, personality routing, brand/design context, prompt-packet gates, company-work checklist and handoff readiness without mutating workflows.
-- Inspect the no-argument interactive dashboard through `forge.interactive.home`, discover slash commands through `forge.interactive.slash_commands`, and route conversational input through `forge.interactive.route` when an agent needs the same command/chat classification as the TUI without launching a local terminal. Read `dashboard.navigation_panel` for `forge.interactive.navigation.v1` keyboard bindings, themes and compact/detailed/focus display modes. Read `dashboard.ui_composition_panel`, call `forge interactive ui-composition --project-root <project-root> --output json`, or use MCP `forge.interactive.ui_composition` for `forge.interactive.ui_composition.v1` regions, Core widgets, Addon widgets from enabled Addon views including `tui` surfaces, renderer families and refresh/inspection commands before composing a TUI, web dashboard or agent-side visual surface. Read `dashboard.release_gates_panel`, call `forge interactive release-gates --version 0.5 --project-root <project-root> --output json`, or use MCP `forge.interactive.release_gates` with `project_root` before claiming milestone readiness; it exposes promotion decision, blocked capabilities, required evidence, current evidence, per-capability evidence-plan status, secret-free manifest templates and next commands without mutating state. Read `dashboard.harness_panel` or call `forge interactive harness --output json` / MCP `forge.interactive.harness` for `forge.interactive.harness.v1` harness mode, doctor, shim status, CLI wrap-plan, `headroom_plan`, `adoption_plan`, `headroom_stats`, `session_lifecycle_plan`, `executor_compatibility`, token-headroom preview and guarded `bootstrap_project_harness` command before rendering Forge-first CLI controls. `executor_compatibility` uses `forge.harness.executor_compatibility.v1` to expose canonical Codex, Claude, Gemini and OpenCode adapter families plus readiness for env overlay, PATH shim, guarded exec, token headroom, session lifecycle, context/memory/skill/MCP routing and credential-vault boundaries. Read `dashboard.sessions_panel` or call `forge interactive sessions --output json` / MCP `forge.interactive.sessions` for `forge.interactive.sessions.v1` provider/session readiness, lifecycle state, per-session `operation_plan`, shell history commands and next lifecycle controls before opening or attaching brain shells. Read `dashboard.patch_workbench_panel` or call `forge interactive patch-workbench --output json` / MCP `forge.interactive.patch_workbench` for `forge.interactive.patch_workbench.v1` `addon_contract`, Git status, `diff_preview`, `diff_review_queue`, per-file `action_hint` next actions, `edit_intake` required inputs/forms, ordered `operation_plan`, diff stat/check, changed-file lanes, `approval_flow` review/approval/rollback gates and permission-gated `patch plan/review/diff/apply/restore` commands before presenting file editing or diff review UI. Read `dashboard.identity_panel` or call `forge interactive identity --output json` / MCP `forge.interactive.identity` for `forge.interactive.identity.v1` operating context, identity registry, channel aliases, memberships and tenant audit before rendering identity or tenant context operations. Read `dashboard.permissions_panel` or call `forge interactive permissions --output json` / MCP `forge.interactive.permissions` for `forge.interactive.permissions.v1` tenant memberships, Addon permission authorizations and pending human approvals before rendering permission or approval operations. Read `dashboard.structured_logs_panel` or call `forge interactive structured-logs --output json` / MCP `forge.interactive.structured_logs` for `forge.interactive.structured_logs.v1` recent event logs with store sequence, workflow, category, severity, origin, source, correlation, observability and payload preview before building timeline drill-downs. Before opening brain shells, call `forge interactive readiness --output json` or MCP `forge.interactive.readiness` for `forge.interactive.readiness.v1` executor, brain, shell, Forge-controlled surface and harness readiness with next corrective commands; also read `dashboard.harness_panel`, `dashboard.sessions_panel`, `dashboard.harness_mode_panel` and `dashboard.harness_doctor_panel`. Before operational handoff decisions, call `forge interactive operational-cockpit --output json` or MCP `forge.interactive.operational_cockpit` for `forge.interactive.operational_cockpit.v1`; inspect its `modifier_lane` (`forge.interactive.operational_modifier_lane.v1`) for pending/applied human+AI strategic runtime mutations before applying proposals through the ops console/API, then read `dashboard.digital_twin_panel` for `forge.ops.operational_digital_twin.v1` state, `dashboard.dag_panel` or call `forge interactive workflow-dag --output json` / MCP `forge.interactive.workflow_dag` for `forge.interactive.workflow_dag.v1` dependency nodes/edges, readiness, human waits and drill-down commands, and read `dashboard.task_board_panel` or call `forge interactive task-board --output json` / MCP `forge.interactive.task_board`; these expose workflow lanes, attention, handoffs, checkpoint resume candidates, pending human waits, artifacts, selected brain, observability and direct next commands.
-- Read `dashboard.command_palette_panel` or call `forge interactive command-palette --output json` / MCP `forge.interactive.command_palette` for `forge.interactive.command_palette.v1` grouped contextual actions before building command palettes, quick-open menus or agent-side action pickers; it is read-only and exposes navigation, workflow, Addon actions, permission, harness, session and observability actions with mutation and approval flags. CLI actions declared by enabled TUI Addon views can provide `palette_group`, `source_panel`, `description`, `risk_level`, `mutates_workflow`, `command_template` and `keywords`; the palette preserves `addon_contract` using `forge.interactive.addon_action_contract.v1`, plus `addon_view_id` and `addon_view_action_id`, and each entry carries `enabled`, `blocked_reason` and `operation_plan` using `forge.interactive.command_palette_action_plan.v1` so clients can show source Addon, Addon version/lifecycle, capability, permission, permission-gate status, execution/diagnostic status and concrete view action before offering domain-specific commands. When an Addon action is blocked by permission readiness, the entry remains visible for diagnosis, exposes no executable command template and points to the Addon view inspection command as the next diagnostic step.
-- Read `dashboard.action_registry_panel`, type `/actions [query]` in the interactive REPL, or call `forge interactive action-registry --output json` / MCP `forge.interactive.action_registry` for `forge.interactive.action_registry.v1` when a TUI, web dashboard or agent needs a stable read-only list of actions independent of command-palette layout. It derives from the same governed action contracts but returns strict query filtering, per-group counts, enabled/blocked/diagnostic/mutation/approval totals, action `operation_plan` data and next diagnostic commands.
-- Type `/action <action-id>` in the interactive REPL, call `forge interactive action-invocation --action <action-id> --output json`, or use MCP `forge.interactive.action_invocation` when a TUI, web dashboard or agent has selected one action and needs a safe invocation plan. It resolves the action from the registry into `forge.interactive.action_invocation.v1`, returns `can_execute`, `selected_command`, `operation_plan`, diagnostics and `not_executed=true`; clients must still execute explicit commands themselves or route future mutations through Forge.
+- Inspect the no-argument interactive dashboard through `forge.interactive.home`, discover slash commands through `forge.interactive.slash_commands`, and route conversational input through `forge.interactive.route` when an agent needs the same command/chat classification as the TUI without launching a local terminal. Read `dashboard.navigation_panel` for `forge.interactive.navigation.v1` keyboard bindings, themes and compact/detailed/focus display modes. Read `dashboard.ui_composition_panel`, call `forge interactive ui-composition --project-root <project-root> --output json`, or use MCP `forge.interactive.ui_composition` for `forge.interactive.ui_composition.v1` regions, Core widgets, Addon widgets from enabled Addon views including `tui` surfaces, renderer families and refresh/inspection commands before composing a TUI, web dashboard or agent-side visual surface. Read `dashboard.release_gates_panel`, call `forge interactive release-gates --version 0.5 --project-root <project-root> --output json`, or use MCP `forge.interactive.release_gates` with `project_root` before claiming milestone readiness; it exposes promotion decision, blocked capabilities, required evidence, current evidence, per-capability evidence-plan status, secret-free manifest templates and next commands without mutating state. Read `dashboard.harness_panel` or call `forge interactive harness --output json` / MCP `forge.interactive.harness` for `forge.interactive.harness.v1` harness mode, doctor, shim status, CLI wrap-plan, `headroom_plan`, `adoption_plan`, `headroom_stats`, `session_lifecycle_plan`, `executor_compatibility`, token-headroom preview and guarded `bootstrap_project_harness` command before rendering Forge-first CLI controls. `executor_compatibility` uses `forge.harness.executor_compatibility.v1` to expose canonical Codex, Claude, Antigravity and OpenCode adapter families plus readiness for env overlay, PATH shim, guarded exec, token headroom, session lifecycle, context/memory/skill/MCP routing and credential-vault boundaries. Read `dashboard.sessions_panel` or call `forge interactive sessions --output json` / MCP `forge.interactive.sessions` for `forge.interactive.sessions.v1` provider/session readiness, lifecycle state, per-session `operation_plan`, shell history commands and next lifecycle controls before opening or attaching brain shells. Read `dashboard.patch_workbench_panel` or call `forge interactive patch-workbench --output json` / MCP `forge.interactive.patch_workbench` for `forge.interactive.patch_workbench.v1` `addon_contract`, Git status, `diff_preview`, `diff_review_queue`, per-file `action_hint` next actions, `edit_intake` required inputs/forms, ordered `operation_plan`, diff stat/check, changed-file lanes, `approval_flow` review/approval/rollback gates and permission-gated `patch plan/review/diff/apply/restore` commands before presenting file editing or diff review UI. Read `dashboard.identity_panel` or call `forge interactive identity --output json` / MCP `forge.interactive.identity` for `forge.interactive.identity.v1` operating context, identity registry, channel aliases, memberships and tenant audit before rendering identity or tenant context operations. Read `dashboard.permissions_panel` or call `forge interactive permissions --output json` / MCP `forge.interactive.permissions` for `forge.interactive.permissions.v1` tenant memberships, Addon permission authorizations and pending human approvals before rendering permission or approval operations. Read `dashboard.structured_logs_panel` or call `forge interactive structured-logs --output json` / MCP `forge.interactive.structured_logs` for `forge.interactive.structured_logs.v1` recent event logs with store sequence, workflow, category, severity, origin, source, correlation, observability and payload preview before building timeline drill-downs. Before opening brain shells, call `forge interactive readiness --output json` or MCP `forge.interactive.readiness` for `forge.interactive.readiness.v1` executor, brain, shell, Forge-controlled surface and harness readiness with next corrective commands; also read `dashboard.harness_panel`, `dashboard.sessions_panel`, `dashboard.harness_mode_panel` and `dashboard.harness_doctor_panel`. Before operational handoff decisions, call `forge interactive operational-cockpit --output json` or MCP `forge.interactive.operational_cockpit` for `forge.interactive.operational_cockpit.v1`; inspect its `modifier_lane` (`forge.interactive.operational_modifier_lane.v1`) for pending/applied human+AI strategic runtime mutations before applying proposals through the ops console/API, then read `dashboard.digital_twin_panel` for `forge.ops.operational_digital_twin.v1` state, `dashboard.dag_panel` or call `forge interactive workflow-dag --output json` / MCP `forge.interactive.workflow_dag` for `forge.interactive.workflow_dag.v1` dependency nodes/edges, readiness, human waits and drill-down commands, and read `dashboard.task_board_panel` or call `forge interactive task-board --output json` / MCP `forge.interactive.task_board`; these expose workflow lanes, attention, handoffs, checkpoint resume candidates, pending human waits, artifacts, selected brain, observability and direct next commands.
+- Read `dashboard.command_palette_panel` or call `forge interactive command-palette --output json` / MCP `forge.interactive.command_palette` for `forge.interactive.command_palette.v1` grouped contextual actions before building command palettes, quick-open menus or agent-side action pickers; it is read-only and exposes navigation, workflow, Addon actions, permission, harness, session and observability actions with mutation and approval flags. CLI actions declared by enabled TUI Addon views can provide `palette_group`, `source_panel`, `description`, `risk_level`, `mutates_workflow`, `command_template`, `keywords` and optional action hooks. The palette preserves `addon_contract` using `forge.interactive.addon_action_contract.v1`, generic `hook_contract` using `forge.interactive.action_hook_contract.v1`, workflow dispatch `workflow_hook_contract` using `forge.interactive.workflow_hook_contract.v1`, and CLI-brain `brain_hook_contract` using `forge.interactive.brain_hook_contract.v1`; each workflow hook is plan-only, `state_owner=forge_workflow_runtime`, `hook_execution_owner=forge_workflow_runtime`, `not_executed=true`, and uses `route_action_hook_to_forge_workflow` so CRM actions such as list/tag/email operations can route to another Forge workflow without bypassing runtime lineage. Each brain hook is plan-only, `state_owner=forge_workflow_runtime`, `hook_execution_owner=forge_harness`, and `not_executed=true`, so clients can route Codex/OpenCode/Antigravity/Claude hooks through Forge instead of launching brains directly. Each entry also carries `addon_view_id`, `addon_view_action_id`, `enabled`, `blocked_reason` and `operation_plan` using `forge.interactive.command_palette_action_plan.v1` so clients can show source Addon, Addon version/lifecycle, capability, permission, permission-gate status, execution/diagnostic status and concrete view action before offering domain-specific commands. When an Addon action is blocked by permission readiness, the entry remains visible for diagnosis, exposes no executable command template and points to the Addon view inspection command as the next diagnostic step.
+- Read `dashboard.action_registry_panel`, type `/actions [query]` in the interactive REPL, or call `forge interactive action-registry --output json` / MCP `forge.interactive.action_registry` for `forge.interactive.action_registry.v1` when a TUI, web dashboard or agent needs a stable read-only list of actions independent of command-palette layout. It derives from the same governed action contracts but returns strict query filtering, per-group counts, enabled/blocked/diagnostic/mutation/approval totals, action `operation_plan`, generic hook contracts, workflow dispatch plans, CLI-brain dispatch plans and next diagnostic commands.
+- Type `/action <action-id>` in the interactive REPL, call `forge interactive action-invocation --action <action-id> --output json`, or use MCP `forge.interactive.action_invocation` when a TUI, web dashboard or agent has selected one action and needs a safe invocation plan. It resolves the action from the registry into `forge.interactive.action_invocation.v1`, returns `can_execute`, `selected_command`, `operation_plan`, diagnostics, `hook_contract`, `workflow_hook_contract`, `brain_hook_contract` and `not_executed=true`; clients must still execute explicit commands themselves or route workflow hooks through Forge runtime and CLI-brain hooks through Forge Harness.
 - Read `dashboard.autocomplete_panel` or call `forge interactive autocomplete --input "<partial input>" --output json` / MCP `forge.interactive.autocomplete` for `forge.interactive.autocomplete.v1` slash-command, command-palette and `/action <partial>` action-id suggestions before building autocomplete, inline command completion or agent-side quick input; it is read-only and returns score, source panel, mutation, approval, `enabled`, `blocked_reason` and `operation_plan` flags. `/action` suggestions use source `action_registry`, insert `/action <action-id>`, and point equivalent commands to `forge interactive action-invocation --action <action-id> --output json`, so clients can complete selected action IDs without executing them. Command-palette suggestions preserve any `addon_contract` using `forge.interactive.addon_action_contract.v1`, plus `addon_view_id` and `addon_view_action_id`, so autocomplete can keep Addon/capability/permission/action lineage visible instead of flattening domain-specific actions into Core commands; blocked Addon actions remain discoverable but have empty insert/equivalent commands and diagnostic-only operation plans.
-- Use the interactive `/brains`, `/sessions`, `/sessions history`, `/sessions lifecycle`, `/shells`, `/harness` and `/harness doctor` commands to show Forge-controlled brain routing, provider/session readiness, auditable shell lifecycle, effective Forge-first harness mode and full CLI readiness before opening a brain shell. Use `forge sessions --output json` or MCP `forge.sessions` to list providers, session readiness, lifecycle state, `lifecycle_policy.allowed_next_states`, per-session `operation_plan`, next lifecycle commands and recorded shell launch events; pass `--provider <brain>`, `--state <state>` or `--readiness <readiness>` on the CLI, or `provider_id`, `lifecycle_state` and `readiness` in MCP input, when the operator/UI only needs one provider or lifecycle lane. Use `forge sessions history --session <id> --output json` or MCP `forge.session.history` when an operator/agent needs one session's chronological shell-launch and lifecycle audit, counts, current state and next lifecycle commands without filtering global events in the client. Use `forge sessions lifecycle --session <id> --state opened|attached|closed --origin <origin>` or MCP `forge.session.lifecycle` to record audit-only shell lifecycle events without starting child processes; Forge returns `previous_state`, `lifecycle_sequence` and a `transition` policy, and rejects invalid ordered transitions such as detaching before attachment. Use `forge shells --executor <executor> --workflow <workflow-id> --task <task-id> --run <run-id> --output json` or MCP `forge.shell.launch_plan` when an operator/agent needs a plan-only launch report with readiness, preflight commands, concrete context/handoff/heartbeat commands, `prompt_packet_gate_policy` and handoff gates before starting an external brain shell; the policy lists `organization_context_required`, `personality_decision_required` and `company_work_decision_required` so shells cannot ignore prompt-packet decisions. Use `forge shells --record-session` or MCP `forge.shell.record_plan` when the shell intent should be auditable as a `shell_launch_planned` event. Directly opening `codex`, `opencode`, `gemini` or `claude` should be treated as inspection/debugging; production handoff should go through Forge context, leases and validation.
-- Use `forge harness doctor --executor <executor> --shim-dir <dir> --project-root <project-root> --output json` or MCP `forge.harness.doctor` for a consolidated read-only readiness audit before relying on Forge-first CLI operation. Use `forge harness mode --output json` or MCP `forge.harness.mode` to audit the effective Forge-first default, source, project config status, exec policy and precedence before relying on a wrapper or shim. Use `forge harness headroom-plan --executor <executor> --project-root <project-root> --output json` or MCP `forge.harness.headroom_plan` to inspect the effective context budget, token-headroom source, wrapper env, `session_lifecycle_plan`, compression pipeline, reserve strategy and next commands before handing large logs, tool output or CLI stdout to a brain. Use `forge harness headroom-stats --source <source> --output json` or MCP `forge.harness.headroom_stats` to inspect persisted token savings by source/content kind and top reversible retrieval refs before expanding noisy outputs back into context. Use `forge harness adoption-plan --executor <executor> --shim-dir <dir> --project-root <project-root> --output json` or MCP `forge.harness.adoption_plan` to get the ordered read-only adoption plan for project harness config, Forge-first shims, activation profile, executor sync, headroom verification, lineage-required dry-run and lineage-required real execution without writing config, installing shims or launching child CLIs. Use the returned `commands.exec_with_lineage_dry_run` first; only then use `commands.exec_with_lineage`, which adds `--execute --allow-exec` and starts the external child process. Use `forge harness activation-profile --executor <executor> --shim-dir <dir> --project-root <project-root> --output json` or MCP `forge.harness.activation_profile` to generate reversible shell activation/deactivation commands that prepend Forge-owned shims to `PATH` and export Forge-first/headroom defaults; add `--shell-rc <path> --apply --approved-by <operator>` only after review to write a reversible Forge-managed shell startup block. Use `forge harness bootstrap --executor <executor> --shim-dir <dir> --project-root <project-root> --output json` or MCP `forge.harness.bootstrap` for a safe dry-run bootstrap; add `--apply --approved-by <operator>` only after review to write `.forge/harness.json` and install Forge-owned shims. Use `forge harness install-provider-adapter` / MCP `forge.harness.install_provider_adapter` to create the separate `.forge/bin/<executor>-provider` command for milestone provider evidence after operator approval. Use `forge harness wrap-plan` / MCP `forge.harness.wrap_plan` before running Codex, Claude, Gemini or OpenCode under Forge-first control; it returns `forge.harness.session_lifecycle_plan.v1` with record-launch/opened/attached/closed commands so shell state is auditable before and after handoff, and returns `connected_brain_provider_wrapper` (`forge.harness.connected_brain_provider_wrapper.v1`) so `.forge/connected-brain-runtimes.json` can point provider commands at the absolute Forge-owned `.forge/bin/<executor>-provider` adapter without counting that preparation as release evidence. Pass `--project-root <project-root>` or MCP `project_root` when planning for another project's `.forge/harness.json`, and pass `--workflow`, `--task` and `--run` whenever the external CLI belongs to a workflow node. When a shell should prefer Forge infrastructure by default, set `FORGE_HARNESS_DEFAULT_MODE=forge_first`, add project `.forge/harness.json` with `{"default_mode":"forge_first"}`, or use `forge harness install-shims --shim-dir <dir> --executor <executor> --project-root <project-root>` / MCP `forge.harness.install_shims` with `project_root`; `--observe-only` disables those defaults for one CLI invocation. Project `.forge/harness.json` may also set `context_budget` or `default_context_budget`, `default_token_headroom` or `token_headroom`, and `require_token_headroom_for_forge_first`; `forge harness mode`, `headroom-plan`, `headroom-stats`, `adoption-plan`, `activation-profile`, `bootstrap`, `wrap-plan`, `doctor`, `install-shims` and `exec` report the resolved `context_budget_source`, `token_headroom_source` and `require_token_headroom_for_forge_first`. Add `"require_lineage_for_exec": true` to the same project file when real child execution must be blocked unless `workflow`, `task` and `run` lineage are present. Harness reports expose `forge_first_source`, `project_exec_policy_status`, `require_lineage_for_exec`, context budget and token-headroom sources, and the child overlay includes `FORGE_HARNESS_MODE_SOURCE`, so operators can tell whether Forge-first came from an explicit flag, env default, project config, observe-only override, MCP input or MCP default. Forge resolves the native CLI from PATH while excluding the shim directory, refuses to overwrite existing non-Forge files unless forced and records the resolution source/status. After installing or changing PATH, use `forge harness shim-status --shim-dir <dir> --executor <executor>` or MCP `forge.harness.shim_status` to audit existence, Forge ownership, executable bit, PATH precedence, parsed real CLI/store/Forge binary and recursion risk before relying on the shim. Then run `forge sync executors --shim-dir <dir>` or `forge sync all --shim-dir <dir>` so `forge executors`, `forge brains`, `/brains`, `/shells` and `forge shells` expose `forge.executor_harness_status.v1`, `forge_first_ready` and Forge-first shell entrypoints. Use `--real-cmd` only when an explicit native CLI path is required. Use `forge harness exec --project-root <project-root>` / MCP `forge.harness.exec` with `project_root` for guarded CLI invocation receipts; with `require_lineage_for_exec`, missing workflow/task/run returns `harness_exec_blocked_by_project_policy` instead of launching the child process. When token headroom is enabled, real child stdout/stderr get `stdout_headroom`/`stderr_headroom` reports with reversible retrieval refs, so compressed output can flow to a brain while Forge preserves the original stream. When a store plus workflow, task or run lineage is present, the receipt records a `forge.harness.exec_event.v1` global timeline event and returns `event_recorded` plus `global_event_id`.
+- Use the interactive `/brains`, `/sessions`, `/sessions history`, `/sessions lifecycle`, `/shells`, `/harness` and `/harness doctor` commands to show Forge-controlled brain routing, provider/session readiness, auditable shell lifecycle, effective Forge-first harness mode and full CLI readiness before opening a brain shell. Use `forge sessions --output json` or MCP `forge.sessions` to list providers, session readiness, lifecycle state, `lifecycle_policy.allowed_next_states`, per-session `operation_plan`, next lifecycle commands and recorded shell launch events; pass `--provider <brain>`, `--state <state>` or `--readiness <readiness>` on the CLI, or `provider_id`, `lifecycle_state` and `readiness` in MCP input, when the operator/UI only needs one provider or lifecycle lane. Use `forge sessions history --session <id> --output json` or MCP `forge.session.history` when an operator/agent needs one session's chronological shell-launch and lifecycle audit, counts, current state and next lifecycle commands without filtering global events in the client. Use `forge sessions lifecycle --session <id> --state opened|attached|closed --origin <origin>` or MCP `forge.session.lifecycle` to record audit-only shell lifecycle events without starting child processes; Forge returns `previous_state`, `lifecycle_sequence` and a `transition` policy, and rejects invalid ordered transitions such as detaching before attachment. Use `forge shells --executor <executor> --workflow <workflow-id> --task <task-id> --run <run-id> --output json` or MCP `forge.shell.launch_plan` when an operator/agent needs a plan-only launch report with readiness, preflight commands, concrete context/handoff/heartbeat commands, `prompt_packet_gate_policy` and handoff gates before starting an external brain shell; the policy lists `organization_context_required`, `personality_decision_required` and `company_work_decision_required` so shells cannot ignore prompt-packet decisions. Use `forge shells --record-session` or MCP `forge.shell.record_plan` when the shell intent should be auditable as a `shell_launch_planned` event. Directly opening `codex`, `opencode`, `antigravity` or `claude` should be treated as inspection/debugging; production handoff should go through Forge context, leases and validation.
+- Use `forge harness doctor --executor <executor> --shim-dir <dir> --project-root <project-root> --output json` or MCP `forge.harness.doctor` for a consolidated read-only readiness audit before relying on Forge-first CLI operation. Use `forge harness mode --output json` or MCP `forge.harness.mode` to audit the effective Forge-first default, source, project config status, exec policy and precedence before relying on a wrapper or shim. Use `forge harness headroom-plan --executor <executor> --project-root <project-root> --output json` or MCP `forge.harness.headroom_plan` to inspect the effective context budget, token-headroom source, wrapper env, `session_lifecycle_plan`, compression pipeline, reserve strategy and next commands before handing large logs, tool output or CLI stdout to a brain. Use `forge harness headroom-stats --source <source> --output json` or MCP `forge.harness.headroom_stats` to inspect persisted token savings by source/content kind and top reversible retrieval refs before expanding noisy outputs back into context. Use `forge harness adoption-plan --executor <executor> --shim-dir <dir> --project-root <project-root> --output json` or MCP `forge.harness.adoption_plan` to get the ordered read-only adoption plan for project harness config, Forge-first shims, activation profile, executor sync, headroom verification, lineage-required dry-run and lineage-required real execution without writing config, installing shims or launching child CLIs. Use the returned `commands.exec_with_lineage_dry_run` first; only then use `commands.exec_with_lineage`, which adds `--execute --allow-exec` and starts the external child process. Use `forge harness activation-profile --executor <executor> --shim-dir <dir> --project-root <project-root> --output json` or MCP `forge.harness.activation_profile` to generate reversible shell activation/deactivation commands that prepend Forge-owned shims to `PATH` and export Forge-first/headroom defaults; add `--shell-rc <path> --apply --approved-by <operator>` only after review to write a reversible Forge-managed shell startup block. Use `forge harness bootstrap --executor <executor> --shim-dir <dir> --project-root <project-root> --output json` or MCP `forge.harness.bootstrap` for a safe dry-run bootstrap; add `--apply --approved-by <operator>` only after review to write `.forge/harness.json` and install Forge-owned shims. Use `forge harness install-provider-adapter` / MCP `forge.harness.install_provider_adapter` to create the separate `.forge/bin/<executor>-provider` command for milestone provider evidence after operator approval. Use `forge harness wrap-plan` / MCP `forge.harness.wrap_plan` before running Codex, Claude, Antigravity or OpenCode under Forge-first control; it returns `forge.harness.session_lifecycle_plan.v1` with record-launch/opened/attached/closed commands so shell state is auditable before and after handoff, and returns `connected_brain_provider_wrapper` (`forge.harness.connected_brain_provider_wrapper.v1`) so `.forge/connected-brain-runtimes.json` can point provider commands at the absolute Forge-owned `.forge/bin/<executor>-provider` adapter without counting that preparation as release evidence. Pass `--project-root <project-root>` or MCP `project_root` when planning for another project's `.forge/harness.json`, and pass `--workflow`, `--task` and `--run` whenever the external CLI belongs to a workflow node. When a shell should prefer Forge infrastructure by default, set `FORGE_HARNESS_DEFAULT_MODE=forge_first`, add project `.forge/harness.json` with `{"default_mode":"forge_first"}`, or use `forge harness install-shims --shim-dir <dir> --executor <executor> --project-root <project-root>` / MCP `forge.harness.install_shims` with `project_root`; `--observe-only` disables those defaults for one CLI invocation. Project `.forge/harness.json` may also set `context_budget` or `default_context_budget`, `default_token_headroom` or `token_headroom`, and `require_token_headroom_for_forge_first`; `forge harness mode`, `headroom-plan`, `headroom-stats`, `adoption-plan`, `activation-profile`, `bootstrap`, `wrap-plan`, `doctor`, `install-shims` and `exec` report the resolved `context_budget_source`, `token_headroom_source` and `require_token_headroom_for_forge_first`. Add `"require_lineage_for_exec": true` to the same project file when real child execution must be blocked unless `workflow`, `task` and `run` lineage are present. Harness reports expose `forge_first_source`, `project_exec_policy_status`, `require_lineage_for_exec`, context budget and token-headroom sources, and the child overlay includes `FORGE_HARNESS_MODE_SOURCE`, so operators can tell whether Forge-first came from an explicit flag, env default, project config, observe-only override, MCP input or MCP default. Forge resolves the native CLI from PATH while excluding the shim directory, refuses to overwrite existing non-Forge files unless forced and records the resolution source/status. After installing or changing PATH, use `forge harness shim-status --shim-dir <dir> --executor <executor>` or MCP `forge.harness.shim_status` to audit existence, Forge ownership, executable bit, PATH precedence, parsed real CLI/store/Forge binary and recursion risk before relying on the shim. Then run `forge sync executors --shim-dir <dir>` or `forge sync all --shim-dir <dir>` so `forge executors`, `forge brains`, `/brains`, `/shells` and `forge shells` expose `forge.executor_harness_status.v1`, `forge_first_ready` and Forge-first shell entrypoints. Use `--real-cmd` only when an explicit native CLI path is required. Use `forge harness exec --project-root <project-root>` / MCP `forge.harness.exec` with `project_root` for guarded CLI invocation receipts; with `require_lineage_for_exec`, missing workflow/task/run returns `harness_exec_blocked_by_project_policy` instead of launching the child process. When token headroom is enabled, real child stdout/stderr get `stdout_headroom`/`stderr_headroom` reports with reversible retrieval refs, so compressed output can flow to a brain while Forge preserves the original stream. When a store plus workflow, task or run lineage is present, the receipt records a `forge.harness.exec_event.v1` global timeline event and returns `event_recorded` plus `global_event_id`.
 - For human+AI assisted operation, use `forge ops snapshot --project-root <project-root> --output json` or MCP `forge.ops.snapshot` for an operational registry view, or `forge ops serve --project-root <project-root> --host 127.0.0.1 --port 8765` to open the local web console. Include `--project-root`/`project_root` whenever project `.forge/memory-governance.json` should be visible to operators and modifier AIs. The snapshot includes `forge.ops.operational_digital_twin.v1`, showing each workflow's current activity, completed work, remaining work, validated work, rejected work, pending approvals and direct inspect/task-board/validate/events commands. The console is local-only by default and lets operators observe workflows, drive runs, step deterministic work, complete tasks with evidence and update workflow goals or task nodes in real time. Its modifier lane lets a separate strategic AI or human propose goal/node mutations and apply them through Forge-owned events while execution continues. Its memory/context governance panel exposes project governance, workflow tenant/personality context and ready-to-run governed `forge context` / `forge memory search` commands. Its visual surface shows tasks/subtasks and lets operators create whiteboards, screens, wireframes, flows, components, documents, token collections, token patches and collaboration events through Forge-owned workflow revisions. Addon renderer interactions are validated against `allowed_client_events` and can be recorded through `/api/addon-renderer/event`, `forge ops renderer-event` or MCP `forge.ops.addon_renderer_event`, then projected back into snapshot runtime state.
 - Treat `outcome_status` from `forge request status`, `forge request drive` and `forge list` as the final-result gate. If it says `support_only`, update the goal or tasks with explicit user-facing deliverables. If it says `needs_user_delivery_evidence` or `needs_final_outcome_audit`, continue the workflow instead of claiming completion.
 - If `forge improve candidates` reports `missing_final_outcome_audit` for a workflow without a driveable run, use `forge request ensure-final-audit --workflow <workflow-id> --executor codex --origin codex --output json` or MCP `forge.workflow.ensure_final_audit` to create or surface the final audit task before packaging.
@@ -72,7 +109,7 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 - When an AI or mixed executor has actually done the ready handoff work, close it with `forge request complete-task --run <run-id> --task <task-id> --executor codex --summary "<result>" --origin codex --output json` or `forge.run.complete_task`; Forge writes a replayable execution trace, builds the executor response, validates it, promotes the task and immediately drives the next action.
 - When `forge request drive` returns `complete`, inspect its `final_delivery_package`; Forge attaches Markdown and JSON summaries automatically at completion. Before handing an older or in-progress run back to the user, create or refresh the same package with `forge request final-package --run <run-id> --origin codex --output json` or `forge.run.final_package`; it reports `ready_for_user`, `in_progress` or `not_ready_for_user` so a support artifact is not mistaken for the requested final result.
 - If the current executor is about to hit a model limit, becomes unavailable, or should hand off work, use `forge request switch-executor --run <run-id> --executor opencode --fallback-executor codex --summary "<takeover summary>" --origin codex --output json` or `forge.run.switch_executor`. This hot-swap changes the execution brain for the workflow run while preserving the same `run_id`, workflow id, checkpoints, artifacts and explicit user directives; it does not require shutting the workflow down. Use fallback executors to keep a run recoverable when the primary executor fails or loses model capacity.
-- To change one AI/mixed node's brain routing while the workflow remains active, use `forge workflow update-node-brain --workflow <workflow-id> --task <task-id> --default-brain gemini --agent-slot agent-001=gemini:primary_node_agent:node-default --max-parallel-agents 1 --origin codex --output json` or MCP `forge.workflow.update_node_brain`. Use repeated `--agent-slot` values for multiple agents, including multiple agents on the same brain.
+- To change one AI/mixed node's brain routing while the workflow remains active, use `forge workflow update-node-brain --workflow <workflow-id> --task <task-id> --default-brain agy --agent-slot agent-001=agy:primary_node_agent:node-default --max-parallel-agents 1 --origin codex --output json` or MCP `forge.workflow.update_node_brain`. Use repeated `--agent-slot` values for multiple agents, including multiple agents on the same brain.
 - If a heartbeat becomes stale, use `forge request recover-stale --run <run-id> --origin codex --output json` or `forge.run.recover_stale` to move the run to `needs_attention` without losing workflow/run lineage.
 - Poll later with `forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json`.
 - List active requests with `forge mcp call forge.request.list --input '{"status":"accepted"}' --output json`.
@@ -122,6 +159,7 @@ Forge Core is an operational, strategic and visual assisted-operations runtime, 
 ```bash
 forge plan --goal "Create a delivery platform" --output json
 forge request start --goal "Improve Forge Core" --origin codex --output json
+forge cli create --name hubspot --goal "Create a relationship intelligence CLI over HubSpot" --source https://developers.hubspot.com --command deals-stale --compound-command forecast-health --output json
 forge request heartbeat --run <run-id> --executor codex --summary "executor applying bounded patch" --ttl-seconds 300 --pid <executor-pid> --origin codex --output json
 forge request drive --run <run-id> --executor codex --ttl-seconds 300 --origin codex --output json
 forge request step --run <run-id> --executor codex --ttl-seconds 300 --origin codex --output json
@@ -129,7 +167,7 @@ forge request complete-task --run <run-id> --task <task-id> --executor codex --s
 forge request final-package --run <run-id> --origin codex --output json
 forge request ensure-final-audit --workflow <workflow-id> --executor codex --origin codex --output json
 forge request switch-executor --run <run-id> --executor opencode --fallback-executor codex --summary "codex limit approaching; opencode continuing from Forge state" --origin codex --output json
-forge workflow update-node-brain --workflow <workflow-id> --task task-001 --default-brain gemini --agent-slot agent-001=gemini:primary_node_agent:node-default --max-parallel-agents 1 --origin codex --output json
+forge workflow update-node-brain --workflow <workflow-id> --task task-001 --default-brain agy --agent-slot agent-001=agy:primary_node_agent:node-default --max-parallel-agents 1 --origin codex --output json
 forge request status --run <run-id> --output json
 forge request resume --run <run-id> --origin codex --output json
 forge request list --status stale --output json
@@ -137,6 +175,7 @@ forge request recover-stale --run <run-id> --origin codex --output json
 forge ops snapshot --project-root <project-root> --output json
 forge ops serve --project-root <project-root> --host 127.0.0.1 --port 8765
 forge mcp call forge.ops.snapshot --input '{"project_root":"<project-root>"}' --output json
+forge mcp call forge.cli.create --input '{"name":"hubspot","goal":"Create a relationship intelligence CLI","source":"https://developers.hubspot.com","commands":["deals-stale"],"compound_commands":["forecast-health"]}' --output json
 forge ops renderer-event --workflow <workflow-id> --addon <addon-id> --view <view-id> --event-kind hover_changed --payload '{"point":"series.current"}' --output json
 forge improve candidates --output json
 forge events improvement-policy --workflow <workflow-id> --output json
@@ -274,7 +313,7 @@ forge mcp call forge.run.step --input '{"run_id":"<run-id>","executor":"codex","
 forge mcp call forge.run.complete_task --input '{"run_id":"<run-id>","task_id":"<task-id>","executor":"codex","summary":"executor finished the ready task with passing evidence","origin":"codex"}' --output json
 forge mcp call forge.run.final_package --input '{"run_id":"<run-id>","origin":"codex"}' --output json
 forge mcp call forge.run.switch_executor --input '{"run_id":"<run-id>","executor":"opencode","fallback_executors":["codex"],"summary":"take over without stopping workflow","origin":"codex"}' --output json
-forge mcp call forge.workflow.update_node_brain --input '{"workflow_id":"<workflow-id>","task_id":"task-001","default_brain":"gemini","agent_slots":["agent-001=gemini:primary_node_agent:node-default"],"max_parallel_agents":1,"origin":"codex"}' --output json
+forge mcp call forge.workflow.update_node_brain --input '{"workflow_id":"<workflow-id>","task_id":"task-001","default_brain":"agy","agent_slots":["agent-001=agy:primary_node_agent:node-default"],"max_parallel_agents":1,"origin":"codex"}' --output json
 forge mcp call forge.run.recover_stale --input '{"run_id":"<run-id>","origin":"codex"}' --output json
 forge mcp call forge.run.status --input '{"run_id":"<run-id>"}' --output json
 forge request list --output json
@@ -293,8 +332,8 @@ forge sync all --home "$HOME" --shim-dir "$HOME/.forge/bin" --allow codex --allo
 forge executors --output json
 forge runtimes --output json
 forge workflow update-goal --workflow <workflow-id> --goal "new goal" --origin codex --output json
-forge workflow attach-artifact --workflow <workflow-id> --path ./artifact.md --kind report --origin opencode --output json
-forge mcp call forge.workflow.attach_artifact --input '{"workflow_id":"<workflow-id>","path":"./artifact.md","kind":"report","origin":"codex"}' --output json
+forge workflow attach-artifact --workflow <workflow-id> --path ./artifact.md --kind report --tag <tag> --origin opencode --output json
+forge mcp call forge.workflow.attach_artifact --input '{"workflow_id":"<workflow-id>","path":"./artifact.md","kind":"report","tags":["report","crm"],"origin":"codex"}' --output json
 forge mcp call forge.context.request --input '{"workflow_id":"<workflow-id>","task_id":"task-001","budget":1200,"project_root":"<project-root>"}' --output json
 forge mcp call forge.task.handoff --input '{"workflow_id":"<workflow-id>","task_id":"task-001","executor":"codex","budget":1200,"project_root":"<project-root>"}' --output json
 /context --workflow <workflow-id> --task task-001 --budget 1200 --strict
@@ -377,6 +416,161 @@ forge self run --repo /home/arthur/projects/forge-core --until 2026-05-25T10:00:
 ```
 "#;
 
+const RUNTIME_SKILL_MD: &str = r#"---
+name: forge-core-runtime
+description: Forge Core runtime workflows, request lifecycle, handoff, schedules, validation and rework.
+license: MIT
+compatibility: codex, opencode, agy, claude
+---
+
+## Runtime Contract
+
+Forge owns workflow state. CLIs and models are execution engines.
+
+Use:
+
+```bash
+forge request start --goal "<objective>" --origin codex --output json
+forge request step --run <run-id> --executor codex --ttl-seconds 300 --origin codex --output json
+forge task handoff --workflow <workflow-id> --task <task-id> --executor codex --output json
+forge mcp call forge.task.handoff --input '{"workflow_id":"<workflow-id>","task_id":"<task-id>","executor":"codex"}' --output json
+forge request complete-task --run <run-id> --task <task-id> --executor codex --summary "<validated evidence>" --origin codex --output json
+forge schedule worker-status --output json
+forge validate --workflow <workflow-id> --output json
+```
+
+Completion means the task goal is definitively ready and validation has no rework tasks. If validation fails, return the task to work with the rework reason.
+"#;
+
+const CONTEXT_SKILL_MD: &str = r#"---
+name: forge-core-context
+description: Forge Core bounded context, memory, deferred discovery and node-scoped context routing.
+license: MIT
+compatibility: codex, opencode, agy, claude
+---
+
+## Context Contract
+
+Do not rediscover all MCP servers, skills, memory or CRM records for every node. Ask Forge for a bounded context packet and obey its router.
+
+Use:
+
+```bash
+forge context --workflow <workflow-id> --task <task-id> --project-root <project-root> --budget 1200 --strict --output json
+forge mcp call forge.context.request --input '{"workflow_id":"<workflow-id>","task_id":"<task-id>","project_root":"<project-root>","strict":true}' --output json
+forge memory policy --project-root <project-root> --output json
+forge memory search --workflow <workflow-id> --query "<query>" --scope project --audience manager --memory-level short_term --output json
+```
+
+Read `forge.context.router.v1`, `context_router`, `deferred_discovery`, `selected_source_ids`, `deferred_source_ids`, `search_tags` and `expand_commands` before loading more context. CRM/user records require a bound subject marker such as `bound_crm_subject`, `user_id`, `lead_id`, `contact_id` or `account_id`.
+"#;
+
+const ARTIFACT_SKILL_MD: &str = r#"---
+name: forge-core-artifacts
+description: Forge Core workflow artifacts, tags, documents, reports and lineage.
+license: MIT
+compatibility: codex, opencode, agy, claude
+---
+
+## Artifact Contract
+
+Artifacts are workflow state. Attach documents, proposals, contracts, reports, campaigns, emails and generated files through Forge so lineage and tags stay auditable.
+
+Use:
+
+```bash
+forge workflow attach-artifact --workflow <workflow-id> --artifact <path> --kind report --tag <tag> --origin codex --output json
+forge mcp call forge.workflow.attach_artifact --input '{"workflow_id":"<workflow-id>","path":"<path>","kind":"report","tags":["crm","proposal"],"origin":"codex"}' --output json
+forge artifacts --workflow <workflow-id> --output json
+forge mcp call forge.artifact.fetch --input '{"workflow_id":"<workflow-id>","path":"<artifact-path>"}' --output json
+```
+
+Use tags for artifact kind, workflow stage, account/customer, domain and search intent. Do not create parallel artifact registries outside Forge.
+"#;
+
+const EXECUTOR_SKILL_MD: &str = r#"---
+name: forge-core-executors
+description: Forge Core executor/brain routing, sessions, harness, quota policy, ai-limits and CLI factory.
+license: MIT
+compatibility: codex, opencode, agy, claude
+---
+
+## Executor Contract
+
+Forge chooses and audits execution engines. Do not use a detected CLI until executor policy marks it allowed.
+
+Use:
+
+```bash
+forge sync all --home "$HOME" --output json
+forge brains --output json
+forge mcp call forge.brain_router --output json
+forge sessions --output json
+forge harness doctor --executor codex --project-root <project-root> --output json
+forge executor-quota ai-limits --ai-limits-cmd ai-limits --output json
+forge request switch-executor --run <run-id> --executor opencode --fallback-executor codex --summary "quota-aware fallback" --origin codex --output json
+forge cli create --name <name> --goal "<goal>" --source <source> --command <command> --output json
+```
+
+Use `ai-limits` evidence to stop or fall back before burning exhausted Codex/Antigravity quota. Model providers remain interchangeable; Forge keeps workflow state and validation gates.
+"#;
+
+const ADDONS_UI_SKILL_MD: &str = r#"---
+name: forge-core-addons-ui
+description: Forge Core Addons, renderer events, TUI/web operational panels and interactive surfaces.
+license: MIT
+compatibility: codex, opencode, agy, claude
+---
+
+## Addon And UI Contract
+
+Domain features belong in Addons. Core exposes stable runtime, permission, renderer, event and inspection contracts.
+
+Use:
+
+```bash
+forge ops snapshot --project-root <project-root> --output json
+forge ops renderer-event --workflow <workflow-id> --addon <addon-id> --view <view-id> --event-kind refresh_requested --payload '{"refresh":true}' --output json
+forge mcp call forge.ops.snapshot --input '{"project_root":"<project-root>"}' --output json
+forge mcp call forge.ops.addon_renderer_event --input '{"workflow_id":"<workflow-id>","addon_id":"<addon-id>","view_id":"<view-id>","event_kind":"refresh_requested","payload":{"refresh":true}}' --output json
+forge interactive home --project-root <project-root> --output json
+forge mcp call forge.interactive.home --input '{"project_root":"<project-root>"}' --output json
+forge interactive action-dispatch --action <action-id> --project-root <project-root> --payload '{"goal":"Run the action hook workflow"}' --origin forge_cli --output json
+forge mcp call forge.interactive.action_dispatch --input '{"action_id":"<action-id>","project_root":"<project-root>","payload":{"goal":"Run the action hook workflow"}}' --output json
+```
+
+Before rendering CRM or other product UIs, resolve Addon capability boundaries and keep mutations routed through Forge workflows, permissions and events. Use action dispatch only for Forge-owned hook routing: workflow hooks start Forge workflows, while CLI brain hooks are routed as Forge harness plans and are not executed directly.
+"#;
+
+#[derive(Debug, Clone, Copy)]
+struct SkillModule {
+    name: &'static str,
+    markdown: &'static str,
+}
+
+const SKILL_MODULES: &[SkillModule] = &[
+    SkillModule {
+        name: "forge-core-runtime",
+        markdown: RUNTIME_SKILL_MD,
+    },
+    SkillModule {
+        name: "forge-core-context",
+        markdown: CONTEXT_SKILL_MD,
+    },
+    SkillModule {
+        name: "forge-core-artifacts",
+        markdown: ARTIFACT_SKILL_MD,
+    },
+    SkillModule {
+        name: "forge-core-executors",
+        markdown: EXECUTOR_SKILL_MD,
+    },
+    SkillModule {
+        name: "forge-core-addons-ui",
+        markdown: ADDONS_UI_SKILL_MD,
+    },
+];
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillInstallReport {
     pub skill: String,
@@ -395,24 +589,21 @@ pub fn install_skill(home: &Path, targets: &[String]) -> Result<SkillInstallRepo
         match target.as_str() {
             "codex" => {
                 let path = home.join(".codex/skills").join(SKILL_NAME).join("SKILL.md");
-                write_skill(&path)?;
-                installed.push(path.display().to_string());
+                push_installed_paths(&mut installed, write_skill_bundle(&path)?);
             }
             "opencode" => {
                 let path = home
                     .join(".config/opencode/skills")
                     .join(SKILL_NAME)
                     .join("SKILL.md");
-                write_skill(&path)?;
-                installed.push(path.display().to_string());
+                push_installed_paths(&mut installed, write_skill_bundle(&path)?);
             }
             "agents" => {
                 let path = home
                     .join(".agents/skills")
                     .join(SKILL_NAME)
                     .join("SKILL.md");
-                write_skill(&path)?;
-                installed.push(path.display().to_string());
+                push_installed_paths(&mut installed, write_skill_bundle(&path)?);
             }
             other => anyhow::bail!("unsupported skill target: {other}"),
         }
@@ -422,11 +613,7 @@ pub fn install_skill(home: &Path, targets: &[String]) -> Result<SkillInstallRepo
         .join(".agents/skills")
         .join(SKILL_NAME)
         .join("SKILL.md");
-    write_skill(&shared_path)?;
-    let shared_display = shared_path.display().to_string();
-    if !installed.iter().any(|path| path == &shared_display) {
-        installed.push(shared_display);
-    }
+    push_installed_paths(&mut installed, write_skill_bundle(&shared_path)?);
 
     Ok(SkillInstallReport {
         skill: SKILL_NAME.to_string(),
@@ -435,14 +622,45 @@ pub fn install_skill(home: &Path, targets: &[String]) -> Result<SkillInstallRepo
 }
 
 pub fn write_repo_skill(path: impl Into<PathBuf>) -> Result<()> {
-    write_skill(&path.into())
+    write_skill_bundle(&path.into()).map(|_| ())
 }
 
-fn write_skill(path: &Path) -> Result<()> {
+fn write_skill_bundle(path: &Path) -> Result<Vec<PathBuf>> {
+    write_skill_file(path, SKILL_MD)?;
+    let skill_dir = path
+        .parent()
+        .with_context(|| format!("skill path has no parent: {}", path.display()))?;
+    let skills_root = skill_dir
+        .parent()
+        .with_context(|| format!("skill directory has no parent: {}", skill_dir.display()))?;
+    let mut written = vec![path.to_path_buf()];
+
+    for module in SKILL_MODULES {
+        let module_path = skills_root.join(module.name).join("SKILL.md");
+        write_skill_file(&module_path, module.markdown)?;
+        written.push(module_path);
+    }
+
+    Ok(written)
+}
+
+fn write_skill_file(path: &Path, markdown: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create skill directory {}", parent.display()))?;
     }
-    fs::write(path, SKILL_MD).with_context(|| format!("failed to write {}", path.display()))?;
+    fs::write(path, markdown).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
+}
+
+fn push_installed_paths(installed: &mut Vec<String>, paths: Vec<PathBuf>) {
+    for path in paths {
+        let display = path.display().to_string();
+        if !installed
+            .iter()
+            .any(|installed_path| installed_path == &display)
+        {
+            installed.push(display);
+        }
+    }
 }

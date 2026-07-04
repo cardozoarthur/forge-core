@@ -29,7 +29,7 @@ const VALIDATION_COMMANDS: [&str; 4] = [
     "cargo test",
     "cargo build --release",
 ];
-const DEFAULT_SELF_EXECUTORS: [&str; 3] = ["opencode", "gemini", "codex"];
+const DEFAULT_SELF_EXECUTORS: [&str; 3] = ["codex", "agy", "opencode"];
 
 #[derive(Debug, Clone)]
 pub struct SelfRunOptions {
@@ -2251,11 +2251,12 @@ fn build_executor_policy(
         .collect::<Vec<_>>();
 
     let mut candidates = vec![
-        opencode_free_non_local_candidate(&requested_chain, &executor_states),
-        gemini_non_local_candidate(&requested_chain, &executor_states),
         codex_non_local_candidate(&requested_chain, &executor_states),
+        agy_non_local_candidate(&requested_chain, &executor_states),
+        opencode_free_non_local_candidate(&requested_chain, &executor_states),
         opencode_paid_non_local_candidate(&requested_chain, &executor_states),
         opencode_local_candidate(&requested_chain, &executor_states),
+        gemini_non_local_candidate(&requested_chain, &executor_states),
     ];
 
     // Apply previous failure status to candidates
@@ -2327,19 +2328,19 @@ fn build_executor_policy(
     let selection_trace = self_executor_selection_trace(&candidates);
 
     let mut repair_goals = vec![
-        "Gemini non-interactive repair: detect auth/model/approval prompts before handoff and create a repair goal instead of repeated timeouts.".to_string(),
+        "agy non-interactive repair: verify `agy --print` before handoff and create a repair goal instead of repeated timeouts.".to_string(),
         "OpenCode model repair: record provider/model availability and distinguish non-local quota-bound choices from local Ollama fallback.".to_string(),
     ];
 
     let mut skipped_to_preserve_quota = Vec::new();
     skipped_to_preserve_quota.push(
-        "Use deterministic validation commands directly instead of spending Gemini/Codex quota."
+        "Use deterministic validation commands directly instead of spending Codex/agy quota."
             .to_string(),
     );
     skipped_to_preserve_quota.push("Prefer local OpenCode/Ollama for cheap repetitive or low-value work when non-local quota value is low.".to_string());
 
     let mut quota_assumptions = vec![
-        "Gemini and Codex are non-local quota-bound capabilities.".to_string(),
+        "Codex and agy are non-local quota-bound capabilities; legacy Gemini is not an active executor path.".to_string(),
         "OpenCode non-local models (google/, openai/, anthropic/) are quota or rate-limit bound.".to_string(),
         "Local models (Ollama) consume local compute but no remote quota.".to_string(),
         "Deterministic command nodes (cargo, git, gh) are zero-quota and preferred for mechanical work.".to_string(),
@@ -2389,6 +2390,7 @@ fn build_executor_policy(
         let executor_name = match candidate.executor.as_str() {
             "opencode" => "OpenCode",
             "gemini" => "Gemini",
+            "agy" => "Antigravity agy",
             "codex" => "Codex",
             other => other,
         };
@@ -2578,7 +2580,7 @@ fn requested_rank(chain: &[String], executor: &str) -> u32 {
 }
 
 fn quota_aware_selection_tier(chain: &[String], executor: &str, capability_rank: u32) -> u32 {
-    capability_rank * 10 + requested_rank(chain, executor).min(9)
+    requested_rank(chain, executor).min(9) * 10 + capability_rank
 }
 
 fn opencode_free_non_local_candidate(
@@ -2607,7 +2609,7 @@ fn opencode_free_non_local_candidate(
         suitability_for_product_business_reasoning: "high_for_high_value_pm_business_or_creative_reasoning".to_string(),
         fallback_risk: "may fail when provider auth, quota or model configuration is missing".to_string(),
         non_interactive_requirement: "must run through opencode run without model/auth prompts".to_string(),
-        selection_tier: quota_aware_selection_tier(chain, "opencode", 1),
+        selection_tier: quota_aware_selection_tier(chain, "opencode", 3),
         selection_status: "eligible".to_string(),
         reason: "OpenCode non-local configured provider path is first choice when expected value justifies quota or cost.".to_string(),
         business_value_score: 80,
@@ -2642,9 +2644,9 @@ fn gemini_non_local_candidate(
         suitability_for_product_business_reasoning: "high_for_product_pm_and_business_decision_tasks".to_string(),
         fallback_risk: "interactive auth, approval or model selection must be classified as configuration failure".to_string(),
         non_interactive_requirement: "Gemini CLI must not wait for approval, model selection or auth prompts.".to_string(),
-        selection_tier: quota_aware_selection_tier(chain, "gemini", 2),
-        selection_status: "eligible".to_string(),
-        reason: "Gemini is a non-local quota-bound capability for high-value reasoning when non-interactive mode works.".to_string(),
+        selection_tier: quota_aware_selection_tier(chain, "gemini", 9),
+        selection_status: "skipped_legacy_invalidated".to_string(),
+        reason: "Gemini CLI is a legacy executor and is not an active Forge self-evolution route; use Codex or agy.".to_string(),
         business_value_score: 90,
         capability_evidence: vec![
             "Supports --approval-mode yolo".to_string(),
@@ -2674,7 +2676,7 @@ fn codex_non_local_candidate(
         suitability_for_product_business_reasoning: "high_as_reliable_fallback_for_complex_reasoning".to_string(),
         fallback_risk: "may consume scarce non-local quota and should be reserved for work where value justifies it".to_string(),
         non_interactive_requirement: "codex exec must run with approval disabled and workspace-write sandbox.".to_string(),
-        selection_tier: quota_aware_selection_tier(chain, "codex", 3),
+        selection_tier: quota_aware_selection_tier(chain, "codex", 1),
         selection_status: "eligible".to_string(),
         reason: "Codex is a reliable non-local quota-bound fallback when expected value justifies quota.".to_string(),
         business_value_score: 95,
@@ -2682,6 +2684,44 @@ fn codex_non_local_candidate(
             "Supports --ask-for-approval never".to_string(),
             "Non-interactive --sandbox workspace-write available".to_string(),
         ],
+    };
+    apply_executor_state_to_candidate(&mut candidate, states);
+    candidate
+}
+
+fn agy_non_local_candidate(
+    chain: &[String],
+    states: &[crate::executor::ExecutorState],
+) -> SelfExecutorPolicyCandidate {
+    let model = std::env::var("ANTIGRAVITY_MODEL")
+        .ok()
+        .or_else(|| Some("agy-default".to_string()));
+    let mut candidate = SelfExecutorPolicyCandidate {
+        executor: "agy".to_string(),
+        provider: "antigravity".to_string(),
+        model,
+        local_vs_non_local: "non_local".to_string(),
+        free_vs_paid_if_known: "unknown_or_configured_non_local_quota_bound".to_string(),
+        quota_model: "quota_bound".to_string(),
+        remaining_quota: "unknown_until_agy_probe".to_string(),
+        rate_limit_risk: "medium".to_string(),
+        monetary_or_token_cost: "quota_or_paid_usage_if_configured".to_string(),
+        latency: "medium".to_string(),
+        expected_quality: "high".to_string(),
+        suitability_for_product_business_reasoning:
+            "high_for_agentic_workspace_and_visual_or_product_work".to_string(),
+        fallback_risk:
+            "may fail when agy auth, project session or model configuration is unavailable"
+                .to_string(),
+        non_interactive_requirement:
+            "agy --print must run without interactive auth, project or approval prompts."
+                .to_string(),
+        selection_tier: quota_aware_selection_tier(chain, "agy", 2),
+        selection_status: "eligible".to_string(),
+        reason: "Antigravity/agy is the modern Gemini replacement for bounded agentic CLI work."
+            .to_string(),
+        business_value_score: 82,
+        capability_evidence: Vec::new(),
     };
     apply_executor_state_to_candidate(&mut candidate, states);
     candidate
@@ -2727,7 +2767,7 @@ fn opencode_paid_non_local_candidate(
         non_interactive_requirement:
             "must run through opencode run with explicit provider/model and no auth prompts"
                 .to_string(),
-        selection_tier: quota_aware_selection_tier(chain, "opencode", 3).saturating_add(5),
+        selection_tier: quota_aware_selection_tier(chain, "opencode", 30),
         selection_status: "eligible".to_string(),
         reason: "OpenCode non-local paid-or-unknown provider path is used after configured no-cost options and stronger non-local fallbacks are unsuitable.".to_string(),
         business_value_score: 85,
@@ -2762,7 +2802,7 @@ fn opencode_local_candidate(
         suitability_for_product_business_reasoning: "medium_for_repetitive_or_low_value_work_low_for_hard_pm_strategy".to_string(),
         fallback_risk: "local model may be weaker or unavailable and should not displace high-value non-local reasoning when quota is justified".to_string(),
         non_interactive_requirement: "opencode must run with explicit Ollama model and no interactive provider prompt.".to_string(),
-        selection_tier: quota_aware_selection_tier(chain, "opencode", 4),
+        selection_tier: quota_aware_selection_tier(chain, "opencode", 40),
         selection_status: "eligible".to_string(),
         reason: "OpenCode local/Ollama is efficient when quotas are low, work is cheap or privacy/locality matters.".to_string(),
         business_value_score: 50,
@@ -2948,6 +2988,29 @@ fn execute_cycle(repo: &Path, strategy: &SelfExecutorStrategy, prompt: &str) -> 
             } else {
                 bail!(
                     "gemini executor failed: {}{}",
+                    String::from_utf8_lossy(&output.stderr),
+                    response
+                )
+            }
+        }
+        "agy" | "antigravity" => {
+            let output = execute_command_capture(
+                "agy",
+                &["--print", prompt],
+                repo,
+                Some(EXECUTOR_TIMEOUT_SECONDS),
+            )?;
+            fs::create_dir_all(repo.join(".forge"))?;
+            let response = String::from_utf8_lossy(&output.stdout);
+            fs::write(
+                repo.join(".forge/last-agy-self-evolution.md"),
+                response.as_bytes(),
+            )?;
+            if output.status.success() {
+                Ok(response.trim().to_string())
+            } else {
+                bail!(
+                    "agy executor failed: {}{}",
                     String::from_utf8_lossy(&output.stderr),
                     response
                 )
@@ -3853,11 +3916,12 @@ mod tests {
         assert_eq!(
             ordered,
             vec![
+                ("codex", "openai", "non_local"),
                 ("opencode", "google", "non_local"),
                 ("gemini", "google", "non_local"),
-                ("codex", "openai", "non_local"),
                 ("opencode", "configured_cli", "non_local"),
                 ("opencode", "ollama", "local"),
+                ("agy", "antigravity", "non_local"),
             ]
         );
         assert!(policy.selection_principle.contains("expected value"));
@@ -4234,7 +4298,7 @@ mod tests {
         assert!(workflow
             .tasks
             .iter()
-            .any(|t| t.title.contains("Gemini non-interactive repair")));
+            .any(|t| t.title.contains("agy non-interactive repair")));
         assert!(workflow
             .tasks
             .iter()
@@ -4321,7 +4385,7 @@ mod tests {
         assert!(policy
             .quota_assumptions
             .iter()
-            .any(|a| a.contains("Skipping non-local candidate gemini due to quota preservation")));
+            .any(|a| a.contains("legacy Gemini is not an active executor path")));
         assert!(policy
             .business_reasoning_summary
             .contains("Stronger non-local reasoning is worth scarce quota"));

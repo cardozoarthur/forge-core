@@ -595,6 +595,29 @@ impl ForgeStore {
         let connection = Connection::open(&path)
             .with_context(|| format!("failed to open SQLite store {}", path.display()))?;
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+
+        let table_count: i64 = connection.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(0);
+
+        if table_count > 0 {
+            let events_exists: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='events')",
+                [],
+                |row| row.get(0),
+            ).unwrap_or(false);
+            let workflows_exists: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflows')",
+                [],
+                |row| row.get(0),
+            ).unwrap_or(false);
+            if events_exists && !workflows_exists {
+                anyhow::bail!("Database is corrupted: table 'workflows' is missing.");
+            }
+        }
+
         let store = Self { path, connection };
         store.migrate()?;
         Ok(store)
@@ -1060,6 +1083,13 @@ impl ForgeStore {
                 data_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (executor, provider, model)
+            );
+            CREATE TABLE IF NOT EXISTS web_benchmark_cache (
+                brain_id TEXT PRIMARY KEY,
+                lmsys_score INTEGER NOT NULL,
+                mmlu_score REAL NOT NULL,
+                human_eval_score REAL NOT NULL,
+                updated_at TEXT NOT NULL
             );
             "#,
         )?;

@@ -5,6 +5,7 @@ use crate::storage::{ForgeStore, GlobalEventWrite};
 use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
@@ -529,6 +530,17 @@ pub struct ExecutorQuotaPolicyCandidate {
     pub evidence: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutorQuotaAiLimitsImportReport {
+    pub schema_version: String,
+    pub status: String,
+    pub source_command: String,
+    pub generated_at: String,
+    pub observation_count: usize,
+    pub observations: Vec<ExecutorQuotaObservation>,
+    pub privacy: String,
+}
+
 #[derive(Debug)]
 struct ProbeOutput {
     status: Option<ExitStatus>,
@@ -557,7 +569,7 @@ const EXECUTORS: &[ExecutorDefinition] = &[
     },
     ExecutorDefinition {
         id: "gemini",
-        display_name: "Gemini CLI",
+        display_name: "Gemini CLI (legacy)",
         command: "gemini",
     },
     ExecutorDefinition {
@@ -569,6 +581,16 @@ const EXECUTORS: &[ExecutorDefinition] = &[
         id: "ollama",
         display_name: "Ollama",
         command: "ollama",
+    },
+    ExecutorDefinition {
+        id: "agy",
+        display_name: "Antigravity agy CLI",
+        command: "agy",
+    },
+    ExecutorDefinition {
+        id: "antigravity",
+        display_name: "Antigravity CLI (legacy alias)",
+        command: "agy",
     },
 ];
 
@@ -609,6 +631,227 @@ pub fn load_executors(store: &ForgeStore) -> Result<ExecutorSyncReport> {
         .map(serde_json::from_value)
         .collect::<Result<Vec<ExecutorState>, _>>()?;
     Ok(build_report("loaded", &store.base_dir(), states, store))
+}
+
+pub fn import_ai_limits_observations(
+    store: &ForgeStore,
+    ai_limits_cmd: &Path,
+    timeout_ms: u64,
+) -> Result<ExecutorQuotaAiLimitsImportReport> {
+    let output = run_probe_command(
+        ai_limits_cmd,
+        &["--json"],
+        Duration::from_millis(timeout_ms.max(100)),
+    )?;
+    if output.timed_out {
+        anyhow::bail!("ai-limits timed out after {timeout_ms}ms");
+    }
+    if !output.status.is_some_and(|status| status.success()) {
+        anyhow::bail!(
+            "ai-limits failed with exit code {:?}: {}",
+            output.status.and_then(|status| status.code()),
+            output.stderr.trim()
+        );
+    }
+    let payload: Value = serde_json::from_str(&output.stdout)?;
+    let generated_at = payload
+        .get("generated_at")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let mut observations = Vec::new();
+    collect_ai_limits_provider_observations(
+        &payload,
+        "codex",
+        "Codex",
+        "openai",
+        &generated_at,
+        &mut observations,
+    );
+    collect_ai_limits_provider_observations(
+        &payload,
+        "gemini",
+        "Gemini",
+        "google",
+        &generated_at,
+        &mut observations,
+    );
+
+    for observation in &observations {
+        store.save_executor_quota(
+            &observation.executor,
+            &observation.provider,
+            observation.model.as_deref().unwrap_or(""),
+            &serde_json::to_value(observation)?,
+        )?;
+    }
+
+    let report = ExecutorQuotaAiLimitsImportReport {
+        schema_version: "forge.executor_quota_ai_limits_import.v1".to_string(),
+        status: "ai_limits_imported".to_string(),
+        source_command: ai_limits_cmd.display().to_string(),
+        generated_at,
+        observation_count: observations.len(),
+        observations,
+        privacy:
+            "ai-limits output is reduced to provider/model/capacity metadata; access and refresh tokens are never persisted or printed."
+                .to_string(),
+    };
+    store.record_event(
+        "_system",
+        "executor_quota_ai_limits_imported",
+        &serde_json::to_value(&report)?,
+    )?;
+    Ok(report)
+}
+
+fn collect_ai_limits_provider_observations(
+    payload: &Value,
+    provider_key: &str,
+    executor: &str,
+    provider: &str,
+    generated_at: &str,
+    observations: &mut Vec<ExecutorQuotaObservation>,
+) {
+    let Some(provider_payload) = payload.get(provider_key) else {
+        return;
+    };
+    let provider_status = provider_payload
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let Some(limits) = provider_payload.get("limits").and_then(Value::as_array) else {
+        observations.push(ai_limits_observation(
+            provider_key,
+            executor,
+            provider,
+            None,
+            provider_status,
+            None,
+            generated_at,
+        ));
+        return;
+    };
+
+    if limits.is_empty() {
+        observations.push(ai_limits_observation(
+            provider_key,
+            executor,
+            provider,
+            None,
+            provider_status,
+            None,
+            generated_at,
+        ));
+        return;
+    }
+
+    for limit in limits {
+        let model = limit
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+            .map(|model| model.trim().to_string());
+        let percent_remaining = ai_limits_percent_remaining(limit);
+        observations.push(ai_limits_observation(
+            provider_key,
+            executor,
+            provider,
+            model,
+            provider_status,
+            percent_remaining,
+            generated_at,
+        ));
+    }
+}
+
+fn ai_limits_observation(
+    provider_key: &str,
+    executor: &str,
+    provider: &str,
+    model: Option<String>,
+    provider_status: &str,
+    percent_remaining: Option<f64>,
+    generated_at: &str,
+) -> ExecutorQuotaObservation {
+    let blocked = ai_limits_provider_blocked(provider_status)
+        || percent_remaining.is_some_and(|value| value <= 0.0);
+    let percent = percent_remaining.map(|value| value.clamp(0.0, 100.0).round() as u64);
+    let remaining_quota = match (blocked, percent) {
+        (true, _) => "exhausted_until_reset".to_string(),
+        (false, Some(percent)) => format!("available_{percent}_percent"),
+        (false, None) => "available_status_unknown_percent".to_string(),
+    };
+    let rate_limit_risk = if blocked {
+        "blocked"
+    } else {
+        match percent {
+            Some(value) if value >= 50 => "low",
+            Some(value) if value >= 20 => "medium",
+            Some(_) => "medium_high",
+            None => "unknown",
+        }
+    };
+
+    ExecutorQuotaObservation {
+        executor: provider_key.to_string(),
+        provider: provider.to_string(),
+        model,
+        local_vs_non_local: "non_local".to_string(),
+        free_vs_paid_if_known: ai_limits_quota_kind(provider_key).to_string(),
+        remaining_quota,
+        rate_limit_risk: rate_limit_risk.to_string(),
+        monetary_or_token_cost: "quota_or_paid_usage".to_string(),
+        latency: if blocked { "blocked" } else { "medium" }.to_string(),
+        expected_quality: "high".to_string(),
+        suitability: if blocked {
+            format!(
+                "stop_or_fallback_until_capacity_recovers; ai-limits reported {executor} as {provider_status}"
+            )
+        } else {
+            format!("usable_capacity_observed_by_ai_limits; ai-limits reported {executor} as {provider_status}")
+        },
+        source: format!("ai-limits:{provider_key}"),
+        observed_at: generated_at.to_string(),
+    }
+}
+
+fn ai_limits_percent_remaining(limit: &Value) -> Option<f64> {
+    for key in [
+        "percent_remaining",
+        "remaining_percent",
+        "remaining_percentage",
+        "quota_remaining_percent",
+    ] {
+        if let Some(value) = limit.get(key).and_then(Value::as_f64) {
+            return Some(value);
+        }
+    }
+
+    for key in ["percent_used", "used_percent", "usage_percent"] {
+        if let Some(value) = limit.get(key).and_then(Value::as_f64) {
+            return Some(100.0 - value);
+        }
+    }
+
+    None
+}
+
+fn ai_limits_provider_blocked(status: &str) -> bool {
+    let status = status.to_ascii_lowercase();
+    status.contains("blocked")
+        || status.contains("exhausted")
+        || status.contains("rate_limited")
+        || status.contains("rate-limited")
+        || status.contains("quota")
+}
+
+fn ai_limits_quota_kind(provider_key: &str) -> &'static str {
+    match provider_key {
+        "codex" => "not_free_quota_bound",
+        "gemini" => "quota_bound",
+        _ => "quota_bound",
+    }
 }
 
 fn build_report(
@@ -759,7 +1002,9 @@ fn probe_non_interactive(id: &str, path: &Path) -> (bool, Vec<String>) {
 
     // Probe 1: Version/Help check (smoke test)
     let args = match id {
-        "gemini" | "opencode" | "codex" | "claude" | "ollama" => vec!["--version"],
+        "gemini" | "opencode" | "codex" | "claude" | "ollama" | "agy" | "antigravity" => {
+            vec!["--version"]
+        }
         _ => vec!["--help"],
     };
 
@@ -1060,6 +1305,11 @@ fn config_evidence(id: &str, home: &Path) -> Vec<String> {
                 evidence.push("env:OLLAMA_HOST".to_string());
             }
         }
+        "agy" | "antigravity" => {
+            if env::var_os("ANTIGRAVITY_API_KEY").is_some() {
+                evidence.push("env:ANTIGRAVITY_API_KEY".to_string());
+            }
+        }
         _ => {}
     }
 
@@ -1081,6 +1331,10 @@ fn config_candidates(id: &str, home: &Path) -> Vec<PathBuf> {
         ],
         "claude" => vec![home.join(".claude"), home.join(".config/claude")],
         "ollama" => vec![home.join(".ollama")],
+        "agy" | "antigravity" => vec![
+            home.join(".gemini/antigravity-cli/settings.json"),
+            home.join(".gemini/antigravity-cli"),
+        ],
         _ => Vec::new(),
     }
 }
@@ -1088,7 +1342,8 @@ fn config_candidates(id: &str, home: &Path) -> Vec<PathBuf> {
 fn build_integrations(executors: &[ExecutorState]) -> Vec<ExecutorIntegration> {
     let codex_allowed = executor_is_allowed(executors, "codex");
     let opencode_allowed = executor_is_allowed(executors, "opencode");
-    let gemini_allowed = executor_is_allowed(executors, "gemini");
+    let agy_allowed =
+        executor_is_allowed(executors, "agy") || executor_is_allowed(executors, "antigravity");
     let ollama_allowed = executor_is_allowed(executors, "ollama");
 
     let mut integrations = Vec::new();
@@ -1107,16 +1362,16 @@ fn build_integrations(executors: &[ExecutorState]) -> Vec<ExecutorIntegration> {
     });
 
     integrations.push(ExecutorIntegration {
-        id: "gemini_codex_bridge".to_string(),
-        from: "gemini".to_string(),
+        id: "agy_codex_bridge".to_string(),
+        from: "agy".to_string(),
         to: "codex".to_string(),
         kind: "delegated_cli_executor".to_string(),
-        enabled: gemini_allowed && codex_allowed,
-        reason: if gemini_allowed && codex_allowed {
-            "Gemini and Codex are both available; Forge may route bounded tasks through either executor and keep Codex as the primary motor."
+        enabled: agy_allowed && codex_allowed,
+        reason: if agy_allowed && codex_allowed {
+            "agy and Codex are both available; Forge may route bounded tasks through either executor and keep Codex as the primary motor."
                 .to_string()
         } else {
-            "requires Gemini and Codex to be installed, configured and human-authorized".to_string()
+            "requires agy and Codex to be installed, configured and human-authorized".to_string()
         },
     });
 
@@ -1230,11 +1485,20 @@ fn preferred_brain_id(executors: &[ExecutorState]) -> Option<String> {
     if codex_ready {
         return Some("codex".to_string());
     }
-    let gemini_ready = executors.iter().any(|executor| {
-        executor.id == "gemini" && executor.allowed && executor.installed && executor.configured
+    let agy_ready = executors.iter().any(|executor| {
+        executor.id == "agy" && executor.allowed && executor.installed && executor.configured
     });
-    if gemini_ready {
-        return Some("gemini".to_string());
+    if agy_ready {
+        return Some("agy".to_string());
+    }
+    let antigravity_ready = executors.iter().any(|executor| {
+        executor.id == "antigravity"
+            && executor.allowed
+            && executor.installed
+            && executor.configured
+    });
+    if antigravity_ready {
+        return Some("agy".to_string());
     }
     let opencode_ready = executors.iter().any(|executor| {
         executor.id == "opencode" && executor.allowed && executor.installed && executor.configured
@@ -1304,7 +1568,7 @@ fn brain_candidate(executor: &ExecutorState) -> BrainCandidate {
 
 fn brain_execution_mode(id: &str) -> &'static str {
     match id {
-        "codex" | "opencode" | "gemini" | "claude" => "external_cli_brain",
+        "codex" | "opencode" | "gemini" | "claude" | "agy" | "antigravity" => "external_cli_brain",
         "ollama" => "local_model_runtime",
         _ => "custom_execution_brain",
     }
@@ -1333,6 +1597,14 @@ fn brain_shell_entrypoints(executor: &ExecutorState) -> Vec<Vec<String>> {
             vec![
                 "gemini".to_string(),
                 "-p".to_string(),
+                "<prompt>".to_string(),
+            ],
+        ],
+        "agy" | "antigravity" => vec![
+            vec!["agy".to_string()],
+            vec![
+                "agy".to_string(),
+                "--print".to_string(),
                 "<prompt>".to_string(),
             ],
         ],
@@ -2616,44 +2888,6 @@ fn build_quota_policy(
         quota_candidate(
             executors,
             &observations,
-            "opencode",
-            "configured_cli",
-            opencode_free_model.clone().or_else(|| Some("google/gemini-2.5-pro".to_string())),
-            "non_local",
-            "unknown_or_configured_non_local_quota_bound",
-            "quota_or_rate_limit_bound",
-            "unknown",
-            "medium",
-            "provider_config_dependent",
-            "medium",
-            "medium_high",
-            "good_for_product_and_code_when_configured_quota_or_cost_is_available",
-            "medium",
-            10,
-            "OpenCode non-local configured provider path is the first choice when expected value justifies quota or cost.",
-        ),
-        quota_candidate(
-            executors,
-            &observations,
-            "gemini",
-            "google",
-            None,
-            "non_local",
-            "quota_bound",
-            "quota_bound",
-            "unknown",
-            "medium_high",
-            "quota_or_paid",
-            "medium",
-            "high",
-            "strong_for_product_business_reasoning_when_non_interactive",
-            "medium_high",
-            20,
-            "Gemini is a non-local quota-bound capability; use it for high-value reasoning when non-interactive auth and model selection are validated.",
-        ),
-        quota_candidate(
-            executors,
-            &observations,
             "codex",
             "openai",
             None,
@@ -2667,8 +2901,65 @@ fn build_quota_policy(
             "high",
             "strong_for_product_business_reasoning_and_code_when_quota_value_is_justified",
             "low",
+            10,
+            "Codex is the primary authorized non-local quota-bound executor when expected value justifies consuming quota.",
+        ),
+        quota_candidate(
+            executors,
+            &observations,
+            "agy",
+            "antigravity",
+            Some("agy-default".to_string()),
+            "non_local",
+            "unknown_or_configured_non_local_quota_bound",
+            "quota_bound",
+            "unknown",
+            "medium",
+            "quota_or_paid",
+            "medium",
+            "high",
+            "strong_for_agentic_workspace_and_visual_or_product_work",
+            "medium",
+            20,
+            "agy is the Antigravity CLI executor used for bounded agentic workspace and visual/product work.",
+        ),
+        quota_candidate(
+            executors,
+            &observations,
+            "opencode",
+            "configured_cli",
+            opencode_free_model.clone().or_else(|| Some("google/gemini-2.5-pro".to_string())),
+            "non_local",
+            "unknown_or_configured_non_local_quota_bound",
+            "quota_or_rate_limit_bound",
+            "unknown",
+            "medium",
+            "provider_config_dependent",
+            "medium",
+            "medium_high",
+            "good_for_product_and_code_when_configured_quota_or_cost_is_available",
+            "medium",
             30,
-            "Codex is an authorized non-local quota-bound fallback when expected value justifies consuming quota.",
+            "OpenCode non-local configured provider path is used after Codex/agy when expected value justifies quota or cost.",
+        ),
+        quota_candidate(
+            executors,
+            &observations,
+            "gemini",
+            "google",
+            None,
+            "non_local",
+            "legacy_invalidated",
+            "quota_bound",
+            "unknown",
+            "medium_high",
+            "quota_or_paid",
+            "medium",
+            "high",
+            "legacy_executor_not_for_new_routes",
+            "high",
+            99,
+            "Gemini CLI is a legacy executor and is not an active Forge route; use Codex or agy.",
         ),
         quota_candidate(
             executors,
@@ -2686,7 +2977,7 @@ fn build_quota_policy(
             "medium_high",
             "good_for_product_and_code_when_configured",
             "medium",
-            35,
+            50,
             "OpenCode non-local (potentially paid) provider path is used when free options are exhausted or unsuitable.",
         ),
         quota_candidate(
@@ -2705,10 +2996,18 @@ fn build_quota_policy(
             "medium",
             "efficient_for_repetitive_low_value_or_privacy_sensitive_work",
             "medium",
-            40,
+            60,
             "OpenCode local/Ollama models are efficient when quota should be preserved, work is repetitive, privacy matters or expected value does not justify non-local quota.",
         ),
     ];
+    for candidate in &mut candidates {
+        if candidate.executor == "gemini" {
+            candidate.selection_status = "skipped_legacy_invalidated".to_string();
+            candidate.reason =
+                "Gemini CLI is a legacy executor and is not an active Forge route; use Codex or agy."
+                    .to_string();
+        }
+    }
     candidates.sort_by_key(|candidate| candidate.selection_tier);
     let repair_goals = quota_policy_repair_goals(&candidates);
     let selection_trace = executor_selection_trace(&candidates);
@@ -2737,7 +3036,7 @@ fn build_quota_policy(
         selection_trace,
         skipped_to_preserve_quota: vec![
             "Use deterministic command nodes for repeated validation, file inspection and low-value mechanical work before spending non-local quota.".to_string(),
-            "Use local models when quota is low, privacy/locality matters or the task value does not justify Gemini/Codex/OpenCode non-local capacity.".to_string(),
+            "Use local models when quota is low, privacy/locality matters or the task value does not justify Codex/agy/OpenCode non-local capacity.".to_string(),
         ],
         repair_goals,
     }
@@ -2788,7 +3087,7 @@ fn executor_selection_trace(
 
 fn quota_policy_repair_goals(candidates: &[ExecutorQuotaPolicyCandidate]) -> Vec<String> {
     let mut goals = vec![
-        "Detect Gemini non-interactive auth/model/approval readiness before handoff and mark interactive waits as executor configuration failures.".to_string(),
+        "Verify agy non-interactive `--print` readiness before handoff and mark interactive waits as executor configuration failures.".to_string(),
         "Record OpenCode provider/model availability, including non-local provider options and local Ollama fallback, before selection.".to_string(),
         "Persist observed quota, rate-limit and cost evidence when executors report it so future selection can move from estimates to measurements.".to_string(),
     ];
@@ -2819,9 +3118,11 @@ fn executor_display_name(executor: &str) -> &str {
     match executor {
         "codex" => "Codex",
         "opencode" => "OpenCode",
-        "gemini" => "Gemini",
+        "gemini" => "Gemini (legacy)",
         "claude" => "Claude",
         "ollama" => "Ollama",
+        "agy" => "Antigravity agy",
+        "antigravity" => "Antigravity (legacy alias)",
         _ => executor,
     }
 }
@@ -2832,7 +3133,7 @@ fn quota_workload_routes() -> Vec<ExecutorQuotaWorkloadRoute> {
             workload_class: "high_value_pm_business_creative_reasoning".to_string(),
             default_policy: "prefer_best_authorized_non_local_when_quota_value_is_justified"
                 .to_string(),
-            preferred_candidate: "opencode_non_local_then_gemini_then_codex".to_string(),
+            preferred_candidate: "codex_then_agy_then_opencode".to_string(),
             quota_spend_rule:
                 "spend non-local quota when decision quality materially changes product or business outcome"
                     .to_string(),
@@ -2850,7 +3151,7 @@ fn quota_workload_routes() -> Vec<ExecutorQuotaWorkloadRoute> {
             quota_spend_rule:
                 "avoid non-local model calls unless failures require high-value diagnosis".to_string(),
             quota_preservation_rule:
-                "preserve Gemini/Codex/OpenCode non-local quota for reasoning that cannot be checked deterministically"
+                "preserve Codex/Antigravity/OpenCode non-local quota for reasoning that cannot be checked deterministically"
                     .to_string(),
             business_reason:
                 "keeps recurring validation cheap and repeatable while reserving quota for decisions with user value"
@@ -3125,16 +3426,22 @@ mod tests {
             .unwrap();
         assert_eq!(
             gemini_candidate.selection_status,
-            "skipped_interactive_hang_risk"
+            "skipped_legacy_invalidated"
         );
         assert!(gemini_candidate
             .evidence
             .iter()
             .any(|evidence| evidence.contains("timed out")));
-        assert!(report.quota_policy.repair_goals.iter().any(|goal| {
-            goal.contains("Repair Gemini non-interactive readiness")
-                && goal.contains("non-interactive smoke test `--version` timed out")
-        }));
+        assert!(report
+            .quota_policy
+            .repair_goals
+            .iter()
+            .any(|goal| goal.contains("Verify agy non-interactive")));
+        assert!(!report
+            .quota_policy
+            .repair_goals
+            .iter()
+            .any(|goal| goal.contains("Repair Gemini")));
     }
 
     #[test]

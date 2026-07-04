@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use forge_core::adapter::validate_executor_response_file;
 use forge_core::addon::{
     addon_observability_report, authorize_addon_permission, claim_addon_runtime_contract_dispatch,
@@ -24,7 +24,7 @@ use forge_core::addon::{
     AddonRuntimeWorkerRegistrationInput, AddonTrustKeyInput, AddonValidatorDispatchInput,
     AddonValidatorExecutionInput, CapabilityRegistrySyncInput,
 };
-use forge_core::artifact::list_workflow_artifacts;
+use forge_core::artifact::list_workflow_artifacts_with_tags;
 use forge_core::aws_ops::{
     run_check as run_aws_ops_check, run_inventory as run_aws_ops_inventory,
     run_raw as run_aws_ops_raw,
@@ -32,6 +32,7 @@ use forge_core::aws_ops::{
 use forge_core::checkpoint::{
     load_latest_task_checkpoint, record_task_checkpoint, TaskCheckpointRequest,
 };
+use forge_core::cli_factory::{create_cli_factory_plan, CliFactoryCreateInput};
 use forge_core::cluster::{
     build_cluster_task_handoff, list_cluster_node_leases, list_cluster_nodes,
     place_task_on_cluster, register_cluster_node, ClusterNodeInput,
@@ -65,10 +66,10 @@ use forge_core::event::{
 use forge_core::execution::run_simulated;
 use forge_core::executor::{
     build_brain_session_history_report, build_brain_sessions_report_with_options,
-    build_shell_launch_plan, load_executors, record_brain_session_lifecycle,
-    record_shell_session_plan, sync_executors, BrainSessionLifecycleOptions,
-    BrainSessionsReportOptions, ExecutorQuotaObservation, ExecutorSyncOptions,
-    ShellLaunchPlanOptions,
+    build_shell_launch_plan, import_ai_limits_observations, load_executors,
+    record_brain_session_lifecycle, record_shell_session_plan, sync_executors,
+    BrainSessionLifecycleOptions, BrainSessionsReportOptions, ExecutorQuotaObservation,
+    ExecutorSyncOptions, ShellLaunchPlanOptions,
 };
 use forge_core::graph::create_workflow;
 use forge_core::handoff::build_task_handoff_with_project;
@@ -122,7 +123,8 @@ use forge_core::interactive::{
     build_interactive_workflow_dag, build_interactive_workflow_mutation,
     build_interactive_workflow_sidebar, build_multimodal_runtime_evidence_smoke,
     build_operational_tui_smoke, build_replacement_cli_evidence_smoke,
-    render_forge_first_harness_smoke, render_interactive_action_invocation,
+    dispatch_interactive_action_hooks_for_project, render_forge_first_harness_smoke,
+    render_interactive_action_dispatch, render_interactive_action_invocation,
     render_interactive_action_registry, render_interactive_addon_capabilities,
     render_interactive_architecture_compass, render_interactive_artifacts,
     render_interactive_autocomplete, render_interactive_command_palette,
@@ -202,7 +204,7 @@ use forge_core::skill::install_skill;
 use forge_core::storage::ForgeStore;
 use forge_core::validation::validate_workflow;
 use forge_core::workflow::{
-    attach_creative_artifact, attach_workflow_artifact, get_workflow_token_collection,
+    attach_creative_artifact, attach_workflow_artifact_with_tags, get_workflow_token_collection,
     inspect_creative_artifact, inspect_creative_collaboration, list_creative_artifacts,
     parse_node_brain_agent_slot, patch_workflow_token, record_creative_collaboration_event,
     resolve_workflow_tokens, set_workflow_token_collection, update_workflow_goal,
@@ -211,6 +213,7 @@ use forge_core::workflow::{
 };
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -232,6 +235,8 @@ enum Commands {
         addon_dirs: Vec<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
+        #[arg(short = 'd', long = "detached")]
+        detached: bool,
     },
     List {
         #[arg(long, value_enum, default_value_t = WorkflowLifecycleArg::All)]
@@ -317,6 +322,10 @@ enum Commands {
     Addons {
         #[command(subcommand)]
         command: AddonCommands,
+    },
+    Cli {
+        #[command(subcommand)]
+        command: CliCommands,
     },
     Harness {
         #[command(subcommand)]
@@ -460,6 +469,34 @@ enum Commands {
     SelfRun {
         #[command(subcommand)]
         command: SelfCommands,
+    },
+    Teamwork {
+        #[arg(long)]
+        goal: String,
+        #[arg(short = 'd', long = "detached")]
+        detached: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+        #[arg(long)]
+        bypass_cache: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CliCommands {
+    Create {
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "")]
+        goal: String,
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long = "command")]
+        commands: Vec<String>,
+        #[arg(long = "compound-command")]
+        compound_commands: Vec<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
     },
 }
 
@@ -2374,36 +2411,47 @@ fn default_home_path() -> PathBuf {
 
 #[derive(Debug, Subcommand)]
 enum ExecutorQuotaCommands {
-    Record {
-        #[arg(long)]
-        executor: String,
-        #[arg(long)]
-        provider: String,
-        #[arg(long)]
-        model: String,
-        #[arg(long)]
-        locality: String,
-        #[arg(long = "free-vs-paid")]
-        free_vs_paid: String,
-        #[arg(long = "remaining-quota")]
-        remaining_quota: String,
-        #[arg(long = "rate-limit-risk")]
-        rate_limit_risk: String,
-        #[arg(long = "cost")]
-        monetary_or_token_cost: String,
-        #[arg(long)]
-        latency: String,
-        #[arg(long = "expected-quality")]
-        expected_quality: String,
-        #[arg(long)]
-        suitability: String,
-        #[arg(long)]
-        source: String,
-        #[arg(long = "observed-at")]
-        observed_at: Option<String>,
+    AiLimits {
+        #[arg(long = "ai-limits-cmd", default_value = "ai-limits")]
+        ai_limits_cmd: PathBuf,
+        #[arg(long = "timeout-ms", default_value_t = 3000)]
+        timeout_ms: u64,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
+    Record(Box<ExecutorQuotaRecordArgs>),
+}
+
+#[derive(Debug, Args)]
+struct ExecutorQuotaRecordArgs {
+    #[arg(long)]
+    executor: String,
+    #[arg(long)]
+    provider: String,
+    #[arg(long)]
+    model: String,
+    #[arg(long)]
+    locality: String,
+    #[arg(long = "free-vs-paid")]
+    free_vs_paid: String,
+    #[arg(long = "remaining-quota")]
+    remaining_quota: String,
+    #[arg(long = "rate-limit-risk")]
+    rate_limit_risk: String,
+    #[arg(long = "cost")]
+    monetary_or_token_cost: String,
+    #[arg(long)]
+    latency: String,
+    #[arg(long = "expected-quality")]
+    expected_quality: String,
+    #[arg(long)]
+    suitability: String,
+    #[arg(long)]
+    source: String,
+    #[arg(long = "observed-at")]
+    observed_at: Option<String>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    output: OutputFormat,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2758,6 +2806,8 @@ enum WorkflowCommands {
         path: PathBuf,
         #[arg(long)]
         kind: String,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
         #[arg(long)]
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -2980,6 +3030,8 @@ enum RequestCommands {
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
+        #[arg(short = 'd', long = "detached")]
+        detached: bool,
     },
     Status {
         #[arg(long = "run")]
@@ -3124,6 +3176,16 @@ enum RequestCommands {
         origin: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
+    },
+    DriveLoop {
+        #[arg(long = "run")]
+        run_id: String,
+        #[arg(long, default_value = "forge_cli")]
+        executor: String,
+        #[arg(long = "ttl-seconds", default_value_t = 300)]
+        ttl_seconds: u64,
+        #[arg(long, default_value = "background_driver")]
+        origin: String,
     },
 }
 
@@ -3497,6 +3559,18 @@ enum InteractiveCommands {
         action_id: String,
         #[arg(long = "project-root")]
         project_root: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        output: OutputFormat,
+    },
+    ActionDispatch {
+        #[arg(long = "action")]
+        action_id: String,
+        #[arg(long = "project-root")]
+        project_root: Option<PathBuf>,
+        #[arg(long, default_value = "forge_cli")]
+        origin: String,
+        #[arg(long, default_value = "{}")]
+        payload: String,
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         output: OutputFormat,
     },
@@ -4136,12 +4210,59 @@ fn run() -> Result<i32> {
         return run_forge_tui(&cli.store, Some(std::env::current_dir()?));
     };
     match command {
+        Commands::Teamwork {
+            goal,
+            detached,
+            output,
+            bypass_cache,
+        } => {
+            let store_path = cli.store.clone();
+            let store = ForgeStore::open(store_path.clone())?;
+            let response = forge_core::teamwork::plan_teamwork_workflow(
+                &store,
+                &goal,
+                detached,
+                bypass_cache,
+            )?;
+            if matches!(output, OutputFormat::Human) {
+                println!("FORGE TEAMWORK EXECUTION PLAN");
+                println!("Goal: {}", response.goal);
+                println!(
+                    "Execution Mode: {}",
+                    if detached { "Detached" } else { "Normal" }
+                );
+                println!("\nTEAM ROSTER");
+                println!("\nTASK GRAPH");
+                println!("\nEXECUTION STATUS");
+                println!("Status: {}", response.status);
+            } else {
+                print_response(output, &response)?;
+            }
+            if detached {
+                if let Some(ref r_id) = response.run_id {
+                    let current_exe = std::env::current_exe()?;
+                    std::process::Command::new(current_exe)
+                        .arg("--store")
+                        .arg(&store_path)
+                        .arg("request")
+                        .arg("drive-loop")
+                        .arg("--run")
+                        .arg(r_id)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()?;
+                }
+            }
+            Ok(0)
+        }
         Commands::Plan {
             goal,
             addon_dirs,
             output,
+            detached,
         } => {
-            let store = ForgeStore::open(cli.store)?;
+            let store_path = cli.store.clone();
+            let store = ForgeStore::open(store_path.clone())?;
             let project_root = std::env::current_dir()?;
             let dirs = addon_dirs_or_default(addon_dirs);
             let addon_catalog = load_addon_catalog_from_store(&store, &dirs)?;
@@ -4159,6 +4280,13 @@ fn run() -> Result<i32> {
                 "workflow_planned",
                 &serde_json::to_value(&workflow)?,
             )?;
+            let mut run_id = None;
+            if detached {
+                let run =
+                    forge_core::request::create_run_record(&workflow, "forge_cli", "accepted");
+                forge_core::request::save_run_record(&store, &run)?;
+                run_id = Some(run.run_id.clone());
+            }
             let response = serde_json::json!({
                 "status": "planned",
                 "workflow_id": workflow.id,
@@ -4168,8 +4296,24 @@ fn run() -> Result<i32> {
                 "intent": workflow.intent,
                 "reuse_candidates": reuse_candidates,
                 "attached_subflows": attached_subflows,
+                "run_id": run_id,
             });
             print_response(output, &response)?;
+            if detached {
+                if let Some(ref r_id) = run_id {
+                    let current_exe = std::env::current_exe()?;
+                    std::process::Command::new(current_exe)
+                        .arg("--store")
+                        .arg(&store_path)
+                        .arg("request")
+                        .arg("drive-loop")
+                        .arg("--run")
+                        .arg(r_id)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()?;
+                }
+            }
             Ok(0)
         }
         Commands::List {
@@ -4445,8 +4589,14 @@ fn run() -> Result<i32> {
         }
         Commands::Artifacts { workflow, output } => {
             let store = ForgeStore::open(cli.store)?;
-            let _workflow = store.load_workflow(&workflow)?;
-            let artifacts = list_workflow_artifacts(&store.base_dir(), &workflow)?;
+            let loaded_workflow = store.load_workflow(&workflow)?;
+            let artifact_tags = loaded_workflow
+                .artifacts
+                .iter()
+                .map(|artifact| (artifact.path.clone(), artifact.tags.clone()))
+                .collect::<BTreeMap<_, _>>();
+            let artifacts =
+                list_workflow_artifacts_with_tags(&store.base_dir(), &workflow, &artifact_tags)?;
             let response = serde_json::json!({
                 "workflow_id": workflow,
                 "artifacts": artifacts,
@@ -6331,6 +6481,30 @@ fn run() -> Result<i32> {
                 Ok(0)
             }
         },
+        Commands::Cli { command } => match command {
+            CliCommands::Create {
+                name,
+                goal,
+                source,
+                commands,
+                compound_commands,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let report = create_cli_factory_plan(
+                    &store,
+                    CliFactoryCreateInput {
+                        name,
+                        goal,
+                        source,
+                        commands,
+                        compound_commands,
+                    },
+                )?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+        },
         Commands::Harness { command } => match command {
             HarnessCommands::TokenHeadroom {
                 content,
@@ -7287,37 +7461,32 @@ fn run() -> Result<i32> {
             Ok(0)
         }
         Commands::ExecutorQuota { command } => match command {
-            ExecutorQuotaCommands::Record {
-                executor,
-                provider,
-                model,
-                locality,
-                free_vs_paid,
-                remaining_quota,
-                rate_limit_risk,
-                monetary_or_token_cost,
-                latency,
-                expected_quality,
-                suitability,
-                source,
-                observed_at,
+            ExecutorQuotaCommands::AiLimits {
+                ai_limits_cmd,
+                timeout_ms,
                 output,
             } => {
                 let store = ForgeStore::open(cli.store)?;
+                let report = import_ai_limits_observations(&store, &ai_limits_cmd, timeout_ms)?;
+                print_response(output, &report)?;
+                Ok(0)
+            }
+            ExecutorQuotaCommands::Record(args) => {
+                let store = ForgeStore::open(cli.store)?;
                 let observation = build_executor_quota_observation(
-                    executor,
-                    provider,
-                    model,
-                    locality,
-                    free_vs_paid,
-                    remaining_quota,
-                    rate_limit_risk,
-                    monetary_or_token_cost,
-                    latency,
-                    expected_quality,
-                    suitability,
-                    source,
-                    observed_at,
+                    args.executor,
+                    args.provider,
+                    args.model,
+                    args.locality,
+                    args.free_vs_paid,
+                    args.remaining_quota,
+                    args.rate_limit_risk,
+                    args.monetary_or_token_cost,
+                    args.latency,
+                    args.expected_quality,
+                    args.suitability,
+                    args.source,
+                    args.observed_at,
                 )?;
                 store.save_executor_quota(
                     &observation.executor,
@@ -7331,7 +7500,7 @@ fn run() -> Result<i32> {
                     "observation": observation,
                 });
                 store.record_event("_system", "executor_quota_recorded", &response)?;
-                print_response(output, &response)?;
+                print_response(args.output, &response)?;
                 Ok(0)
             }
         },
@@ -7660,11 +7829,14 @@ fn run() -> Result<i32> {
                 workflow,
                 path,
                 kind,
+                tags,
                 origin,
                 output,
             } => {
                 let store = ForgeStore::open(cli.store)?;
-                let report = attach_workflow_artifact(&store, &workflow, &path, &kind, &origin)?;
+                let report = attach_workflow_artifact_with_tags(
+                    &store, &workflow, &path, &kind, &origin, &tags,
+                )?;
                 print_response(output, &report)?;
                 Ok(0)
             }
@@ -8020,10 +8192,25 @@ fn run() -> Result<i32> {
                 goal,
                 origin,
                 output,
+                detached,
             } => {
-                let store = ForgeStore::open(cli.store)?;
+                let store_path = cli.store.clone();
+                let store = ForgeStore::open(store_path.clone())?;
                 let report = start_async_request(&store, &goal, &origin)?;
                 print_response(output, &report)?;
+                if detached {
+                    let current_exe = std::env::current_exe()?;
+                    std::process::Command::new(current_exe)
+                        .arg("--store")
+                        .arg(&store_path)
+                        .arg("request")
+                        .arg("drive-loop")
+                        .arg("--run")
+                        .arg(&report.run_id)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()?;
+                }
                 Ok(0)
             }
             RequestCommands::Status { run_id, output } => {
@@ -8210,6 +8397,32 @@ fn run() -> Result<i32> {
                 let store = ForgeStore::open(cli.store)?;
                 let report = recover_stale_request(&store, &run_id, &origin)?;
                 print_response(output, &report)?;
+                Ok(0)
+            }
+            RequestCommands::DriveLoop {
+                run_id,
+                executor,
+                ttl_seconds,
+                origin,
+            } => {
+                let store = ForgeStore::open(cli.store.clone())?;
+                loop {
+                    let report = step_request(&store, &run_id, &executor, ttl_seconds, &origin)?;
+                    if report.status == "completed"
+                        || report.status == "failed"
+                        || report.status == "cancelled"
+                    {
+                        break;
+                    }
+                    if report.status == "skipped" && report.reason.contains("no ready handoff task")
+                    {
+                        break;
+                    }
+                    if report.status == "handoff_required" || report.status == "validation_failed" {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
                 Ok(0)
             }
         },
@@ -8722,6 +8935,30 @@ fn run() -> Result<i32> {
                     OutputFormat::Json => print_response(output, &report)?,
                     OutputFormat::Human => {
                         println!("{}", render_interactive_action_invocation(&report))
+                    }
+                }
+                Ok(0)
+            }
+            InteractiveCommands::ActionDispatch {
+                action_id,
+                project_root,
+                origin,
+                payload,
+                output,
+            } => {
+                let store = ForgeStore::open(cli.store)?;
+                let payload: Value = serde_json::from_str(&payload)?;
+                let report = dispatch_interactive_action_hooks_for_project(
+                    &store,
+                    &action_id,
+                    project_root.as_deref(),
+                    &origin,
+                    payload,
+                )?;
+                match output {
+                    OutputFormat::Json => print_response(output, &report)?,
+                    OutputFormat::Human => {
+                        println!("{}", render_interactive_action_dispatch(&report))
                     }
                 }
                 Ok(0)

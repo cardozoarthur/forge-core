@@ -810,6 +810,20 @@ fn run_fullscreen_tui(
                             break;
                         }
                     }
+                    KeyCode::Char('\n' | '\r') => {
+                        touch_interaction(&mut state);
+                        let input = state.input.trim().to_string();
+                        state.input.clear();
+                        if handle_tui_submit(
+                            store,
+                            &mut report,
+                            project_root.clone(),
+                            &mut state,
+                            &input,
+                        )? {
+                            break;
+                        }
+                    }
                     KeyCode::Char(ch) => {
                         touch_interaction(&mut state);
                         state.input.push(ch);

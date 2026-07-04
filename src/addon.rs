@@ -956,6 +956,8 @@ pub struct AddonViewActionHook {
     #[serde(default, alias = "type", alias = "kind")]
     pub hook_type: String,
     #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
     pub target: String,
     #[serde(default)]
     pub workflow_id: String,
@@ -3566,6 +3568,7 @@ fn promote_addon_executor_result_to_workflow(
             kind: kind.to_string(),
             path: relative_path,
             sha256,
+            tags: Vec::new(),
             created_at: Utc::now(),
             lineage: None,
         };

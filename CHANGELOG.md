@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added `forge teamwork` strategy metadata that mirrors the observed Antigravity `agy` `/teamwork-preview` flow with prompt review, delegated execution wave, auditor promotion gates, explicit agent count and max parallel agents.
+- Added Codex/agy-first teamwork routing while legacy Gemini is invalidated by default for new teamwork rosters and interactive Forge brain fallback.
+
 - Added `forge aws check`, `forge aws inventory` and `forge aws raw`, delegating to the local `aws-ops` plugin and its AWS credential-vault defaults.
 - Added MCP tools `forge.aws.check`, `forge.aws.inventory` and `forge.aws.raw` so agents can validate, observe and run guarded AWS CLI commands through Forge without resolving secrets.
 - Added `forge request step` and MCP `forge.run.step` so Forge can auto-promote one ready deterministic task through executor-response validation instead of stopping at a handoff instruction.

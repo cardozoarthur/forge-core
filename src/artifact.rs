@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -9,6 +10,7 @@ pub struct ListedArtifact {
     pub path: String,
     pub sha256: String,
     pub bytes: u64,
+    pub tags: Vec<String>,
 }
 
 pub fn write_json_artifact(
@@ -51,6 +53,14 @@ pub fn copy_artifact(
 }
 
 pub fn list_workflow_artifacts(base_dir: &Path, workflow_id: &str) -> Result<Vec<ListedArtifact>> {
+    list_workflow_artifacts_with_tags(base_dir, workflow_id, &BTreeMap::new())
+}
+
+pub fn list_workflow_artifacts_with_tags(
+    base_dir: &Path,
+    workflow_id: &str,
+    artifact_tags: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<ListedArtifact>> {
     let artifact_dir = base_dir.join("artifacts").join(workflow_id);
     if !artifact_dir.exists() {
         return Ok(Vec::new());
@@ -72,6 +82,7 @@ pub fn list_workflow_artifacts(base_dir: &Path, workflow_id: &str) -> Result<Vec
             .to_string_lossy()
             .to_string();
         artifacts.push(ListedArtifact {
+            tags: artifact_tags.get(&relative).cloned().unwrap_or_default(),
             path: relative,
             sha256: hex_sha256(&bytes),
             bytes: bytes.len() as u64,

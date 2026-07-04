@@ -2302,6 +2302,7 @@ fn detect_replacement_cli_provider_candidates() -> Vec<MilestoneEvidenceProvider
         ("gemini", "gemini", &["--version"][..]),
         ("claude", "claude", &["--version"][..]),
         ("ollama", "ollama", &["--version"][..]),
+        ("antigravity", "agy", &["--version"][..]),
     ]
     .iter()
     .map(|(provider_id, binary, version_args)| {

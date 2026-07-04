@@ -34,6 +34,7 @@ use crate::aws_ops::{
     run_raw as run_aws_ops_raw, AWS_OPS_COMMAND_SCHEMA,
 };
 use crate::checkpoint::load_latest_task_checkpoint;
+use crate::cli_factory::{create_cli_factory_plan, CliFactoryCreateInput};
 use crate::context::{build_context_package_with_checkpoint_and_project, DEFAULT_CONTEXT_BUDGET};
 use crate::cost::{
     apply_cost_ledger_retention_for_context, build_cost_ledger_for_context,
@@ -106,9 +107,9 @@ use crate::interactive::{
     build_interactive_schedules, build_interactive_sessions, build_interactive_structured_logs,
     build_interactive_task_board, build_interactive_token_usage, build_interactive_ui_composition,
     build_interactive_workflow_dag, build_interactive_workflow_mutation,
-    build_interactive_workflow_sidebar, route_interactive_input, slash_command_catalog,
-    InteractiveHarnessOptions, InteractiveHomeOptions, InteractiveReplacementCliOptions,
-    InteractiveSessionsOptions,
+    build_interactive_workflow_sidebar, dispatch_interactive_action_hooks_for_project,
+    route_interactive_input, slash_command_catalog, InteractiveHarnessOptions,
+    InteractiveHomeOptions, InteractiveReplacementCliOptions, InteractiveSessionsOptions,
 };
 use crate::ir::{CreativeArtifact, TokenCollection};
 use crate::memory::{
@@ -159,7 +160,7 @@ use crate::schedule::{
 use crate::storage::ForgeStore;
 use crate::validation::{validate_workflow, ValidationReport};
 use crate::workflow::{
-    attach_creative_artifact, attach_workflow_artifact, get_workflow_token_collection,
+    attach_creative_artifact, attach_workflow_artifact_with_tags, get_workflow_token_collection,
     inspect_creative_artifact, inspect_creative_collaboration, list_creative_artifacts,
     parse_node_brain_agent_slot, patch_workflow_token, record_creative_collaboration_event,
     resolve_workflow_tokens, set_workflow_token_collection, update_workflow_goal,
@@ -277,6 +278,17 @@ struct ImprovePromoteEventPolicyInput {
     recommended_policy: Option<String>,
     approved_by: Option<String>,
     origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliFactoryCreateMcpInput {
+    name: String,
+    goal: Option<String>,
+    source: Option<String>,
+    commands: Option<Vec<String>>,
+    command: Option<Vec<String>>,
+    compound_commands: Option<Vec<String>>,
+    compound_command: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -646,6 +658,16 @@ struct InteractiveActionInvocationInput {
     action: Option<String>,
     action_id: Option<String>,
     project_root: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InteractiveActionDispatchInput {
+    action: Option<String>,
+    action_id: Option<String>,
+    project_root: Option<String>,
+    origin: Option<String>,
+    #[serde(default)]
+    payload: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1739,6 +1761,8 @@ struct WorkflowAttachArtifactInput {
     workflow_id: String,
     path: String,
     kind: String,
+    #[serde(default)]
+    tags: Vec<String>,
     origin: String,
 }
 
@@ -3164,6 +3188,34 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 ToolFlags::new(false, true),
             ),
             tool(
+                "forge.cli.create",
+                "Create Workflow-backed CLI",
+                "Create a Forge-owned workflow for generating an agent-native CLI, MCP server, skill and Addon runtime contract from one workflow-backed command model.",
+                object_schema(
+                    &[
+                        ("name", "string", "required CLI/app slug such as hubspot or stripe"),
+                        ("goal", "string", "optional objective for the generated CLI"),
+                        ("source", "string", "optional API docs, website, OpenAPI or discovery source"),
+                        ("commands", "array", "optional requested first-class commands"),
+                        ("compound_commands", "array", "optional local-first compound insight commands"),
+                    ],
+                    &["name"],
+                ),
+                "forge.cli_factory.creation_plan.v1",
+                &[
+                    "forge",
+                    "cli",
+                    "create",
+                    "--name",
+                    "<name>",
+                    "--goal",
+                    "<goal>",
+                    "--output",
+                    "json",
+                ],
+                ToolFlags::new(true, true),
+            ),
+            tool(
                 "forge.interactive.home",
                 "Inspect Interactive Home",
                 "Return the Forge interactive home dashboard for agent-visible runtime state without launching a TTY; project_root lets agents inspect project-scoped panels without relying on cwd.",
@@ -3365,6 +3417,21 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                 "forge.interactive.action_invocation.v1",
                 &["forge", "interactive", "action-invocation", "--action", "<action-id>", "--output", "json"],
                 ToolFlags::new(true, false),
+            ),
+            tool(
+                "forge.interactive.action_dispatch",
+                "Dispatch Interactive Action Hooks",
+                "Resolve one action id from the interactive action registry, start Forge workflow hooks through the runtime and route CLI brain hooks through Forge harness plans without executing external CLIs directly.",
+                object_schema(&[
+                    ("action_id", "string", "action id to dispatch, such as crm.lead.add_tag"),
+                    ("action", "string", "alias for action_id"),
+                    ("project_root", "string", "optional project root used to resolve project-scoped Addon actions"),
+                    ("origin", "string", "dispatch origin; defaults to mcp"),
+                    ("payload", "object", "structured hook payload; payload.goal becomes the workflow goal when present; requested_hook_id/requested_hook_ids and requested_hook_tag/requested_hook_tags narrow dispatch to matching hooks"),
+                ], &[]),
+                "forge.interactive.action_dispatch.v1",
+                &["forge", "interactive", "action-dispatch", "--action", "<action-id>", "--payload", "<json>", "--output", "json"],
+                ToolFlags::new(true, true),
             ),
             tool(
                 "forge.interactive.autocomplete",
@@ -5944,6 +6011,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("workflow_id", "string", "workflow id"),
                     ("path", "string", "local artifact path"),
                     ("kind", "string", "artifact kind"),
+                    ("tags", "array", "optional artifact search tags"),
                     ("origin", "string", "codex|opencode|skill|mcp"),
                 ], &["workflow_id", "path", "kind", "origin"]),
                 "forge.artifact_attach.v1",
@@ -6287,7 +6355,7 @@ pub fn mcp_tools_manifest() -> McpToolsManifest {
                     ("ttl_seconds", "integer", "lease TTL in seconds"),
                     ("project_root", "string", "optional project root containing .forge/memory-governance.json"),
                 ], &["workflow_id", "task_id", "executor"]),
-                "forge.executor_handoff.v8",
+                "forge.executor_handoff.v9",
                 &["forge", "task", "handoff", "--workflow", "<workflow-id>", "--task", "<task-id>", "--executor", "<executor>", "--output", "json"],
                 ToolFlags::new(true, true),
             ),
@@ -7823,6 +7891,24 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 input.origin.as_deref().unwrap_or("mcp"),
             )?)?
         }
+        "forge.cli.create" => {
+            let input: CliFactoryCreateMcpInput = parse_input(input)?;
+            let commands = input.commands.or(input.command).unwrap_or_default();
+            let compound_commands = input
+                .compound_commands
+                .or(input.compound_command)
+                .unwrap_or_default();
+            serde_json::to_value(create_cli_factory_plan(
+                store,
+                CliFactoryCreateInput {
+                    name: input.name,
+                    goal: input.goal.unwrap_or_default(),
+                    source: input.source,
+                    commands,
+                    compound_commands,
+                },
+            )?)?
+        }
         "forge.interactive.home" => {
             let input: InteractiveHomeInput = if input.is_null() {
                 InteractiveHomeInput { project_root: None }
@@ -7960,6 +8046,25 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
                 store,
                 &action_id,
                 project_root.as_deref(),
+            )?)?
+        }
+        "forge.interactive.action_dispatch" => {
+            let input: InteractiveActionDispatchInput = if input.is_null() {
+                InteractiveActionDispatchInput::default()
+            } else {
+                parse_input(input)?
+            };
+            let action_id = input.action_id.or(input.action).ok_or_else(|| {
+                anyhow::anyhow!("forge.interactive.action_dispatch requires action_id")
+            })?;
+            let origin = input.origin.unwrap_or_else(|| "mcp".to_string());
+            let project_root = input.project_root.map(PathBuf::from);
+            serde_json::to_value(dispatch_interactive_action_hooks_for_project(
+                store,
+                &action_id,
+                project_root.as_deref(),
+                &origin,
+                input.payload,
             )?)?
         }
         "forge.interactive.autocomplete" => {
@@ -9477,12 +9582,13 @@ pub fn call_mcp_tool(store: &ForgeStore, tool_name: &str, input: Value) -> Resul
         }
         "forge.workflow.attach_artifact" => {
             let input: WorkflowAttachArtifactInput = parse_input(input)?;
-            serde_json::to_value(attach_workflow_artifact(
+            serde_json::to_value(attach_workflow_artifact_with_tags(
                 store,
                 &input.workflow_id,
                 &PathBuf::from(input.path),
                 &input.kind,
                 &input.origin,
+                &input.tags,
             )?)?
         }
         "forge.interaction.create_choice" => {

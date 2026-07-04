@@ -2122,6 +2122,7 @@ fn upsert_artifact(
         kind: kind.to_string(),
         path: relative_path.to_string(),
         sha256: hex_sha256(bytes),
+        tags: Vec::new(),
         created_at: Utc::now(),
         lineage,
     });

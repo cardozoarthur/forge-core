@@ -123,6 +123,38 @@ pub fn validate_executor_response_file(
     if report.accepted {
         let promotion = promote_validated_task(&mut workflow, task_id, &response);
         store.save_workflow(&workflow)?;
+
+        let executor = response
+            .validation_evidence
+            .first()
+            .and_then(|ev| {
+                let parts: Vec<&str> = ev.command.split_whitespace().collect();
+                if let Some(pos) = parts.iter().position(|&p| p == "--executor") {
+                    parts.get(pos + 1).map(|s| s.replace(['\'', '"'], ""))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "codex".to_string());
+
+        let checkpoint = crate::checkpoint::TaskCheckpoint {
+            checkpoint_id: format!("ckpt_{}", uuid::Uuid::new_v4().to_string().replace('-', "")),
+            workflow_id: workflow_id.to_string(),
+            task_id: task_id.to_string(),
+            executor,
+            state: response.status.clone(),
+            summary: response
+                .validation_evidence
+                .first()
+                .map(|e| e.summary.clone())
+                .unwrap_or_default(),
+            context_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
+            context_routing_cache_key: None,
+            workflow_revision: promotion.revision,
+            created_at: Utc::now(),
+        };
+        store.save_task_checkpoint(&checkpoint)?;
         store.record_event(
             workflow_id,
             "executor_response_promoted",

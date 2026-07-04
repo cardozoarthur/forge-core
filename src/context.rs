@@ -39,10 +39,12 @@ const CONTEXT_ROUTING_QUALITY_SUMMARY_SCHEMA_VERSION: &str =
 const CONTEXT_HANDOFF_SUMMARY_SCHEMA_VERSION: &str = "forge.context_handoff_summary.v1";
 const CONTINUATION_PLAN_SCHEMA_VERSION: &str = "forge.context.continuation_plan.v1";
 const CONTEXT_MEMORY_POLICY_SCHEMA_VERSION: &str = "forge.context.memory_policy.v1";
+const CONTEXT_DEFERRED_DISCOVERY_SCHEMA_VERSION: &str = "forge.context.deferred_discovery.v1";
+const CONTEXT_ROUTER_SCHEMA_VERSION: &str = "forge.context.router.v1";
 const ROUTING_POLICY: &str =
     "task_local_revisioned_persona_profile_compressed_executor_policy_subflow_checkpoint_dependencies_handoff_budget_summary_required_first_content_addressed_shards_budget_ledger_quality_contract_repair_budget_plan_minimum_correct_set_persona_contract_next_action_delta_economy_prompt_packet_replay_manifest_continuation_plan_shard_selection_audit_v30";
 const MINIMUM_CONTEXT_BUDGET_BYTES: usize = 128;
-pub const DEFAULT_CONTEXT_BUDGET: usize = 1200;
+pub const DEFAULT_CONTEXT_BUDGET: usize = 4096;
 const DETERMINISTIC_CONTEXT_BUDGET: usize = 640;
 const ARTIFACT_MANIFEST_CONTEXT_BUDGET: usize = DEFAULT_CONTEXT_BUDGET;
 const FINAL_COMPLETION_AUDIT_CONTEXT_BUDGET: usize = 12000;
@@ -147,6 +149,8 @@ pub struct ContextPackage {
     pub lineage: ContextLineage,
     pub operating_context: OperatingContextSpec,
     pub memory_policy: ContextMemoryPolicy,
+    pub deferred_discovery: ContextDeferredDiscoveryPlan,
+    pub context_router: ContextRouterPlan,
     pub persona: Option<PersonaRoutingSpec>,
     pub persona_profile: Option<ContextPersonaProfile>,
     pub persona_contract: Option<ContextPersonaContract>,
@@ -229,6 +233,84 @@ pub struct ContextMemoryTenantBoundary {
     pub product_id: String,
     pub user_id: String,
     pub channel_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextDeferredDiscoveryPlan {
+    pub schema_version: String,
+    pub state_owner: String,
+    pub routing_strategy: String,
+    pub routing_model: String,
+    pub global_discovery_allowed: bool,
+    pub avoided_global_discovery: bool,
+    pub litellm_inspiration: String,
+    pub current_node: ContextDeferredDiscoveryNode,
+    pub selected_sources: Vec<ContextDeferredDiscoverySource>,
+    pub deferred_sources: Vec<ContextDeferredDiscoverySource>,
+    pub expand_commands: Vec<String>,
+    pub decision_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextDeferredDiscoveryNode {
+    pub workflow_id: String,
+    pub task_id: String,
+    pub task_title: String,
+    pub executor_profile_id: String,
+    pub context_requirement_count: usize,
+    pub task_goal_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextDeferredDiscoverySource {
+    pub source_id: String,
+    pub source_kind: String,
+    pub search_tags: Vec<String>,
+    pub load_state: String,
+    pub priority: u8,
+    pub trigger: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextRouterPlan {
+    pub schema_version: String,
+    pub state_owner: String,
+    pub routing_strategy: String,
+    pub routing_model: String,
+    pub request_scope: String,
+    pub global_discovery_allowed: bool,
+    pub avoided_global_discovery: bool,
+    pub litellm_inspiration: String,
+    pub current_node: ContextDeferredDiscoveryNode,
+    pub node_tags: Vec<String>,
+    pub pre_call_checks: Vec<String>,
+    pub selected_source_ids: Vec<String>,
+    pub deferred_source_ids: Vec<String>,
+    pub route_groups: Vec<ContextRouterRouteGroup>,
+    pub fallback_policy: ContextRouterFallbackPolicy,
+    pub decision_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextRouterRouteGroup {
+    pub group_name: String,
+    pub matched_tags: Vec<String>,
+    pub search_tags: Vec<String>,
+    pub selected: bool,
+    pub selected_source_ids: Vec<String>,
+    pub deferred_source_ids: Vec<String>,
+    pub fallback_source_ids: Vec<String>,
+    pub priority: u8,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextRouterFallbackPolicy {
+    pub mode: String,
+    pub not_executed: bool,
+    pub ordered_fallbacks: Vec<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1058,6 +1140,8 @@ struct RoutingFingerprintInput<'a> {
     execution_policy_decision: &'a ContextExecutionPolicyDecision,
     replay_manifest: &'a ContextReplayManifest,
     selection_receipt: &'a ContextSelectionReceipt,
+    deferred_discovery: &'a ContextDeferredDiscoveryPlan,
+    context_router: &'a ContextRouterPlan,
     persona_profile: Option<&'a ContextPersonaProfile>,
     persona_contract: Option<&'a ContextPersonaContract>,
     prompt_packet: &'a ContextPromptPacket,
@@ -1608,6 +1692,8 @@ pub fn build_context_package_with_checkpoint_and_project(
         context_ready,
         handoff_status,
     })?;
+    let deferred_discovery = build_deferred_discovery_plan(workflow, task, &profile, budget)?;
+    let context_router = build_context_router_plan(&deferred_discovery, task, budget)?;
     let prompt_packet = build_prompt_packet(PromptPacketInput {
         workflow_id: &workflow.id,
         task,
@@ -1646,6 +1732,8 @@ pub fn build_context_package_with_checkpoint_and_project(
         execution_policy_decision: &execution_policy_decision,
         replay_manifest: &replay_manifest,
         selection_receipt: &selection_receipt,
+        deferred_discovery: &deferred_discovery,
+        context_router: &context_router,
         persona_profile: persona_profile.as_ref(),
         persona_contract: persona_contract.as_ref(),
         prompt_packet: &prompt_packet,
@@ -1688,6 +1776,8 @@ pub fn build_context_package_with_checkpoint_and_project(
         lineage,
         operating_context,
         memory_policy,
+        deferred_discovery,
+        context_router,
         persona,
         persona_profile,
         persona_contract,
@@ -1735,6 +1825,569 @@ pub fn build_context_package_with_checkpoint_and_project(
 
 pub fn context_next_action(package: &ContextPackage) -> ContextNextAction {
     package.next_action.clone()
+}
+
+fn build_deferred_discovery_plan(
+    workflow: &Workflow,
+    task: &AtomicTask,
+    profile: &ExecutorContextProfile,
+    budget: usize,
+) -> Result<ContextDeferredDiscoveryPlan> {
+    let node_text = discovery_node_text(task);
+    let workflow_text = workflow.goal.to_lowercase();
+    let workflow_lookup_needed = contains_any(
+        &node_text,
+        &[
+            "workflow",
+            "requirements",
+            "requirement",
+            "requisito",
+            "intent",
+            "intenção",
+            "task graph",
+            "grafo",
+        ],
+    ) || contains_any(&workflow_text, &["workflow", "fluxo"]);
+    let mcp_lookup_needed = contains_any(
+        &node_text,
+        &["mcp", "tool", "tools", "ferramenta", "server", "servidor"],
+    );
+    let skill_lookup_needed = contains_any(
+        &node_text,
+        &[
+            "skill",
+            "skills",
+            "plugin",
+            "plugins",
+            "capability",
+            "capacidade",
+        ],
+    );
+    let crm_subject_bound = crm_subject_bound_to_current_node(&node_text);
+    let crm_subject_needed = crm_subject_bound;
+    let crm_timeline_needed = crm_subject_bound
+        && contains_any(
+            &node_text,
+            &[
+                "timeline",
+                "history",
+                "histórico",
+                "conversation",
+                "conversa",
+                "ticket",
+                "sla",
+                "follow-up",
+            ],
+        );
+    let project_memory_needed = contains_any(
+        &node_text,
+        &[
+            "memory",
+            "memória",
+            "knowledge",
+            "conhecimento",
+            "project",
+            "projeto",
+        ],
+    );
+
+    let mut selected_sources = Vec::new();
+    let mut deferred_sources = Vec::new();
+    route_deferred_source(
+        &mut selected_sources,
+        &mut deferred_sources,
+        workflow_lookup_needed,
+        ContextDeferredDiscoverySource {
+            source_id: "workflow_registry_search".to_string(),
+            source_kind: "workflow_index".to_string(),
+            search_tags: tagged(&[
+                "workflow",
+                "workflow_registry",
+                "template",
+                "requirements",
+                "planning",
+            ]),
+            load_state: String::new(),
+            priority: 95,
+            trigger: "node_needs_workflow_creation_or_template_lookup".to_string(),
+            reason: "Current node is in workflow planning/requirements scope and only needs workflow registry search, not global MCP or skill discovery.".to_string(),
+        },
+    );
+    route_deferred_source(
+        &mut selected_sources,
+        &mut deferred_sources,
+        mcp_lookup_needed,
+        ContextDeferredDiscoverySource {
+            source_id: "mcp_servers_and_tools".to_string(),
+            source_kind: "mcp_tool_catalog".to_string(),
+            search_tags: tagged(&["mcp", "tool", "server", "external_tool", "capability"]),
+            load_state: String::new(),
+            priority: 80,
+            trigger: "node_requires_external_mcp_tool_execution".to_string(),
+            reason: "MCP servers/tools remain unloaded until a node explicitly needs an external tool route.".to_string(),
+        },
+    );
+    route_deferred_source(
+        &mut selected_sources,
+        &mut deferred_sources,
+        skill_lookup_needed,
+        ContextDeferredDiscoverySource {
+            source_id: "skills_catalog".to_string(),
+            source_kind: "skill_catalog".to_string(),
+            search_tags: tagged(&["skill", "skills", "plugin", "capability", "executor"]),
+            load_state: String::new(),
+            priority: 78,
+            trigger: "node_requires_skill_capability_selection".to_string(),
+            reason: "Skills remain unloaded until a node needs capability matching or skill installation context.".to_string(),
+        },
+    );
+    route_deferred_source(
+        &mut selected_sources,
+        &mut deferred_sources,
+        crm_subject_needed,
+        ContextDeferredDiscoverySource {
+            source_id: "crm_subject_profile".to_string(),
+            source_kind: "domain_subject_context".to_string(),
+            search_tags: tagged(&[
+                "crm", "subject", "user", "contact", "lead", "account", "customer",
+            ]),
+            load_state: String::new(),
+            priority: 76,
+            trigger: "node_has_bound_crm_user_contact_lead_or_account".to_string(),
+            reason: "CRM subject data is routed only after a node is working with a specific CRM user, contact, lead or account.".to_string(),
+        },
+    );
+    route_deferred_source(
+        &mut selected_sources,
+        &mut deferred_sources,
+        crm_timeline_needed,
+        ContextDeferredDiscoverySource {
+            source_id: "crm_account_timeline".to_string(),
+            source_kind: "domain_timeline_context".to_string(),
+            search_tags: tagged(&["crm", "timeline", "history", "ticket", "sla", "omnichannel"]),
+            load_state: String::new(),
+            priority: 74,
+            trigger: "node_requires_crm_history_or_omnichannel_timeline".to_string(),
+            reason: "CRM timeline/history stays deferred until the current node needs relationship or service history.".to_string(),
+        },
+    );
+    route_deferred_source(
+        &mut selected_sources,
+        &mut deferred_sources,
+        project_memory_needed,
+        ContextDeferredDiscoverySource {
+            source_id: "project_memory_search".to_string(),
+            source_kind: "governed_memory_search".to_string(),
+            search_tags: tagged(&["memory", "project", "knowledge", "semantic_search"]),
+            load_state: String::new(),
+            priority: 70,
+            trigger: "node_requires_governed_project_memory".to_string(),
+            reason: "Project memory is searched explicitly through Forge memory policy rather than being inlined by default.".to_string(),
+        },
+    );
+
+    let mut expand_commands = vec![
+        "forge context --workflow {workflow_id} --task {task_id} --budget {budget} --output json"
+            .to_string(),
+    ];
+    if discovery_source_selected(&selected_sources, "workflow_registry_search") {
+        expand_commands.push("forge list --output json".to_string());
+    }
+    if discovery_source_selected(&selected_sources, "project_memory_search") {
+        expand_commands.push(
+            "forge memory search --workflow {workflow_id} --query \"{node_query}\" --output json"
+                .to_string(),
+        );
+    }
+    if discovery_source_selected(&selected_sources, "mcp_servers_and_tools") {
+        expand_commands.push("forge mcp tools --output json".to_string());
+    }
+
+    let current_node = ContextDeferredDiscoveryNode {
+        workflow_id: workflow.id.clone(),
+        task_id: task.id.clone(),
+        task_title: task.title.clone(),
+        executor_profile_id: profile.id.to_string(),
+        context_requirement_count: task.context_requirements.len(),
+        task_goal_sha256: hex_sha256(task.goal.as_bytes()),
+    };
+
+    let mut plan = ContextDeferredDiscoveryPlan {
+        schema_version: CONTEXT_DEFERRED_DISCOVERY_SCHEMA_VERSION.to_string(),
+        state_owner: "forge_workflow_runtime".to_string(),
+        routing_strategy: "node_scoped_lazy_discovery".to_string(),
+        routing_model: "litellm_inspired_policy_router_for_context_sources".to_string(),
+        global_discovery_allowed: false,
+        avoided_global_discovery: true,
+        litellm_inspiration:
+            "per-request routing groups, fallbacks, cooldowns and budget-aware selection"
+                .to_string(),
+        current_node,
+        selected_sources,
+        deferred_sources,
+        expand_commands,
+        decision_sha256: String::new(),
+    };
+
+    #[derive(Serialize)]
+    struct DecisionSeed<'a> {
+        schema_version: &'a str,
+        workflow_id: &'a str,
+        task_id: &'a str,
+        executor_profile_id: &'a str,
+        budget: usize,
+        selected_sources: &'a [ContextDeferredDiscoverySource],
+        deferred_sources: &'a [ContextDeferredDiscoverySource],
+    }
+
+    let seed = DecisionSeed {
+        schema_version: CONTEXT_DEFERRED_DISCOVERY_SCHEMA_VERSION,
+        workflow_id: &workflow.id,
+        task_id: &task.id,
+        executor_profile_id: profile.id,
+        budget,
+        selected_sources: &plan.selected_sources,
+        deferred_sources: &plan.deferred_sources,
+    };
+    plan.decision_sha256 = hex_sha256(serde_json::to_string(&seed)?.as_bytes());
+
+    Ok(plan)
+}
+
+fn route_deferred_source(
+    selected_sources: &mut Vec<ContextDeferredDiscoverySource>,
+    deferred_sources: &mut Vec<ContextDeferredDiscoverySource>,
+    selected_for_current_node: bool,
+    mut source: ContextDeferredDiscoverySource,
+) {
+    if selected_for_current_node {
+        source.load_state = "selected_for_current_node".to_string();
+        selected_sources.push(source);
+    } else {
+        source.load_state = "deferred_until_node_requires_it".to_string();
+        deferred_sources.push(source);
+    }
+}
+
+fn discovery_source_selected(sources: &[ContextDeferredDiscoverySource], source_id: &str) -> bool {
+    sources.iter().any(|source| source.source_id == source_id)
+}
+
+fn tagged(tags: &[&str]) -> Vec<String> {
+    tags.iter().map(|tag| (*tag).to_string()).collect()
+}
+
+fn build_context_router_plan(
+    deferred_discovery: &ContextDeferredDiscoveryPlan,
+    task: &AtomicTask,
+    budget: usize,
+) -> Result<ContextRouterPlan> {
+    let node_tags = context_router_node_tags(task);
+    let selected_source_ids = deferred_discovery
+        .selected_sources
+        .iter()
+        .map(|source| source.source_id.clone())
+        .collect::<Vec<_>>();
+    let deferred_source_ids = deferred_discovery
+        .deferred_sources
+        .iter()
+        .map(|source| source.source_id.clone())
+        .collect::<Vec<_>>();
+    let route_groups = vec![
+        context_router_route_group(
+            "workflow_creation",
+            vec!["workflow", "requirements"],
+            vec!["workflow_registry_search"],
+            &selected_source_ids,
+            &deferred_source_ids,
+            95,
+            "Route workflow template/search context only to nodes that are creating or inspecting workflows.",
+        ),
+        context_router_route_group(
+            "external_tooling",
+            vec!["mcp", "tool"],
+            vec!["mcp_servers_and_tools"],
+            &selected_source_ids,
+            &deferred_source_ids,
+            80,
+            "Route MCP servers/tools only after the node needs an external tool executor.",
+        ),
+        context_router_route_group(
+            "skill_capability",
+            vec!["skill", "plugin", "capability"],
+            vec!["skills_catalog"],
+            &selected_source_ids,
+            &deferred_source_ids,
+            78,
+            "Route skill catalog context only when capability matching or installation is part of the node.",
+        ),
+        context_router_route_group(
+            "crm_subject_context",
+            vec![
+                "crm_subject_bound",
+                "crm",
+                "user",
+                "customer",
+                "lead",
+                "account",
+            ],
+            vec!["crm_subject_profile"],
+            &selected_source_ids,
+            &deferred_source_ids,
+            76,
+            "Route CRM subject data only after the workflow is bound to a concrete user, contact, lead or account.",
+        ),
+        context_router_route_group(
+            "crm_timeline_context",
+            vec!["timeline", "history", "ticket", "sla"],
+            vec!["crm_account_timeline"],
+            &selected_source_ids,
+            &deferred_source_ids,
+            74,
+            "Route CRM timelines only to nodes that need relationship or service history.",
+        ),
+        context_router_route_group(
+            "project_memory_context",
+            vec!["memory", "knowledge", "project"],
+            vec!["project_memory_search"],
+            &selected_source_ids,
+            &deferred_source_ids,
+            70,
+            "Route governed project memory through explicit memory search instead of default prompt inlining.",
+        ),
+    ];
+    let fallback_policy = ContextRouterFallbackPolicy {
+        mode: "deferred_expansion_before_global_discovery".to_string(),
+        not_executed: true,
+        ordered_fallbacks: vec![
+            "selected_route_group".to_string(),
+            "forge_context_expansion_command".to_string(),
+            "governed_memory_search".to_string(),
+            "operator_authorized_global_discovery".to_string(),
+        ],
+        reason: "If a selected node lacks required context, Forge plans an explicit expansion or governed search before any broad discovery.".to_string(),
+    };
+    let mut plan = ContextRouterPlan {
+        schema_version: CONTEXT_ROUTER_SCHEMA_VERSION.to_string(),
+        state_owner: "forge_workflow_runtime".to_string(),
+        routing_strategy: "node_requirement_tag_routing_with_budget_fallbacks".to_string(),
+        routing_model: "litellm_inspired_context_router".to_string(),
+        request_scope: "current_workflow_node".to_string(),
+        global_discovery_allowed: false,
+        avoided_global_discovery: true,
+        litellm_inspiration:
+            "routing groups, tags, pre-call context-window checks and ordered fallbacks".to_string(),
+        current_node: deferred_discovery.current_node.clone(),
+        node_tags,
+        pre_call_checks: vec![
+            "node_requirement_match".to_string(),
+            "bound_subject_or_defer".to_string(),
+            "tenant_scope_allowed".to_string(),
+            "context_budget_available".to_string(),
+            "source_permission_allowed".to_string(),
+            "fallback_route_declared".to_string(),
+        ],
+        selected_source_ids,
+        deferred_source_ids,
+        route_groups,
+        fallback_policy,
+        decision_sha256: String::new(),
+    };
+
+    #[derive(Serialize)]
+    struct RouterDecisionSeed<'a> {
+        schema_version: &'a str,
+        task_id: &'a str,
+        budget: usize,
+        node_tags: &'a [String],
+        selected_source_ids: &'a [String],
+        deferred_source_ids: &'a [String],
+        route_groups: &'a [ContextRouterRouteGroup],
+        fallback_policy: &'a ContextRouterFallbackPolicy,
+    }
+
+    let seed = RouterDecisionSeed {
+        schema_version: CONTEXT_ROUTER_SCHEMA_VERSION,
+        task_id: &deferred_discovery.current_node.task_id,
+        budget,
+        node_tags: &plan.node_tags,
+        selected_source_ids: &plan.selected_source_ids,
+        deferred_source_ids: &plan.deferred_source_ids,
+        route_groups: &plan.route_groups,
+        fallback_policy: &plan.fallback_policy,
+    };
+    plan.decision_sha256 = hex_sha256(serde_json::to_string(&seed)?.as_bytes());
+
+    Ok(plan)
+}
+
+fn context_router_route_group(
+    group_name: &str,
+    matched_tags: Vec<&str>,
+    source_ids: Vec<&str>,
+    selected_source_ids: &[String],
+    deferred_source_ids: &[String],
+    priority: u8,
+    reason: &str,
+) -> ContextRouterRouteGroup {
+    let search_tags = route_group_search_tags(&matched_tags, &source_ids);
+    let selected = source_ids.iter().any(|source_id| {
+        selected_source_ids
+            .iter()
+            .any(|selected| selected.as_str() == *source_id)
+    });
+    let selected_group_sources = source_ids
+        .iter()
+        .filter(|source_id| {
+            selected_source_ids
+                .iter()
+                .any(|selected| selected.as_str() == **source_id)
+        })
+        .map(|source_id| (*source_id).to_string())
+        .collect::<Vec<_>>();
+    let deferred_group_sources = source_ids
+        .iter()
+        .filter(|source_id| {
+            deferred_source_ids
+                .iter()
+                .any(|deferred| deferred.as_str() == **source_id)
+        })
+        .map(|source_id| (*source_id).to_string())
+        .collect::<Vec<_>>();
+    let fallback_source_ids = if selected {
+        deferred_group_sources.clone()
+    } else {
+        source_ids
+            .iter()
+            .map(|source_id| (*source_id).to_string())
+            .collect::<Vec<_>>()
+    };
+
+    ContextRouterRouteGroup {
+        group_name: group_name.to_string(),
+        matched_tags: matched_tags
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        search_tags,
+        selected,
+        selected_source_ids: selected_group_sources,
+        deferred_source_ids: deferred_group_sources,
+        fallback_source_ids,
+        priority,
+        reason: reason.to_string(),
+    }
+}
+
+fn route_group_search_tags(matched_tags: &[&str], source_ids: &[&str]) -> Vec<String> {
+    let mut tags = BTreeSet::new();
+    for tag in matched_tags {
+        tags.insert((*tag).to_string());
+    }
+    for source_id in source_ids {
+        for part in source_id.split('_') {
+            if !part.is_empty() {
+                tags.insert(part.to_string());
+            }
+        }
+    }
+    tags.into_iter().collect()
+}
+
+fn context_router_node_tags(task: &AtomicTask) -> Vec<String> {
+    let node_text = discovery_node_text(task);
+    let mut tags = BTreeSet::new();
+    for (tag, needles) in [
+        (
+            "workflow",
+            &["workflow", "fluxo", "requirements", "requisito"][..],
+        ),
+        ("mcp", &["mcp", "tool", "ferramenta", "server"][..]),
+        (
+            "skill",
+            &["skill", "plugin", "capability", "capacidade"][..],
+        ),
+        (
+            "crm",
+            &["crm", "customer", "cliente", "user", "usuário"][..],
+        ),
+        (
+            "crm_timeline",
+            &["timeline", "history", "histórico", "ticket"][..],
+        ),
+        (
+            "memory",
+            &["memory", "memória", "knowledge", "conhecimento"][..],
+        ),
+    ] {
+        if contains_any(&node_text, needles) {
+            tags.insert(tag.to_string());
+        }
+    }
+    if crm_subject_bound_to_current_node(&node_text) {
+        tags.insert("crm_subject_bound".to_string());
+    }
+    if tags.is_empty() {
+        tags.insert("task_local".to_string());
+    }
+    tags.into_iter().collect()
+}
+
+fn discovery_node_text(task: &AtomicTask) -> String {
+    let mut text = format!("{} {} {}", task.title, task.goal, task.expected_output);
+    if !task.context_requirements.is_empty() {
+        text.push(' ');
+        text.push_str(&task.context_requirements.join(" "));
+    }
+    text.to_lowercase()
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn crm_subject_bound_to_current_node(node_text: &str) -> bool {
+    contains_any(
+        node_text,
+        &[
+            "bound_crm_subject:",
+            "bound_crm_subject=",
+            "bound crm subject:",
+            "bound crm subject=",
+            "crm_subject:",
+            "crm_subject=",
+            "crm subject id:",
+            "crm subject id=",
+            "customer_id:",
+            "customer_id=",
+            "cliente_id:",
+            "cliente_id=",
+            "user_id:",
+            "user_id=",
+            "usuario_id:",
+            "usuario_id=",
+            "usuário_id:",
+            "usuário_id=",
+            "lead_id:",
+            "lead_id=",
+            "contact_id:",
+            "contact_id=",
+            "contato_id:",
+            "contato_id=",
+            "account_id:",
+            "account_id=",
+            "empresa_id:",
+            "empresa_id=",
+            "company_id:",
+            "company_id=",
+            "opportunity_id:",
+            "opportunity_id=",
+            "oportunidade_id:",
+            "oportunidade_id=",
+            "ticket_id:",
+            "ticket_id=",
+        ],
+    )
 }
 
 fn build_context_next_action(
@@ -3225,6 +3878,8 @@ fn build_routing_fingerprint(
     let execution_policy_decision = input.execution_policy_decision.decision_sha256.clone();
     let replay_manifest = input.replay_manifest.manifest_sha256.clone();
     let selection_receipt = input.selection_receipt.receipt_sha256.clone();
+    let deferred_discovery = input.deferred_discovery.decision_sha256.clone();
+    let context_router = input.context_router.decision_sha256.clone();
     let persona_profile = serde_json::to_string(&input.persona_profile)?;
     let persona_contract = serde_json::to_string(&input.persona_contract)?;
     let source_shards = input
@@ -3307,6 +3962,8 @@ fn build_routing_fingerprint(
         fingerprint_component("execution_policy_decision", execution_policy_decision),
         fingerprint_component("replay_manifest", replay_manifest),
         fingerprint_component("selection_receipt", selection_receipt),
+        fingerprint_component("deferred_discovery", deferred_discovery),
+        fingerprint_component("context_router", context_router),
         fingerprint_component("persona_profile", persona_profile),
         fingerprint_component("persona_contract", persona_contract),
         fingerprint_component("prompt_packet", input.prompt_packet.packet_sha256.clone()),
